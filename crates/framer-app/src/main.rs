@@ -567,6 +567,9 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
             ui.strong("Cut length");
             ui.label(member.cut_length.to_string());
             ui.end_row();
+            ui.strong("Drawn depth");
+            ui.label(member.cross_section_depth.to_string());
+            ui.end_row();
             ui.strong("Rule");
             ui.label(&member.provenance.rule_id);
             ui.end_row();
@@ -726,6 +729,8 @@ fn draw_wall_elevation(
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
 
+    draw_opening_guides(&painter, drawing, sx, sy, wall);
+
     for member in members {
         let member_rect = member_rect(drawing, sx, sy, member);
         let hovered = pointer.is_some_and(|position| member_rect.contains(position));
@@ -796,6 +801,8 @@ fn draw_wall_axonometric(
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
 
+    draw_opening_guides(&painter, drawing, sx, sy, wall);
+
     for member in members {
         let member_rect = member_rect(drawing, sx, sy, member);
         let shadow = member_rect.translate(depth * 0.45);
@@ -826,20 +833,48 @@ fn member_rect(drawing: Rect, sx: f32, sy: f32, member: &FrameMember) -> Rect {
     match member.orientation {
         MemberOrientation::Horizontal => {
             let width = (member.cut_length.inches() as f32 * sx).max(2.0);
-            let height = (member.profile.thickness().inches() as f32 * sy).max(3.0);
+            let height = (member.cross_section_depth.inches() as f32 * sy).max(3.0);
             Rect::from_min_size(
                 Pos2::new(start_x, start_y - height),
                 Vec2::new(width, height),
             )
         }
         MemberOrientation::Vertical => {
-            let width = (member.profile.thickness().inches() as f32 * sx).max(3.0);
+            let width = (member.cross_section_depth.inches() as f32 * sx).max(3.0);
             let height = (member.cut_length.inches() as f32 * sy).max(2.0);
             Rect::from_min_size(
                 Pos2::new(start_x - width / 2.0, start_y - height),
                 Vec2::new(width, height),
             )
         }
+    }
+}
+
+fn draw_opening_guides(painter: &egui::Painter, drawing: Rect, sx: f32, sy: f32, wall: &Wall) {
+    for opening in &wall.openings {
+        let x = drawing.left() + opening.left().inches() as f32 * sx;
+        let y = drawing.bottom() - opening.top().inches() as f32 * sy;
+        let width = (opening.width.inches() as f32 * sx).max(4.0);
+        let height = (opening.height.inches() as f32 * sy).max(4.0);
+        let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height));
+        painter.rect_filled(
+            rect,
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 76),
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(137, 102, 52)),
+            StrokeKind::Outside,
+        );
+        painter.text(
+            rect.left_top() + Vec2::new(4.0, 12.0),
+            Align2::LEFT_CENTER,
+            kind_label(opening.kind),
+            FontId::proportional(11.0),
+            Color32::from_rgb(99, 74, 39),
+        );
     }
 }
 

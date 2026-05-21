@@ -44,6 +44,7 @@ pub struct FrameMember {
     pub x: Length,
     pub elevation: Length,
     pub cut_length: Length,
+    pub cross_section_depth: Length,
     pub provenance: RuleProvenance,
 }
 
@@ -169,6 +170,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
         Length::ZERO,
         Length::ZERO,
         wall.length,
+        code.plate_profile.thickness(),
         RuleProvenance::new(
             "wall.plate.continuous",
             "Bottom plate runs the authored wall length using the configured plate profile.",
@@ -185,6 +187,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
             Length::ZERO,
             wall.height - plate_thickness * (index as i64 + 1),
             wall.length,
+            code.plate_profile.thickness(),
             RuleProvenance::new(
                 "wall.plate.double-top",
                 format!(
@@ -208,6 +211,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
                 x,
                 stud_base,
                 stud_length,
+                code.stud_profile.thickness(),
                 RuleProvenance::new(
                     "wall.studs.on-center",
                     format!(
@@ -278,6 +282,7 @@ fn add_opening_members(
             x,
             stud_base,
             stud_top - stud_base,
+            code.stud_profile.thickness(),
             RuleProvenance::new(
                 "opening.king-studs.each-side",
                 format!(
@@ -296,6 +301,7 @@ fn add_opening_members(
             x,
             stud_base,
             header_bottom - stud_base,
+            code.stud_profile.thickness(),
             RuleProvenance::new(
                 "opening.jack-studs.header-bearing",
                 format!(
@@ -314,6 +320,7 @@ fn add_opening_members(
         left,
         header_bottom,
         opening.width,
+        header_depth,
         RuleProvenance::new(
             "opening.header.default-profile",
             format!(
@@ -334,6 +341,7 @@ fn add_opening_members(
             left,
             opening.sill_height,
             opening.width,
+            code.stud_profile.thickness(),
             RuleProvenance::new(
                 "opening.window.rough-sill",
                 format!(
@@ -379,6 +387,7 @@ fn add_cripples(
             x,
             bottom,
             cut_length,
+            code.stud_profile.thickness(),
             RuleProvenance::new(
                 "opening.cripples.on-center",
                 format!(
@@ -401,6 +410,7 @@ fn frame_member(
     x: Length,
     elevation: Length,
     cut_length: Length,
+    cross_section_depth: Length,
     provenance: RuleProvenance,
 ) -> FrameMember {
     FrameMember {
@@ -412,6 +422,7 @@ fn frame_member(
         x,
         elevation,
         cut_length,
+        cross_section_depth,
         provenance,
     }
 }
@@ -548,19 +559,39 @@ pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     )
     .unwrap();
 
+    for opening in &wall.openings {
+        writeln!(
+            svg,
+            r##"  <rect data-opening="{}" x="{}" y="{}" width="{}" height="{}" fill="#ffffff" fill-opacity="0.28" stroke="#896634" stroke-width="0.25" stroke-dasharray="2 1">"##,
+            escape_xml(&opening.id.0),
+            svg_number(opening.left().inches()),
+            svg_number(height - opening.top().inches()),
+            svg_number(opening.width.inches()),
+            svg_number(opening.height.inches())
+        )
+        .unwrap();
+        writeln!(
+            svg,
+            "    <title>{} {}</title>",
+            escape_xml(&format!("{:?}", opening.kind)),
+            escape_xml(&opening.name)
+        )
+        .unwrap();
+        writeln!(svg, "  </rect>").unwrap();
+    }
+
     for member in &plan.members {
-        let thickness = member.profile.thickness().inches();
         let (x, y, member_width, member_height) = match member.orientation {
             MemberOrientation::Horizontal => (
                 member.x.inches(),
-                height - member.elevation.inches() - thickness,
+                height - member.elevation.inches() - member.cross_section_depth.inches(),
                 member.cut_length.inches(),
-                thickness,
+                member.cross_section_depth.inches(),
             ),
             MemberOrientation::Vertical => (
-                member.x.inches() - thickness / 2.0,
+                member.x.inches() - member.cross_section_depth.inches() / 2.0,
                 height - member.elevation.inches() - member.cut_length.inches(),
-                thickness,
+                member.cross_section_depth.inches(),
                 member.cut_length.inches(),
             ),
         };
@@ -783,6 +814,7 @@ mod tests {
         assert_eq!(header.source.0, "opening-door-1");
         assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
         assert!(header.provenance.summary.contains("no span/load lookup"));
+        assert_eq!(header.cross_section_depth, model.code.default_header_depth);
     }
 
     #[test]
@@ -813,6 +845,13 @@ mod tests {
         assert_eq!(first_svg, second_svg);
         assert!(first_svg.contains("<svg"));
         assert!(first_svg.contains("opening-garage-1-header"));
+        assert!(first_svg.contains(r#"data-opening="opening-garage-1""#));
+        assert!(
+            first_svg
+                .lines()
+                .any(|line| line.contains(r#"id="opening-door-1-header""#)
+                    && line.contains(r#"height="9""#))
+        );
         assert!(csv.starts_with("quantity,profile,kind"));
         assert!(csv.contains("total_length_inches"));
     }
