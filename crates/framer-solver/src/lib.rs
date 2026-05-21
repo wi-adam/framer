@@ -142,6 +142,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
     let mut members = Vec::new();
     let mut diagnostics = starter_profile_diagnostics(wall, code);
     let plate_thickness = code.plate_profile.thickness();
+    let stud_thickness = code.stud_profile.thickness();
     let top_plate_count = if code.double_top_plate { 2 } else { 1 };
     let stud_top = wall.height - plate_thickness * top_plate_count as i64;
     let stud_length = stud_top - plate_thickness;
@@ -153,6 +154,14 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
     }
 
     for opening in &wall.openings {
+        if opening.left() < stud_thickness * 2 || opening.right() + stud_thickness * 2 > wall.length
+        {
+            return Err(SolverError::OpeningTooCloseToWallEnd {
+                wall: wall.id.clone(),
+                opening: opening.id.clone(),
+            });
+        }
+
         if opening.top() >= stud_top {
             return Err(SolverError::OpeningLeavesNoHeaderSpace {
                 wall: wall.id.clone(),
@@ -201,7 +210,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
 
     let stud_base = plate_thickness;
     for x in stud_positions(wall.length, wall.stud_spacing) {
-        if !is_inside_opening(x, &wall.openings) {
+        if !is_inside_opening_framing_assembly(x, &wall.openings, stud_thickness) {
             members.push(frame_member(
                 format!("stud-{}", x.ticks()),
                 &wall.id,
@@ -259,6 +268,8 @@ fn add_opening_members(
     let header_top = header_bottom + header_depth;
     let left = opening.left();
     let right = opening.right();
+    let stud_thickness = code.stud_profile.thickness();
+    let side_positions = OpeningSidePositions::new(left, right, stud_thickness);
 
     if header_depth < code.default_header_depth {
         diagnostics.push(PlanDiagnostic::new(
@@ -272,14 +283,21 @@ fn add_opening_members(
         ));
     }
 
-    for (side, x) in [("left", left), ("right", right)] {
+    for (side, king_x, jack_x) in [
+        ("left", side_positions.left_king, side_positions.left_jack),
+        (
+            "right",
+            side_positions.right_king,
+            side_positions.right_jack,
+        ),
+    ] {
         members.push(frame_member(
             format!("{}-king-{}", opening.id.0, side),
             &opening.id,
             MemberKind::KingStud,
             code.stud_profile,
             MemberOrientation::Vertical,
-            x,
+            king_x,
             stud_base,
             stud_top - stud_base,
             code.stud_profile.thickness(),
@@ -298,7 +316,7 @@ fn add_opening_members(
             MemberKind::JackStud,
             code.stud_profile,
             MemberOrientation::Vertical,
-            x,
+            jack_x,
             stud_base,
             header_bottom - stud_base,
             code.stud_profile.thickness(),
@@ -317,9 +335,9 @@ fn add_opening_members(
         MemberKind::Header,
         code.header_profile,
         MemberOrientation::Horizontal,
-        left,
+        side_positions.left_jack_left_face,
         header_bottom,
-        opening.width,
+        opening.width + stud_thickness * 2,
         header_depth,
         RuleProvenance::new(
             "opening.header.default-profile",
@@ -362,6 +380,27 @@ fn add_opening_members(
     }
 
     add_cripples(members, code, opening, "upper", header_top, stud_top);
+}
+
+struct OpeningSidePositions {
+    left_king: Length,
+    left_jack: Length,
+    left_jack_left_face: Length,
+    right_jack: Length,
+    right_king: Length,
+}
+
+impl OpeningSidePositions {
+    fn new(opening_left: Length, opening_right: Length, stud_thickness: Length) -> Self {
+        let half_stud = stud_thickness / 2;
+        Self {
+            left_king: opening_left - stud_thickness - half_stud,
+            left_jack: opening_left - half_stud,
+            left_jack_left_face: opening_left - stud_thickness,
+            right_jack: opening_right + half_stud,
+            right_king: opening_right + stud_thickness + half_stud,
+        }
+    }
 }
 
 fn add_cripples(
@@ -487,10 +526,14 @@ fn cripple_positions(left: Length, right: Length, spacing: Length) -> Vec<Length
     positions
 }
 
-fn is_inside_opening(x: Length, openings: &[Opening]) -> bool {
-    openings
-        .iter()
-        .any(|opening| x > opening.left() && x < opening.right())
+fn is_inside_opening_framing_assembly(
+    x: Length,
+    openings: &[Opening],
+    stud_thickness: Length,
+) -> bool {
+    openings.iter().any(|opening| {
+        x >= opening.left() - stud_thickness * 2 && x <= opening.right() + stud_thickness * 2
+    })
 }
 
 pub fn export_bom_csv(bom: &[BomItem]) -> String {
@@ -692,6 +735,10 @@ pub enum SolverError {
     WallTooShortForPlateStack { wall: ElementId },
     #[error("opening {opening:?} in wall {wall:?} leaves no header space below the top plates")]
     OpeningLeavesNoHeaderSpace { wall: ElementId, opening: ElementId },
+    #[error(
+        "opening {opening:?} in wall {wall:?} is too close to a wall end for starter king/jack framing"
+    )]
+    OpeningTooCloseToWallEnd { wall: ElementId, opening: ElementId },
 }
 
 #[cfg(test)]
@@ -729,7 +776,42 @@ mod tests {
             2
         );
         assert!(plan.members.iter().any(|member| {
-            member.kind == MemberKind::Header && member.cut_length == Length::from_inches(36.0)
+            member.kind == MemberKind::Header && member.cut_length == Length::from_inches(39.0)
+        }));
+    }
+
+    #[test]
+    fn king_and_jack_studs_are_adjacent_not_overlapping() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+
+        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let left_king = find_member(&plan, "door-king-left");
+        let left_jack = find_member(&plan, "door-jack-left");
+        let right_jack = find_member(&plan, "door-jack-right");
+        let right_king = find_member(&plan, "door-king-right");
+
+        assert_eq!(left_jack.x - left_king.x, code.stud_profile.thickness());
+        assert_eq!(right_king.x - right_jack.x, code.stud_profile.thickness());
+        assert_eq!(
+            left_jack.x + code.stud_profile.thickness() / 2,
+            wall.openings[0].left()
+        );
+        assert_eq!(
+            right_jack.x - code.stud_profile.thickness() / 2,
+            wall.openings[0].right()
+        );
+        assert!(!plan.members.iter().any(|member| {
+            member.kind == MemberKind::CommonStud
+                && member.x > left_king.x - code.stud_profile.thickness() / 2
+                && member.x < right_king.x + code.stud_profile.thickness() / 2
         }));
     }
 
@@ -854,5 +936,12 @@ mod tests {
         );
         assert!(csv.starts_with("quantity,profile,kind"));
         assert!(csv.contains("total_length_inches"));
+    }
+
+    fn find_member<'a>(plan: &'a WallFramePlan, id: &str) -> &'a FrameMember {
+        plan.members
+            .iter()
+            .find(|member| member.id == id)
+            .unwrap_or_else(|| panic!("expected member {id}"))
     }
 }
