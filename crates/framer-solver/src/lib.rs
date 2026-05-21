@@ -209,7 +209,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
     }
 
     let stud_base = plate_thickness;
-    for x in stud_positions(wall.length, wall.stud_spacing) {
+    for x in stud_positions(wall.length, wall.stud_spacing, stud_thickness) {
         if !is_inside_opening_framing_assembly(x, &wall.openings, stud_thickness) {
             members.push(frame_member(
                 format!("stud-{}", x.ticks()),
@@ -224,7 +224,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
                 RuleProvenance::new(
                     "wall.studs.on-center",
                     format!(
-                        "Common studs are placed from wall ends at {} on center, skipping the clear width of authored openings.",
+                        "End studs align with wall faces, interior common studs are placed at {} layout marks, and authored opening framing assemblies are kept clear.",
                         wall.stud_spacing
                     ),
                 ),
@@ -502,16 +502,25 @@ fn starter_profile_diagnostics(wall: &Wall, code: &CodeProfile) -> Vec<PlanDiagn
     diagnostics
 }
 
-fn stud_positions(length: Length, spacing: Length) -> Vec<Length> {
+fn stud_positions(length: Length, spacing: Length, stud_thickness: Length) -> Vec<Length> {
+    if length <= stud_thickness {
+        return vec![length / 2];
+    }
+
     let mut positions = Vec::new();
-    let mut x = Length::ZERO;
-    while x < length {
+    let first_center = stud_thickness / 2;
+    let last_center = length - first_center;
+
+    positions.push(first_center);
+
+    let mut x = spacing;
+    while x < last_center {
         positions.push(x);
         x += spacing;
     }
 
-    if positions.last().copied() != Some(length) {
-        positions.push(length);
+    if positions.last().copied() != Some(last_center) {
+        positions.push(last_center);
     }
     positions
 }
@@ -828,6 +837,29 @@ mod tests {
                 && item.cut_length == Length::from_feet(8.0)
                 && item.quantity == 2
         }));
+    }
+
+    #[test]
+    fn end_studs_align_faces_with_wall_edges() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
+
+        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let mut common_studs = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::CommonStud)
+            .collect::<Vec<_>>();
+        common_studs.sort_by_key(|member| member.x);
+
+        let half_stud = code.stud_profile.thickness() / 2;
+        assert_eq!(common_studs.first().unwrap().x, half_stud);
+        assert_eq!(common_studs.last().unwrap().x, wall.length - half_stud);
+        assert!(
+            !common_studs
+                .iter()
+                .any(|member| member.x == Length::ZERO || member.x == wall.length)
+        );
     }
 
     #[test]
