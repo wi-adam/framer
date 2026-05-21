@@ -1,0 +1,12 @@
+[package]
+name = "framer-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+eframe.workspace = true
+env_logger.workspace = true
+framer-core.workspace = true
+framer-solver.workspace = true

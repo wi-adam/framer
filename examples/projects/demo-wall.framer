@@ -1,0 +1,91 @@
+{
+  "format": "framer.project",
+  "schema_version": 1,
+  "authored": {
+    "code": {
+      "code": "Irc2021",
+      "display_name": "IRC 2021 prescriptive starter profile",
+      "default_wall_height": {
+        "ticks": 1536
+      },
+      "default_stud_spacing": {
+        "ticks": 256
+      },
+      "double_top_plate": true,
+      "default_header_depth": {
+        "ticks": 144
+      },
+      "stud_profile": "TwoByFour",
+      "plate_profile": "TwoByFour",
+      "header_profile": "TwoByTen"
+    },
+    "walls": [
+      {
+        "id": "wall-1",
+        "name": "Demo wall",
+        "length": {
+          "ticks": 5376
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "openings": [
+          {
+            "id": "opening-door-1",
+            "name": "Door",
+            "kind": "Door",
+            "center": {
+              "ticks": 576
+            },
+            "width": {
+              "ticks": 576
+            },
+            "height": {
+              "ticks": 1280
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          },
+          {
+            "id": "opening-garage-1",
+            "name": "Garage Door",
+            "kind": "GarageDoor",
+            "center": {
+              "ticks": 3712
+            },
+            "width": {
+              "ticks": 1536
+            },
+            "height": {
+              "ticks": 1344
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          },
+          {
+            "id": "opening-window-1",
+            "name": "Window",
+            "kind": "Window",
+            "center": {
+              "ticks": 1728
+            },
+            "width": {
+              "ticks": 768
+            },
+            "height": {
+              "ticks": 768
+            },
+            "sill_height": {
+              "ticks": 576
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
