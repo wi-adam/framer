@@ -1,10 +1,19 @@
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
-
-use eframe::egui::{
-    self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2,
+use std::ops::Neg;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    f32::consts::{FRAC_PI_2, FRAC_PI_4},
 };
+
+use bytemuck::{Pod, Zeroable};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+    epaint::Vertex,
+};
+use eframe::{egui_wgpu, wgpu};
 use framer_core::{BuildingModel, Length, Point2, Wall};
-use framer_solver::{FrameMember, MemberKind, MemberOrientation};
+use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
+use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
 use super::{FramerApp, Selection, ViewClick, ViewportMode};
@@ -19,9 +28,84 @@ pub(super) struct View3dState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewCubeAction {
     Home,
-    Top,
-    Front,
-    Right,
+    Snap(ViewCubeOrientation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewCubeOrientation {
+    x: i8,
+    y: i8,
+    z: i8,
+}
+
+impl ViewCubeOrientation {
+    const TOP: Self = Self { x: 0, y: 0, z: 1 };
+    const BOTTOM: Self = Self { x: 0, y: 0, z: -1 };
+    const FRONT: Self = Self { x: 0, y: 1, z: 0 };
+    const BACK: Self = Self { x: 0, y: -1, z: 0 };
+    const RIGHT: Self = Self { x: 1, y: 0, z: 0 };
+    const LEFT: Self = Self { x: -1, y: 0, z: 0 };
+
+    fn new(x: i8, y: i8, z: i8) -> Self {
+        Self { x, y, z }
+    }
+
+    fn from_point(point: Point3) -> Self {
+        Self::new(
+            point.x.signum() as i8,
+            point.y.signum() as i8,
+            point.z.signum() as i8,
+        )
+    }
+
+    fn from_points(start: Point3, end: Point3) -> Self {
+        let component = |left: f32, right: f32| {
+            if (left - right).abs() <= f32::EPSILON {
+                left.signum() as i8
+            } else {
+                0
+            }
+        };
+        Self::new(
+            component(start.x, end.x),
+            component(start.y, end.y),
+            component(start.z, end.z),
+        )
+    }
+
+    fn component_count(self) -> usize {
+        [self.x, self.y, self.z]
+            .into_iter()
+            .filter(|component| *component != 0)
+            .count()
+    }
+
+    fn includes_face(self, face: Self) -> bool {
+        face.component_count() == 1
+            && (face.x == 0 || self.x == face.x)
+            && (face.y == 0 || self.y == face.y)
+            && (face.z == 0 || self.z == face.z)
+    }
+}
+
+impl ViewCubeAction {
+    const TOP: Self = Self::Snap(ViewCubeOrientation::TOP);
+    const BOTTOM: Self = Self::Snap(ViewCubeOrientation::BOTTOM);
+    const FRONT: Self = Self::Snap(ViewCubeOrientation::FRONT);
+    const BACK: Self = Self::Snap(ViewCubeOrientation::BACK);
+    const RIGHT: Self = Self::Snap(ViewCubeOrientation::RIGHT);
+    const LEFT: Self = Self::Snap(ViewCubeOrientation::LEFT);
+
+    fn snap(orientation: ViewCubeOrientation) -> Self {
+        Self::Snap(orientation)
+    }
+
+    fn orientation(self) -> Option<ViewCubeOrientation> {
+        match self {
+            Self::Home => None,
+            Self::Snap(orientation) => Some(orientation),
+        }
+    }
 }
 
 impl Default for View3dState {
@@ -37,7 +121,7 @@ impl Default for View3dState {
 impl View3dState {
     fn orbit(&mut self, delta: Vec2) {
         self.yaw += delta.x * 0.01;
-        self.pitch = (self.pitch - delta.y * 0.01).clamp(0.05, FRAC_PI_2 - 0.02);
+        self.pitch = (self.pitch - delta.y * 0.01).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
     }
 
     fn zoom_by(&mut self, factor: f32) {
@@ -49,17 +133,17 @@ impl View3dState {
     fn snap_to(&mut self, action: ViewCubeAction) {
         match action {
             ViewCubeAction::Home => *self = Self::default(),
-            ViewCubeAction::Top => {
-                self.yaw = 0.0;
-                self.pitch = FRAC_PI_2;
-            }
-            ViewCubeAction::Front => {
-                self.yaw = 0.0;
-                self.pitch = 0.0;
-            }
-            ViewCubeAction::Right => {
-                self.yaw = FRAC_PI_2;
-                self.pitch = 0.0;
+            ViewCubeAction::Snap(orientation) => {
+                let x = orientation.x as f32;
+                let y = orientation.y as f32;
+                let z = orientation.z as f32;
+                let horizontal = (x * x + y * y).sqrt();
+                self.pitch = z.atan2(horizontal);
+                if horizontal > f32::EPSILON {
+                    self.yaw = (-x / horizontal).atan2(y / horizontal);
+                } else {
+                    self.yaw = 0.0;
+                }
             }
         }
     }
@@ -113,9 +197,11 @@ impl FramerApp {
             ViewportMode::Axonometric => draw_project_axonometric(
                 ui,
                 &self.model,
+                plan,
                 self.selected_wall,
                 &self.selected,
                 &mut self.view_3d,
+                self.gpu_target_format,
             ),
         };
 
@@ -303,9 +389,11 @@ fn draw_project_plan(
 fn draw_project_axonometric(
     ui: &mut Ui,
     model: &BuildingModel,
+    plan: &ProjectFramePlan,
     selected_wall: usize,
     selection: &Selection,
     view: &mut View3dState,
+    gpu_target_format: Option<wgpu::TextureFormat>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
@@ -316,10 +404,14 @@ fn draw_project_axonometric(
     draw_view_border(&painter, drawing);
     let cube_rect = view_cube_rect(drawing);
     let pointer = response.interact_pointer_pos();
+    let cube_hover_pointer = ui
+        .input(|input| input.pointer.hover_pos())
+        .filter(|position| cube_rect.contains(*position));
+    let press_origin = ui.input(|input| input.pointer.press_origin());
+    let dragging_primary = response.dragged_by(egui::PointerButton::Primary);
+    let dragging_from_cube = dragging_primary && pointer_started_in_rect(press_origin, cube_rect);
 
-    if response.dragged_by(egui::PointerButton::Primary)
-        && !pointer.is_some_and(|position| cube_rect.contains(position))
-    {
+    if dragging_primary {
         view.orbit(response.drag_delta());
     }
 
@@ -333,103 +425,845 @@ fn draw_project_axonometric(
         }
     }
 
-    let Some(projector) = OrbitProjector::from_model(model, drawing, *view) else {
+    let Some(scene) = Scene3d::from_project(model, plan, selected_wall, selection) else {
+        draw_view_empty(&painter, rect, "No 3D geometry");
+        return None;
+    };
+    let Some(projector) = OrbitProjector::from_points(&scene.points, drawing, *view) else {
         draw_view_empty(&painter, rect, "No wall segments");
         return None;
     };
 
-    let mut wall_draw_order = model.walls.iter().enumerate().collect::<Vec<_>>();
-    wall_draw_order.sort_by(|(_, left), (_, right)| {
-        let left_depth = projector.wall_depth(left);
-        let right_depth = projector.wall_depth(right);
-        left_depth.total_cmp(&right_depth)
-    });
+    let clicked = pointer
+        .filter(|position| !cube_rect.contains(*position))
+        .and_then(|position| scene.pick(position, &projector))
+        .filter(|_| response.clicked());
 
-    let mut clicked_wall = None;
-    let mut clicked_opening = None;
-    for (index, wall) in wall_draw_order {
-        let points = [
-            projector.project(wall.start, Length::ZERO),
-            projector.project(wall.end, Length::ZERO),
-            projector.project(wall.end, wall.height),
-            projector.project(wall.start, wall.height),
-        ];
-        let positions = projected_positions(points);
-        let hovered = pointer.is_some_and(|position| {
-            !cube_rect.contains(position) && point_hits_projected_quad(position, &positions)
-        });
-        let selected = selected_wall == index && matches!(selection, Selection::Wall);
-        let fill = if selected {
-            Color32::from_rgb(202, 220, 230)
-        } else if hovered {
-            Color32::from_rgb(226, 225, 214)
-        } else {
-            Color32::from_rgb(216, 213, 200)
-        };
-        draw_projected_quad(
-            &painter,
-            &positions,
-            fill,
-            Stroke::new(
-                if selected || hovered { 1.75 } else { 1.0 },
-                Color32::from_rgb(111, 91, 63),
-            ),
+    if let Some(target_format) = gpu_target_format {
+        let callback = egui_wgpu::Callback::new_paint_callback(
+            drawing,
+            Framer3dCallback {
+                frame_key: Framer3dFrameKey::MODEL,
+                vertices: scene.vertices,
+                indices: scene.indices,
+                opaque_index_count: scene.opaque_index_count,
+                transparent_index_count: scene.transparent_index_count,
+                uniforms: GpuUniforms::from_projector(&projector, drawing),
+                target_format,
+            },
         );
-        if hovered && response.clicked() {
-            clicked_wall = Some(ViewClick::Wall(index));
-        }
-
-        for opening in &wall.openings {
-            let left = wall.point_at_local_x(opening.left());
-            let right = wall.point_at_local_x(opening.right());
-            let opening_points = [
-                projector.project(left, opening.sill_height),
-                projector.project(right, opening.sill_height),
-                projector.project(right, opening.top()),
-                projector.project(left, opening.top()),
-            ];
-            let opening_positions = projected_positions(opening_points);
-            let opening_hovered = pointer.is_some_and(|position| {
-                !cube_rect.contains(position)
-                    && point_hits_projected_quad(position, &opening_positions)
-            });
-            let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
-                && selected_wall == index;
-            draw_projected_quad(
-                &painter,
-                &opening_positions,
-                Color32::from_rgba_unmultiplied(250, 250, 248, 190),
-                Stroke::new(
-                    if opening_selected || opening_hovered {
-                        2.0
-                    } else {
-                        1.0
-                    },
-                    if opening_selected {
-                        Color32::from_rgb(35, 94, 150)
-                    } else {
-                        Color32::from_rgb(137, 102, 52)
-                    },
-                ),
-            );
-            if opening_hovered && response.clicked() {
-                clicked_opening = Some(ViewClick::Opening {
-                    wall_index: index,
-                    opening_id: opening.id.0.clone(),
-                });
-            }
-        }
+        painter.add(callback);
+    } else {
+        draw_view_empty(&painter, drawing, "WGPU renderer unavailable");
     }
 
-    let cube_action = draw_view_cube(&painter, cube_rect, pointer, response.clicked());
+    let cube_action = draw_view_cube(
+        &painter,
+        cube_rect,
+        if dragging_from_cube {
+            pointer.or(cube_hover_pointer)
+        } else {
+            cube_hover_pointer
+        },
+        response.clicked() && !dragging_from_cube,
+        *view,
+        gpu_target_format,
+    );
     if let Some(action) = cube_action {
         view.snap_to(action);
         return None;
     }
 
-    draw_view_title(&painter, drawing, "3D shell workspace");
+    draw_view_title(&painter, drawing, "3D model workspace");
 
-    clicked_opening.or(clicked_wall)
+    clicked
+}
+
+const FRAMER_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+const FRAMER_3D_SHADER: &str = r#"
+struct Uniforms {
+    center: vec4<f32>,
+    right: vec4<f32>,
+    depth_axis: vec4<f32>,
+    raw_center_scale: vec4<f32>,
+    depth_center_scale: vec4<f32>,
+};
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) normal: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec3<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    let local = input.position - uniforms.center.xyz;
+    let raw_x = dot(local.xy, uniforms.right.xy);
+    let along_depth = dot(local.xy, uniforms.depth_axis.xy);
+    let raw_y = along_depth * uniforms.depth_axis.z - local.z * uniforms.depth_axis.w;
+    let depth = along_depth * uniforms.depth_axis.w + local.z * uniforms.depth_axis.z;
+
+    var output: VertexOutput;
+    output.position = vec4<f32>(
+        (raw_x - uniforms.raw_center_scale.x) * uniforms.raw_center_scale.z,
+        -(raw_y - uniforms.raw_center_scale.y) * uniforms.raw_center_scale.w,
+        clamp(uniforms.depth_center_scale.z - (depth - uniforms.depth_center_scale.x) * uniforms.depth_center_scale.y, 0.0, 1.0),
+        1.0,
+    );
+    output.color = input.color;
+    output.normal = input.normal;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let light = normalize(vec3<f32>(-0.35, -0.45, 0.82));
+    let shade = 0.50 + 0.50 * max(dot(normalize(input.normal), light), 0.0);
+    return vec4<f32>(input.color.rgb * shade, input.color.a);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+    normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuUniforms {
+    center: [f32; 4],
+    right: [f32; 4],
+    depth_axis: [f32; 4],
+    raw_center_scale: [f32; 4],
+    depth_center_scale: [f32; 4],
+}
+
+impl GpuUniforms {
+    fn from_projector(projector: &OrbitProjector, drawing: Rect) -> Self {
+        let scale_x = projector.scale / (drawing.width() / 2.0).max(1.0);
+        let scale_y = projector.scale / (drawing.height() / 2.0).max(1.0);
+        Self {
+            center: [
+                projector.center.x,
+                projector.center.y,
+                projector.center.z,
+                0.0,
+            ],
+            right: [projector.right.x, projector.right.y, 0.0, 0.0],
+            depth_axis: [
+                projector.depth_axis.x,
+                projector.depth_axis.y,
+                projector.pitch.sin(),
+                projector.pitch.cos(),
+            ],
+            raw_center_scale: [
+                projector.raw_center.x,
+                projector.raw_center.y,
+                scale_x,
+                scale_y,
+            ],
+            depth_center_scale: [projector.depth_center, projector.depth_scale, 0.5, 0.0],
+        }
+    }
+
+    fn from_projector_with_depth_base(
+        projector: &OrbitProjector,
+        drawing: Rect,
+        depth_base: f32,
+    ) -> Self {
+        let mut uniforms = Self::from_projector(projector, drawing);
+        uniforms.depth_center_scale[2] = depth_base;
+        uniforms
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Framer3dFrameKey(u64);
+
+impl Framer3dFrameKey {
+    const MODEL: Self = Self(1);
+    const VIEW_CUBE: Self = Self(2);
+}
+
+struct Framer3dCallback {
+    frame_key: Framer3dFrameKey,
+    vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
+    opaque_index_count: u32,
+    transparent_index_count: u32,
+    uniforms: GpuUniforms,
+    target_format: wgpu::TextureFormat,
+}
+
+struct Framer3dResources {
+    target_format: wgpu::TextureFormat,
+    bind_group_layout: wgpu::BindGroupLayout,
+    opaque_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+}
+
+struct Framer3dFrame {
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    opaque_index_count: u32,
+    transparent_index_count: u32,
+}
+
+#[derive(Default)]
+struct Framer3dFrameStore {
+    frames: HashMap<Framer3dFrameKey, Framer3dFrame>,
+}
+
+impl egui_wgpu::CallbackTrait for Framer3dCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let needs_resources = callback_resources
+            .get::<Framer3dResources>()
+            .is_none_or(|resources| resources.target_format != self.target_format);
+        if needs_resources {
+            callback_resources.insert(Framer3dResources::new(device, self.target_format));
+        }
+        let resources = callback_resources
+            .get::<Framer3dResources>()
+            .expect("3D render resources should exist");
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("framer_3d_vertices"),
+            contents: bytemuck::cast_slice(&self.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("framer_3d_indices"),
+            contents: bytemuck::cast_slice(&self.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("framer_3d_uniforms"),
+            contents: bytemuck::bytes_of(&self.uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("framer_3d_bind_group"),
+            layout: &resources.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        if callback_resources.get::<Framer3dFrameStore>().is_none() {
+            callback_resources.insert(Framer3dFrameStore::default());
+        }
+        let frame_store = callback_resources
+            .get_mut::<Framer3dFrameStore>()
+            .expect("3D frame store should exist");
+        frame_store.frames.insert(
+            self.frame_key,
+            Framer3dFrame {
+                bind_group,
+                vertex_buffer,
+                index_buffer,
+                opaque_index_count: self.opaque_index_count,
+                transparent_index_count: self.transparent_index_count,
+            },
+        );
+
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(resources) = callback_resources.get::<Framer3dResources>() else {
+            return;
+        };
+        let Some(frame) = callback_resources
+            .get::<Framer3dFrameStore>()
+            .and_then(|store| store.frames.get(&self.frame_key))
+        else {
+            return;
+        };
+
+        render_pass.set_bind_group(0, &frame.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, frame.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(frame.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+        if frame.opaque_index_count > 0 {
+            render_pass.set_pipeline(&resources.opaque_pipeline);
+            render_pass.draw_indexed(0..frame.opaque_index_count, 0, 0..1);
+        }
+
+        if frame.transparent_index_count > 0 {
+            let start = frame.opaque_index_count;
+            let end = start + frame.transparent_index_count;
+            render_pass.set_pipeline(&resources.transparent_pipeline);
+            render_pass.draw_indexed(start..end, 0, 0..1);
+        }
+    }
+}
+
+impl Framer3dResources {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("framer_3d_bind_group_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("framer_3d_shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(FRAMER_3D_SHADER)),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("framer_3d_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let opaque_pipeline =
+            create_3d_pipeline(device, &pipeline_layout, &shader, target_format, None, true);
+        let transparent_pipeline = create_3d_pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            target_format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+        );
+
+        Self {
+            target_format,
+            bind_group_layout,
+            opaque_pipeline,
+            transparent_pipeline,
+        }
+    }
+}
+
+fn create_3d_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    target_format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    depth_write_enabled: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("framer_3d_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GpuVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3,
+                    1 => Float32x4,
+                    2 => Float32x3
+                ],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: FRAMER_DEPTH_FORMAT,
+            depth_write_enabled: Some(depth_write_enabled),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+struct Scene3d {
+    vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
+    opaque_index_count: u32,
+    transparent_index_count: u32,
+    points: Vec<Point3>,
+    picks: Vec<PickSolid>,
+}
+
+#[derive(Default)]
+struct SceneBuilder {
+    vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
+    points: Vec<Point3>,
+    picks: Vec<PickSolid>,
+    opaque_index_count: u32,
+}
+
+struct WallSegmentSpan {
+    x0: Length,
+    x1: Length,
+    z0: Length,
+    z1: Length,
+}
+
+impl WallSegmentSpan {
+    fn new(x0: Length, x1: Length, z0: Length, z1: Length) -> Self {
+        Self { x0, x1, z0, z1 }
+    }
+}
+
+impl Scene3d {
+    fn from_project(
+        model: &BuildingModel,
+        plan: &ProjectFramePlan,
+        selected_wall: usize,
+        selection: &Selection,
+    ) -> Option<Self> {
+        if model.walls.is_empty() {
+            return None;
+        }
+
+        let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+        let mut builder = SceneBuilder::default();
+
+        for (wall_index, wall) in model.walls.iter().enumerate() {
+            if let Some(wall_plan) = plan.wall_plan(&wall.id) {
+                let wall_selected = selected_wall == wall_index;
+                for member in &wall_plan.members {
+                    let member_selected = matches!(
+                        selection,
+                        Selection::Member { wall_id, member_id }
+                            if wall_id == &wall.id.0 && member_id == &member.id
+                    );
+                    builder.push_member(wall, member, wall_depth, wall_selected, member_selected);
+                }
+            }
+        }
+
+        builder.finish_opaque();
+
+        for (wall_index, wall) in model.walls.iter().enumerate() {
+            let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
+            builder.push_wall_envelope(wall, wall_index, wall_depth, wall_selected);
+            for opening in &wall.openings {
+                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), wall_depth);
+            }
+        }
+
+        Some(builder.finish())
+    }
+
+    fn pick(&self, pointer: Pos2, projector: &OrbitProjector) -> Option<ViewClick> {
+        let mut best = None::<(u8, f32, ViewClick)>;
+        for solid in &self.picks {
+            let Some(depth) = solid.hit_depth(pointer, projector) else {
+                continue;
+            };
+            let replace = best.as_ref().is_none_or(|(priority, best_depth, _)| {
+                solid.priority > *priority || (solid.priority == *priority && depth > *best_depth)
+            });
+            if replace {
+                best = Some((solid.priority, depth, solid.click.clone()));
+            }
+        }
+        best.map(|(_, _, click)| click)
+    }
+}
+
+impl SceneBuilder {
+    fn push_member(
+        &mut self,
+        wall: &Wall,
+        member: &FrameMember,
+        wall_depth: f32,
+        wall_selected: bool,
+        selected: bool,
+    ) {
+        let half_member = member.cross_section_depth.inches() as f32 / 2.0;
+        let (x0, x1, z0, z1) = match member.orientation {
+            MemberOrientation::Horizontal => (
+                member.x.inches() as f32,
+                (member.x + member.cut_length).inches() as f32,
+                member.elevation.inches() as f32,
+                (member.elevation + member.cross_section_depth).inches() as f32,
+            ),
+            MemberOrientation::Vertical => (
+                member.x.inches() as f32 - half_member,
+                member.x.inches() as f32 + half_member,
+                member.elevation.inches() as f32,
+                (member.elevation + member.cut_length).inches() as f32,
+            ),
+        };
+        let color = if selected {
+            Color32::from_rgb(49, 116, 178)
+        } else if wall_selected {
+            brighten(member_color(member.kind), 20)
+        } else {
+            member_color(member.kind)
+        };
+        let solid = WallCuboid::new(wall, x0, x1, -wall_depth / 2.0, wall_depth / 2.0, z0, z1);
+        self.push_cuboid(&solid, color_to_rgba(color));
+        self.picks.push(PickSolid {
+            click: ViewClick::Member {
+                wall_id: wall.id.0.clone(),
+                member_id: member.id.clone(),
+            },
+            priority: 3,
+            corners: solid.corners,
+        });
+    }
+
+    fn push_wall_envelope(
+        &mut self,
+        wall: &Wall,
+        wall_index: usize,
+        wall_depth: f32,
+        selected: bool,
+    ) {
+        let color = if selected {
+            Color32::from_rgba_unmultiplied(92, 145, 190, 82)
+        } else {
+            Color32::from_rgba_unmultiplied(188, 179, 158, 54)
+        };
+        let mut openings = wall.openings.iter().collect::<Vec<_>>();
+        openings.sort_by_key(|opening| opening.left());
+        let mut cursor = Length::ZERO;
+
+        for opening in openings {
+            self.push_wall_segment(
+                wall,
+                WallSegmentSpan::new(cursor, opening.left(), Length::ZERO, wall.height),
+                wall_depth,
+                color,
+            );
+            if opening.sill_height > Length::ZERO {
+                self.push_wall_segment(
+                    wall,
+                    WallSegmentSpan::new(
+                        opening.left(),
+                        opening.right(),
+                        Length::ZERO,
+                        opening.sill_height,
+                    ),
+                    wall_depth,
+                    color,
+                );
+            }
+            if opening.top() < wall.height {
+                self.push_wall_segment(
+                    wall,
+                    WallSegmentSpan::new(
+                        opening.left(),
+                        opening.right(),
+                        opening.top(),
+                        wall.height,
+                    ),
+                    wall_depth,
+                    color,
+                );
+            }
+            cursor = opening.right();
+        }
+        self.push_wall_segment(
+            wall,
+            WallSegmentSpan::new(cursor, wall.length, Length::ZERO, wall.height),
+            wall_depth,
+            color,
+        );
+
+        let solid = WallCuboid::new(
+            wall,
+            0.0,
+            wall.length.inches() as f32,
+            -wall_depth / 2.0,
+            wall_depth / 2.0,
+            0.0,
+            wall.height.inches() as f32,
+        );
+        self.picks.push(PickSolid {
+            click: ViewClick::Wall(wall_index),
+            priority: 1,
+            corners: solid.corners,
+        });
+    }
+
+    fn push_wall_segment(
+        &mut self,
+        wall: &Wall,
+        span: WallSegmentSpan,
+        wall_depth: f32,
+        color: Color32,
+    ) {
+        if span.x1 <= span.x0 || span.z1 <= span.z0 {
+            return;
+        }
+        let solid = WallCuboid::new(
+            wall,
+            span.x0.inches() as f32,
+            span.x1.inches() as f32,
+            -wall_depth / 2.0,
+            wall_depth / 2.0,
+            span.z0.inches() as f32,
+            span.z1.inches() as f32,
+        );
+        self.push_cuboid(&solid, color_to_rgba(color));
+    }
+
+    fn push_opening_pick(
+        &mut self,
+        wall: &Wall,
+        wall_index: usize,
+        opening_id: String,
+        wall_depth: f32,
+    ) {
+        let Some(opening) = wall
+            .openings
+            .iter()
+            .find(|candidate| candidate.id.0 == opening_id)
+        else {
+            return;
+        };
+        let solid = WallCuboid::new(
+            wall,
+            opening.left().inches() as f32,
+            opening.right().inches() as f32,
+            -wall_depth / 2.0,
+            wall_depth / 2.0,
+            opening.sill_height.inches() as f32,
+            opening.top().inches() as f32,
+        );
+        self.picks.push(PickSolid {
+            click: ViewClick::Opening {
+                wall_index,
+                opening_id,
+            },
+            priority: 2,
+            corners: solid.corners,
+        });
+    }
+
+    fn push_cuboid(&mut self, cuboid: &WallCuboid, color: [f32; 4]) {
+        if cuboid.is_degenerate() {
+            return;
+        }
+
+        self.points.extend(cuboid.corners);
+        for face in cuboid.faces() {
+            let base = self.vertices.len() as u32;
+            for corner in face.corners {
+                let point = cuboid.corners[corner];
+                self.vertices.push(GpuVertex {
+                    position: [point.x, point.y, point.z],
+                    color,
+                    normal: [face.normal.x, face.normal.y, face.normal.z],
+                });
+            }
+            self.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    fn finish_opaque(&mut self) {
+        self.opaque_index_count = self.indices.len() as u32;
+    }
+
+    fn finish(self) -> Scene3d {
+        let total_index_count = self.indices.len() as u32;
+        Scene3d {
+            vertices: self.vertices,
+            indices: self.indices,
+            opaque_index_count: self.opaque_index_count,
+            transparent_index_count: total_index_count - self.opaque_index_count,
+            points: self.points,
+            picks: self.picks,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WallCuboid {
+    corners: [Point3; 8],
+    along: Point3,
+    side: Point3,
+}
+
+impl WallCuboid {
+    #[allow(clippy::too_many_arguments)]
+    fn new(wall: &Wall, x0: f32, x1: f32, side0: f32, side1: f32, z0: f32, z1: f32) -> Self {
+        let basis = WallBasis::new(wall);
+        let corners = [
+            basis.point(x0, side0, z0),
+            basis.point(x1, side0, z0),
+            basis.point(x1, side1, z0),
+            basis.point(x0, side1, z0),
+            basis.point(x0, side0, z1),
+            basis.point(x1, side0, z1),
+            basis.point(x1, side1, z1),
+            basis.point(x0, side1, z1),
+        ];
+        Self {
+            corners,
+            along: Point3::vector(basis.along_x, basis.along_y, 0.0),
+            side: Point3::vector(basis.side_x, basis.side_y, 0.0),
+        }
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.corners[0].distance_squared(self.corners[1]) < f32::EPSILON
+            || self.corners[1].distance_squared(self.corners[2]) < f32::EPSILON
+            || self.corners[0].distance_squared(self.corners[4]) < f32::EPSILON
+    }
+
+    fn faces(&self) -> [CuboidFace; 6] {
+        [
+            CuboidFace::new([0, 3, 2, 1], -Point3::Z),
+            CuboidFace::new([4, 5, 6, 7], Point3::Z),
+            CuboidFace::new([0, 1, 5, 4], -self.side),
+            CuboidFace::new([1, 2, 6, 5], self.along),
+            CuboidFace::new([2, 3, 7, 6], self.side),
+            CuboidFace::new([3, 0, 4, 7], -self.along),
+        ]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CuboidFace {
+    corners: [usize; 4],
+    normal: Point3,
+}
+
+impl CuboidFace {
+    fn new(corners: [usize; 4], normal: Point3) -> Self {
+        Self { corners, normal }
+    }
+}
+
+struct PickSolid {
+    click: ViewClick,
+    priority: u8,
+    corners: [Point3; 8],
+}
+
+impl PickSolid {
+    fn hit_depth(&self, pointer: Pos2, projector: &OrbitProjector) -> Option<f32> {
+        let mut best_depth = None::<f32>;
+        for face in CUBOID_FACE_INDICES {
+            let projected = face.map(|index| projector.project_point(self.corners[index]));
+            let positions = projected.map(|point| point.pos);
+            if point_hits_projected_quad(pointer, &positions) {
+                let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 4.0;
+                best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+            }
+        }
+        best_depth
+    }
+}
+
+const CUBOID_FACE_INDICES: [[usize; 4]; 6] = [
+    [0, 3, 2, 1],
+    [4, 5, 6, 7],
+    [0, 1, 5, 4],
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [3, 0, 4, 7],
+];
+
+struct WallBasis {
+    origin_x: f32,
+    origin_y: f32,
+    along_x: f32,
+    along_y: f32,
+    side_x: f32,
+    side_y: f32,
+}
+
+impl WallBasis {
+    fn new(wall: &Wall) -> Self {
+        let dx = (wall.end.x - wall.start.x).inches() as f32;
+        let dy = (wall.end.y - wall.start.y).inches() as f32;
+        let length = (dx * dx + dy * dy).sqrt().max(1.0);
+        let along_x = dx / length;
+        let along_y = dy / length;
+        Self {
+            origin_x: wall.start.x.inches() as f32,
+            origin_y: wall.start.y.inches() as f32,
+            along_x,
+            along_y,
+            side_x: -along_y,
+            side_y: along_x,
+        }
+    }
+
+    fn point(&self, local_x: f32, side: f32, z: f32) -> Point3 {
+        Point3 {
+            x: self.origin_x + self.along_x * local_x + self.side_x * side,
+            y: self.origin_y + self.along_y * local_x + self.side_y * side,
+            z,
+        }
+    }
+}
+
+fn color_to_rgba(color: Color32) -> [f32; 4] {
+    [
+        color.r() as f32 / 255.0,
+        color.g() as f32 / 255.0,
+        color.b() as f32 / 255.0,
+        color.a() as f32 / 255.0,
+    ]
+}
+
+fn brighten(color: Color32, amount: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        color.r().saturating_add(amount),
+        color.g().saturating_add(amount),
+        color.b().saturating_add(amount),
+        color.a(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -502,55 +1336,50 @@ struct OrbitProjector {
     depth_axis: Vec2,
     pitch: f32,
     center: Point3,
+    depth_center: f32,
+    depth_scale: f32,
 }
 
 impl OrbitProjector {
+    #[cfg(test)]
     fn from_model(model: &BuildingModel, drawing: Rect, view: View3dState) -> Option<Self> {
         let points = model_3d_points(model)?;
+        Self::from_points(&points, drawing, view)
+    }
+
+    fn from_points(points: &[Point3], drawing: Rect, view: View3dState) -> Option<Self> {
+        if points.is_empty() {
+            return None;
+        }
         let yaw = view.yaw;
-        let pitch = view.pitch.clamp(0.0, FRAC_PI_2);
+        let pitch = view.pitch.clamp(-FRAC_PI_2, FRAC_PI_2);
         let right = Vec2::angled(yaw);
         let depth_axis = Vec2::new(-right.y, right.x);
-        let center = model_3d_center(&points);
-        let mut raw_points = Vec::with_capacity(points.len());
-        for point in &points {
-            raw_points.push(raw_orbit(*point, center, right, depth_axis, pitch).0);
-        }
-
-        let min_x = raw_points
-            .iter()
-            .map(|point| point.x)
-            .fold(f32::MAX, f32::min);
-        let min_y = raw_points
-            .iter()
-            .map(|point| point.y)
-            .fold(f32::MAX, f32::min);
-        let max_x = raw_points
-            .iter()
-            .map(|point| point.x)
-            .fold(f32::MIN, f32::max);
-        let max_y = raw_points
-            .iter()
-            .map(|point| point.y)
-            .fold(f32::MIN, f32::max);
-        let width = (max_x - min_x).max(1.0);
-        let height = (max_y - min_y).max(1.0);
-        let scale = (drawing.width() / width).min(drawing.height() / height) * 0.92 * view.zoom;
-        let raw_center = Vec2::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+        let center = model_3d_center(points);
+        let radius = model_3d_radius(points, center).max(1.0);
+        let diameter = radius * 2.0;
+        let scale = drawing.width().min(drawing.height()) / diameter * 0.92 * view.zoom;
 
         Some(Self {
-            raw_center,
+            raw_center: Vec2::ZERO,
             scale,
             origin: drawing.center(),
             right,
             depth_axis,
             pitch,
             center,
+            depth_center: 0.0,
+            depth_scale: 0.45 / diameter,
         })
     }
 
+    #[cfg(test)]
     fn project(&self, point: Point2, elevation: Length) -> ProjectedPoint {
         let point = Point3::new(point.x, point.y, elevation);
+        self.project_point(point)
+    }
+
+    fn project_point(&self, point: Point3) -> ProjectedPoint {
         let (raw, depth) = raw_orbit(point, self.center, self.right, self.depth_axis, self.pitch);
         ProjectedPoint {
             pos: Pos2::new(
@@ -561,18 +1390,33 @@ impl OrbitProjector {
         }
     }
 
-    fn wall_depth(&self, wall: &Wall) -> f32 {
-        let points = [
-            self.project(wall.start, Length::ZERO),
-            self.project(wall.end, Length::ZERO),
-            self.project(wall.start, wall.height),
-            self.project(wall.end, wall.height),
-        ];
-        points.iter().map(|point| point.depth).sum::<f32>() / points.len() as f32
+    fn view_direction(&self) -> Point3 {
+        Point3::vector(
+            self.depth_axis.x * self.pitch.cos(),
+            self.depth_axis.y * self.pitch.cos(),
+            self.pitch.sin(),
+        )
     }
 }
 
 impl Point3 {
+    const X: Self = Self {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    const Y: Self = Self {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    const Z: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
+
+    #[cfg(test)]
     fn new(point_x: Length, point_y: Length, elevation: Length) -> Self {
         Self {
             x: point_x.inches() as f32,
@@ -580,8 +1424,44 @@ impl Point3 {
             z: elevation.inches() as f32,
         }
     }
+
+    fn vector(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    fn distance_squared(self, other: Self) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        dx * dx + dy * dy + dz * dz
+    }
+
+    fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    fn offset(self, axis: Self, amount: f32) -> Self {
+        Self {
+            x: self.x + axis.x * amount,
+            y: self.y + axis.y * amount,
+            z: self.z + axis.z * amount,
+        }
+    }
 }
 
+impl Neg for Point3 {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+}
+
+#[cfg(test)]
 fn model_3d_points(model: &BuildingModel) -> Option<Vec<Point3>> {
     let mut points = Vec::new();
     for wall in &model.walls {
@@ -622,6 +1502,14 @@ fn model_3d_center(points: &[Point3]) -> Point3 {
     }
 }
 
+fn model_3d_radius(points: &[Point3], center: Point3) -> f32 {
+    points
+        .iter()
+        .map(|point| point.distance_squared(center))
+        .fold(0.0, f32::max)
+        .sqrt()
+}
+
 fn raw_orbit(
     point: Point3,
     center: Point3,
@@ -640,18 +1528,6 @@ fn raw_orbit(
     let depth = along_depth * pitch.cos() + z * pitch.sin();
 
     (raw, depth)
-}
-
-fn projected_positions(points: [ProjectedPoint; 4]) -> [Pos2; 4] {
-    [points[0].pos, points[1].pos, points[2].pos, points[3].pos]
-}
-
-fn draw_projected_quad(painter: &egui::Painter, points: &[Pos2; 4], fill: Color32, stroke: Stroke) {
-    if polygon_area(points) <= 1.0 {
-        painter.line_segment([points[0], points[1]], stroke);
-    } else {
-        painter.add(Shape::convex_polygon(points.to_vec(), fill, stroke));
-    }
 }
 
 fn point_hits_projected_quad(point: Pos2, points: &[Pos2; 4]) -> bool {
@@ -700,49 +1576,249 @@ fn view_cube_rect(drawing: Rect) -> Rect {
     )
 }
 
+fn view_cube_body_rect(rect: Rect) -> Rect {
+    Rect::from_min_max(
+        rect.left_top() + Vec2::new(18.0, 8.0),
+        rect.right_bottom() - Vec2::new(6.0, 6.0),
+    )
+}
+
+fn pointer_started_in_rect(press_origin: Option<Pos2>, rect: Rect) -> bool {
+    press_origin.is_some_and(|origin| rect.contains(origin))
+}
+
 struct ViewCubeGeometry {
     home_rect: Rect,
-    top_face: [Pos2; 4],
-    right_face: [Pos2; 4],
-    front_face: [Pos2; 4],
+    faces: Vec<ViewCubeFaceGeometry>,
+    edges: Vec<ViewCubeEdgeGeometry>,
+    corners: Vec<ViewCubeCornerGeometry>,
+}
+
+#[derive(Clone, Copy)]
+struct ViewCubeFaceGeometry {
+    action: ViewCubeAction,
+    points: [Pos2; 4],
+}
+
+#[derive(Clone, Copy)]
+struct ViewCubeEdgeGeometry {
+    action: ViewCubeAction,
+    points: [Pos2; 2],
+}
+
+#[derive(Clone, Copy)]
+struct ViewCubeCornerGeometry {
+    action: ViewCubeAction,
+    center: Pos2,
 }
 
 impl ViewCubeGeometry {
-    fn from_rect(rect: Rect) -> Self {
-        let center_x = rect.center().x;
-        let top_y = rect.top() + 8.0;
-        let top = pos2(center_x, top_y);
-        let right = pos2(center_x + 38.0, top_y + 22.0);
-        let middle = pos2(center_x, top_y + 44.0);
-        let left = pos2(center_x - 38.0, top_y + 22.0);
-        let right_bottom = pos2(center_x + 38.0, top_y + 64.0);
-        let bottom = pos2(center_x, top_y + 86.0);
-        let left_bottom = pos2(center_x - 38.0, top_y + 64.0);
+    fn from_rect(rect: Rect, view: View3dState) -> Self {
+        let corners = view_cube_points();
+        let body_rect = view_cube_body_rect(rect);
+        let projector = view_cube_projector(body_rect, view);
+        let camera_direction = projector.view_direction();
+        let projected = corners.map(|point| projector.project_point(point).pos);
+        let face_specs = view_cube_face_specs();
+        let faces = face_specs
+            .iter()
+            .filter_map(|spec| {
+                view_cube_face_geometry(&projector, &corners, *spec, camera_direction)
+            })
+            .collect::<Vec<_>>();
+        let mut visible_corners = [false; 8];
+        for face in &faces {
+            if let Some(spec) = face_specs.iter().find(|spec| spec.action == face.action) {
+                for corner in spec.face {
+                    visible_corners[corner] = true;
+                }
+            }
+        }
 
         Self {
             home_rect: Rect::from_min_size(
                 rect.left_top() + Vec2::new(6.0, 6.0),
                 Vec2::splat(22.0),
             ),
-            top_face: [top, right, middle, left],
-            right_face: [right, right_bottom, bottom, middle],
-            front_face: [left, middle, bottom, left_bottom],
+            edges: view_cube_edges()
+                .into_iter()
+                .filter(|[start, end]| {
+                    visible_corners[*start]
+                        && visible_corners[*end]
+                        && faces.iter().any(|face| {
+                            face_specs
+                                .iter()
+                                .find(|spec| spec.action == face.action)
+                                .is_some_and(|spec| {
+                                    view_cube_face_has_edge(spec.face, *start, *end)
+                                })
+                        })
+                })
+                .map(|[start, end]| ViewCubeEdgeGeometry {
+                    action: ViewCubeAction::snap(ViewCubeOrientation::from_points(
+                        corners[start],
+                        corners[end],
+                    )),
+                    points: [projected[start], projected[end]],
+                })
+                .collect(),
+            corners: visible_corners
+                .iter()
+                .enumerate()
+                .filter(|(_, visible)| **visible)
+                .map(|(index, _)| ViewCubeCornerGeometry {
+                    action: ViewCubeAction::snap(ViewCubeOrientation::from_point(corners[index])),
+                    center: projected[index],
+                })
+                .collect(),
+            faces,
         }
     }
 
     fn hit(&self, position: Pos2) -> Option<ViewCubeAction> {
         if self.home_rect.contains(position) {
             Some(ViewCubeAction::Home)
-        } else if point_in_polygon(position, &self.top_face) {
-            Some(ViewCubeAction::Top)
-        } else if point_in_polygon(position, &self.right_face) {
-            Some(ViewCubeAction::Right)
-        } else if point_in_polygon(position, &self.front_face) {
-            Some(ViewCubeAction::Front)
+        } else if let Some(corner) = self
+            .corners
+            .iter()
+            .filter(|corner| corner.center.distance(position) <= 8.0)
+            .min_by(|left, right| {
+                left.center
+                    .distance(position)
+                    .total_cmp(&right.center.distance(position))
+            })
+        {
+            Some(corner.action)
+        } else if let Some(edge) = self
+            .edges
+            .iter()
+            .filter(|edge| distance_to_segment(position, edge.points[0], edge.points[1]) <= 7.0)
+            .min_by(|left, right| {
+                distance_to_segment(position, left.points[0], left.points[1]).total_cmp(
+                    &distance_to_segment(position, right.points[0], right.points[1]),
+                )
+            })
+        {
+            Some(edge.action)
         } else {
-            None
+            self.faces
+                .iter()
+                .find(|face| point_in_polygon(position, &face.points))
+                .map(|face| face.action)
         }
     }
+}
+
+fn view_cube_projector(rect: Rect, view: View3dState) -> OrbitProjector {
+    let mut cube_view = view;
+    cube_view.zoom = 1.0;
+    OrbitProjector::from_points(&view_cube_points(), rect, cube_view)
+        .expect("view cube has fixed geometry")
+}
+
+fn view_cube_points() -> [Point3; 8] {
+    [
+        Point3::vector(-1.0, -1.0, -1.0),
+        Point3::vector(1.0, -1.0, -1.0),
+        Point3::vector(1.0, 1.0, -1.0),
+        Point3::vector(-1.0, 1.0, -1.0),
+        Point3::vector(-1.0, -1.0, 1.0),
+        Point3::vector(1.0, -1.0, 1.0),
+        Point3::vector(1.0, 1.0, 1.0),
+        Point3::vector(-1.0, 1.0, 1.0),
+    ]
+}
+
+#[derive(Clone, Copy)]
+struct ViewCubeFaceSpec {
+    action: ViewCubeAction,
+    face: [usize; 4],
+    normal: Point3,
+    color: Color32,
+}
+
+fn view_cube_face_specs() -> [ViewCubeFaceSpec; 6] {
+    [
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::BOTTOM,
+            face: [0, 3, 2, 1],
+            normal: -Point3::Z,
+            color: Color32::from_rgb(192, 197, 193),
+        },
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::TOP,
+            face: [4, 5, 6, 7],
+            normal: Point3::Z,
+            color: Color32::from_rgb(228, 235, 232),
+        },
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::BACK,
+            face: [0, 1, 5, 4],
+            normal: -Point3::Y,
+            color: Color32::from_rgb(196, 201, 196),
+        },
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::RIGHT,
+            face: [1, 2, 6, 5],
+            normal: Point3::X,
+            color: Color32::from_rgb(230, 232, 229),
+        },
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::FRONT,
+            face: [2, 3, 7, 6],
+            normal: Point3::Y,
+            color: Color32::from_rgb(238, 238, 234),
+        },
+        ViewCubeFaceSpec {
+            action: ViewCubeAction::LEFT,
+            face: [3, 0, 4, 7],
+            normal: -Point3::X,
+            color: Color32::from_rgb(186, 191, 188),
+        },
+    ]
+}
+
+fn view_cube_edges() -> [[usize; 2]; 12] {
+    [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 0],
+        [4, 5],
+        [5, 6],
+        [6, 7],
+        [7, 4],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ]
+}
+
+fn view_cube_face_has_edge(face: [usize; 4], start: usize, end: usize) -> bool {
+    face.iter().enumerate().any(|(index, corner)| {
+        let next = face[(index + 1) % face.len()];
+        (*corner == start && next == end) || (*corner == end && next == start)
+    })
+}
+
+fn view_cube_face_geometry(
+    projector: &OrbitProjector,
+    corners: &[Point3; 8],
+    spec: ViewCubeFaceSpec,
+    camera_direction: Point3,
+) -> Option<ViewCubeFaceGeometry> {
+    if spec.normal.dot(camera_direction) <= 0.0 {
+        return None;
+    }
+
+    let points = spec
+        .face
+        .map(|index| projector.project_point(corners[index]).pos);
+    Some(ViewCubeFaceGeometry {
+        action: spec.action,
+        points,
+    })
 }
 
 fn draw_view_cube(
@@ -750,13 +1826,12 @@ fn draw_view_cube(
     rect: Rect,
     pointer: Option<Pos2>,
     clicked: bool,
+    view: View3dState,
+    gpu_target_format: Option<wgpu::TextureFormat>,
 ) -> Option<ViewCubeAction> {
-    let geometry = ViewCubeGeometry::from_rect(rect);
+    let geometry = ViewCubeGeometry::from_rect(rect, view);
     let hovered_action = pointer.and_then(|position| geometry.hit(position));
     let hovered_home = hovered_action == Some(ViewCubeAction::Home);
-    let hovered_top = hovered_action == Some(ViewCubeAction::Top);
-    let hovered_right = hovered_action == Some(ViewCubeAction::Right);
-    let hovered_front = hovered_action == Some(ViewCubeAction::Front);
 
     painter.rect_filled(
         rect,
@@ -792,59 +1867,270 @@ fn draw_view_cube(
         Color32::from_rgb(61, 67, 71),
     );
 
-    draw_view_cube_face(
-        painter,
-        &geometry.top_face,
-        hovered_top,
-        Color32::from_rgb(232, 237, 234),
-        "Top",
-    );
-    draw_view_cube_face(
-        painter,
-        &geometry.right_face,
-        hovered_right,
-        Color32::from_rgb(213, 224, 230),
-        "Right",
-    );
-    draw_view_cube_face(
-        painter,
-        &geometry.front_face,
-        hovered_front,
-        Color32::from_rgb(222, 218, 207),
-        "Front",
-    );
+    let body_rect = view_cube_body_rect(rect);
+    let projector = view_cube_projector(body_rect, view);
+    if let Some(target_format) = gpu_target_format {
+        let (vertices, indices) = view_cube_mesh(hovered_action);
+        painter.add(egui_wgpu::Callback::new_paint_callback(
+            body_rect,
+            Framer3dCallback {
+                frame_key: Framer3dFrameKey::VIEW_CUBE,
+                opaque_index_count: indices.len() as u32,
+                transparent_index_count: 0,
+                uniforms: GpuUniforms::from_projector_with_depth_base(&projector, body_rect, 0.14),
+                vertices,
+                indices,
+                target_format,
+            },
+        ));
+        draw_view_cube_edges(painter, &geometry, hovered_action);
+        draw_view_cube_labels(painter, &projector, &geometry);
+    } else {
+        draw_view_empty(painter, body_rect, "3D");
+    }
 
     if clicked { hovered_action } else { None }
 }
 
-fn draw_view_cube_face(
-    painter: &egui::Painter,
-    points: &[Pos2; 4],
-    hovered: bool,
-    fill: Color32,
-    label: &str,
+fn view_cube_mesh(hovered_action: Option<ViewCubeAction>) -> (Vec<GpuVertex>, Vec<u32>) {
+    let corners = view_cube_points();
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    let hovered_orientation = hovered_action.and_then(ViewCubeAction::orientation);
+    for spec in view_cube_face_specs() {
+        let face_orientation = spec.action.orientation().expect("cube faces snap");
+        let color = if hovered_orientation
+            .is_some_and(|orientation| orientation.includes_face(face_orientation))
+        {
+            brighten(spec.color, 24)
+        } else {
+            spec.color
+        };
+        push_view_cube_face(
+            &mut vertices,
+            &mut indices,
+            &corners,
+            spec.face,
+            spec.normal,
+            color,
+        );
+    }
+
+    (vertices, indices)
+}
+
+fn push_view_cube_face(
+    vertices: &mut Vec<GpuVertex>,
+    indices: &mut Vec<u32>,
+    corners: &[Point3; 8],
+    face: [usize; 4],
+    normal: Point3,
+    color: Color32,
 ) {
-    let fill = if hovered {
-        Color32::from_rgb(194, 218, 232)
-    } else {
-        fill
-    };
-    painter.add(Shape::convex_polygon(
-        points.to_vec(),
-        fill,
-        Stroke::new(1.0, Color32::from_rgb(105, 108, 103)),
-    ));
-    let center = points
-        .iter()
-        .fold(Vec2::ZERO, |sum, point| sum + point.to_vec2())
-        / points.len() as f32;
-    painter.text(
-        Pos2::new(center.x, center.y),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(10.0),
-        Color32::from_rgb(57, 61, 64),
+    push_view_cube_quad(
+        vertices,
+        indices,
+        face.map(|index| corners[index]),
+        normal,
+        color_to_rgba(color),
     );
+}
+
+fn push_view_cube_quad(
+    vertices: &mut Vec<GpuVertex>,
+    indices: &mut Vec<u32>,
+    points: [Point3; 4],
+    normal: Point3,
+    color: [f32; 4],
+) {
+    let base = vertices.len() as u32;
+    for point in points {
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color,
+            normal: [normal.x, normal.y, normal.z],
+        });
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+#[derive(Clone, Copy)]
+struct ViewCubeLabelSpec {
+    action: ViewCubeAction,
+    text: &'static str,
+    center: Point3,
+    u_axis: Point3,
+    v_axis: Point3,
+    width: f32,
+}
+
+fn view_cube_label_specs() -> [ViewCubeLabelSpec; 3] {
+    [
+        ViewCubeLabelSpec {
+            action: ViewCubeAction::TOP,
+            text: "TOP",
+            center: Point3::vector(0.0, 0.0, 1.0),
+            u_axis: Point3::Y,
+            v_axis: Point3::X,
+            width: 0.90,
+        },
+        ViewCubeLabelSpec {
+            action: ViewCubeAction::RIGHT,
+            text: "RIGHT",
+            center: Point3::vector(1.0, 0.0, 0.0),
+            u_axis: -Point3::Y,
+            v_axis: Point3::Z,
+            width: 1.28,
+        },
+        ViewCubeLabelSpec {
+            action: ViewCubeAction::FRONT,
+            text: "FRONT",
+            center: Point3::vector(0.0, 1.0, 0.0),
+            u_axis: Point3::X,
+            v_axis: Point3::Z,
+            width: 1.28,
+        },
+    ]
+}
+
+fn draw_view_cube_edges(
+    painter: &egui::Painter,
+    geometry: &ViewCubeGeometry,
+    hovered_action: Option<ViewCubeAction>,
+) {
+    let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(82, 89, 88, 128));
+    for face in &geometry.faces {
+        for index in 0..face.points.len() {
+            painter.line_segment(
+                [
+                    face.points[index],
+                    face.points[(index + 1) % face.points.len()],
+                ],
+                stroke,
+            );
+        }
+    }
+
+    let Some(orientation) = hovered_action.and_then(ViewCubeAction::orientation) else {
+        return;
+    };
+
+    let highlight = Stroke::new(2.25, Color32::from_rgb(42, 124, 186));
+    match orientation.component_count() {
+        1 => {
+            if let Some(face) = geometry
+                .faces
+                .iter()
+                .find(|face| face.action.orientation() == Some(orientation))
+            {
+                for index in 0..face.points.len() {
+                    painter.line_segment(
+                        [
+                            face.points[index],
+                            face.points[(index + 1) % face.points.len()],
+                        ],
+                        highlight,
+                    );
+                }
+            }
+        }
+        2 => {
+            if let Some(edge) = geometry
+                .edges
+                .iter()
+                .find(|edge| edge.action.orientation() == Some(orientation))
+            {
+                painter.line_segment(edge.points, highlight);
+            }
+        }
+        3 => {
+            if let Some(corner) = geometry
+                .corners
+                .iter()
+                .find(|corner| corner.action.orientation() == Some(orientation))
+            {
+                painter.circle_filled(
+                    corner.center,
+                    4.0,
+                    Color32::from_rgba_unmultiplied(42, 124, 186, 130),
+                );
+                painter.circle_stroke(corner.center, 4.0, highlight);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn draw_view_cube_labels(
+    painter: &egui::Painter,
+    projector: &OrbitProjector,
+    geometry: &ViewCubeGeometry,
+) {
+    for spec in view_cube_label_specs() {
+        if geometry.faces.iter().any(|face| face.action == spec.action) {
+            draw_view_cube_projected_label(painter, projector, spec);
+        }
+    }
+}
+
+fn draw_view_cube_projected_label(
+    painter: &egui::Painter,
+    projector: &OrbitProjector,
+    spec: ViewCubeLabelSpec,
+) {
+    let color = Color32::from_rgba_unmultiplied(53, 60, 62, 215);
+    let galley = painter.layout_no_wrap(spec.text.to_owned(), FontId::proportional(12.0), color);
+    let size = galley.rect.size();
+    if size.x <= f32::EPSILON || size.y <= f32::EPSILON {
+        return;
+    }
+
+    let center = projector.project_point(spec.center).pos;
+    let u = projector
+        .project_point(spec.center.offset(spec.u_axis, 1.0))
+        .pos
+        - center;
+    let v = projector
+        .project_point(spec.center.offset(spec.v_axis, 1.0))
+        .pos
+        - center;
+    let point_scale = spec.width / size.x;
+    let glyph_center = galley.rect.center();
+    let font_image_size = painter.fonts_mut(|fonts| fonts.font_image_size());
+    let uv_scale = Vec2::new(
+        1.0 / font_image_size[0] as f32,
+        1.0 / font_image_size[1] as f32,
+    );
+    let mut mesh = Mesh::default();
+
+    for row in &galley.rows {
+        if row.visuals.mesh.is_empty() {
+            continue;
+        }
+        let index_offset = mesh.vertices.len() as u32;
+        mesh.indices.extend(
+            row.visuals
+                .mesh
+                .indices
+                .iter()
+                .map(|index| index + index_offset),
+        );
+        mesh.vertices
+            .extend(row.visuals.mesh.vertices.iter().map(|vertex| {
+                let local = row.pos + vertex.pos.to_vec2();
+                let centered = local - glyph_center;
+                let pos = center + u * (centered.x * point_scale) - v * (centered.y * point_scale);
+                Vertex {
+                    pos,
+                    uv: (vertex.uv.to_vec2() * uv_scale).to_pos2(),
+                    color,
+                }
+            }));
+    }
+
+    if !mesh.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
 }
 
 fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
@@ -1046,9 +2332,20 @@ mod tests {
         view.zoom_by(10.0);
         assert_eq!(view.zoom, 3.0);
 
-        view.snap_to(ViewCubeAction::Top);
+        view.snap_to(ViewCubeAction::TOP);
         assert_close(view.yaw, 0.0);
         assert_close(view.pitch, FRAC_PI_2);
+
+        view.snap_to(ViewCubeAction::RIGHT);
+        assert_close(view.yaw, -FRAC_PI_2);
+        assert_close(view.pitch, 0.0);
+
+        view.snap_to(ViewCubeAction::snap(ViewCubeOrientation::new(0, 1, 1)));
+        assert_close(view.yaw, 0.0);
+        assert_close(view.pitch, FRAC_PI_4);
+
+        view.snap_to(ViewCubeAction::snap(ViewCubeOrientation::new(1, 1, 1)));
+        assert_close(view.yaw, -FRAC_PI_4);
 
         view.snap_to(ViewCubeAction::Home);
         assert_close(view.yaw, -FRAC_PI_4);
@@ -1066,7 +2363,7 @@ mod tests {
             .project(front_end, Length::ZERO)
             .pos;
         let mut right_view = View3dState::default();
-        right_view.snap_to(ViewCubeAction::Right);
+        right_view.snap_to(ViewCubeAction::RIGHT);
         let right = OrbitProjector::from_model(&model, drawing, right_view)
             .unwrap()
             .project(front_end, Length::ZERO)
@@ -1076,25 +2373,72 @@ mod tests {
     }
 
     #[test]
+    fn orbit_projector_keeps_distance_stable_when_view_rotates() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        let home =
+            OrbitProjector::from_points(&scene.points, drawing, View3dState::default()).unwrap();
+        let mut right_view = View3dState::default();
+        right_view.snap_to(ViewCubeAction::RIGHT);
+        let right = OrbitProjector::from_points(&scene.points, drawing, right_view).unwrap();
+
+        assert_close(home.scale, right.scale);
+    }
+
+    #[test]
+    fn orbit_projector_applies_explicit_zoom_without_auto_fit_drift() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        let base =
+            OrbitProjector::from_points(&scene.points, drawing, View3dState::default()).unwrap();
+        let mut zoomed_view = View3dState::default();
+        zoomed_view.zoom_by(1.25);
+        let zoomed = OrbitProjector::from_points(&scene.points, drawing, zoomed_view).unwrap();
+
+        assert_close(zoomed.scale / base.scale, 1.25);
+    }
+
+    #[test]
     fn view_cube_geometry_hits_clickable_faces() {
-        let rect = Rect::from_min_size(pos2(100.0, 80.0), Vec2::splat(104.0));
-        let geometry = ViewCubeGeometry::from_rect(rect);
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::splat(104.0));
+        let geometry = ViewCubeGeometry::from_rect(rect, View3dState::default());
+        let top_face = geometry
+            .faces
+            .iter()
+            .find(|face| face.action == ViewCubeAction::TOP)
+            .expect("default view shows the top face");
+        let right_face = geometry
+            .faces
+            .iter()
+            .find(|face| face.action == ViewCubeAction::RIGHT)
+            .expect("default view shows the right face");
+        let front_face = geometry
+            .faces
+            .iter()
+            .find(|face| face.action == ViewCubeAction::FRONT)
+            .expect("default view shows the front face");
 
         assert_eq!(
             geometry.hit(geometry.home_rect.center()),
             Some(ViewCubeAction::Home)
         );
         assert_eq!(
-            geometry.hit(face_center(&geometry.top_face)),
-            Some(ViewCubeAction::Top)
+            geometry.hit(view_cube_face_center(top_face)),
+            Some(ViewCubeAction::TOP)
         );
         assert_eq!(
-            geometry.hit(face_center(&geometry.right_face)),
-            Some(ViewCubeAction::Right)
+            geometry.hit(view_cube_face_center(right_face)),
+            Some(ViewCubeAction::RIGHT)
         );
         assert_eq!(
-            geometry.hit(face_center(&geometry.front_face)),
-            Some(ViewCubeAction::Front)
+            geometry.hit(view_cube_face_center(front_face)),
+            Some(ViewCubeAction::FRONT)
         );
         assert_eq!(
             geometry.hit(rect.left_bottom() + Vec2::new(4.0, -4.0)),
@@ -1102,12 +2446,153 @@ mod tests {
         );
     }
 
-    fn face_center(points: &[Pos2; 4]) -> Pos2 {
-        let center = points
+    #[test]
+    fn view_cube_geometry_hits_unlabeled_faces_edges_and_corners() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::splat(104.0));
+        let mut left_view = View3dState::default();
+        left_view.snap_to(ViewCubeAction::LEFT);
+        let left_geometry = ViewCubeGeometry::from_rect(rect, left_view);
+        let left_face = left_geometry
+            .faces
             .iter()
-            .fold(Vec2::ZERO, |sum, point| sum + point.to_vec2())
-            / points.len() as f32;
-        Pos2::new(center.x, center.y)
+            .find(|face| face.action == ViewCubeAction::LEFT)
+            .expect("left face should be visible after left snap");
+        assert_eq!(
+            left_geometry.hit(view_cube_face_center(left_face)),
+            Some(ViewCubeAction::LEFT)
+        );
+
+        let mut bottom_view = View3dState::default();
+        bottom_view.snap_to(ViewCubeAction::BOTTOM);
+        let bottom_geometry = ViewCubeGeometry::from_rect(rect, bottom_view);
+        let bottom_face = bottom_geometry
+            .faces
+            .iter()
+            .find(|face| face.action == ViewCubeAction::BOTTOM)
+            .expect("bottom face should be visible after bottom snap");
+        assert_eq!(
+            bottom_geometry.hit(view_cube_face_center(bottom_face)),
+            Some(ViewCubeAction::BOTTOM)
+        );
+
+        let geometry = ViewCubeGeometry::from_rect(rect, View3dState::default());
+        let top_front = ViewCubeAction::snap(ViewCubeOrientation::new(0, 1, 1));
+        let top_front_edge = geometry
+            .edges
+            .iter()
+            .find(|edge| edge.action == top_front)
+            .expect("default view shows the top/front edge");
+        let edge_center = top_front_edge.points[0].lerp(top_front_edge.points[1], 0.5);
+        assert_eq!(geometry.hit(edge_center), Some(top_front));
+
+        let top_front_right = ViewCubeAction::snap(ViewCubeOrientation::new(1, 1, 1));
+        let top_front_right_corner = geometry
+            .corners
+            .iter()
+            .find(|corner| corner.action == top_front_right)
+            .expect("default view shows the top/front/right corner");
+        assert_eq!(
+            geometry.hit(top_front_right_corner.center),
+            Some(top_front_right)
+        );
+    }
+
+    #[test]
+    fn view_cube_drag_ownership_uses_press_origin() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::splat(104.0));
+
+        assert!(pointer_started_in_rect(Some(rect.center()), rect));
+        assert!(!pointer_started_in_rect(
+            Some(rect.right_bottom() + Vec2::splat(1.0)),
+            rect
+        ));
+        assert!(!pointer_started_in_rect(None, rect));
+    }
+
+    #[test]
+    fn view_cube_mesh_builds_solid_cube_faces() {
+        let (vertices, indices) = view_cube_mesh(None);
+
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
+        assert!(
+            vertices
+                .iter()
+                .any(|vertex| vertex.normal == [0.0, 0.0, 1.0])
+        );
+        assert!(
+            vertices
+                .iter()
+                .any(|vertex| vertex.normal == [1.0, 0.0, 0.0])
+        );
+        assert!(
+            vertices
+                .iter()
+                .any(|vertex| vertex.normal == [0.0, 1.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn view_cube_label_specs_stay_on_visible_face_planes() {
+        let [top, right, front] = view_cube_label_specs();
+
+        assert_eq!(top.text, "TOP");
+        assert_close(top.center.z, 1.0);
+        assert_close(top.u_axis.y, 1.0);
+        assert_eq!(right.text, "RIGHT");
+        assert_close(right.center.x, 1.0);
+        assert_eq!(front.text, "FRONT");
+        assert_close(front.center.y, 1.0);
+    }
+
+    #[test]
+    fn scene_3d_builds_depth_tested_wall_and_member_cuboids() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+
+        assert!(!scene.vertices.is_empty());
+        assert!(scene.opaque_index_count > 0);
+        assert!(scene.transparent_index_count > 0);
+        assert_eq!(scene.opaque_index_count % 36, 0);
+        assert_eq!(scene.transparent_index_count % 36, 0);
+
+        let min_y = scene
+            .points
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            min_y <= -wall_depth / 2.0,
+            "front wall should have real thickness in plan depth"
+        );
+    }
+
+    #[test]
+    fn scene_3d_contains_pickable_members_openings_and_walls() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+
+        assert!(
+            scene
+                .picks
+                .iter()
+                .any(|pick| matches!(&pick.click, ViewClick::Wall(0)))
+        );
+        assert!(
+            scene
+                .picks
+                .iter()
+                .any(|pick| matches!(&pick.click, ViewClick::Opening { .. }))
+        );
+        assert!(
+            scene
+                .picks
+                .iter()
+                .any(|pick| matches!(&pick.click, ViewClick::Member { .. }))
+        );
     }
 
     fn assert_close(actual: f32, expected: f32) {
@@ -1115,5 +2600,14 @@ mod tests {
             (actual - expected).abs() < 0.0001,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    fn view_cube_face_center(face: &ViewCubeFaceGeometry) -> Pos2 {
+        let center = face
+            .points
+            .iter()
+            .fold(Vec2::ZERO, |sum, point| sum + point.to_vec2())
+            / face.points.len() as f32;
+        Pos2::new(center.x, center.y)
     }
 }

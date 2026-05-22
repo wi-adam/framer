@@ -63,9 +63,11 @@ B-rep CAD kernel. Wood framing work is dominated by planes, spans, levels,
 offsets, openings, and repeated members. That makes a semantic solver more
 valuable than early NURBS or freeform modeling.
 
-A future 3D viewport can be generated from the same derived framing model using
-`wgpu`, while the first application shell uses `eframe`/`egui` for native panels,
-editing, and immediate-mode drawing.
+The 3D viewport is generated from the same derived framing model using `wgpu`
+inside the `eframe`/`egui` shell. The current renderer is intentionally small:
+it draws wall-envelope and generated-framing cuboids with depth testing while
+the native panels, inspectors, and drawing views remain ordinary `egui`
+surfaces.
 
 Framer should not make arbitrary solid operations the primary modeling surface.
 The viewport should let users place, select, drag, snap, and parametrically edit
@@ -94,7 +96,8 @@ multi-wall CAD shell:
   segments, openings, joins, and generated framing; an inspector for selectable
   objects; catalog placement for doors, windows, and garage doors; diagnostics;
   a BOM table; a whole-shell plan viewport; selected-wall elevation view; and a
-  first selectable 2.5D shell workspace.
+  WGPU-backed 3D viewport with selectable wall, opening, and generated-member
+  solids.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
 

@@ -18,7 +18,8 @@ multi-system CAD alpha. The repository currently contains:
   export, and CSV BOM export.
 - `framer-app`: a native Rust desktop shell using `eframe`/`egui` with a model
   tree, object catalog, inspector, diagnostics, BOM, whole-shell plan view,
-  selected-wall elevation view, and a first 2.5D shell workspace.
+  selected-wall elevation view, and a WGPU-backed 3D workspace with
+  depth-tested wall and framing member solids.
 
 The completed Phase 1 workflow still frames one straight wall with doors,
 windows, or garage-door-style openings. The current beyond-Phase-1 alpha also

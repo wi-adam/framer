@@ -31,6 +31,7 @@ pub(crate) struct FramerApp {
     artifact_status: Option<String>,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
+    gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     show_section: bool,
 }
 
@@ -50,6 +51,7 @@ enum ViewportMode {
     Axonometric,
 }
 
+#[derive(Clone)]
 enum ViewClick {
     Wall(usize),
     Opening {
@@ -75,6 +77,7 @@ impl Default for FramerApp {
             artifact_status: None,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
+            gpu_target_format: None,
             show_section: true,
         };
         app.rebuild();
@@ -83,6 +86,16 @@ impl Default for FramerApp {
 }
 
 impl FramerApp {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            gpu_target_format: cc
+                .wgpu_render_state
+                .as_ref()
+                .map(|render_state| render_state.target_format),
+            ..Self::default()
+        }
+    }
+
     fn rebuild(&mut self) {
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
@@ -288,8 +301,10 @@ mod tests {
     #[test]
     fn app_saves_and_reopens_demo_project() {
         let path = std::env::temp_dir().join(format!("framer-demo-wall-{}.framer", process::id()));
-        let mut app = FramerApp::default();
-        app.project_path = path.display().to_string();
+        let mut app = FramerApp {
+            project_path: path.display().to_string(),
+            ..FramerApp::default()
+        };
 
         app.save_project_file();
         assert!(matches!(app.file_status.as_deref(), Some(status) if status.starts_with("Saved ")));
@@ -311,8 +326,10 @@ mod tests {
             std::env::temp_dir().join(format!("framer-demo-export-{}.framer", process::id()));
         let svg_path = path.with_extension("svg");
         let csv_path = path.with_extension("csv");
-        let mut app = FramerApp::default();
-        app.project_path = path.display().to_string();
+        let mut app = FramerApp {
+            project_path: path.display().to_string(),
+            ..FramerApp::default()
+        };
 
         app.export_current_artifacts();
 

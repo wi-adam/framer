@@ -212,11 +212,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
         &wall.id,
         MemberKind::BottomPlate,
         code.plate_profile,
-        MemberOrientation::Horizontal,
-        Length::ZERO,
-        Length::ZERO,
-        wall.length,
-        code.plate_profile.thickness(),
+        FrameMemberPlacement::new(
+            MemberOrientation::Horizontal,
+            Length::ZERO,
+            Length::ZERO,
+            wall.length,
+            code.plate_profile.thickness(),
+        ),
         RuleProvenance::new(
             "wall.plate.continuous",
             "Bottom plate runs the authored wall length using the configured plate profile.",
@@ -229,11 +231,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
             &wall.id,
             MemberKind::TopPlate,
             code.plate_profile,
-            MemberOrientation::Horizontal,
-            Length::ZERO,
-            wall.height - plate_thickness * (index as i64 + 1),
-            wall.length,
-            code.plate_profile.thickness(),
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                Length::ZERO,
+                wall.height - plate_thickness * (index as i64 + 1),
+                wall.length,
+                code.plate_profile.thickness(),
+            ),
             RuleProvenance::new(
                 "wall.plate.double-top",
                 format!(
@@ -253,11 +257,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
                 &wall.id,
                 MemberKind::CommonStud,
                 code.stud_profile,
-                MemberOrientation::Vertical,
-                x,
-                stud_base,
-                stud_length,
-                code.stud_profile.thickness(),
+                FrameMemberPlacement::new(
+                    MemberOrientation::Vertical,
+                    x,
+                    stud_base,
+                    stud_length,
+                    code.stud_profile.thickness(),
+                ),
                 RuleProvenance::new(
                     "wall.studs.on-center",
                     format!(
@@ -379,11 +385,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 &join.id,
                 MemberKind::CornerPost,
                 model.code.stud_profile,
-                MemberOrientation::Vertical,
-                post_x,
-                stud_base,
-                stud_length,
-                model.code.stud_profile.thickness(),
+                FrameMemberPlacement::new(
+                    MemberOrientation::Vertical,
+                    post_x,
+                    stud_base,
+                    stud_length,
+                    model.code.stud_profile.thickness(),
+                ),
                 RuleProvenance::new(
                     "wall.join.corner-posts",
                     format!(
@@ -453,11 +461,13 @@ fn add_opening_members(
             &opening.id,
             MemberKind::KingStud,
             code.stud_profile,
-            MemberOrientation::Vertical,
-            king_x,
-            stud_base,
-            stud_top - stud_base,
-            code.stud_profile.thickness(),
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                king_x,
+                stud_base,
+                stud_top - stud_base,
+                code.stud_profile.thickness(),
+            ),
             RuleProvenance::new(
                 "opening.king-studs.each-side",
                 format!(
@@ -472,11 +482,13 @@ fn add_opening_members(
             &opening.id,
             MemberKind::JackStud,
             code.stud_profile,
-            MemberOrientation::Vertical,
-            jack_x,
-            stud_base,
-            header_bottom - stud_base,
-            code.stud_profile.thickness(),
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                jack_x,
+                stud_base,
+                header_bottom - stud_base,
+                code.stud_profile.thickness(),
+            ),
             RuleProvenance::new(
                 "opening.jack-studs.header-bearing",
                 format!(
@@ -491,11 +503,13 @@ fn add_opening_members(
         &opening.id,
         MemberKind::Header,
         code.header_profile,
-        MemberOrientation::Horizontal,
-        side_positions.left_jack_left_face,
-        header_bottom,
-        opening.width + stud_thickness * 2,
-        header_depth,
+        FrameMemberPlacement::new(
+            MemberOrientation::Horizontal,
+            side_positions.left_jack_left_face,
+            header_bottom,
+            opening.width + stud_thickness * 2,
+            header_depth,
+        ),
         RuleProvenance::new(
             "opening.header.default-profile",
             format!(
@@ -512,11 +526,13 @@ fn add_opening_members(
             &opening.id,
             MemberKind::RoughSill,
             code.stud_profile,
-            MemberOrientation::Horizontal,
-            left,
-            opening.sill_height,
-            opening.width,
-            code.stud_profile.thickness(),
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                left,
+                opening.sill_height,
+                opening.width,
+                code.stud_profile.thickness(),
+            ),
             RuleProvenance::new(
                 "opening.window.rough-sill",
                 format!(
@@ -579,11 +595,13 @@ fn add_cripples(
             &opening.id,
             MemberKind::CrippleStud,
             code.stud_profile,
-            MemberOrientation::Vertical,
-            x,
-            bottom,
-            cut_length,
-            code.stud_profile.thickness(),
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                x,
+                bottom,
+                cut_length,
+                code.stud_profile.thickness(),
+            ),
             RuleProvenance::new(
                 "opening.cripples.on-center",
                 format!(
@@ -597,16 +615,38 @@ fn add_cripples(
     }
 }
 
-fn frame_member(
-    id: impl Into<String>,
-    source: &ElementId,
-    kind: MemberKind,
-    profile: BoardProfile,
+struct FrameMemberPlacement {
     orientation: MemberOrientation,
     x: Length,
     elevation: Length,
     cut_length: Length,
     cross_section_depth: Length,
+}
+
+impl FrameMemberPlacement {
+    fn new(
+        orientation: MemberOrientation,
+        x: Length,
+        elevation: Length,
+        cut_length: Length,
+        cross_section_depth: Length,
+    ) -> Self {
+        Self {
+            orientation,
+            x,
+            elevation,
+            cut_length,
+            cross_section_depth,
+        }
+    }
+}
+
+fn frame_member(
+    id: impl Into<String>,
+    source: &ElementId,
+    kind: MemberKind,
+    profile: BoardProfile,
+    placement: FrameMemberPlacement,
     provenance: RuleProvenance,
 ) -> FrameMember {
     FrameMember {
@@ -614,11 +654,11 @@ fn frame_member(
         source: source.clone(),
         kind,
         profile,
-        orientation,
-        x,
-        elevation,
-        cut_length,
-        cross_section_depth,
+        orientation: placement.orientation,
+        x: placement.x,
+        elevation: placement.elevation,
+        cut_length: placement.cut_length,
+        cross_section_depth: placement.cross_section_depth,
         provenance,
     }
 }

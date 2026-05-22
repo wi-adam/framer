@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
 eframe.workspace = true
 env_logger.workspace = true
 framer-core.workspace = true

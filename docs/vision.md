@@ -182,7 +182,7 @@ and reopen it.
   through the model tree/catalog plus per-wall inspector selection.**
 - Introduce the 3D workspace direction with selectable construction objects.
   **Implemented as a whole-shell plan view, selected-wall elevation view, and
-  selectable 2.5D shell viewport.**
+  selectable WGPU 3D viewport with wall-envelope and generated-framing cuboids.**
 - Generate plan and elevation views. **Implemented as app views and a
   whole-project SVG export with a shell plan and wall elevations.**
 - Produce a whole-shell BOM. **Implemented by aggregating generated members
