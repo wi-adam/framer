@@ -1,0 +1,326 @@
+{
+  "format": "framer.project",
+  "schema_version": 2,
+  "authored": {
+    "code": {
+      "code": "Irc2021",
+      "display_name": "IRC 2021 prescriptive starter profile",
+      "default_wall_height": {
+        "ticks": 1536
+      },
+      "default_stud_spacing": {
+        "ticks": 256
+      },
+      "double_top_plate": true,
+      "default_header_depth": {
+        "ticks": 144
+      },
+      "stud_profile": "TwoByFour",
+      "plate_profile": "TwoByFour",
+      "header_profile": "TwoByTen"
+    },
+    "levels": [
+      {
+        "id": "level-1",
+        "name": "Level 1",
+        "elevation": {
+          "ticks": 0
+        }
+      }
+    ],
+    "walls": [
+      {
+        "id": "wall-back",
+        "name": "Back wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 3840
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3840
+          }
+        },
+        "length": {
+          "ticks": 5376
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "openings": [
+          {
+            "id": "opening-back-left-window",
+            "name": "Back left window",
+            "kind": "Window",
+            "center": {
+              "ticks": 1344
+            },
+            "width": {
+              "ticks": 768
+            },
+            "height": {
+              "ticks": 768
+            },
+            "sill_height": {
+              "ticks": 576
+            }
+          },
+          {
+            "id": "opening-back-right-window",
+            "name": "Back right window",
+            "kind": "Window",
+            "center": {
+              "ticks": 3840
+            },
+            "width": {
+              "ticks": 768
+            },
+            "height": {
+              "ticks": 768
+            },
+            "sill_height": {
+              "ticks": 576
+            }
+          }
+        ]
+      },
+      {
+        "id": "wall-front",
+        "name": "Front wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "length": {
+          "ticks": 5376
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "openings": [
+          {
+            "id": "opening-front-door",
+            "name": "Front door",
+            "kind": "Door",
+            "center": {
+              "ticks": 960
+            },
+            "width": {
+              "ticks": 576
+            },
+            "height": {
+              "ticks": 1280
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          },
+          {
+            "id": "opening-front-garage",
+            "name": "Garage door",
+            "kind": "GarageDoor",
+            "center": {
+              "ticks": 3744
+            },
+            "width": {
+              "ticks": 1536
+            },
+            "height": {
+              "ticks": 1344
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          }
+        ]
+      },
+      {
+        "id": "wall-left",
+        "name": "Left wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3840
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "length": {
+          "ticks": 3840
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "openings": [
+          {
+            "id": "opening-left-service-door",
+            "name": "Service door",
+            "kind": "Door",
+            "center": {
+              "ticks": 1536
+            },
+            "width": {
+              "ticks": 576
+            },
+            "height": {
+              "ticks": 1280
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          }
+        ]
+      },
+      {
+        "id": "wall-right",
+        "name": "Right wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 3840
+          }
+        },
+        "length": {
+          "ticks": 3840
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "openings": [
+          {
+            "id": "opening-right-window",
+            "name": "Right window",
+            "kind": "Window",
+            "center": {
+              "ticks": 1920
+            },
+            "width": {
+              "ticks": 672
+            },
+            "height": {
+              "ticks": 672
+            },
+            "sill_height": {
+              "ticks": 576
+            }
+          }
+        ]
+      }
+    ],
+    "wall_joins": [
+      {
+        "id": "join-back-left",
+        "name": "Back left corner",
+        "kind": "Corner",
+        "first_wall": "wall-back",
+        "second_wall": "wall-left",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3840
+          }
+        }
+      },
+      {
+        "id": "join-front-right",
+        "name": "Front right corner",
+        "kind": "Corner",
+        "first_wall": "wall-front",
+        "second_wall": "wall-right",
+        "point": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
+        "id": "join-left-front",
+        "name": "Left front corner",
+        "kind": "Corner",
+        "first_wall": "wall-left",
+        "second_wall": "wall-front",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
+        "id": "join-right-back",
+        "name": "Right back corner",
+        "kind": "Corner",
+        "first_wall": "wall-right",
+        "second_wall": "wall-back",
+        "point": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 3840
+          }
+        }
+      }
+    ]
+  }
+}
