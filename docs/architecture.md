@@ -75,20 +75,28 @@ be projections of the same semantic model.
 
 ## Current Alpha Slice
 
-The current checked-in alpha slice is still intentionally modest, but it now
-connects the major layers end to end:
+The completed Phase 1 slice is still supported: a single straight wall can be
+opened, edited, framed, exported, saved, reopened, and regenerated
+deterministically. The current checked-in alpha now extends that loop to a first
+multi-wall CAD shell:
 
 - `.framer` JSON stores schema-versioned authored intent only.
-- The demo project models a single straight wall with a door, window, and
-  garage-door-style opening.
-- `framer-solver` deterministically generates plates, common studs, king studs,
-  jack studs, headers, rough sills, cripples, grouped BOM rows, diagnostics, and
-  per-member rule provenance.
-- `framer-app` exposes a CAD-oriented shell with a model tree, object catalog,
-  inspector, diagnostics, BOM table, member selection, and elevation/3D workspace
-  views.
-- SVG elevation and CSV BOM exports are sidecar artifacts regenerated from the
-  authored model and generated framing plan.
+- The default demo project models a connected rectilinear wall shell with one
+  level, four placed wall segments, four corner joins, doors, windows, and a
+  garage-door-style opening on different walls.
+- `framer-core` represents levels, wall segment placement, wall joins/corners,
+  wall openings, and deterministic project ordering. Schema v1 single-wall files
+  migrate into the current placed-wall shape on load.
+- `framer-solver` deterministically generates per-wall plates, common studs,
+  king studs, jack studs, headers, rough sills, cripples, join corner posts,
+  grouped whole-project BOM rows, diagnostics, and per-member rule provenance.
+- `framer-app` exposes a CAD-oriented shell with a model tree for levels, wall
+  segments, openings, joins, and generated framing; an inspector for selectable
+  objects; catalog placement for doors, windows, and garage doors; diagnostics;
+  a BOM table; a whole-shell plan viewport; selected-wall elevation view; and a
+  first selectable 2.5D shell workspace.
+- Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
+  the authored model and generated framing plan.
 
 Unsupported conditions are shown explicitly. The starter profile does not claim
 complete IRC compliance, and garage doors are currently framed as wide rough
@@ -108,7 +116,7 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v1 `.framer` format is documented in
+The current v2 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only;
 derived framing plans, cached view state, and exports remain disposable outputs
 that are regenerated from the project.
@@ -118,11 +126,12 @@ be the only source of truth for a design.
 
 Current exports:
 
-- Current wall framing elevation as SVG.
-- Grouped BOM and cut list as CSV.
+- Whole-project SVG with a shell plan and wall elevation strips.
+- Grouped whole-project BOM and cut list as CSV.
 
 Expected future exports:
 
+- Richer plan/elevation/section drawing sheets as SVG/PDF.
 - Framing plans as PDF.
 - 3D/interop geometry as GLTF or a similar open format.
 - Machine-readable project summaries for downstream automation.

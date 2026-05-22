@@ -8,19 +8,23 @@ from configurable code profiles such as IRC 2021.
 
 ## Status
 
-Framer is at the first end-to-end alpha-slice stage. The repository currently
-contains:
+Framer has moved beyond the first straight-wall alpha slice into an initial
+multi-system CAD alpha. The repository currently contains:
 
-- `framer-core`: UI-agnostic building, opening, code-profile, and unit models.
-- `framer-solver`: a deterministic straight-wall framing generator, grouped BOM,
-  rule provenance, diagnostics, SVG elevation export, and CSV BOM export.
+- `framer-core`: UI-agnostic levels, placed wall segments, wall joins/corners,
+  openings, code-profile, and unit models.
+- `framer-solver`: deterministic wall and whole-project framing generation,
+  join corner posts, grouped BOM, rule provenance, diagnostics, SVG project
+  export, and CSV BOM export.
 - `framer-app`: a native Rust desktop shell using `eframe`/`egui` with a model
-  tree, object catalog, inspector, diagnostics, BOM, and elevation/3D workspace
-  views.
+  tree, object catalog, inspector, diagnostics, BOM, whole-shell plan view,
+  selected-wall elevation view, and a first 2.5D shell workspace.
 
-The current solver is intentionally narrow: it frames one straight wall with
-doors, windows, or garage-door-style openings. The code profile is a starter
-data shape, not yet a complete code-compliance engine.
+The completed Phase 1 workflow still frames one straight wall with doors,
+windows, or garage-door-style openings. The current beyond-Phase-1 alpha also
+loads, edits, regenerates, exports, saves, and reopens a connected multi-wall
+shell. The code profile remains a starter data shape, not yet a complete
+code-compliance engine.
 
 Project files use a schema-versioned, text-first `.framer` JSON format for
 authored design intent. See [docs/project-files.md](docs/project-files.md) for
@@ -32,15 +36,15 @@ the file format and agent editing contract.
 cargo run -p framer-app
 ```
 
-The app opens `examples/projects/demo-wall.framer` by default. The alpha workflow
-is:
+The app opens `examples/projects/demo-shell.framer` by default. The alpha
+workflow is:
 
 1. Use `New` or `Open` to create or load a schema-versioned `.framer` project.
 2. Select authored objects in the model tree and edit dimensions in the
-   inspector.
+   inspector, including wall placement, openings, levels, and joins.
 3. Add doors, windows, or garage doors from the catalog.
-4. Inspect regenerated framing, diagnostics, rule provenance, and the grouped
-   BOM.
+4. Inspect regenerated whole-project framing, diagnostics, rule provenance, and
+   the grouped BOM.
 5. Use `Save` to persist authored intent only.
 6. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
 

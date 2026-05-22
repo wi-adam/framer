@@ -5,33 +5,40 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v1 format stores only the canonical intent model. Generated framing plans,
+The v2 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
-v1 file.
+v2 file.
 
-See [../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer)
-for a complete checked-in alpha example with a door, window, and
-garage-door-style opening.
+See
+[../examples/projects/demo-shell.framer](../examples/projects/demo-shell.framer)
+for a complete checked-in multi-wall alpha example with a connected shell,
+corner joins, doors, windows, and a garage-door-style opening. The Phase 1
+single-wall example remains checked in at
+[../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
 
-## V1 Shape
+## V2 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 1,
+  "schema_version": 2,
   "authored": {
     "code": {},
-    "walls": []
+    "levels": [],
+    "walls": [],
+    "wall_joins": []
   }
 }
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `1`.
+- `schema_version` must be `2` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected. Do not add `generated`, `cache`,
-  `exports`, or presentation data to v1 project files.
+  `exports`, or presentation data to v2 project files.
+- Schema v1 single-wall files are accepted on load and migrated to the current
+  placed-wall shape with a default `level-1` level and a straight wall segment.
 
 Lengths are exact integer ticks:
 
@@ -53,16 +60,38 @@ Example:
 
 ## Authored Model
 
-The current v1 authored model supports the Phase 1 single-wall workflow:
+The current v2 authored model supports the completed Phase 1 single-wall
+workflow and the first beyond-Phase-1 multi-wall shell workflow:
 
 - `code`: starter framing defaults used by the current solver.
-- `walls`: deterministic list of wall objects.
-- `openings`: deterministic list of wall openings.
+- `levels`: deterministic list of project levels.
+- `walls`: deterministic list of placed rectilinear wall segments.
+- `wall_joins`: deterministic list of authored wall joins/corners.
+- `openings`: deterministic list of wall openings hosted by each wall segment.
 
-Wall and opening IDs are stable semantic identifiers. They must be non-empty and
-contain only lowercase letters, digits, or hyphens. Examples:
+Each wall stores both a local framing length and a project placement:
 
+- `level`: the level that owns the wall segment.
+- `start` and `end`: rectilinear project coordinates in ticks.
+- `length`: the wall's local framing length; it must match the axis-aligned
+  distance between `start` and `end`.
+
+Each wall join stores:
+
+- `kind`: currently `Corner`, `EndToEnd`, `Tee`, or `Cross`.
+- `first_wall` and `second_wall`: the connected wall segment IDs.
+- `point`: the project coordinate where the walls meet.
+
+The solver currently generates corner-post members for `Corner` and `EndToEnd`
+joins. `Tee` and `Cross` joins are stored as authored intent but reported as
+unsupported for framing generation.
+
+Level, wall, join, and opening IDs are stable semantic identifiers. They must be
+non-empty and contain only lowercase letters, digits, or hyphens. Examples:
+
+- `level-1`
 - `wall-1`
+- `join-front-right`
 - `opening-door-1`
 - `opening-window-1`
 
@@ -82,10 +111,12 @@ structural design is not implemented.
 
 Framer canonicalizes project files before saving:
 
+- Levels are sorted by `id`.
 - Walls are sorted by `id`.
 - Openings within each wall are sorted by `id`.
+- Wall joins are sorted by `id`.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing is deterministic output and is not saved in v1 files.
+- Generated framing is deterministic output and is not saved in v2 files.
 
 This keeps `.framer` files stable for Git diffs, code review, and agent edits.
 
@@ -118,18 +149,21 @@ round-tripping.
 
 ## App Support
 
-The desktop app opens with the demo wall model and a default project path of
-`examples/projects/demo-wall.framer`.
+The desktop app opens with the demo shell model and a default project path of
+`examples/projects/demo-shell.framer`.
 
 Use:
 
 - `New` to create a fresh single-wall project.
+- `Shell Demo` to return to the connected multi-wall alpha example.
+- `Wall Demo` to return to the completed Phase 1 straight-wall example.
 - `Open` and `Save` to load or persist the authored `.framer` file.
-- the model tree and inspector to edit wall and opening intent.
-- the catalog to add doors, windows, and garage doors.
+- the model tree and inspector to edit levels, wall placement, openings, joins,
+  and generated-member selections.
+- the catalog to add doors, windows, and garage doors to the selected wall.
 - `Export` to write disposable sidecar artifacts next to the project path:
-  `<project>.svg` for the current framing elevation and `<project>.csv` for the
-  grouped BOM/cut list.
+  `<project>.svg` for the whole-project shell plan plus wall elevations and
+  `<project>.csv` for the grouped whole-project BOM/cut list.
 
 The SVG and CSV exports are regenerated outputs. Do not copy them back into the
 canonical project document.

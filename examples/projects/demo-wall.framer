@@ -1,6 +1,6 @@
 {
   "format": "framer.project",
-  "schema_version": 1,
+  "schema_version": 2,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -19,10 +19,36 @@
       "plate_profile": "TwoByFour",
       "header_profile": "TwoByTen"
     },
+    "levels": [
+      {
+        "id": "level-1",
+        "name": "Level 1",
+        "elevation": {
+          "ticks": 0
+        }
+      }
+    ],
     "walls": [
       {
         "id": "wall-1",
         "name": "Demo wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 5376
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
         "length": {
           "ticks": 5376
         },
@@ -86,6 +112,7 @@
           }
         ]
       }
-    ]
+    ],
+    "wall_joins": []
   }
 }

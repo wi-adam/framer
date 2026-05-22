@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use framer_core::{BoardProfile, CodeProfile, ElementId, Length, ModelError, Opening, Wall};
+use framer_core::{
+    BoardProfile, BuildingModel, CodeProfile, ElementId, Length, ModelError, Opening, Point2, Wall,
+    WallJoinKind,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,24 +17,56 @@ pub struct WallFramePlan {
 
 impl WallFramePlan {
     pub fn bom(&self) -> Vec<BomItem> {
-        let mut grouped: BTreeMap<(BoardProfile, MemberKind, Length), u32> = BTreeMap::new();
-        for member in &self.members {
-            *grouped
-                .entry((member.profile, member.kind, member.cut_length))
-                .or_default() += 1;
-        }
-
-        grouped
-            .into_iter()
-            .map(|((profile, kind, cut_length), quantity)| BomItem {
-                profile,
-                kind,
-                cut_length,
-                quantity,
-                total_length: cut_length * quantity as i64,
-            })
-            .collect()
+        bom_from_members(self.members.iter())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectFramePlan {
+    pub wall_plans: Vec<WallFramePlan>,
+    pub diagnostics: Vec<PlanDiagnostic>,
+}
+
+impl ProjectFramePlan {
+    pub fn bom(&self) -> Vec<BomItem> {
+        bom_from_members(
+            self.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.members.iter()),
+        )
+    }
+
+    pub fn wall_plan(&self, wall: &ElementId) -> Option<&WallFramePlan> {
+        self.wall_plans
+            .iter()
+            .find(|wall_plan| wall_plan.wall == *wall)
+    }
+
+    pub fn wall_plan_mut(&mut self, wall: &ElementId) -> Option<&mut WallFramePlan> {
+        self.wall_plans
+            .iter_mut()
+            .find(|wall_plan| wall_plan.wall == *wall)
+    }
+}
+
+fn bom_from_members<'a>(members: impl IntoIterator<Item = &'a FrameMember>) -> Vec<BomItem> {
+    let mut grouped: BTreeMap<(BoardProfile, MemberKind, Length), u32> = BTreeMap::new();
+    for member in members {
+        *grouped
+            .entry((member.profile, member.kind, member.cut_length))
+            .or_default() += 1;
+    }
+
+    grouped
+        .into_iter()
+        .map(|((profile, kind, cut_length), quantity)| BomItem {
+            profile,
+            kind,
+            cut_length,
+            quantity,
+            total_length: cut_length * quantity as i64,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +102,7 @@ impl RuleProvenance {
 pub enum MemberKind {
     BottomPlate,
     TopPlate,
+    CornerPost,
     CommonStud,
     KingStud,
     JackStud,
@@ -80,6 +116,7 @@ impl MemberKind {
         match self {
             Self::BottomPlate => "bottom plate",
             Self::TopPlate => "top plate",
+            Self::CornerPost => "corner post",
             Self::CommonStud => "common stud",
             Self::KingStud => "king stud",
             Self::JackStud => "jack stud",
@@ -250,6 +287,115 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
         members,
         diagnostics,
     })
+}
+
+pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, SolverError> {
+    model.validate()?;
+
+    let mut plan = ProjectFramePlan {
+        wall_plans: Vec::with_capacity(model.walls.len()),
+        diagnostics: project_diagnostics(model),
+    };
+
+    for wall in &model.walls {
+        plan.wall_plans.push(generate_wall_plan(wall, &model.code)?);
+    }
+
+    add_join_members(&mut plan, model)?;
+
+    Ok(plan)
+}
+
+fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if model.walls.len() > 1 {
+        diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Info,
+            "solver.scope.multi-wall-shell-alpha",
+            None,
+            format!(
+                "Project framing is generated across {} connected wall segments and {} authored wall joins; floor, roof, shear, and engineered load-path design remain future work.",
+                model.walls.len(),
+                model.wall_joins.len()
+            ),
+        ));
+    }
+
+    diagnostics
+}
+
+fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Result<(), SolverError> {
+    let plate_thickness = model.code.plate_profile.thickness();
+    let stud_base = plate_thickness;
+    let top_plate_count = if model.code.double_top_plate { 2 } else { 1 };
+
+    for join in &model.wall_joins {
+        if !matches!(join.kind, WallJoinKind::Corner | WallJoinKind::EndToEnd) {
+            plan.diagnostics.push(PlanDiagnostic::new(
+                DiagnosticSeverity::Unsupported,
+                "wall.join.unsupported-kind",
+                Some(join.id.clone()),
+                format!(
+                    "{} is stored as an authored {:?} join, but only corner/end-to-end join framing is generated in this alpha.",
+                    join.name, join.kind
+                ),
+            ));
+            continue;
+        }
+
+        for wall_id in [&join.first_wall, &join.second_wall] {
+            let wall = model
+                .walls
+                .iter()
+                .find(|candidate| candidate.id == *wall_id)
+                .ok_or_else(|| SolverError::MissingWallForJoin {
+                    join: join.id.clone(),
+                    wall: wall_id.clone(),
+                })?;
+            let x = wall.local_x_for_point(join.point).ok_or_else(|| {
+                SolverError::JoinPointOutsideWall {
+                    join: join.id.clone(),
+                    wall: wall.id.clone(),
+                }
+            })?;
+            let stud_top = wall.height - plate_thickness * top_plate_count as i64;
+            let stud_length = stud_top - stud_base;
+
+            if stud_length <= Length::ZERO {
+                return Err(SolverError::WallTooShortForPlateStack {
+                    wall: wall.id.clone(),
+                });
+            }
+
+            let wall_plan =
+                plan.wall_plan_mut(&wall.id)
+                    .ok_or_else(|| SolverError::MissingWallPlan {
+                        wall: wall.id.clone(),
+                    })?;
+            wall_plan.members.push(frame_member(
+                format!("{}-{}-corner-post", join.id.0, wall.id.0),
+                &join.id,
+                MemberKind::CornerPost,
+                model.code.stud_profile,
+                MemberOrientation::Vertical,
+                x,
+                stud_base,
+                stud_length,
+                model.code.stud_profile.thickness(),
+                RuleProvenance::new(
+                    "wall.join.corner-posts",
+                    format!(
+                        "A corner post is generated on {} at {} to make the authored {} wall join visible in the project framing plan.",
+                        wall.name,
+                        x,
+                        join.name
+                    ),
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn add_opening_members(
@@ -478,10 +624,10 @@ fn starter_profile_diagnostics(wall: &Wall, code: &CodeProfile) -> Vec<PlanDiagn
             ),
         ),
         PlanDiagnostic::new(
-            DiagnosticSeverity::Unsupported,
-            "solver.scope.straight-wall-only",
+            DiagnosticSeverity::Info,
+            "solver.scope.wall-segment-alpha",
             Some(wall.id.clone()),
-            "Phase 1 frames this authored straight wall only; corners, intersections, hold-downs, and multi-wall load paths are not solved yet.",
+            "This wall segment is framed with deterministic starter rules. Project generation aggregates connected wall segments and authored joins; engineered load paths, hold-downs, floors, and roofs remain future work.",
         ),
     ];
 
@@ -688,9 +834,190 @@ pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     svg
 }
 
+pub fn export_project_svg(model: &BuildingModel, plan: &ProjectFramePlan) -> String {
+    let bounds = project_bounds(model);
+    let width = (bounds.max.x - bounds.min.x).inches().max(1.0);
+    let depth = (bounds.max.y - bounds.min.y).inches().max(1.0);
+    let max_wall_height = model
+        .walls
+        .iter()
+        .map(|wall| wall.height.inches())
+        .fold(96.0, f64::max);
+    let margin = 18.0;
+    let plan_height = depth + margin * 2.0;
+    let elevation_height = (max_wall_height + 26.0) * model.walls.len().max(1) as f64;
+    let canvas_width = width.max(220.0) + margin * 2.0;
+    let canvas_height = plan_height + elevation_height + margin;
+    let mut svg = String::new();
+
+    writeln!(svg, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
+    writeln!(
+        svg,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="{}in" height="{}in">"#,
+        svg_number(canvas_width),
+        svg_number(canvas_height),
+        svg_number(canvas_width / 12.0),
+        svg_number(canvas_height / 12.0)
+    )
+    .unwrap();
+    writeln!(svg, "  <title>Framer project shell plan</title>").unwrap();
+    writeln!(
+        svg,
+        "  <desc>Whole-project alpha export generated from authored Framer intent. Not a permit drawing.</desc>"
+    )
+    .unwrap();
+    writeln!(
+        svg,
+        r##"  <rect x="0" y="0" width="{}" height="{}" fill="#f7f5ee"/>"##,
+        svg_number(canvas_width),
+        svg_number(canvas_height)
+    )
+    .unwrap();
+
+    writeln!(
+        svg,
+        r##"  <text x="{}" y="12" font-family="Arial, sans-serif" font-size="5" fill="#46433d">Plan</text>"##,
+        svg_number(margin)
+    )
+    .unwrap();
+
+    for join in &model.wall_joins {
+        let point = project_svg_point(join.point, bounds.min, margin, plan_height - margin);
+        writeln!(
+            svg,
+            r##"  <circle data-join="{}" cx="{}" cy="{}" r="2.5" fill="#2f5f7f">"##,
+            escape_xml(&join.id.0),
+            svg_number(point.0),
+            svg_number(point.1)
+        )
+        .unwrap();
+        writeln!(svg, "    <title>{}</title>", escape_xml(&join.name)).unwrap();
+        writeln!(svg, "  </circle>").unwrap();
+    }
+
+    for wall in &model.walls {
+        let start = project_svg_point(wall.start, bounds.min, margin, plan_height - margin);
+        let end = project_svg_point(wall.end, bounds.min, margin, plan_height - margin);
+        writeln!(
+            svg,
+            r##"  <line data-wall="{}" x1="{}" y1="{}" x2="{}" y2="{}" stroke="#6f5b3f" stroke-width="3" stroke-linecap="round">"##,
+            escape_xml(&wall.id.0),
+            svg_number(start.0),
+            svg_number(start.1),
+            svg_number(end.0),
+            svg_number(end.1)
+        )
+        .unwrap();
+        writeln!(svg, "    <title>{}</title>", escape_xml(&wall.name)).unwrap();
+        writeln!(svg, "  </line>").unwrap();
+
+        for opening in &wall.openings {
+            let left = wall.point_at_local_x(opening.left());
+            let right = wall.point_at_local_x(opening.right());
+            let left = project_svg_point(left, bounds.min, margin, plan_height - margin);
+            let right = project_svg_point(right, bounds.min, margin, plan_height - margin);
+            writeln!(
+                svg,
+                r##"  <line data-opening="{}" x1="{}" y1="{}" x2="{}" y2="{}" stroke="#f7f5ee" stroke-width="5" stroke-linecap="butt"/>"##,
+                escape_xml(&opening.id.0),
+                svg_number(left.0),
+                svg_number(left.1),
+                svg_number(right.0),
+                svg_number(right.1)
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                r##"  <line data-opening-edge="{}" x1="{}" y1="{}" x2="{}" y2="{}" stroke="#896634" stroke-width="1.25" stroke-linecap="butt"/>"##,
+                escape_xml(&opening.id.0),
+                svg_number(left.0),
+                svg_number(left.1),
+                svg_number(right.0),
+                svg_number(right.1)
+            )
+            .unwrap();
+        }
+    }
+
+    let mut elevation_y = plan_height + margin;
+    for wall in &model.walls {
+        if let Some(wall_plan) = plan.wall_plan(&wall.id) {
+            writeln!(
+                svg,
+                r##"  <g data-wall-elevation="{}" transform="translate({}, {})">"##,
+                escape_xml(&wall.id.0),
+                svg_number(margin),
+                svg_number(elevation_y)
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                r##"    <text x="0" y="-5" font-family="Arial, sans-serif" font-size="4.5" fill="#46433d">{}</text>"##,
+                escape_xml(&wall.name)
+            )
+            .unwrap();
+            write_wall_elevation_contents(&mut svg, wall, wall_plan, 0.45, "    ");
+            writeln!(svg, "  </g>").unwrap();
+            elevation_y += max_wall_height + 26.0;
+        }
+    }
+
+    writeln!(svg, "</svg>").unwrap();
+    svg
+}
+
+fn write_wall_elevation_contents(
+    svg: &mut String,
+    wall: &Wall,
+    plan: &WallFramePlan,
+    scale: f64,
+    indent: &str,
+) {
+    let width = wall.length.inches().max(1.0) * scale;
+    let height = wall.height.inches().max(1.0) * scale;
+    writeln!(
+        svg,
+        r##"{indent}<rect x="0" y="0" width="{}" height="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+        svg_number(width),
+        svg_number(height)
+    )
+    .unwrap();
+
+    for member in &plan.members {
+        let (x, y, member_width, member_height) = match member.orientation {
+            MemberOrientation::Horizontal => (
+                member.x.inches() * scale,
+                height
+                    - member.elevation.inches() * scale
+                    - member.cross_section_depth.inches() * scale,
+                member.cut_length.inches() * scale,
+                member.cross_section_depth.inches() * scale,
+            ),
+            MemberOrientation::Vertical => (
+                member.x.inches() * scale - member.cross_section_depth.inches() * scale / 2.0,
+                height - member.elevation.inches() * scale - member.cut_length.inches() * scale,
+                member.cross_section_depth.inches() * scale,
+                member.cut_length.inches() * scale,
+            ),
+        };
+        writeln!(
+            svg,
+            r##"{indent}<rect data-member="{}" x="{}" y="{}" width="{}" height="{}" fill="{}" stroke="#574634" stroke-width="0.16"/>"##,
+            escape_xml(&member.id),
+            svg_number(x),
+            svg_number(y),
+            svg_number(member_width.max(0.75)),
+            svg_number(member_height.max(0.75)),
+            member_svg_color(member.kind)
+        )
+        .unwrap();
+    }
+}
+
 fn member_svg_color(kind: MemberKind) -> &'static str {
     match kind {
         MemberKind::BottomPlate | MemberKind::TopPlate => "#635543",
+        MemberKind::CornerPost => "#345f7f",
         MemberKind::CommonStud => "#ba915e",
         MemberKind::KingStud => "#97643d",
         MemberKind::JackStud => "#d3a85f",
@@ -698,6 +1025,51 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
         MemberKind::RoughSill => "#5c7990",
         MemberKind::CrippleStud => "#dabe8b",
     }
+}
+
+struct ProjectBounds {
+    min: Point2,
+    max: Point2,
+}
+
+fn project_bounds(model: &BuildingModel) -> ProjectBounds {
+    let mut min_x = Length::ZERO;
+    let mut min_y = Length::ZERO;
+    let mut max_x = Length::ZERO;
+    let mut max_y = Length::ZERO;
+    let mut initialized = false;
+
+    for point in model
+        .walls
+        .iter()
+        .flat_map(|wall| [wall.start, wall.end])
+        .chain(model.wall_joins.iter().map(|join| join.point))
+    {
+        if !initialized {
+            min_x = point.x;
+            min_y = point.y;
+            max_x = point.x;
+            max_y = point.y;
+            initialized = true;
+        } else {
+            min_x = min_x.min(point.x);
+            min_y = min_y.min(point.y);
+            max_x = max_x.max(point.x);
+            max_y = max_y.max(point.y);
+        }
+    }
+
+    ProjectBounds {
+        min: Point2::new(min_x, min_y),
+        max: Point2::new(max_x, max_y),
+    }
+}
+
+fn project_svg_point(point: Point2, min: Point2, margin: f64, baseline: f64) -> (f64, f64) {
+    (
+        margin + (point.x - min.x).inches(),
+        baseline - (point.y - min.y).inches(),
+    )
 }
 
 fn decimal_inches(length: Length) -> String {
@@ -740,6 +1112,12 @@ fn title_case(value: &str) -> String {
 pub enum SolverError {
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error("wall {wall:?} was not found while generating join {join:?}")]
+    MissingWallForJoin { join: ElementId, wall: ElementId },
+    #[error("wall {wall:?} has no generated plan")]
+    MissingWallPlan { wall: ElementId },
+    #[error("join {join:?} point is outside wall {wall:?}")]
+    JoinPointOutsideWall { join: ElementId, wall: ElementId },
     #[error("wall {wall:?} is too short for its configured plate stack")]
     WallTooShortForPlateStack { wall: ElementId },
     #[error("opening {opening:?} in wall {wall:?} leaves no header space below the top plates")]
@@ -752,7 +1130,9 @@ pub enum SolverError {
 
 #[cfg(test)]
 mod tests {
-    use framer_core::{BuildingModel, CodeProfile, Opening, Wall, load_project, save_project};
+    use framer_core::{
+        BuildingModel, CodeProfile, ElementId, Opening, Wall, load_project, save_project,
+    };
 
     use super::*;
 
@@ -885,6 +1265,38 @@ mod tests {
 
         assert_eq!(loaded, model);
         assert_eq!(regenerated, original);
+    }
+
+    #[test]
+    fn project_plan_frames_connected_shell_and_groups_bom() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert_eq!(plan.wall_plans.len(), 4);
+        assert!(plan.wall_plan(&ElementId::new("wall-front")).is_some());
+        assert!(
+            plan.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.members.iter())
+                .any(|member| member.kind == MemberKind::CornerPost
+                    && member.source.0 == "join-front-right")
+        );
+        assert!(plan.bom().iter().any(|item| {
+            item.kind == MemberKind::CornerPost && item.quantity >= model.wall_joins.len() as u32
+        }));
+    }
+
+    #[test]
+    fn project_exports_include_whole_shell_plan_and_elevations() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+        let svg = export_project_svg(&model, &plan);
+        let csv = export_bom_csv(&plan.bom());
+
+        assert!(svg.contains("data-wall=\"wall-front\""));
+        assert!(svg.contains("data-join=\"join-front-right\""));
+        assert!(svg.contains("data-wall-elevation=\"wall-right\""));
+        assert!(csv.contains("corner post"));
     }
 
     #[test]

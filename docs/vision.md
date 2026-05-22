@@ -167,12 +167,30 @@ starter framing model, not complete IRC compliance.
 
 Goal: model a simple rectilinear framed shell.
 
-- Add levels and connected wall segments.
-- Handle corners, intersections, and wall joins.
-- Place doors, windows, and garage doors across multiple walls.
+Status: first multi-wall CAD alpha is implemented. Framer now has a
+project-level model with levels, placed wall segments, wall joins/corners, and
+multiple openings across different walls. The app defaults to a connected
+multi-wall shell example and can open, inspect, edit, regenerate, export, save,
+and reopen it.
+
+- Add levels and connected wall segments. **Implemented for rectilinear wall
+  shells.**
+- Handle corners, intersections, and wall joins. **Implemented for authored
+  corner/end-to-end joins with generated corner-post members; tee/cross framing
+  remains unsupported and diagnosed.**
+- Place doors, windows, and garage doors across multiple walls. **Implemented
+  through the model tree/catalog plus per-wall inspector selection.**
 - Introduce the 3D workspace direction with selectable construction objects.
-- Generate plan and elevation views.
-- Produce a whole-shell BOM.
+  **Implemented as a whole-shell plan view, selected-wall elevation view, and
+  selectable 2.5D shell viewport.**
+- Generate plan and elevation views. **Implemented as app views and a
+  whole-project SVG export with a shell plan and wall elevations.**
+- Produce a whole-shell BOM. **Implemented by aggregating generated members
+  across all wall segments and join members.**
+
+Remaining M2 work: richer join rules, intersections beyond simple corners,
+snapping/drag handles, dimension annotations, and stronger plan/elevation
+drawing output.
 
 ### M3: Floors And Roofs
 
