@@ -11,12 +11,12 @@ use eframe::egui::{
     epaint::Vertex,
 };
 use eframe::{egui_wgpu, wgpu};
-use framer_core::{BuildingModel, Length, Point2, Wall};
+use framer_core::{BuildingModel, Length, Opening, OpeningKind, Point2, Wall};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
-use super::{FramerApp, Selection, ViewClick, ViewportMode};
+use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
@@ -152,7 +152,10 @@ impl View3dState {
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.heading("CAD Workspace");
+            ui.heading(match self.workspace_mode {
+                WorkspaceMode::Design => "Design Workspace",
+                WorkspaceMode::Plan => "Plan Workspace",
+            });
             ui.separator();
             ui.label(self.model.code.display_name.as_str());
         });
@@ -172,64 +175,56 @@ impl FramerApp {
                     ui.label("No wall selected");
                     return;
                 };
-                let Some(wall_plan) = plan.wall_plan(&wall.id) else {
-                    ui.label("No generated framing for selected wall");
-                    return;
-                };
-                let selected_member = match &self.selected {
-                    Selection::Member { wall_id, member_id } if wall_id == &wall.id.0 => {
-                        Some(member_id.as_str())
-                    }
-                    _ => None,
-                };
-                let section_x = if self.show_section {
-                    section_position(wall, &self.selected)
+                if !self.workspace_mode.shows_generated_plan() {
+                    let selected_opening = match &self.selected {
+                        Selection::Opening(id) => Some(id.as_str()),
+                        _ => None,
+                    };
+                    draw_wall_design_elevation(ui, wall, selected_opening).map(|opening_id| {
+                        ViewClick::Opening {
+                            wall_index: self.selected_wall,
+                            opening_id,
+                        }
+                    })
                 } else {
-                    None
-                };
-                draw_wall_elevation(ui, wall, &wall_plan.members, selected_member, section_x).map(
-                    |member_id| ViewClick::Member {
-                        wall_id: wall.id.0.clone(),
-                        member_id,
-                    },
-                )
+                    let Some(wall_plan) = plan.wall_plan(&wall.id) else {
+                        ui.label("No generated framing for selected wall");
+                        return;
+                    };
+                    let selected_member = match &self.selected {
+                        Selection::Member { wall_id, member_id } if wall_id == &wall.id.0 => {
+                            Some(member_id.as_str())
+                        }
+                        _ => None,
+                    };
+                    let section_x = if self.show_section {
+                        section_position(wall, &self.selected)
+                    } else {
+                        None
+                    };
+                    draw_wall_elevation(ui, wall, &wall_plan.members, selected_member, section_x)
+                        .map(|member_id| ViewClick::Member {
+                            wall_id: wall.id.0.clone(),
+                            member_id,
+                        })
+                }
             }
             ViewportMode::Axonometric => draw_project_axonometric(
                 ui,
-                &self.model,
-                plan,
-                self.selected_wall,
-                &self.selected,
+                AxonometricView {
+                    model: &self.model,
+                    plan,
+                    selected_wall: self.selected_wall,
+                    selection: &self.selected,
+                    workspace_mode: self.workspace_mode,
+                    gpu_target_format: self.gpu_target_format,
+                },
                 &mut self.view_3d,
-                self.gpu_target_format,
             ),
         };
 
         if let Some(click) = click {
-            match click {
-                ViewClick::Wall(index) => {
-                    self.selected_wall = index;
-                    self.selected = Selection::Wall;
-                }
-                ViewClick::Opening {
-                    wall_index,
-                    opening_id,
-                } => {
-                    self.selected_wall = wall_index;
-                    self.selected = Selection::Opening(opening_id);
-                }
-                ViewClick::Member { wall_id, member_id } => {
-                    if let Some(index) = self
-                        .model
-                        .walls
-                        .iter()
-                        .position(|wall| wall.id.0 == wall_id)
-                    {
-                        self.selected_wall = index;
-                    }
-                    self.selected = Selection::Member { wall_id, member_id };
-                }
-            }
+            self.handle_view_click(click);
         }
     }
 }
@@ -386,15 +381,29 @@ fn draw_project_plan(
     clicked_opening.or(clicked_wall)
 }
 
+struct AxonometricView<'a> {
+    model: &'a BuildingModel,
+    plan: &'a ProjectFramePlan,
+    selected_wall: usize,
+    selection: &'a Selection,
+    workspace_mode: WorkspaceMode,
+    gpu_target_format: Option<wgpu::TextureFormat>,
+}
+
 fn draw_project_axonometric(
     ui: &mut Ui,
-    model: &BuildingModel,
-    plan: &ProjectFramePlan,
-    selected_wall: usize,
-    selection: &Selection,
+    axonometric: AxonometricView<'_>,
     view: &mut View3dState,
-    gpu_target_format: Option<wgpu::TextureFormat>,
 ) -> Option<ViewClick> {
+    let AxonometricView {
+        model,
+        plan,
+        selected_wall,
+        selection,
+        workspace_mode,
+        gpu_target_format,
+    } = axonometric;
+
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -425,7 +434,8 @@ fn draw_project_axonometric(
         }
     }
 
-    let Some(scene) = Scene3d::from_project(model, plan, selected_wall, selection) else {
+    let Some(scene) = Scene3d::from_project(model, plan, selected_wall, selection, workspace_mode)
+    else {
         draw_view_empty(&painter, rect, "No 3D geometry");
         return None;
     };
@@ -474,7 +484,7 @@ fn draw_project_axonometric(
         return None;
     }
 
-    draw_view_title(&painter, drawing, "3D model workspace");
+    draw_view_title(&painter, drawing, "3D workspace");
 
     clicked
 }
@@ -863,6 +873,7 @@ impl Scene3d {
         plan: &ProjectFramePlan,
         selected_wall: usize,
         selection: &Selection,
+        workspace_mode: WorkspaceMode,
     ) -> Option<Self> {
         if model.walls.is_empty() {
             return None;
@@ -871,16 +882,24 @@ impl Scene3d {
         let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
         let mut builder = SceneBuilder::default();
 
-        for (wall_index, wall) in model.walls.iter().enumerate() {
-            if let Some(wall_plan) = plan.wall_plan(&wall.id) {
-                let wall_selected = selected_wall == wall_index;
-                for member in &wall_plan.members {
-                    let member_selected = matches!(
-                        selection,
-                        Selection::Member { wall_id, member_id }
-                            if wall_id == &wall.id.0 && member_id == &member.id
-                    );
-                    builder.push_member(wall, member, wall_depth, wall_selected, member_selected);
+        if workspace_mode.shows_generated_plan() {
+            for (wall_index, wall) in model.walls.iter().enumerate() {
+                if let Some(wall_plan) = plan.wall_plan(&wall.id) {
+                    let wall_selected = selected_wall == wall_index;
+                    for member in &wall_plan.members {
+                        let member_selected = matches!(
+                            selection,
+                            Selection::Member { wall_id, member_id }
+                                if wall_id == &wall.id.0 && member_id == &member.id
+                        );
+                        builder.push_member(
+                            wall,
+                            member,
+                            wall_depth,
+                            wall_selected,
+                            member_selected,
+                        );
+                    }
                 }
             }
         }
@@ -2143,6 +2162,61 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     point.distance(start + segment * t)
 }
 
+fn draw_wall_design_elevation(
+    ui: &mut Ui,
+    wall: &Wall,
+    selected_opening: Option<&str>,
+) -> Option<String> {
+    let available = ui.available_size();
+    let desired = Vec2::new(available.x.max(420.0), (available.y - 16.0).max(420.0));
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    let painter = ui.painter_at(rect);
+
+    let margin = 52.0;
+    let drawing = Rect::from_min_max(
+        rect.min + Vec2::splat(margin),
+        rect.max - Vec2::new(margin, margin),
+    );
+
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
+    painter.rect_stroke(
+        drawing,
+        0.0,
+        Stroke::new(1.0, Color32::from_rgb(190, 184, 172)),
+        StrokeKind::Outside,
+    );
+
+    let sx = drawing.width() / wall.length.inches().max(1.0) as f32;
+    let sy = drawing.height() / wall.height.inches().max(1.0) as f32;
+    let pointer = response.interact_pointer_pos();
+    let mut clicked = None;
+
+    painter.rect_filled(
+        drawing,
+        0.0,
+        Color32::from_rgba_unmultiplied(188, 179, 158, 34),
+    );
+    for opening in &wall.openings {
+        let opening_rect = opening_rect(drawing, sx, sy, opening);
+        let hovered = pointer.is_some_and(|position| opening_rect.contains(position));
+        let selected = selected_opening == Some(opening.id.0.as_str());
+        draw_opening_guide(&painter, opening_rect, opening.kind, selected, hovered);
+        if hovered && response.clicked() {
+            clicked = Some(opening.id.0.clone());
+        }
+    }
+
+    painter.text(
+        Pos2::new(drawing.left(), drawing.bottom() + 20.0),
+        Align2::LEFT_CENTER,
+        format!("{} x {}", wall.length, wall.height),
+        FontId::proportional(13.0),
+        Color32::from_rgb(70, 67, 61),
+    );
+
+    clicked
+}
+
 fn draw_wall_elevation(
     ui: &mut Ui,
     wall: &Wall,
@@ -2227,30 +2301,51 @@ fn member_rect(drawing: Rect, sx: f32, sy: f32, member: &FrameMember) -> Rect {
 
 fn draw_opening_guides(painter: &egui::Painter, drawing: Rect, sx: f32, sy: f32, wall: &Wall) {
     for opening in &wall.openings {
-        let x = drawing.left() + opening.left().inches() as f32 * sx;
-        let y = drawing.bottom() - opening.top().inches() as f32 * sy;
-        let width = (opening.width.inches() as f32 * sx).max(4.0);
-        let height = (opening.height.inches() as f32 * sy).max(4.0);
-        let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height));
-        painter.rect_filled(
-            rect,
-            0.0,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 76),
-        );
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.0, Color32::from_rgb(137, 102, 52)),
-            StrokeKind::Outside,
-        );
-        painter.text(
-            rect.left_top() + Vec2::new(4.0, 12.0),
-            Align2::LEFT_CENTER,
-            kind_label(opening.kind),
-            FontId::proportional(11.0),
-            Color32::from_rgb(99, 74, 39),
+        draw_opening_guide(
+            painter,
+            opening_rect(drawing, sx, sy, opening),
+            opening.kind,
+            false,
+            false,
         );
     }
+}
+
+fn opening_rect(drawing: Rect, sx: f32, sy: f32, opening: &Opening) -> Rect {
+    let x = drawing.left() + opening.left().inches() as f32 * sx;
+    let y = drawing.bottom() - opening.top().inches() as f32 * sy;
+    let width = (opening.width.inches() as f32 * sx).max(4.0);
+    let height = (opening.height.inches() as f32 * sy).max(4.0);
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
+}
+
+fn draw_opening_guide(
+    painter: &egui::Painter,
+    rect: Rect,
+    kind: OpeningKind,
+    selected: bool,
+    hovered: bool,
+) {
+    let stroke = if selected {
+        Stroke::new(2.0, Color32::from_rgb(35, 94, 150))
+    } else if hovered {
+        Stroke::new(1.5, Color32::from_rgb(88, 88, 78))
+    } else {
+        Stroke::new(1.0, Color32::from_rgb(137, 102, 52))
+    };
+    painter.rect_filled(
+        rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 76),
+    );
+    painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Outside);
+    painter.text(
+        rect.left_top() + Vec2::new(4.0, 12.0),
+        Align2::LEFT_CENTER,
+        kind_label(kind),
+        FontId::proportional(11.0),
+        Color32::from_rgb(99, 74, 39),
+    );
 }
 
 fn draw_member_rect(
@@ -2376,7 +2471,8 @@ mod tests {
     fn orbit_projector_keeps_distance_stable_when_view_rotates() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let home =
@@ -2392,7 +2488,8 @@ mod tests {
     fn orbit_projector_applies_explicit_zoom_without_auto_fit_drift() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let base =
@@ -2549,7 +2646,8 @@ mod tests {
     fn scene_3d_builds_depth_tested_wall_and_member_cuboids() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
         let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
 
         assert!(!scene.vertices.is_empty());
@@ -2573,25 +2671,48 @@ mod tests {
     fn scene_3d_contains_pickable_members_openings_and_walls() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene = Scene3d::from_project(&model, &plan, 0, &Selection::Wall).unwrap();
+        let plan_scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
 
         assert!(
-            scene
+            plan_scene
                 .picks
                 .iter()
                 .any(|pick| matches!(&pick.click, ViewClick::Wall(0)))
         );
         assert!(
-            scene
+            plan_scene
                 .picks
                 .iter()
                 .any(|pick| matches!(&pick.click, ViewClick::Opening { .. }))
         );
         assert!(
-            scene
+            plan_scene
                 .picks
                 .iter()
                 .any(|pick| matches!(&pick.click, ViewClick::Member { .. }))
+        );
+
+        let design_scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Design)
+                .unwrap();
+        assert!(
+            design_scene
+                .picks
+                .iter()
+                .any(|pick| matches!(&pick.click, ViewClick::Wall(0)))
+        );
+        assert!(
+            design_scene
+                .picks
+                .iter()
+                .any(|pick| matches!(&pick.click, ViewClick::Opening { .. }))
+        );
+        assert!(
+            design_scene
+                .picks
+                .iter()
+                .all(|pick| !matches!(&pick.click, ViewClick::Member { .. }))
         );
     }
 

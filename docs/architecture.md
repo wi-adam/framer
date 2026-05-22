@@ -42,6 +42,28 @@ end-state interaction model.
 Only the first layer should be directly editable by users. The second and third
 layers are regenerated unless the product later adds explicit override records.
 
+## Mode Contract
+
+The desktop app should expose the modeling layers as two conceptual modes:
+
+1. **Design Mode** edits the intent model. It is the default workspace for
+   placing and sizing walls, doors, windows, floors, roofs, posts, beams,
+   openings, levels, joins, constraints, and project assumptions. The solver may
+   run in the background for validation or preview, but Design Mode operations
+   should persist only authored intent.
+2. **Plan Mode** regenerates and inspects derived output. It displays framing
+   members, sheathing zones, blocking, diagnostics, drawings, BOM rows, and rule
+   explanations produced from the current design plus code/material profiles.
+   Generated objects can be selected and explained, but they should not become
+   the canonical source of truth.
+
+This mode split is a UI and workflow contract, not a second storage model. The
+canonical `.framer` file remains authored design intent. Plan output is
+deterministic generated state, equivalent to a slicer output derived from a 3D
+printing model. If Framer later allows manual plan adjustments, they should be
+stored as explicit intent constraints or override records that the solver can
+validate and explain.
+
 ## Code Profiles
 
 Code profiles should be versioned data plus executable rules. A profile such as
@@ -92,14 +114,21 @@ multi-wall CAD shell:
 - `framer-solver` deterministically generates per-wall plates, common studs,
   king studs, jack studs, headers, rough sills, cripples, join corner posts,
   grouped whole-project BOM rows, diagnostics, and per-member rule provenance.
-- `framer-app` exposes a CAD-oriented shell with a model tree for levels, wall
-  segments, openings, joins, and generated framing; an inspector for selectable
-  objects; catalog placement for doors, windows, and garage doors; diagnostics;
-  a BOM table; a whole-shell plan viewport; selected-wall elevation view; and a
-  WGPU-backed 3D viewport with selectable wall, opening, and generated-member
-  solids.
+- `framer-app` exposes a CAD-oriented shell with explicit Design and Plan
+  workspace modes; a model tree for levels, wall segments, openings, joins, and
+  generated framing; an inspector for selectable objects; catalog placement for
+  doors, windows, and garage doors; diagnostics; a BOM table; a whole-shell plan
+  viewport; selected-wall elevation view; and a WGPU-backed 3D viewport with
+  selectable wall, opening, and generated-member solids.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
+
+The current app makes Design Mode and Plan Mode explicit UI states. Design Mode
+keeps the catalog, authored model tree, editable inspector, Shell view, Wall
+view, and envelope-oriented 3D view focused on authored objects. Selecting a wall
+or opening from the Design Shell view opens the Wall view for layout on that wall.
+Plan Mode exposes generated framing in the model tree, read-only authored
+summaries, selectable generated members, diagnostics, BOM review, and export.
 
 Unsupported conditions are shown explicitly. The starter profile does not claim
 complete IRC compliance, and garage doors are currently framed as wide rough

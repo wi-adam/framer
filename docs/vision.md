@@ -19,6 +19,10 @@ The product succeeds when someone can model a small building or framed object,
 understand how Framer framed it, and take the output into a real planning or
 construction workflow.
 
+This workflow should be visible in the product as two conceptual modes:
+**Design Mode** for authoring the structure and **Plan Mode** for generating,
+inspecting, explaining, and exporting the derived framing plan.
+
 ## Target Users
 
 - Owner-builders planning sheds, studios, garages, ADUs, decks, or outdoor
@@ -74,6 +78,31 @@ Framer should become a real 3D parametric CAD workspace with:
 The UI should not expose arbitrary solid modeling operations as the main product
 primitive. Users should place and edit construction objects; Framer should derive
 the framing geometry, drawings, and BOM from those objects.
+
+## Design And Plan Modes
+
+Framer should make a clear product distinction between authored design intent and
+generated framing layout.
+
+**Design Mode** is where users define the thing they want to build. It should
+prioritize dimensions, levels, wall envelopes, openings, hosts, offsets, snaps,
+constraints, and code/material assumptions. Derived studs, sheathing seams,
+headers, blocking, and BOM details are usually immaterial while laying out doors,
+windows, walls, floors, and roofs, so they should be hidden, simplified, or
+ghosted unless the user asks for preview feedback. Design Mode edits only the
+authored intent model.
+
+**Plan Mode** is where Framer turns that design into a framing plan. It should
+show the generated stud layout, plates, headers, cripples, sheathing zones,
+blocking, diagnostics, BOM rows, drawings, and rule explanations. Generated
+members should be selectable and explainable, but they are regenerated output. A
+user-visible change to the plan should either flow back into authored design
+intent or become an explicit override record, not a silent mutation of generated
+geometry.
+
+The mental model is similar to 3D printing software: the design is the canonical
+source, and the generated plan is the deterministic "slice" Framer derives from
+that source.
 
 ## Agent-Accessible Project Files
 
@@ -134,6 +163,10 @@ Users edit intent. Framer regenerates derived framing and presentation artifacts
 Manual overrides may come later, but they should be explicit override records,
 not silent mutations of generated output.
 
+Design Mode is the user-facing editor for the intent model. Plan Mode is the
+user-facing inspection and export surface for derived framing and presentation
+artifacts.
+
 ## Milestones
 
 ### M0: Repo Foundation
@@ -171,7 +204,8 @@ Status: first multi-wall CAD alpha is implemented. Framer now has a
 project-level model with levels, placed wall segments, wall joins/corners, and
 multiple openings across different walls. The app defaults to a connected
 multi-wall shell example and can open, inspect, edit, regenerate, export, save,
-and reopen it.
+and reopen it. It now exposes Design Mode for authored object layout and Plan
+Mode for generated framing inspection, diagnostics, BOM review, and export.
 
 - Add levels and connected wall segments. **Implemented for rectilinear wall
   shells.**
@@ -181,8 +215,10 @@ and reopen it.
 - Place doors, windows, and garage doors across multiple walls. **Implemented
   through the model tree/catalog plus per-wall inspector selection.**
 - Introduce the 3D workspace direction with selectable construction objects.
-  **Implemented as a whole-shell plan view, selected-wall elevation view, and
-  selectable WGPU 3D viewport with wall-envelope and generated-framing cuboids.**
+  **Implemented as explicit Design and Plan modes with a whole-shell plan view,
+  Design Wall view for laying out openings on the selected wall, generated
+  wall-elevation view, and selectable WGPU 3D viewport that can focus on authored
+  envelopes/openings or generated framing cuboids.**
 - Generate plan and elevation views. **Implemented as app views and a
   whole-project SVG export with a shell plan and wall elevations.**
 - Produce a whole-shell BOM. **Implemented by aggregating generated members
@@ -245,7 +281,8 @@ dependency is unavoidable.
 - **G-010 Packaging:** add release packaging for the native desktop app.
 - **G-011 CAD Workspace UX:** define and prototype the Fusion/Inventor/SolidWorks
   style workspace: 3D viewport, model tree, inspector, command palette, object
-  catalog, and generated drawing views.
+  catalog, Design Mode for authored construction objects, Plan Mode for
+  generated framing inspection, and generated drawing views.
 - **G-012 Agent Editing Contract:** document how agents should inspect and edit
   `.framer` projects, including stable IDs, authored-vs-generated data,
   provenance, and validation commands.

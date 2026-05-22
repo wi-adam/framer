@@ -29,6 +29,7 @@ pub(crate) struct FramerApp {
     project_path: String,
     file_status: Option<String>,
     artifact_status: Option<String>,
+    workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
@@ -42,6 +43,22 @@ enum Selection {
     Opening(String),
     Join(String),
     Member { wall_id: String, member_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceMode {
+    Design,
+    Plan,
+}
+
+impl WorkspaceMode {
+    fn allows_design_edits(self) -> bool {
+        matches!(self, Self::Design)
+    }
+
+    fn shows_generated_plan(self) -> bool {
+        matches!(self, Self::Plan)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +92,7 @@ impl Default for FramerApp {
             project_path: DEFAULT_PROJECT_PATH.to_owned(),
             file_status: None,
             artifact_status: None,
+            workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
             gpu_target_format: None,
@@ -129,6 +147,7 @@ impl FramerApp {
         self.project_path = "untitled-alpha.framer".to_owned();
         self.file_status = Some("Created new project".to_owned());
         self.artifact_status = None;
+        self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
 
@@ -139,6 +158,7 @@ impl FramerApp {
         self.project_path = DEFAULT_PROJECT_PATH.to_owned();
         self.file_status = Some("Reset to multi-wall demo shell".to_owned());
         self.artifact_status = None;
+        self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
 
@@ -149,6 +169,7 @@ impl FramerApp {
         self.project_path = "examples/projects/demo-wall.framer".to_owned();
         self.file_status = Some("Reset to Phase 1 demo wall".to_owned());
         self.artifact_status = None;
+        self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
 
@@ -185,6 +206,7 @@ impl FramerApp {
                 self.model = model;
                 self.selected_wall = 0;
                 self.selected = Selection::Wall;
+                self.workspace_mode = WorkspaceMode::Design;
                 self.rebuild();
                 self.file_status = Some(format!("Opened {}", path.display()));
                 self.artifact_status = None;
@@ -213,7 +235,37 @@ impl FramerApp {
         });
     }
 
+    fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if self.workspace_mode == mode {
+            return;
+        }
+
+        self.workspace_mode = mode;
+        match mode {
+            WorkspaceMode::Design => self.select_authored_for_design_mode(),
+            WorkspaceMode::Plan => self.rebuild(),
+        }
+    }
+
+    fn select_authored_for_design_mode(&mut self) {
+        if let Selection::Member { wall_id, .. } = &self.selected {
+            if let Some(index) = self
+                .model
+                .walls
+                .iter()
+                .position(|wall| wall.id.0 == *wall_id)
+            {
+                self.selected_wall = index;
+            }
+            self.selected = Selection::Wall;
+        }
+    }
+
     fn add_opening(&mut self, kind: OpeningKind) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+
         let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
             return;
         };
@@ -268,6 +320,43 @@ impl FramerApp {
             .members
             .iter()
             .find(|member| member.id == member_id)
+    }
+
+    fn handle_view_click(&mut self, click: ViewClick) {
+        match click {
+            ViewClick::Wall(index) => {
+                self.selected_wall = index;
+                self.selected = Selection::Wall;
+                self.open_wall_view_from_design_shell();
+            }
+            ViewClick::Opening {
+                wall_index,
+                opening_id,
+            } => {
+                self.selected_wall = wall_index;
+                self.selected = Selection::Opening(opening_id);
+                self.open_wall_view_from_design_shell();
+            }
+            ViewClick::Member { wall_id, member_id } => {
+                if self.workspace_mode.shows_generated_plan() {
+                    if let Some(index) = self
+                        .model
+                        .walls
+                        .iter()
+                        .position(|wall| wall.id.0 == wall_id)
+                    {
+                        self.selected_wall = index;
+                    }
+                    self.selected = Selection::Member { wall_id, member_id };
+                }
+            }
+        }
+    }
+
+    fn open_wall_view_from_design_shell(&mut self) {
+        if self.workspace_mode.allows_design_edits() && self.viewport_mode == ViewportMode::Plan {
+            self.viewport_mode = ViewportMode::Elevation;
+        }
     }
 }
 
@@ -356,5 +445,58 @@ mod tests {
 
         assert_eq!(app.model.walls.len(), 1);
         assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn design_mode_keeps_generated_members_out_of_the_editing_selection() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        let wall_id = app.model.walls[0].id.0.clone();
+        let member_id = app.project_plan.as_ref().unwrap().wall_plans[0].members[0]
+            .id
+            .clone();
+        app.selected = Selection::Member { wall_id, member_id };
+
+        app.set_workspace_mode(WorkspaceMode::Design);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.selected, Selection::Wall);
+    }
+
+    #[test]
+    fn plan_mode_does_not_mutate_authored_openings_from_catalog_actions() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        let opening_count = app.model.walls[0].openings.len();
+
+        app.add_opening(OpeningKind::Door);
+
+        assert_eq!(app.model.walls[0].openings.len(), opening_count);
+    }
+
+    #[test]
+    fn design_shell_wall_click_opens_wall_layout_view() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Design);
+        app.viewport_mode = ViewportMode::Plan;
+
+        app.handle_view_click(ViewClick::Wall(1));
+
+        assert_eq!(app.selected_wall, 1);
+        assert_eq!(app.selected, Selection::Wall);
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+    }
+
+    #[test]
+    fn plan_wall_click_keeps_plan_view() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        app.viewport_mode = ViewportMode::Plan;
+
+        app.handle_view_click(ViewClick::Wall(1));
+
+        assert_eq!(app.selected_wall, 1);
+        assert_eq!(app.selected, Selection::Wall);
+        assert_eq!(app.viewport_mode, ViewportMode::Plan);
     }
 }

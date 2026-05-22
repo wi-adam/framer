@@ -1,10 +1,10 @@
 use eframe::egui::{self, Color32, ComboBox, ScrollArea, Ui};
-use framer_core::{ElementId, Length, OpeningKind, WallJoinKind};
+use framer_core::{ElementId, Length, Level, Opening, OpeningKind, Wall, WallJoin, WallJoinKind};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
 use super::labels::{diagnostic_code_prefix, join_kind_label, kind_label};
 use super::model_edit::set_wall_length_keep_direction;
-use super::{FramerApp, Selection, ViewportMode};
+use super::{FramerApp, Selection, ViewportMode, WorkspaceMode};
 
 impl FramerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
@@ -26,19 +26,40 @@ impl FramerApp {
             if ui.button("Save").clicked() {
                 self.save_project_file();
             }
-            if ui.button("Export").clicked() {
+            if ui
+                .add_enabled(
+                    self.workspace_mode.shows_generated_plan(),
+                    egui::Button::new("Export"),
+                )
+                .clicked()
+            {
                 self.export_current_artifacts();
             }
             ui.add(egui::TextEdit::singleline(&mut self.project_path).desired_width(340.0));
             ui.separator();
-            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Plan, "Plan");
-            ui.selectable_value(
-                &mut self.viewport_mode,
-                ViewportMode::Elevation,
-                "Elevation",
-            );
+            let mut next_mode = self.workspace_mode;
+            ui.selectable_value(&mut next_mode, WorkspaceMode::Design, "Design");
+            ui.selectable_value(&mut next_mode, WorkspaceMode::Plan, "Plan");
+            if next_mode != self.workspace_mode {
+                self.set_workspace_mode(next_mode);
+            }
+            ui.separator();
+            let shell_label = if self.workspace_mode.allows_design_edits() {
+                "Shell"
+            } else {
+                "Plan"
+            };
+            let wall_label = if self.workspace_mode.allows_design_edits() {
+                "Wall"
+            } else {
+                "Elevation"
+            };
+            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Plan, shell_label);
+            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Elevation, wall_label);
             ui.selectable_value(&mut self.viewport_mode, ViewportMode::Axonometric, "3D");
-            ui.checkbox(&mut self.show_section, "Section");
+            if self.workspace_mode.shows_generated_plan() {
+                ui.checkbox(&mut self.show_section, "Section");
+            }
         });
 
         if self.file_status.is_some() || self.artifact_status.is_some() {
@@ -170,76 +191,86 @@ impl FramerApp {
                     }
                 });
 
-            let generated_count = self
-                .project_plan
-                .as_ref()
-                .map(|plan| {
-                    plan.wall_plans
-                        .iter()
-                        .map(|wall_plan| wall_plan.members.len())
-                        .sum::<usize>()
-                })
-                .unwrap_or_default();
-            egui::CollapsingHeader::new(format!("Generated ({generated_count} members)"))
-                .default_open(false)
-                .show(ui, |ui| {
-                    if let Some(plan) = &self.project_plan {
-                        for wall_plan in &plan.wall_plans {
-                            let wall_name = self
-                                .model
-                                .walls
-                                .iter()
-                                .find(|wall| wall.id == wall_plan.wall)
-                                .map(|wall| wall.name.as_str())
-                                .unwrap_or(wall_plan.wall.0.as_str());
-                            let wall_selected = self
-                                .model
-                                .walls
-                                .get(self.selected_wall)
-                                .is_some_and(|wall| wall.id == wall_plan.wall);
-                            egui::CollapsingHeader::new(format!(
-                                "Framing: {wall_name} ({} members)",
-                                wall_plan.members.len()
-                            ))
-                            .default_open(wall_selected)
-                            .show(ui, |ui| {
-                                for member in &wall_plan.members {
-                                    let selected = matches!(
-                                        &self.selected,
-                                        Selection::Member { wall_id, member_id }
-                                            if wall_id == &wall_plan.wall.0
-                                                && member_id == &member.id
-                                    );
-                                    if ui
-                                        .selectable_label(
-                                            selected,
-                                            format!("{}: {}", member.kind.label(), member.id),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.selected = Selection::Member {
-                                            wall_id: wall_plan.wall.0.clone(),
-                                            member_id: member.id.clone(),
-                                        };
+            if self.workspace_mode.shows_generated_plan() {
+                let generated_count = self
+                    .project_plan
+                    .as_ref()
+                    .map(|plan| {
+                        plan.wall_plans
+                            .iter()
+                            .map(|wall_plan| wall_plan.members.len())
+                            .sum::<usize>()
+                    })
+                    .unwrap_or_default();
+                egui::CollapsingHeader::new(format!("Generated ({generated_count} members)"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(plan) = &self.project_plan {
+                            for wall_plan in &plan.wall_plans {
+                                let wall_name = self
+                                    .model
+                                    .walls
+                                    .iter()
+                                    .find(|wall| wall.id == wall_plan.wall)
+                                    .map(|wall| wall.name.as_str())
+                                    .unwrap_or(wall_plan.wall.0.as_str());
+                                let wall_selected = self
+                                    .model
+                                    .walls
+                                    .get(self.selected_wall)
+                                    .is_some_and(|wall| wall.id == wall_plan.wall);
+                                egui::CollapsingHeader::new(format!(
+                                    "Framing: {wall_name} ({} members)",
+                                    wall_plan.members.len()
+                                ))
+                                .default_open(wall_selected)
+                                .show(ui, |ui| {
+                                    for member in &wall_plan.members {
+                                        let selected = matches!(
+                                            &self.selected,
+                                            Selection::Member { wall_id, member_id }
+                                                if wall_id == &wall_plan.wall.0
+                                                    && member_id == &member.id
+                                        );
+                                        if ui
+                                            .selectable_label(
+                                                selected,
+                                                format!("{}: {}", member.kind.label(), member.id),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(index) = self
+                                                .model
+                                                .walls
+                                                .iter()
+                                                .position(|wall| wall.id == wall_plan.wall)
+                                            {
+                                                self.selected_wall = index;
+                                            }
+                                            self.selected = Selection::Member {
+                                                wall_id: wall_plan.wall.0.clone(),
+                                                member_id: member.id.clone(),
+                                            };
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
+                        } else {
+                            ui.label("No generated framing");
                         }
-                    } else {
-                        ui.label("No generated framing");
-                    }
-                });
-
-            ui.separator();
-            ui.heading("Catalog");
-            if ui.button("+ Door").clicked() {
-                self.add_opening(OpeningKind::Door);
-            }
-            if ui.button("+ Window").clicked() {
-                self.add_opening(OpeningKind::Window);
-            }
-            if ui.button("+ Garage Door").clicked() {
-                self.add_opening(OpeningKind::GarageDoor);
+                    });
+            } else {
+                ui.separator();
+                ui.heading("Catalog");
+                if ui.button("+ Door").clicked() {
+                    self.add_opening(OpeningKind::Door);
+                }
+                if ui.button("+ Window").clicked() {
+                    self.add_opening(OpeningKind::Window);
+                }
+                if ui.button("+ Garage Door").clicked() {
+                    self.add_opening(OpeningKind::GarageDoor);
+                }
             }
         });
     }
@@ -247,6 +278,7 @@ impl FramerApp {
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let mut changed = false;
         let selection = self.selected.clone();
+        let can_edit = self.workspace_mode.allows_design_edits();
         let level_options = self
             .model
             .levels
@@ -266,50 +298,64 @@ impl FramerApp {
         match selection {
             Selection::Level(id) => {
                 if let Some(level) = self.model.levels.iter_mut().find(|level| level.id.0 == id) {
-                    ui.label(&level.id.0);
-                    changed |= text_edit(ui, "Name", &mut level.name);
-                    changed |= coordinate_drag(ui, "Elevation", &mut level.elevation);
+                    if can_edit {
+                        ui.label(&level.id.0);
+                        changed |= text_edit(ui, "Name", &mut level.name);
+                        changed |= coordinate_drag(ui, "Elevation", &mut level.elevation);
+                    } else {
+                        level_summary(ui, level);
+                    }
                 } else {
                     ui.label("Level no longer exists");
                 }
             }
             Selection::Wall => {
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
-                    ui.label(&wall.id.0);
-                    changed |= text_edit(ui, "Name", &mut wall.name);
+                    if can_edit {
+                        ui.label(&wall.id.0);
+                        changed |= text_edit(ui, "Name", &mut wall.name);
 
-                    let mut level_id = wall.level.0.clone();
-                    ComboBox::from_label("Level")
-                        .selected_text(level_display_name(&level_options, &level_id))
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &level_options {
-                                ui.selectable_value(&mut level_id, id.clone(), name);
-                            }
-                        });
-                    if level_id != wall.level.0 {
-                        wall.level = ElementId::new(level_id);
-                        changed = true;
-                    }
-
-                    let mut wall_length = wall.length;
-                    if length_drag(ui, "Length", &mut wall_length, 24.0, 480.0, "ft") {
-                        set_wall_length_keep_direction(wall, wall_length);
-                        changed = true;
-                    }
-                    changed |= length_drag(ui, "Height", &mut wall.height, 48.0, 168.0, "ft");
-                    changed |=
-                        length_drag(ui, "Stud spacing", &mut wall.stud_spacing, 8.0, 32.0, "in");
-                    ui.separator();
-                    ui.strong("Placement");
-                    let placement_changed = coordinate_drag(ui, "Start X", &mut wall.start.x)
-                        | coordinate_drag(ui, "Start Y", &mut wall.start.y)
-                        | coordinate_drag(ui, "End X", &mut wall.end.x)
-                        | coordinate_drag(ui, "End Y", &mut wall.end.y);
-                    if placement_changed {
-                        if let Some(length) = wall.placement_length() {
-                            wall.length = length;
+                        let mut level_id = wall.level.0.clone();
+                        ComboBox::from_label("Level")
+                            .selected_text(level_display_name(&level_options, &level_id))
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &level_options {
+                                    ui.selectable_value(&mut level_id, id.clone(), name);
+                                }
+                            });
+                        if level_id != wall.level.0 {
+                            wall.level = ElementId::new(level_id);
+                            changed = true;
                         }
-                        changed = true;
+
+                        let mut wall_length = wall.length;
+                        if length_drag(ui, "Length", &mut wall_length, 24.0, 480.0, "ft") {
+                            set_wall_length_keep_direction(wall, wall_length);
+                            changed = true;
+                        }
+                        changed |= length_drag(ui, "Height", &mut wall.height, 48.0, 168.0, "ft");
+                        changed |= length_drag(
+                            ui,
+                            "Stud spacing",
+                            &mut wall.stud_spacing,
+                            8.0,
+                            32.0,
+                            "in",
+                        );
+                        ui.separator();
+                        ui.strong("Placement");
+                        let placement_changed = coordinate_drag(ui, "Start X", &mut wall.start.x)
+                            | coordinate_drag(ui, "Start Y", &mut wall.start.y)
+                            | coordinate_drag(ui, "End X", &mut wall.end.x)
+                            | coordinate_drag(ui, "End Y", &mut wall.end.y);
+                        if placement_changed {
+                            if let Some(length) = wall.placement_length() {
+                                wall.length = length;
+                            }
+                            changed = true;
+                        }
+                    } else {
+                        wall_summary(ui, wall, &level_options);
                     }
                 }
             }
@@ -319,44 +365,60 @@ impl FramerApp {
                     if let Some(opening) =
                         wall.openings.iter_mut().find(|opening| opening.id.0 == id)
                     {
-                        ui.label(&opening.id.0);
-                        changed |= text_edit(ui, "Name", &mut opening.name);
-                        ComboBox::from_label("Kind")
-                            .selected_text(kind_label(opening.kind))
-                            .show_ui(ui, |ui| {
-                                changed |= ui
-                                    .selectable_value(&mut opening.kind, OpeningKind::Door, "Door")
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut opening.kind,
-                                        OpeningKind::Window,
-                                        "Window",
-                                    )
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut opening.kind,
-                                        OpeningKind::GarageDoor,
-                                        "Garage door",
-                                    )
-                                    .changed();
-                            });
-                        changed |= length_drag(ui, "Center", &mut opening.center, 0.0, 480.0, "ft");
-                        changed |= length_drag(ui, "Width", &mut opening.width, 12.0, 240.0, "in");
-                        changed |=
-                            length_drag(ui, "Height", &mut opening.height, 12.0, 120.0, "in");
-                        if opening.has_sill() {
+                        if can_edit {
+                            ui.label(&opening.id.0);
+                            changed |= text_edit(ui, "Name", &mut opening.name);
+                            ComboBox::from_label("Kind")
+                                .selected_text(kind_label(opening.kind))
+                                .show_ui(ui, |ui| {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut opening.kind,
+                                            OpeningKind::Door,
+                                            "Door",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut opening.kind,
+                                            OpeningKind::Window,
+                                            "Window",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut opening.kind,
+                                            OpeningKind::GarageDoor,
+                                            "Garage door",
+                                        )
+                                        .changed();
+                                });
                             changed |=
-                                length_drag(ui, "Sill", &mut opening.sill_height, 0.0, 96.0, "in");
-                        } else if opening.sill_height != Length::ZERO {
-                            opening.sill_height = Length::ZERO;
-                            changed = true;
-                        }
+                                length_drag(ui, "Center", &mut opening.center, 0.0, 480.0, "ft");
+                            changed |=
+                                length_drag(ui, "Width", &mut opening.width, 12.0, 240.0, "in");
+                            changed |=
+                                length_drag(ui, "Height", &mut opening.height, 12.0, 120.0, "in");
+                            if opening.has_sill() {
+                                changed |= length_drag(
+                                    ui,
+                                    "Sill",
+                                    &mut opening.sill_height,
+                                    0.0,
+                                    96.0,
+                                    "in",
+                                );
+                            } else if opening.sill_height != Length::ZERO {
+                                opening.sill_height = Length::ZERO;
+                                changed = true;
+                            }
 
-                        ui.separator();
-                        if ui.button("Remove Opening").clicked() {
-                            remove = true;
+                            ui.separator();
+                            if ui.button("Remove Opening").clicked() {
+                                remove = true;
+                            }
+                        } else {
+                            opening_summary(ui, opening);
                         }
                     } else {
                         ui.label("Opening no longer exists");
@@ -376,59 +438,67 @@ impl FramerApp {
                     .iter_mut()
                     .find(|join| join.id.0 == id)
                 {
-                    ui.label(&join.id.0);
-                    changed |= text_edit(ui, "Name", &mut join.name);
-                    ComboBox::from_label("Kind")
-                        .selected_text(join_kind_label(join.kind))
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(&mut join.kind, WallJoinKind::Corner, "Corner")
-                                .changed();
-                            changed |= ui
-                                .selectable_value(
-                                    &mut join.kind,
-                                    WallJoinKind::EndToEnd,
-                                    "End-to-end",
-                                )
-                                .changed();
-                            changed |= ui
-                                .selectable_value(&mut join.kind, WallJoinKind::Tee, "Tee")
-                                .changed();
-                            changed |= ui
-                                .selectable_value(&mut join.kind, WallJoinKind::Cross, "Cross")
-                                .changed();
-                        });
+                    if can_edit {
+                        ui.label(&join.id.0);
+                        changed |= text_edit(ui, "Name", &mut join.name);
+                        ComboBox::from_label("Kind")
+                            .selected_text(join_kind_label(join.kind))
+                            .show_ui(ui, |ui| {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut join.kind,
+                                        WallJoinKind::Corner,
+                                        "Corner",
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut join.kind,
+                                        WallJoinKind::EndToEnd,
+                                        "End-to-end",
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(&mut join.kind, WallJoinKind::Tee, "Tee")
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(&mut join.kind, WallJoinKind::Cross, "Cross")
+                                    .changed();
+                            });
 
-                    let mut first_wall = join.first_wall.0.clone();
-                    ComboBox::from_label("First wall")
-                        .selected_text(wall_display_name(&wall_options, &first_wall))
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &wall_options {
-                                ui.selectable_value(&mut first_wall, id.clone(), name);
-                            }
-                        });
-                    if first_wall != join.first_wall.0 {
-                        join.first_wall = ElementId::new(first_wall);
-                        changed = true;
+                        let mut first_wall = join.first_wall.0.clone();
+                        ComboBox::from_label("First wall")
+                            .selected_text(wall_display_name(&wall_options, &first_wall))
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &wall_options {
+                                    ui.selectable_value(&mut first_wall, id.clone(), name);
+                                }
+                            });
+                        if first_wall != join.first_wall.0 {
+                            join.first_wall = ElementId::new(first_wall);
+                            changed = true;
+                        }
+
+                        let mut second_wall = join.second_wall.0.clone();
+                        ComboBox::from_label("Second wall")
+                            .selected_text(wall_display_name(&wall_options, &second_wall))
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &wall_options {
+                                    ui.selectable_value(&mut second_wall, id.clone(), name);
+                                }
+                            });
+                        if second_wall != join.second_wall.0 {
+                            join.second_wall = ElementId::new(second_wall);
+                            changed = true;
+                        }
+
+                        ui.separator();
+                        ui.strong("Join point");
+                        changed |= coordinate_drag(ui, "X", &mut join.point.x);
+                        changed |= coordinate_drag(ui, "Y", &mut join.point.y);
+                    } else {
+                        join_summary(ui, join, &wall_options);
                     }
-
-                    let mut second_wall = join.second_wall.0.clone();
-                    ComboBox::from_label("Second wall")
-                        .selected_text(wall_display_name(&wall_options, &second_wall))
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &wall_options {
-                                ui.selectable_value(&mut second_wall, id.clone(), name);
-                            }
-                        });
-                    if second_wall != join.second_wall.0 {
-                        join.second_wall = ElementId::new(second_wall);
-                        changed = true;
-                    }
-
-                    ui.separator();
-                    ui.strong("Join point");
-                    changed |= coordinate_drag(ui, "X", &mut join.point.x);
-                    changed |= coordinate_drag(ui, "Y", &mut join.point.y);
                 } else {
                     ui.label("Wall join no longer exists");
                 }
@@ -447,11 +517,94 @@ impl FramerApp {
             self.rebuild();
         }
 
-        ui.separator();
-        diagnostics_panel(ui, self.error.as_deref(), self.project_plan.as_ref());
-        ui.separator();
-        bom_panel(ui, self.project_plan.as_ref());
+        if self.workspace_mode.shows_generated_plan() {
+            ui.separator();
+            diagnostics_panel(ui, self.error.as_deref(), self.project_plan.as_ref());
+            ui.separator();
+            bom_panel(ui, self.project_plan.as_ref());
+        } else if let Some(error) = self.error.as_deref() {
+            ui.separator();
+            ui.heading("Validation");
+            ui.colored_label(Color32::from_rgb(185, 65, 65), error);
+        }
     }
+}
+
+fn level_summary(ui: &mut Ui, level: &Level) {
+    ui.label(&level.id.0);
+    egui::Grid::new("level-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &level.name);
+            summary_row(ui, "Elevation", level.elevation.to_string());
+        });
+}
+
+fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)]) {
+    ui.label(&wall.id.0);
+    egui::Grid::new("wall-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &wall.name);
+            summary_row(
+                ui,
+                "Level",
+                level_display_name(level_options, &wall.level.0),
+            );
+            summary_row(ui, "Length", wall.length.to_string());
+            summary_row(ui, "Height", wall.height.to_string());
+            summary_row(ui, "Stud spacing", wall.stud_spacing.to_string());
+            summary_row(ui, "Openings", wall.openings.len().to_string());
+            summary_row(ui, "Start", format!("{}, {}", wall.start.x, wall.start.y));
+            summary_row(ui, "End", format!("{}, {}", wall.end.x, wall.end.y));
+        });
+}
+
+fn opening_summary(ui: &mut Ui, opening: &Opening) {
+    ui.label(&opening.id.0);
+    egui::Grid::new("opening-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &opening.name);
+            summary_row(ui, "Kind", kind_label(opening.kind));
+            summary_row(ui, "Center", opening.center.to_string());
+            summary_row(ui, "Width", opening.width.to_string());
+            summary_row(ui, "Height", opening.height.to_string());
+            if opening.has_sill() {
+                summary_row(ui, "Sill", opening.sill_height.to_string());
+            }
+        });
+}
+
+fn join_summary(ui: &mut Ui, join: &WallJoin, wall_options: &[(String, String)]) {
+    ui.label(&join.id.0);
+    egui::Grid::new("join-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &join.name);
+            summary_row(ui, "Kind", join_kind_label(join.kind));
+            summary_row(
+                ui,
+                "First wall",
+                wall_display_name(wall_options, &join.first_wall.0),
+            );
+            summary_row(
+                ui,
+                "Second wall",
+                wall_display_name(wall_options, &join.second_wall.0),
+            );
+            summary_row(ui, "Point", format!("{}, {}", join.point.x, join.point.y));
+        });
+}
+
+fn summary_row(ui: &mut Ui, label: &str, value: impl ToString) {
+    ui.strong(label);
+    ui.label(value.to_string());
+    ui.end_row();
 }
 
 fn member_inspector(ui: &mut Ui, member: &FrameMember) {

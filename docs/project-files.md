@@ -10,6 +10,10 @@ cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 v2 file.
 
+This matches Framer's Design Mode / Plan Mode split. Design Mode writes the
+authored model saved here. Plan Mode regenerates framing layouts, diagnostics,
+drawings, schedules, and exports from that authored model.
+
 See
 [../examples/projects/demo-shell.framer](../examples/projects/demo-shell.framer)
 for a complete checked-in multi-wall alpha example with a connected shell,
@@ -134,7 +138,9 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 6. Use exact tick values for dimensions.
 7. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
 8. Do not present the starter IRC 2021 profile as complete code compliance.
-9. Validate after edits.
+9. Represent plan adjustments as authored design changes or explicit override
+   records if the schema supports them; do not add generated members directly.
+10. Validate after edits.
 
 Recommended validation:
 
@@ -158,10 +164,17 @@ Use:
 - `Shell Demo` to return to the connected multi-wall alpha example.
 - `Wall Demo` to return to the completed Phase 1 straight-wall example.
 - `Open` and `Save` to load or persist the authored `.framer` file.
-- the model tree and inspector to edit levels, wall placement, openings, joins,
-  and generated-member selections.
-- the catalog to add doors, windows, and garage doors to the selected wall.
-- `Export` to write disposable sidecar artifacts next to the project path:
+- `Design` to edit authored levels, wall placement, openings, and joins through
+  the model tree, inspector, catalog, and authored-object viewports.
+- `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode
+  for laying out authored openings on the selected wall. Selecting a wall or
+  opening in the Shell view opens the selected wall in Wall view.
+- `Plan` to inspect generated framing, diagnostics, BOM rows, read-only authored
+  summaries, and selectable generated members.
+- the catalog in Design Mode to add doors, windows, and garage doors to the
+  selected wall.
+- `Export` in Plan Mode to write disposable sidecar artifacts next to the
+  project path:
   `<project>.svg` for the whole-project shell plan plus wall elevations and
   `<project>.csv` for the grouped whole-project BOM/cut list.
 
