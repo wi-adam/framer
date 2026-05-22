@@ -352,12 +352,14 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                     join: join.id.clone(),
                     wall: wall_id.clone(),
                 })?;
-            let x = wall.local_x_for_point(join.point).ok_or_else(|| {
+            let join_x = wall.local_x_for_point(join.point).ok_or_else(|| {
                 SolverError::JoinPointOutsideWall {
                     join: join.id.clone(),
                     wall: wall.id.clone(),
                 }
             })?;
+            let post_x =
+                face_aligned_center(join_x, wall.length, model.code.stud_profile.thickness());
             let stud_top = wall.height - plate_thickness * top_plate_count as i64;
             let stud_length = stud_top - stud_base;
 
@@ -378,16 +380,16 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 MemberKind::CornerPost,
                 model.code.stud_profile,
                 MemberOrientation::Vertical,
-                x,
+                post_x,
                 stud_base,
                 stud_length,
                 model.code.stud_profile.thickness(),
                 RuleProvenance::new(
                     "wall.join.corner-posts",
                     format!(
-                        "A corner post is generated on {} at {} to make the authored {} wall join visible in the project framing plan.",
+                        "A corner post is generated on {} with its faces inside the wall edge at {} to make the authored {} wall join visible in the project framing plan.",
                         wall.name,
-                        x,
+                        post_x,
                         join.name
                     ),
                 ),
@@ -396,6 +398,15 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
     }
 
     Ok(())
+}
+
+fn face_aligned_center(x: Length, length: Length, member_depth: Length) -> Length {
+    if length <= member_depth {
+        return length / 2;
+    }
+
+    let half_depth = member_depth / 2;
+    x.max(half_depth).min(length - half_depth)
 }
 
 fn add_opening_members(
@@ -1284,6 +1295,33 @@ mod tests {
         assert!(plan.bom().iter().any(|item| {
             item.kind == MemberKind::CornerPost && item.quantity >= model.wall_joins.len() as u32
         }));
+    }
+
+    #[test]
+    fn corner_posts_align_faces_with_joined_wall_edges() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+        let half_stud = model.code.stud_profile.thickness() / 2;
+
+        for join in &model.wall_joins {
+            for wall_id in [&join.first_wall, &join.second_wall] {
+                let wall = model
+                    .walls
+                    .iter()
+                    .find(|candidate| candidate.id == *wall_id)
+                    .unwrap();
+                let join_x = wall.local_x_for_point(join.point).unwrap();
+                let expected_x =
+                    face_aligned_center(join_x, wall.length, model.code.stud_profile.thickness());
+                let wall_plan = plan.wall_plan(&wall.id).unwrap();
+                let member_id = format!("{}-{}-corner-post", join.id.0, wall.id.0);
+                let member = find_member(wall_plan, &member_id);
+
+                assert_eq!(member.x, expected_x, "{member_id}");
+                assert!(member.x >= half_stud, "{member_id}");
+                assert!(member.x <= wall.length - half_stud, "{member_id}");
+            }
+        }
     }
 
     #[test]
