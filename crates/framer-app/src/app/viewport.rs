@@ -2217,27 +2217,23 @@ fn draw_wall_design_elevation(
         rect.min + Vec2::new(side_margin, top_margin),
         rect.max - Vec2::new(side_margin, side_margin),
     );
+    let layout = WallElevationLayout::new(drawing, wall);
+    let wall_rect = layout.wall_rect;
+    let scale = layout.scale;
 
     painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
-    painter.rect_stroke(
-        drawing,
-        0.0,
-        Stroke::new(1.0, Color32::from_rgb(190, 184, 172)),
-        StrokeKind::Outside,
-    );
-
-    let sx = drawing.width() / wall.length.inches().max(1.0) as f32;
-    let sy = drawing.height() / wall.height.inches().max(1.0) as f32;
+    draw_view_border(&painter, drawing);
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
 
     painter.rect_filled(
-        drawing,
+        wall_rect,
         0.0,
         Color32::from_rgba_unmultiplied(188, 179, 158, 34),
     );
+    draw_view_border(&painter, wall_rect);
     for opening in &wall.openings {
-        let opening_rect = opening_rect(drawing, sx, sy, opening);
+        let opening_rect = opening_rect(wall_rect, scale, scale, opening);
         let hovered = pointer.is_some_and(|position| opening_rect.contains(position));
         let selected = selected_opening == Some(opening.id.0.as_str());
         draw_opening_guide(&painter, opening_rect, opening.kind, selected, hovered);
@@ -2248,8 +2244,8 @@ fn draw_wall_design_elevation(
 
     let dimension_click = draw_wall_dimension_annotations(
         &painter,
-        drawing,
-        sx,
+        wall_rect,
+        scale,
         wall,
         selected_dimension,
         pointer,
@@ -2260,17 +2256,24 @@ fn draw_wall_design_elevation(
     }
 
     if dimension_tool_active {
-        draw_dimension_anchors(&painter, drawing, sx, sy, wall, first_dimension_anchor);
+        draw_dimension_anchors(
+            &painter,
+            wall_rect,
+            scale,
+            scale,
+            wall,
+            first_dimension_anchor,
+        );
         if let Some(position) = pointer
             && response.clicked()
-            && let Some(anchor) = hit_dimension_anchor(position, drawing, sx, sy, wall)
+            && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
         {
             clicked = Some(DesignElevationClick::DimensionAnchor(anchor));
         }
     }
 
     painter.text(
-        Pos2::new(drawing.left(), drawing.bottom() + 20.0),
+        Pos2::new(wall_rect.left(), wall_rect.bottom() + 20.0),
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
@@ -2278,6 +2281,27 @@ fn draw_wall_design_elevation(
     );
 
     clicked
+}
+
+#[derive(Clone, Copy)]
+struct WallElevationLayout {
+    wall_rect: Rect,
+    scale: f32,
+}
+
+impl WallElevationLayout {
+    fn new(available: Rect, wall: &Wall) -> Self {
+        let wall_width = wall.length.inches().max(1.0) as f32;
+        let wall_height = wall.height.inches().max(1.0) as f32;
+        let scale = (available.width() / wall_width)
+            .min(available.height() / wall_height)
+            .max(0.001);
+        let wall_size = Vec2::new(wall_width * scale, wall_height * scale);
+        Self {
+            wall_rect: Rect::from_center_size(available.center(), wall_size),
+            scale,
+        }
+    }
 }
 
 fn draw_wall_dimension_annotations(
@@ -2485,24 +2509,19 @@ fn draw_wall_elevation(
         rect.min + Vec2::splat(margin),
         rect.max - Vec2::new(margin, margin),
     );
+    let layout = WallElevationLayout::new(drawing, wall);
+    let wall_rect = layout.wall_rect;
+    let scale = layout.scale;
 
     painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
-    painter.rect_stroke(
-        drawing,
-        0.0,
-        Stroke::new(1.0, Color32::from_rgb(190, 184, 172)),
-        StrokeKind::Outside,
-    );
-
-    let sx = drawing.width() / wall.length.inches().max(1.0) as f32;
-    let sy = drawing.height() / wall.height.inches().max(1.0) as f32;
+    draw_view_border(&painter, drawing);
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
 
-    draw_opening_guides(&painter, drawing, sx, sy, wall);
+    draw_opening_guides(&painter, wall_rect, scale, scale, wall);
 
     for member in members {
-        let member_rect = member_rect(drawing, sx, sy, member);
+        let member_rect = member_rect(wall_rect, scale, scale, member);
         let hovered = pointer.is_some_and(|position| member_rect.contains(position));
         let selected = selected_member == Some(member.id.as_str());
         draw_member_rect(&painter, member_rect, member.kind, selected, hovered);
@@ -2512,11 +2531,12 @@ fn draw_wall_elevation(
     }
 
     if let Some(section_x) = section_x {
-        draw_section_line(&painter, drawing, sx, section_x);
+        draw_section_line(&painter, wall_rect, scale, section_x);
     }
 
+    draw_view_border(&painter, wall_rect);
     painter.text(
-        Pos2::new(drawing.left(), drawing.bottom() + 20.0),
+        Pos2::new(wall_rect.left(), wall_rect.bottom() + 20.0),
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
@@ -2759,6 +2779,29 @@ mod tests {
         let zoomed = OrbitProjector::from_points(&scene.points, drawing, zoomed_view).unwrap();
 
         assert_close(zoomed.scale / base.scale, 1.25);
+    }
+
+    #[test]
+    fn wall_elevation_layout_preserves_wall_aspect_ratio() {
+        let model = BuildingModel::demo_wall();
+        let wall = &model.walls[0];
+        let available = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1000.0));
+        let layout = WallElevationLayout::new(available, wall);
+
+        assert_close(
+            layout.wall_rect.width() / wall.length.inches() as f32,
+            layout.scale,
+        );
+        assert_close(
+            layout.wall_rect.height() / wall.height.inches() as f32,
+            layout.scale,
+        );
+        assert_close(
+            layout.wall_rect.width() / layout.wall_rect.height(),
+            wall.length.inches() as f32 / wall.height.inches() as f32,
+        );
+        assert_close(layout.wall_rect.center().x, available.center().x);
+        assert_close(layout.wall_rect.center().y, available.center().y);
     }
 
     #[test]
