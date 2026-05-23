@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 2,\n"));
+        assert!(json.contains("  \"schema_version\": 3,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));

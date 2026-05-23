@@ -1,8 +1,11 @@
 use eframe::egui::{self, Color32, ComboBox, ScrollArea, Ui};
-use framer_core::{ElementId, Length, Level, Opening, OpeningKind, Wall, WallJoin, WallJoinKind};
+use framer_core::{
+    DimensionAnchor, DimensionConstraint, DimensionKind, ElementId, Length, Level, Opening,
+    OpeningKind, Wall, WallJoin, WallJoinKind,
+};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
-use super::labels::{diagnostic_code_prefix, join_kind_label, kind_label};
+use super::labels::{diagnostic_code_prefix, dimension_kind_label, join_kind_label, kind_label};
 use super::model_edit::set_wall_length_keep_direction;
 use super::{FramerApp, Selection, ViewportMode, WorkspaceMode};
 
@@ -59,15 +62,54 @@ impl FramerApp {
             ui.selectable_value(&mut self.viewport_mode, ViewportMode::Axonometric, "3D");
             if self.workspace_mode.shows_generated_plan() {
                 ui.checkbox(&mut self.show_section, "Section");
+            } else {
+                ui.separator();
+                if ui
+                    .selectable_label(self.dimension_tool.active, "Dimension")
+                    .clicked()
+                {
+                    self.dimension_tool.active = !self.dimension_tool.active;
+                    self.dimension_tool.first_anchor = None;
+                    self.dimension_status = if self.dimension_tool.active {
+                        Some("Pick two anchors in the wall view".to_owned())
+                    } else {
+                        None
+                    };
+                    if self.dimension_tool.active {
+                        self.viewport_mode = ViewportMode::Elevation;
+                    }
+                }
+                if self.dimension_tool.active {
+                    ComboBox::from_id_salt("dimension-tool-kind")
+                        .selected_text(dimension_kind_label(self.dimension_tool.kind))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.dimension_tool.kind,
+                                DimensionKind::Driving,
+                                "Driving",
+                            );
+                            ui.selectable_value(
+                                &mut self.dimension_tool.kind,
+                                DimensionKind::Reference,
+                                "Reference",
+                            );
+                        });
+                }
             }
         });
 
-        if self.file_status.is_some() || self.artifact_status.is_some() {
+        if self.file_status.is_some()
+            || self.artifact_status.is_some()
+            || self.dimension_status.is_some()
+        {
             ui.horizontal_wrapped(|ui| {
                 if let Some(status) = &self.file_status {
                     ui.label(status);
                 }
                 if let Some(status) = &self.artifact_status {
+                    ui.label(status);
+                }
+                if let Some(status) = &self.dimension_status {
                     ui.label(status);
                 }
             });
@@ -105,6 +147,16 @@ impl FramerApp {
                                         (opening.id.0.clone(), opening.kind, opening.name.clone())
                                     })
                                     .collect::<Vec<_>>(),
+                                wall.dimensions
+                                    .iter()
+                                    .map(|dimension| {
+                                        (
+                                            dimension.id.0.clone(),
+                                            dimension.kind,
+                                            dimension.name.clone(),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
                             )
                         })
                         .collect();
@@ -126,7 +178,9 @@ impl FramerApp {
                         }
 
                         ui.indent(format!("level-{level_id}"), |ui| {
-                            for (index, wall_id, wall_name, wall_level, openings) in &walls {
+                            for (index, wall_id, wall_name, wall_level, openings, dimensions) in
+                                &walls
+                            {
                                 if wall_level != &level_id {
                                     continue;
                                 }
@@ -164,6 +218,29 @@ impl FramerApp {
                                         {
                                             self.selected_wall = *index;
                                             self.selected = Selection::Opening(opening_id.clone());
+                                            self.rebuild();
+                                        }
+                                    }
+                                    for (dimension_id, dimension_kind, dimension_name) in dimensions
+                                    {
+                                        let selected = matches!(
+                                            &self.selected,
+                                            Selection::Dimension(id) if id == dimension_id
+                                        );
+                                        if ui
+                                            .selectable_label(
+                                                selected,
+                                                format!(
+                                                    "{} dimension: {}",
+                                                    dimension_kind_label(*dimension_kind),
+                                                    dimension_name
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.selected_wall = *index;
+                                            self.selected =
+                                                Selection::Dimension(dimension_id.clone());
                                             self.rebuild();
                                         }
                                     }
@@ -431,6 +508,30 @@ impl FramerApp {
                     }
                 }
             }
+            Selection::Dimension(id) => {
+                if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
+                    let mut remove = false;
+                    if let Some(dimension_index) = wall
+                        .dimensions
+                        .iter()
+                        .position(|dimension| dimension.id.0 == id)
+                    {
+                        if can_edit {
+                            changed |= dimension_inspector(ui, wall, dimension_index, &mut remove);
+                        } else {
+                            dimension_summary(ui, wall, &wall.dimensions[dimension_index]);
+                        }
+                    } else {
+                        ui.label("Dimension no longer exists");
+                    }
+
+                    if remove {
+                        wall.dimensions.retain(|dimension| dimension.id.0 != id);
+                        self.selected = Selection::Wall;
+                        changed = true;
+                    }
+                }
+            }
             Selection::Join(id) => {
                 if let Some(join) = self
                     .model
@@ -575,6 +676,104 @@ fn opening_summary(ui: &mut Ui, opening: &Opening) {
             summary_row(ui, "Height", opening.height.to_string());
             if opening.has_sill() {
                 summary_row(ui, "Sill", opening.sill_height.to_string());
+            }
+        });
+}
+
+fn dimension_inspector(
+    ui: &mut Ui,
+    wall: &mut Wall,
+    dimension_index: usize,
+    remove: &mut bool,
+) -> bool {
+    let start_label = dimension_anchor_label(wall, &wall.dimensions[dimension_index].start);
+    let end_label = dimension_anchor_label(wall, &wall.dimensions[dimension_index].end);
+    let measured = wall
+        .dimension_measurement(&wall.dimensions[dimension_index])
+        .unwrap_or(Length::ZERO);
+    let wall_length_inches = wall.length.inches().max(1.0);
+    let mut changed = false;
+    let mut apply_driving = false;
+
+    {
+        let dimension = &mut wall.dimensions[dimension_index];
+        ui.label(&dimension.id.0);
+        changed |= text_edit(ui, "Name", &mut dimension.name);
+
+        let previous_kind = dimension.kind;
+        ComboBox::from_label("Kind")
+            .selected_text(dimension_kind_label(dimension.kind))
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut dimension.kind, DimensionKind::Driving, "Driving")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut dimension.kind, DimensionKind::Reference, "Reference")
+                    .changed();
+            });
+        if dimension.kind != previous_kind {
+            match dimension.kind {
+                DimensionKind::Driving => {
+                    dimension.value = Some(measured.max(Length::from_whole_inches(1)));
+                    apply_driving = true;
+                }
+                DimensionKind::Reference => {
+                    dimension.value = None;
+                }
+            }
+        }
+
+        egui::Grid::new("dimension-inspector")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                summary_row(ui, "From", &start_label);
+                summary_row(ui, "To", &end_label);
+                summary_row(ui, "Measured", measured.to_string());
+            });
+
+        if dimension.kind == DimensionKind::Driving {
+            let mut value = dimension.value.unwrap_or(measured);
+            if length_drag(ui, "Distance", &mut value, 1.0, wall_length_inches, "in") {
+                dimension.value = Some(value);
+                changed = true;
+                apply_driving = true;
+            }
+        }
+
+        ui.separator();
+        if ui.button("Remove Dimension").clicked() {
+            *remove = true;
+        }
+    }
+
+    if apply_driving {
+        let dimension = wall.dimensions[dimension_index].clone();
+        if !wall.apply_driving_dimension(&dimension) {
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn dimension_summary(ui: &mut Ui, wall: &Wall, dimension: &DimensionConstraint) {
+    ui.label(&dimension.id.0);
+    let measured = wall
+        .dimension_measurement(dimension)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unresolved".to_owned());
+    egui::Grid::new("dimension-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &dimension.name);
+            summary_row(ui, "Kind", dimension_kind_label(dimension.kind));
+            summary_row(ui, "From", dimension_anchor_label(wall, &dimension.start));
+            summary_row(ui, "To", dimension_anchor_label(wall, &dimension.end));
+            summary_row(ui, "Measured", measured);
+            if let Some(value) = dimension.value {
+                summary_row(ui, "Target", value.to_string());
             }
         });
 }
@@ -769,6 +968,30 @@ fn wall_display_name(options: &[(String, String)], id: &str) -> String {
         .iter()
         .find(|(candidate, _)| candidate == id)
         .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn dimension_anchor_label(wall: &Wall, anchor: &DimensionAnchor) -> String {
+    match anchor {
+        DimensionAnchor::WallStart => "Wall start".to_owned(),
+        DimensionAnchor::WallEnd => "Wall end".to_owned(),
+        DimensionAnchor::OpeningLeft { opening } => {
+            format!("{} left", opening_display_name(wall, &opening.0))
+        }
+        DimensionAnchor::OpeningCenter { opening } => {
+            format!("{} center", opening_display_name(wall, &opening.0))
+        }
+        DimensionAnchor::OpeningRight { opening } => {
+            format!("{} right", opening_display_name(wall, &opening.0))
+        }
+    }
+}
+
+fn opening_display_name(wall: &Wall, id: &str) -> String {
+    wall.openings
+        .iter()
+        .find(|opening| opening.id.0 == id)
+        .map(|opening| opening.name.clone())
         .unwrap_or_else(|| id.to_owned())
 }
 

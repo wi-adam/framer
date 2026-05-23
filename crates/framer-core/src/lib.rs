@@ -3,7 +3,8 @@ mod project;
 mod units;
 
 pub use model::{
-    BoardProfile, BuildingModel, CodeProfile, ElementId, Level, ModelError, Opening, OpeningKind,
+    BoardProfile, BuildingModel, CodeProfile, DimensionAnchor, DimensionConstraint,
+    DimensionDirection, DimensionKind, ElementId, Level, ModelError, Opening, OpeningKind,
     PrescriptiveCode, Wall, WallJoin, WallJoinKind,
 };
 pub use project::{

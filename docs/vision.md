@@ -225,8 +225,8 @@ Mode for generated framing inspection, diagnostics, BOM review, and export.
   across all wall segments and join members.**
 
 Remaining M2 work: richer join rules, intersections beyond simple corners,
-snapping/drag handles, dimension annotations, and stronger plan/elevation
-drawing output.
+snapping/drag handles, cross-wall projection constraints, and stronger
+plan/elevation drawing output.
 
 ### M3: Floors And Roofs
 

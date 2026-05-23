@@ -11,7 +11,9 @@ use eframe::egui::{
     epaint::Vertex,
 };
 use eframe::{egui_wgpu, wgpu};
-use framer_core::{BuildingModel, Length, Opening, OpeningKind, Point2, Wall};
+use framer_core::{
+    BuildingModel, DimensionAnchor, DimensionKind, Length, Opening, OpeningKind, Point2, Wall,
+};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
@@ -180,10 +182,38 @@ impl FramerApp {
                         Selection::Opening(id) => Some(id.as_str()),
                         _ => None,
                     };
-                    draw_wall_design_elevation(ui, wall, selected_opening).map(|opening_id| {
-                        ViewClick::Opening {
+                    let selected_dimension = match &self.selected {
+                        Selection::Dimension(id) => Some(id.as_str()),
+                        _ => None,
+                    };
+                    let first_anchor = self
+                        .dimension_tool
+                        .first_anchor
+                        .as_ref()
+                        .filter(|pick| pick.wall_index == self.selected_wall)
+                        .map(|pick| &pick.anchor);
+                    draw_wall_design_elevation(
+                        ui,
+                        wall,
+                        selected_opening,
+                        selected_dimension,
+                        self.dimension_tool.active,
+                        first_anchor,
+                    )
+                    .map(|click| match click {
+                        DesignElevationClick::Opening(opening_id) => ViewClick::Opening {
                             wall_index: self.selected_wall,
                             opening_id,
+                        },
+                        DesignElevationClick::Dimension(dimension_id) => ViewClick::Dimension {
+                            wall_index: self.selected_wall,
+                            dimension_id,
+                        },
+                        DesignElevationClick::DimensionAnchor(anchor) => {
+                            ViewClick::DimensionAnchor {
+                                wall_index: self.selected_wall,
+                                anchor,
+                            }
                         }
                     })
                 } else {
@@ -2162,20 +2192,30 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     point.distance(start + segment * t)
 }
 
+enum DesignElevationClick {
+    Opening(String),
+    Dimension(String),
+    DimensionAnchor(DimensionAnchor),
+}
+
 fn draw_wall_design_elevation(
     ui: &mut Ui,
     wall: &Wall,
     selected_opening: Option<&str>,
-) -> Option<String> {
+    selected_dimension: Option<&str>,
+    dimension_tool_active: bool,
+    first_dimension_anchor: Option<&DimensionAnchor>,
+) -> Option<DesignElevationClick> {
     let available = ui.available_size();
     let desired = Vec2::new(available.x.max(420.0), (available.y - 16.0).max(420.0));
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let painter = ui.painter_at(rect);
 
-    let margin = 52.0;
+    let side_margin = 52.0;
+    let top_margin = (64.0 + wall.dimensions.len().min(4) as f32 * 18.0).min(136.0);
     let drawing = Rect::from_min_max(
-        rect.min + Vec2::splat(margin),
-        rect.max - Vec2::new(margin, margin),
+        rect.min + Vec2::new(side_margin, top_margin),
+        rect.max - Vec2::new(side_margin, side_margin),
     );
 
     painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
@@ -2201,8 +2241,31 @@ fn draw_wall_design_elevation(
         let hovered = pointer.is_some_and(|position| opening_rect.contains(position));
         let selected = selected_opening == Some(opening.id.0.as_str());
         draw_opening_guide(&painter, opening_rect, opening.kind, selected, hovered);
-        if hovered && response.clicked() {
-            clicked = Some(opening.id.0.clone());
+        if hovered && response.clicked() && !dimension_tool_active {
+            clicked = Some(DesignElevationClick::Opening(opening.id.0.clone()));
+        }
+    }
+
+    let dimension_click = draw_wall_dimension_annotations(
+        &painter,
+        drawing,
+        sx,
+        wall,
+        selected_dimension,
+        pointer,
+        response.clicked() && !dimension_tool_active,
+    );
+    if let Some(dimension_id) = dimension_click {
+        clicked = Some(DesignElevationClick::Dimension(dimension_id));
+    }
+
+    if dimension_tool_active {
+        draw_dimension_anchors(&painter, drawing, sx, sy, wall, first_dimension_anchor);
+        if let Some(position) = pointer
+            && response.clicked()
+            && let Some(anchor) = hit_dimension_anchor(position, drawing, sx, sy, wall)
+        {
+            clicked = Some(DesignElevationClick::DimensionAnchor(anchor));
         }
     }
 
@@ -2215,6 +2278,194 @@ fn draw_wall_design_elevation(
     );
 
     clicked
+}
+
+fn draw_wall_dimension_annotations(
+    painter: &egui::Painter,
+    drawing: Rect,
+    sx: f32,
+    wall: &Wall,
+    selected_dimension: Option<&str>,
+    pointer: Option<Pos2>,
+    click_enabled: bool,
+) -> Option<String> {
+    let mut clicked = None;
+
+    for (index, dimension) in wall.dimensions.iter().enumerate() {
+        let Some(start_x) = dimension.start.local_x(wall) else {
+            continue;
+        };
+        let Some(end_x) = dimension.end.local_x(wall) else {
+            continue;
+        };
+        let start = drawing.left() + start_x.inches() as f32 * sx;
+        let end = drawing.left() + end_x.inches() as f32 * sx;
+        let y = drawing.top() - 18.0 - index.min(3) as f32 * 18.0;
+        let line_start = Pos2::new(start, y);
+        let line_end = Pos2::new(end, y);
+        let selected = selected_dimension == Some(dimension.id.0.as_str());
+        let hovered = pointer.is_some_and(|position| {
+            distance_to_segment(position, line_start, line_end) < 7.0
+                || dimension_label_rect(line_start, line_end).contains(position)
+        });
+        let color = if selected {
+            Color32::from_rgb(35, 94, 150)
+        } else if dimension.kind == DimensionKind::Reference {
+            Color32::from_rgb(93, 100, 103)
+        } else {
+            Color32::from_rgb(130, 83, 34)
+        };
+        let stroke = Stroke::new(if selected || hovered { 2.0 } else { 1.25 }, color);
+
+        painter.line_segment([line_start, line_end], stroke);
+        painter.line_segment(
+            [Pos2::new(start, y), Pos2::new(start, drawing.top() + 4.0)],
+            Stroke::new(0.75, color),
+        );
+        painter.line_segment(
+            [Pos2::new(end, y), Pos2::new(end, drawing.top() + 4.0)],
+            Stroke::new(0.75, color),
+        );
+        draw_dimension_tick(painter, line_start, color);
+        draw_dimension_tick(painter, line_end, color);
+
+        let label = dimension_display_value(wall, dimension);
+        let label_pos = Pos2::new((start + end) / 2.0, y - 2.0);
+        painter.rect_filled(
+            dimension_label_rect(line_start, line_end),
+            2.0,
+            Color32::from_rgb(246, 244, 239),
+        );
+        painter.text(
+            label_pos,
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.0),
+            color,
+        );
+
+        if hovered && click_enabled {
+            clicked = Some(dimension.id.0.clone());
+        }
+    }
+
+    clicked
+}
+
+fn draw_dimension_tick(painter: &egui::Painter, point: Pos2, color: Color32) {
+    painter.line_segment(
+        [point + Vec2::new(-4.0, 4.0), point + Vec2::new(4.0, -4.0)],
+        Stroke::new(1.0, color),
+    );
+}
+
+fn dimension_label_rect(start: Pos2, end: Pos2) -> Rect {
+    let center = Pos2::new((start.x + end.x) / 2.0, start.y - 2.0);
+    Rect::from_center_size(center, Vec2::new(86.0, 18.0))
+}
+
+fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstraint) -> String {
+    let measured = wall.dimension_measurement(dimension);
+    match dimension.kind {
+        DimensionKind::Driving => dimension
+            .value
+            .or(measured)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_owned()),
+        DimensionKind::Reference => measured
+            .map(|value| format!("({value})"))
+            .unwrap_or_else(|| "(?)".to_owned()),
+    }
+}
+
+fn draw_dimension_anchors(
+    painter: &egui::Painter,
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+    first_anchor: Option<&DimensionAnchor>,
+) {
+    for (anchor, position) in dimension_anchor_positions(drawing, sx, sy, wall) {
+        let selected = first_anchor == Some(&anchor);
+        let radius = if selected { 5.5 } else { 4.0 };
+        painter.circle_filled(
+            position,
+            radius,
+            if selected {
+                Color32::from_rgb(35, 94, 150)
+            } else {
+                Color32::from_rgb(247, 247, 242)
+            },
+        );
+        painter.circle_stroke(
+            position,
+            radius,
+            Stroke::new(
+                if selected { 2.0 } else { 1.25 },
+                Color32::from_rgb(35, 94, 150),
+            ),
+        );
+    }
+}
+
+fn hit_dimension_anchor(
+    position: Pos2,
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+) -> Option<DimensionAnchor> {
+    dimension_anchor_positions(drawing, sx, sy, wall)
+        .into_iter()
+        .filter_map(|(anchor, anchor_position)| {
+            let distance = position.distance(anchor_position);
+            (distance <= 11.0).then_some((anchor, distance))
+        })
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(anchor, _)| anchor)
+}
+
+fn dimension_anchor_positions(
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+) -> Vec<(DimensionAnchor, Pos2)> {
+    let mut anchors = vec![
+        (
+            DimensionAnchor::WallStart,
+            Pos2::new(drawing.left(), drawing.bottom()),
+        ),
+        (
+            DimensionAnchor::WallEnd,
+            Pos2::new(drawing.right(), drawing.bottom()),
+        ),
+    ];
+
+    for opening in &wall.openings {
+        let rect = opening_rect(drawing, sx, sy, opening);
+        anchors.push((
+            DimensionAnchor::OpeningLeft {
+                opening: opening.id.clone(),
+            },
+            Pos2::new(rect.left(), rect.center().y),
+        ));
+        anchors.push((
+            DimensionAnchor::OpeningCenter {
+                opening: opening.id.clone(),
+            },
+            rect.center(),
+        ));
+        anchors.push((
+            DimensionAnchor::OpeningRight {
+                opening: opening.id.clone(),
+            },
+            Pos2::new(rect.right(), rect.center().y),
+        ));
+    }
+
+    anchors
 }
 
 fn draw_wall_elevation(
@@ -2404,6 +2655,15 @@ fn section_position(wall: &Wall, selection: &Selection) -> Option<Length> {
             .iter()
             .find(|opening| opening.id.0 == *id)
             .map(|opening| opening.center),
+        Selection::Dimension(id) => wall
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.id.0 == *id)
+            .and_then(|dimension| {
+                let start = dimension.start.local_x(wall)?;
+                let end = dimension.end.local_x(wall)?;
+                Some((start + end) / 2)
+            }),
         Selection::Member { .. } | Selection::Join(_) | Selection::Level(_) | Selection::Wall => {
             Some(wall.length / 2)
         }

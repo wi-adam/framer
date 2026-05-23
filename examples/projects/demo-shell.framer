@@ -1,6 +1,6 @@
 {
   "format": "framer.project",
-  "schema_version": 2,
+  "schema_version": 3,
   "authored": {
     "code": {
       "code": "Irc2021",

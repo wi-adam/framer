@@ -1,4 +1,4 @@
-use framer_core::{OpeningKind, WallJoinKind};
+use framer_core::{DimensionKind, OpeningKind, WallJoinKind};
 use framer_solver::DiagnosticSeverity;
 
 pub(super) fn kind_label(kind: OpeningKind) -> &'static str {
@@ -17,6 +17,13 @@ pub(super) fn join_kind_label(kind: WallJoinKind) -> &'static str {
         WallJoinKind::EndToEnd => "End-to-end",
         WallJoinKind::Tee => "Tee",
         WallJoinKind::Cross => "Cross",
+    }
+}
+
+pub(super) fn dimension_kind_label(kind: DimensionKind) -> &'static str {
+    match kind {
+        DimensionKind::Driving => "Driving",
+        DimensionKind::Reference => "Reference",
     }
 }
 

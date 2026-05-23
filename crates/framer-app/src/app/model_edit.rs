@@ -23,3 +23,14 @@ pub(super) fn next_opening_id(wall: &Wall, prefix: &str) -> (String, usize) {
         index += 1;
     }
 }
+
+pub(super) fn next_dimension_id(wall: &Wall) -> (String, usize) {
+    let mut index = wall.dimensions.len() + 1;
+    loop {
+        let id = format!("dimension-{index}");
+        if wall.dimensions.iter().all(|dimension| dimension.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}

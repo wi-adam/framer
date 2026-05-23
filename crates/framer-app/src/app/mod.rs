@@ -9,14 +9,15 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, CentralPanel, Panel, ScrollArea};
 use framer_core::{
-    BuildingModel, Length, Opening, OpeningKind, Wall, load_project as load_project_document,
+    BuildingModel, DimensionAnchor, DimensionConstraint, DimensionDirection, DimensionKind, Length,
+    Opening, OpeningKind, Wall, load_project as load_project_document,
     save_project as save_project_document,
 };
 use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
-use model_edit::next_opening_id;
+use model_edit::{next_dimension_id, next_opening_id};
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::View3dState;
 
@@ -29,9 +30,11 @@ pub(crate) struct FramerApp {
     project_path: String,
     file_status: Option<String>,
     artifact_status: Option<String>,
+    dimension_status: Option<String>,
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
+    dimension_tool: DimensionToolState,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     show_section: bool,
 }
@@ -41,6 +44,7 @@ enum Selection {
     Level(String),
     Wall,
     Opening(String),
+    Dimension(String),
     Join(String),
     Member { wall_id: String, member_id: String },
 }
@@ -75,10 +79,48 @@ enum ViewClick {
         wall_index: usize,
         opening_id: String,
     },
+    Dimension {
+        wall_index: usize,
+        dimension_id: String,
+    },
+    DimensionAnchor {
+        wall_index: usize,
+        anchor: DimensionAnchor,
+    },
     Member {
         wall_id: String,
         member_id: String,
     },
+}
+
+#[derive(Debug, Clone)]
+struct DimensionToolState {
+    active: bool,
+    kind: DimensionKind,
+    first_anchor: Option<DimensionAnchorPick>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DimensionAnchorPick {
+    wall_index: usize,
+    anchor: DimensionAnchor,
+}
+
+impl Default for DimensionToolState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            kind: DimensionKind::Driving,
+            first_anchor: None,
+        }
+    }
+}
+
+fn dimension_kind_name(kind: DimensionKind) -> &'static str {
+    match kind {
+        DimensionKind::Driving => "driving",
+        DimensionKind::Reference => "reference",
+    }
 }
 
 impl Default for FramerApp {
@@ -92,9 +134,11 @@ impl Default for FramerApp {
             project_path: DEFAULT_PROJECT_PATH.to_owned(),
             file_status: None,
             artifact_status: None,
+            dimension_status: None,
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
+            dimension_tool: DimensionToolState::default(),
             gpu_target_format: None,
             show_section: true,
         };
@@ -119,6 +163,8 @@ impl FramerApp {
             self.selected_wall = 0;
             self.selected = Selection::Wall;
         }
+
+        self.model.apply_driving_dimensions();
 
         match generate_project_plan(&self.model) {
             Ok(plan) => {
@@ -147,6 +193,8 @@ impl FramerApp {
         self.project_path = "untitled-alpha.framer".to_owned();
         self.file_status = Some("Created new project".to_owned());
         self.artifact_status = None;
+        self.dimension_status = None;
+        self.dimension_tool = DimensionToolState::default();
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -158,6 +206,8 @@ impl FramerApp {
         self.project_path = DEFAULT_PROJECT_PATH.to_owned();
         self.file_status = Some("Reset to multi-wall demo shell".to_owned());
         self.artifact_status = None;
+        self.dimension_status = None;
+        self.dimension_tool = DimensionToolState::default();
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -169,6 +219,8 @@ impl FramerApp {
         self.project_path = "examples/projects/demo-wall.framer".to_owned();
         self.file_status = Some("Reset to Phase 1 demo wall".to_owned());
         self.artifact_status = None;
+        self.dimension_status = None;
+        self.dimension_tool = DimensionToolState::default();
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -210,6 +262,8 @@ impl FramerApp {
                 self.rebuild();
                 self.file_status = Some(format!("Opened {}", path.display()));
                 self.artifact_status = None;
+                self.dimension_status = None;
+                self.dimension_tool = DimensionToolState::default();
             }
             Err(error) => {
                 self.file_status = Some(format!("Open failed: {error}"));
@@ -243,7 +297,11 @@ impl FramerApp {
         self.workspace_mode = mode;
         match mode {
             WorkspaceMode::Design => self.select_authored_for_design_mode(),
-            WorkspaceMode::Plan => self.rebuild(),
+            WorkspaceMode::Plan => {
+                self.dimension_tool.active = false;
+                self.dimension_tool.first_anchor = None;
+                self.rebuild();
+            }
         }
     }
 
@@ -311,6 +369,77 @@ impl FramerApp {
         self.rebuild();
     }
 
+    fn handle_dimension_anchor_click(&mut self, wall_index: usize, anchor: DimensionAnchor) {
+        if !self.workspace_mode.allows_design_edits() || !self.dimension_tool.active {
+            return;
+        }
+
+        let pick = DimensionAnchorPick { wall_index, anchor };
+        let Some(first) = self.dimension_tool.first_anchor.take() else {
+            self.dimension_status = Some("Pick a second dimension anchor".to_owned());
+            self.dimension_tool.first_anchor = Some(pick);
+            return;
+        };
+
+        if first.wall_index != pick.wall_index {
+            self.dimension_status =
+                Some("Dimension anchors must be on the same wall for now".to_owned());
+            self.dimension_tool.first_anchor = Some(pick);
+            return;
+        }
+
+        if first.anchor == pick.anchor {
+            self.dimension_status = Some("Pick a different anchor".to_owned());
+            self.dimension_tool.first_anchor = Some(first);
+            return;
+        }
+
+        let Some(wall) = self.model.walls.get_mut(wall_index) else {
+            return;
+        };
+        let Some(start_x) = first.anchor.local_x(wall) else {
+            self.dimension_status = Some("The first dimension anchor no longer exists".to_owned());
+            return;
+        };
+        let Some(end_x) = pick.anchor.local_x(wall) else {
+            self.dimension_status = Some("The second dimension anchor no longer exists".to_owned());
+            return;
+        };
+        let measured = (end_x - start_x).abs();
+        if measured <= Length::ZERO {
+            self.dimension_status = Some("Dimension anchors are coincident".to_owned());
+            self.dimension_tool.first_anchor = Some(first);
+            return;
+        }
+
+        let kind = self.dimension_tool.kind;
+        let (id, index) = next_dimension_id(wall);
+        let direction = if end_x >= start_x {
+            DimensionDirection::Forward
+        } else {
+            DimensionDirection::Backward
+        };
+        let value = if kind == DimensionKind::Driving {
+            Some(measured)
+        } else {
+            None
+        };
+        wall.dimensions.push(DimensionConstraint::new(
+            id.clone(),
+            format!("Dimension {index}"),
+            kind,
+            first.anchor,
+            pick.anchor,
+            direction,
+            value,
+        ));
+
+        self.selected_wall = wall_index;
+        self.selected = Selection::Dimension(id);
+        self.dimension_status = Some(format!("Added {} dimension", dimension_kind_name(kind)));
+        self.rebuild();
+    }
+
     fn selected_member(&self, wall_id: &str, member_id: &str) -> Option<&FrameMember> {
         self.project_plan
             .as_ref()?
@@ -336,6 +465,17 @@ impl FramerApp {
                 self.selected_wall = wall_index;
                 self.selected = Selection::Opening(opening_id);
                 self.open_wall_view_from_design_shell();
+            }
+            ViewClick::Dimension {
+                wall_index,
+                dimension_id,
+            } => {
+                self.selected_wall = wall_index;
+                self.selected = Selection::Dimension(dimension_id);
+                self.open_wall_view_from_design_shell();
+            }
+            ViewClick::DimensionAnchor { wall_index, anchor } => {
+                self.handle_dimension_anchor_click(wall_index, anchor);
             }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {
@@ -498,5 +638,49 @@ mod tests {
         assert_eq!(app.selected_wall, 1);
         assert_eq!(app.selected, Selection::Wall);
         assert_eq!(app.viewport_mode, ViewportMode::Plan);
+    }
+
+    #[test]
+    fn dimension_tool_clicks_create_driving_dimension() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.kind = DimensionKind::Driving;
+        let opening = app.model.walls[0].openings[0].id.clone();
+        let expected = app.model.walls[0].openings[0].center;
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningCenter { opening },
+        });
+
+        let dimension = &app.model.walls[0].dimensions[0];
+        assert_eq!(dimension.kind, DimensionKind::Driving);
+        assert_eq!(dimension.value, Some(expected));
+        assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
+    }
+
+    #[test]
+    fn reference_dimensions_store_no_driving_value() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.kind = DimensionKind::Reference;
+        let opening = app.model.walls[0].openings[0].id.clone();
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningLeft { opening },
+        });
+
+        let dimension = &app.model.walls[0].dimensions[0];
+        assert_eq!(dimension.kind, DimensionKind::Reference);
+        assert_eq!(dimension.value, None);
     }
 }

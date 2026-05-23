@@ -5,10 +5,10 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v2 format stores only the canonical intent model. Generated framing plans,
+The v3 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
-v2 file.
+v3 file.
 
 This matches Framer's Design Mode / Plan Mode split. Design Mode writes the
 authored model saved here. Plan Mode regenerates framing layouts, diagnostics,
@@ -21,12 +21,12 @@ corner joins, doors, windows, and a garage-door-style opening. The Phase 1
 single-wall example remains checked in at
 [../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
 
-## V2 Shape
+## V3 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 2,
+  "schema_version": 3,
   "authored": {
     "code": {},
     "levels": [],
@@ -37,12 +37,14 @@ single-wall example remains checked in at
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `2` when saving from the current app.
+- `schema_version` must be `3` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected. Do not add `generated`, `cache`,
-  `exports`, or presentation data to v2 project files.
+  `exports`, or presentation data to v3 project files.
 - Schema v1 single-wall files are accepted on load and migrated to the current
   placed-wall shape with a default `level-1` level and a straight wall segment.
+- Schema v2 shell files are accepted on load; missing wall dimensions default to
+  an empty list.
 
 Lengths are exact integer ticks:
 
@@ -64,7 +66,7 @@ Example:
 
 ## Authored Model
 
-The current v2 authored model supports the completed Phase 1 single-wall
+The current v3 authored model supports the completed Phase 1 single-wall
 workflow and the first beyond-Phase-1 multi-wall shell workflow:
 
 - `code`: starter framing defaults used by the current solver.
@@ -72,6 +74,8 @@ workflow and the first beyond-Phase-1 multi-wall shell workflow:
 - `walls`: deterministic list of placed rectilinear wall segments.
 - `wall_joins`: deterministic list of authored wall joins/corners.
 - `openings`: deterministic list of wall openings hosted by each wall segment.
+- `dimensions`: deterministic wall-local dimension constraints hosted by a wall
+  segment.
 
 Each wall stores both a local framing length and a project placement:
 
@@ -79,6 +83,41 @@ Each wall stores both a local framing length and a project placement:
 - `start` and `end`: rectilinear project coordinates in ticks.
 - `length`: the wall's local framing length; it must match the axis-aligned
   distance between `start` and `end`.
+- `dimensions`: optional driving or reference dimensions between wall-local
+  anchors.
+
+Each dimension stores:
+
+- `kind`: `Driving` or `Reference`.
+- `start` and `end`: wall-local anchors such as `wall_start`, `wall_end`,
+  `opening_left`, `opening_center`, or `opening_right`.
+- `direction`: `Forward` or `Backward`, preserving the click order used to place
+  the dimension.
+- `value`: present only for `Driving` dimensions. Reference dimensions are
+  measured from the current model and must not store a target value.
+
+Opening anchors include the stable opening ID:
+
+```json
+{
+  "id": "dimension-1",
+  "name": "Dimension 1",
+  "kind": "Driving",
+  "start": { "kind": "wall_start" },
+  "end": {
+    "kind": "opening_center",
+    "opening": "opening-front-door"
+  },
+  "direction": "Forward",
+  "value": { "ticks": 960 }
+}
+```
+
+The current app applies simple wall-local driving dimensions for wall length,
+opening position, and opening width. Reference dimensions are non-driving
+annotations that display the current measured distance. Cross-wall projections
+and alignment/offset constraints are future schema extensions, not implicit
+behavior in v3.
 
 Each wall join stores:
 
@@ -90,14 +129,16 @@ The solver currently generates corner-post members for `Corner` and `EndToEnd`
 joins. `Tee` and `Cross` joins are stored as authored intent but reported as
 unsupported for framing generation.
 
-Level, wall, join, and opening IDs are stable semantic identifiers. They must be
-non-empty and contain only lowercase letters, digits, or hyphens. Examples:
+Level, wall, join, opening, and dimension IDs are stable semantic identifiers.
+They must be non-empty and contain only lowercase letters, digits, or hyphens.
+Examples:
 
 - `level-1`
 - `wall-1`
 - `join-front-right`
 - `opening-door-1`
 - `opening-window-1`
+- `dimension-1`
 
 Do not rewrite existing IDs when changing dimensions or names. Add a new stable
 ID only when adding a new authored object.
@@ -118,9 +159,10 @@ Framer canonicalizes project files before saving:
 - Levels are sorted by `id`.
 - Walls are sorted by `id`.
 - Openings within each wall are sorted by `id`.
+- Dimensions within each wall are sorted by `id`.
 - Wall joins are sorted by `id`.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing is deterministic output and is not saved in v2 files.
+- Generated framing is deterministic output and is not saved in v3 files.
 
 This keeps `.framer` files stable for Git diffs, code review, and agent edits.
 
@@ -169,6 +211,9 @@ Use:
 - `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode
   for laying out authored openings on the selected wall. Selecting a wall or
   opening in the Shell view opens the selected wall in Wall view.
+- `Dimension` in Design Mode to pick two wall/opening anchors in Wall view and
+  create either a driving dimension or a non-driving reference dimension. Driving
+  dimension values can be edited in the inspector.
 - `Plan` to inspect generated framing, diagnostics, BOM rows, read-only authored
   summaries, and selectable generated members.
 - the catalog in Design Mode to add doors, windows, and garage doors to the

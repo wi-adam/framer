@@ -42,12 +42,15 @@ workflow is:
 
 1. Use `New` or `Open` to create or load a schema-versioned `.framer` project.
 2. Select authored objects in the model tree and edit dimensions in the
-   inspector, including wall placement, openings, levels, and joins.
+   inspector, including wall placement, openings, levels, joins, and dimension
+   constraints.
 3. Add doors, windows, or garage doors from the catalog.
-4. Inspect regenerated whole-project framing, diagnostics, rule provenance, and
+4. Use the Design-mode `Dimension` tool in the wall view to click wall/opening
+   anchors and create driving or reference dimensions.
+5. Inspect regenerated whole-project framing, diagnostics, rule provenance, and
    the grouped BOM.
-5. Use `Save` to persist authored intent only.
-6. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
+6. Use `Save` to persist authored intent only.
+7. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
 
 ## Test
 

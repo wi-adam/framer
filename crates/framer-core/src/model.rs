@@ -227,6 +227,9 @@ impl BuildingModel {
             for opening in &wall.openings {
                 insert_unique_id(&mut ids, &opening.id)?;
             }
+            for dimension in &wall.dimensions {
+                insert_unique_id(&mut ids, &dimension.id)?;
+            }
         }
 
         for join in &self.wall_joins {
@@ -284,6 +287,14 @@ impl BuildingModel {
                 wall.end = Point2::new(wall.start.x + wall.length, wall.start.y);
             }
         }
+    }
+
+    pub fn apply_driving_dimensions(&mut self) -> bool {
+        let mut changed = false;
+        for wall in &mut self.walls {
+            changed |= wall.apply_driving_dimensions();
+        }
+        changed
     }
 }
 
@@ -390,6 +401,8 @@ pub struct Wall {
     pub height: Length,
     pub stud_spacing: Length,
     pub openings: Vec<Opening>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<DimensionConstraint>,
 }
 
 impl Wall {
@@ -409,6 +422,7 @@ impl Wall {
             height: code.default_wall_height,
             stud_spacing: code.default_stud_spacing,
             openings: Vec::new(),
+            dimensions: Vec::new(),
         }
     }
 
@@ -485,6 +499,12 @@ impl Wall {
             spans.push((opening.left(), opening.right(), opening.id.clone()));
         }
 
+        let mut dimension_ids = BTreeSet::new();
+        for dimension in &self.dimensions {
+            dimension.validate(&opening_ids, self.length)?;
+            insert_unique_id(&mut dimension_ids, &dimension.id)?;
+        }
+
         spans.sort_by_key(|(left, _, _)| *left);
         for pair in spans.windows(2) {
             let (_, first_right, first_id) = &pair[0];
@@ -502,6 +522,8 @@ impl Wall {
 
     pub fn sort_deterministically(&mut self) {
         self.openings.sort_by(|left, right| left.id.cmp(&right.id));
+        self.dimensions
+            .sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn placement_length(&self) -> Option<Length> {
@@ -538,6 +560,359 @@ impl Wall {
     pub fn has_endpoint(&self, point: Point2) -> bool {
         self.start == point || self.end == point
     }
+
+    pub fn dimension_measurement(&self, dimension: &DimensionConstraint) -> Option<Length> {
+        let start = dimension.start.local_x(self)?;
+        let end = dimension.end.local_x(self)?;
+        Some((end - start).abs())
+    }
+
+    pub fn apply_driving_dimensions(&mut self) -> bool {
+        let dimensions = self
+            .dimensions
+            .iter()
+            .filter(|dimension| dimension.kind == DimensionKind::Driving)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changed = false;
+
+        for dimension in dimensions {
+            changed |= self.apply_driving_dimension(&dimension);
+        }
+
+        changed
+    }
+
+    pub fn apply_driving_dimension(&mut self, dimension: &DimensionConstraint) -> bool {
+        if dimension.kind != DimensionKind::Driving {
+            return false;
+        }
+
+        let Some(value) = dimension.value else {
+            return false;
+        };
+        let Some(start) = dimension.start.local_x(self) else {
+            return false;
+        };
+        let target = match dimension.direction {
+            DimensionDirection::Forward => start + value,
+            DimensionDirection::Backward => start - value,
+        };
+
+        if self.move_dimension_anchor(&dimension.start, &dimension.end, target) {
+            return true;
+        }
+
+        let Some(end) = dimension.end.local_x(self) else {
+            return false;
+        };
+        let reverse_target = match dimension.direction {
+            DimensionDirection::Forward => end - value,
+            DimensionDirection::Backward => end + value,
+        };
+        self.move_dimension_anchor(&dimension.end, &dimension.start, reverse_target)
+    }
+
+    fn move_dimension_anchor(
+        &mut self,
+        start_anchor: &DimensionAnchor,
+        end_anchor: &DimensionAnchor,
+        target: Length,
+    ) -> bool {
+        if target < Length::ZERO {
+            return false;
+        }
+
+        if matches!(
+            (start_anchor, end_anchor),
+            (DimensionAnchor::WallStart, DimensionAnchor::WallEnd)
+                | (DimensionAnchor::WallEnd, DimensionAnchor::WallStart)
+        ) {
+            let Some(length) = self.dimension_target_value(start_anchor, end_anchor, target) else {
+                return false;
+            };
+            if length <= Length::ZERO {
+                return false;
+            }
+            self.set_length_keep_direction(length);
+            return true;
+        }
+
+        if target > self.length {
+            return false;
+        }
+
+        if let Some(changed) =
+            self.try_resize_opening_from_dimension(start_anchor, end_anchor, target)
+        {
+            return changed;
+        }
+
+        self.move_opening_anchor(end_anchor, target)
+    }
+
+    fn dimension_target_value(
+        &self,
+        start_anchor: &DimensionAnchor,
+        end_anchor: &DimensionAnchor,
+        target: Length,
+    ) -> Option<Length> {
+        match (start_anchor, end_anchor) {
+            (DimensionAnchor::WallStart, DimensionAnchor::WallEnd) => Some(target),
+            (DimensionAnchor::WallEnd, DimensionAnchor::WallStart) => {
+                let start = start_anchor.local_x(self)?;
+                Some((target - start).abs())
+            }
+            _ => None,
+        }
+    }
+
+    fn try_resize_opening_from_dimension(
+        &mut self,
+        start_anchor: &DimensionAnchor,
+        end_anchor: &DimensionAnchor,
+        target: Length,
+    ) -> Option<bool> {
+        let (DimensionAnchor::OpeningLeft {
+            opening: start_opening,
+        }
+        | DimensionAnchor::OpeningRight {
+            opening: start_opening,
+        }) = start_anchor
+        else {
+            return None;
+        };
+        let (DimensionAnchor::OpeningLeft {
+            opening: end_opening,
+        }
+        | DimensionAnchor::OpeningRight {
+            opening: end_opening,
+        }) = end_anchor
+        else {
+            return None;
+        };
+
+        if start_opening != end_opening {
+            return None;
+        }
+
+        let stationary = start_anchor.local_x(self)?;
+        let (left, right) = match (start_anchor, end_anchor) {
+            (DimensionAnchor::OpeningLeft { .. }, DimensionAnchor::OpeningRight { .. }) => {
+                (stationary, target)
+            }
+            (DimensionAnchor::OpeningRight { .. }, DimensionAnchor::OpeningLeft { .. }) => {
+                (target, stationary)
+            }
+            _ => return None,
+        };
+
+        if left < Length::ZERO || right > self.length || right <= left {
+            return Some(false);
+        }
+
+        let opening = self
+            .openings
+            .iter_mut()
+            .find(|opening| opening.id == *start_opening)?;
+        opening.width = right - left;
+        opening.center = (left + right) / 2;
+        Some(true)
+    }
+
+    fn move_opening_anchor(&mut self, anchor: &DimensionAnchor, target: Length) -> bool {
+        let (opening_id, role) = match anchor {
+            DimensionAnchor::OpeningLeft { opening } => (opening, OpeningAnchorRole::Left),
+            DimensionAnchor::OpeningCenter { opening } => (opening, OpeningAnchorRole::Center),
+            DimensionAnchor::OpeningRight { opening } => (opening, OpeningAnchorRole::Right),
+            DimensionAnchor::WallStart | DimensionAnchor::WallEnd => return false,
+        };
+
+        let Some(opening) = self
+            .openings
+            .iter_mut()
+            .find(|opening| opening.id == *opening_id)
+        else {
+            return false;
+        };
+
+        let next_center = match role {
+            OpeningAnchorRole::Left => target + opening.width / 2,
+            OpeningAnchorRole::Center => target,
+            OpeningAnchorRole::Right => target - opening.width / 2,
+        };
+
+        let next_left = next_center - opening.width / 2;
+        let next_right = next_center + opening.width / 2;
+        if next_left < Length::ZERO || next_right > self.length {
+            return false;
+        }
+
+        opening.center = next_center;
+        true
+    }
+
+    fn set_length_keep_direction(&mut self, length: Length) {
+        self.length = length;
+        if self.start.y == self.end.y {
+            let direction: i64 = if self.end.x >= self.start.x { 1 } else { -1 };
+            self.end.x = self.start.x + length * direction;
+        } else if self.start.x == self.end.x {
+            let direction: i64 = if self.end.y >= self.start.y { 1 } else { -1 };
+            self.end.y = self.start.y + length * direction;
+        } else {
+            self.end = Point2::new(self.start.x + length, self.start.y);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DimensionConstraint {
+    pub id: ElementId,
+    pub name: String,
+    pub kind: DimensionKind,
+    pub start: DimensionAnchor,
+    pub end: DimensionAnchor,
+    #[serde(default)]
+    pub direction: DimensionDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Length>,
+}
+
+impl DimensionConstraint {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        kind: DimensionKind,
+        start: DimensionAnchor,
+        end: DimensionAnchor,
+        direction: DimensionDirection,
+        value: Option<Length>,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            kind,
+            start,
+            end,
+            direction,
+            value,
+        }
+    }
+
+    fn validate(
+        &self,
+        opening_ids: &BTreeSet<ElementId>,
+        wall_length: Length,
+    ) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        self.start.validate(opening_ids)?;
+        self.end.validate(opening_ids)?;
+
+        if self.start == self.end {
+            return Err(ModelError::DimensionReferencesSameAnchor {
+                dimension: self.id.clone(),
+            });
+        }
+
+        match self.kind {
+            DimensionKind::Driving => {
+                let Some(value) = self.value else {
+                    return Err(ModelError::DrivingDimensionMissingValue {
+                        dimension: self.id.clone(),
+                    });
+                };
+                if value <= Length::ZERO || value > wall_length {
+                    return Err(ModelError::InvalidDimensionValue {
+                        dimension: self.id.clone(),
+                    });
+                }
+            }
+            DimensionKind::Reference => {
+                if self.value.is_some() {
+                    return Err(ModelError::ReferenceDimensionHasValue {
+                        dimension: self.id.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DimensionKind {
+    Driving,
+    Reference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DimensionDirection {
+    #[default]
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DimensionAnchor {
+    WallStart,
+    WallEnd,
+    OpeningLeft { opening: ElementId },
+    OpeningCenter { opening: ElementId },
+    OpeningRight { opening: ElementId },
+}
+
+impl DimensionAnchor {
+    pub fn local_x(&self, wall: &Wall) -> Option<Length> {
+        match self {
+            Self::WallStart => Some(Length::ZERO),
+            Self::WallEnd => Some(wall.length),
+            Self::OpeningLeft { opening } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(Opening::left),
+            Self::OpeningCenter { opening } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(|candidate| candidate.center),
+            Self::OpeningRight { opening } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(Opening::right),
+        }
+    }
+
+    fn validate(&self, opening_ids: &BTreeSet<ElementId>) -> Result<(), ModelError> {
+        let opening = match self {
+            Self::OpeningLeft { opening }
+            | Self::OpeningCenter { opening }
+            | Self::OpeningRight { opening } => Some(opening),
+            Self::WallStart | Self::WallEnd => None,
+        };
+
+        if let Some(opening) = opening
+            && !opening_ids.contains(opening)
+        {
+            return Err(ModelError::DimensionReferencesUnknownOpening {
+                opening: opening.clone(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpeningAnchorRole {
+    Left,
+    Center,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -701,6 +1076,16 @@ pub enum ModelError {
     OpeningTooTall { wall: ElementId, opening: ElementId },
     #[error("openings {first:?} and {second:?} overlap")]
     OverlappingOpenings { first: ElementId, second: ElementId },
+    #[error("dimension {dimension:?} references the same anchor twice")]
+    DimensionReferencesSameAnchor { dimension: ElementId },
+    #[error("dimension references unknown opening {opening:?}")]
+    DimensionReferencesUnknownOpening { opening: ElementId },
+    #[error("driving dimension {dimension:?} must have a positive value within the wall")]
+    InvalidDimensionValue { dimension: ElementId },
+    #[error("driving dimension {dimension:?} must store its target value")]
+    DrivingDimensionMissingValue { dimension: ElementId },
+    #[error("reference dimension {dimension:?} must not store a target value")]
+    ReferenceDimensionHasValue { dimension: ElementId },
     #[error("wall join {join:?} references unknown wall {wall:?}")]
     JoinReferencesUnknownWall { join: ElementId, wall: ElementId },
     #[error("wall join {join:?} must reference two different walls")]
@@ -817,5 +1202,133 @@ mod tests {
         assert_eq!(model.walls[0].id.0, "wall-a");
         assert_eq!(model.walls[1].openings[0].id.0, "opening-a");
         assert_eq!(model.walls[1].openings[1].id.0, "opening-b");
+    }
+
+    #[test]
+    fn wall_dimensions_validate_opening_anchors() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
+        wall.dimensions.push(DimensionConstraint::new(
+            "dim",
+            "Missing opening dimension",
+            DimensionKind::Reference,
+            DimensionAnchor::WallStart,
+            DimensionAnchor::OpeningCenter {
+                opening: ElementId::new("missing-opening"),
+            },
+            DimensionDirection::Forward,
+            None,
+        ));
+
+        assert!(matches!(
+            wall.validate(),
+            Err(ModelError::DimensionReferencesUnknownOpening { .. })
+        ));
+    }
+
+    #[test]
+    fn driving_dimension_moves_opening_anchor() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(4.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "dim",
+            "Left offset",
+            DimensionKind::Driving,
+            DimensionAnchor::WallStart,
+            DimensionAnchor::OpeningLeft {
+                opening: ElementId::new("window"),
+            },
+            DimensionDirection::Forward,
+            Some(Length::from_feet(5.0)),
+        ));
+
+        assert!(wall.apply_driving_dimensions());
+
+        let window = wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == "window")
+            .unwrap();
+        assert_eq!(window.left(), Length::from_feet(5.0));
+        assert_eq!(window.width, Length::from_feet(3.0));
+    }
+
+    #[test]
+    fn driving_dimension_between_opening_edges_resizes_opening() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(4.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "dim",
+            "Window width",
+            DimensionKind::Driving,
+            DimensionAnchor::OpeningLeft {
+                opening: ElementId::new("window"),
+            },
+            DimensionAnchor::OpeningRight {
+                opening: ElementId::new("window"),
+            },
+            DimensionDirection::Forward,
+            Some(Length::from_feet(4.0)),
+        ));
+
+        assert!(wall.apply_driving_dimensions());
+
+        let window = wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == "window")
+            .unwrap();
+        assert_eq!(window.width, Length::from_feet(4.0));
+        assert_eq!(window.left(), Length::from_feet(2.5));
+    }
+
+    #[test]
+    fn driving_dimension_can_move_first_anchor_when_second_anchor_is_fixed() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(4.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "dim",
+            "Center from start",
+            DimensionKind::Driving,
+            DimensionAnchor::OpeningCenter {
+                opening: ElementId::new("window"),
+            },
+            DimensionAnchor::WallStart,
+            DimensionDirection::Backward,
+            Some(Length::from_feet(6.0)),
+        ));
+
+        assert!(wall.apply_driving_dimensions());
+
+        let window = wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == "window")
+            .unwrap();
+        assert_eq!(window.center, Length::from_feet(6.0));
     }
 }
