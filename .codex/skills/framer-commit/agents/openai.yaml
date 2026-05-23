@@ -1,0 +1,4 @@
+interface:
+  display_name: "Framer Commit"
+  short_description: "Validate and commit Framer changes safely."
+  default_prompt: "Use $framer-commit to inspect the Framer worktree, run formatting, clippy, and tests, then create a scoped commit only when the checks pass."
