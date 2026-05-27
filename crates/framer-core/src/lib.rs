@@ -1,7 +1,9 @@
+mod constraints;
 mod model;
 mod project;
 mod units;
 
+pub use constraints::{ConstraintSystem, ConstraintVariable, LinearConstraint, LinearExpression};
 pub use model::{
     BoardProfile, BuildingModel, CodeProfile, DimensionAnchor, DimensionConstraint,
     DimensionDirection, DimensionKind, ElementId, Level, ModelError, Opening, OpeningKind,

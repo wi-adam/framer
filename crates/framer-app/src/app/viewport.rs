@@ -2498,11 +2498,15 @@ fn draw_wall_dimension_annotations(
         let line_start = Pos2::new(start, y);
         let line_end = Pos2::new(end, y);
         let selected = selected_dimension == Some(dimension.id.0.as_str());
+        let unsatisfied = dimension.kind == DimensionKind::Driving
+            && !wall.is_driving_dimension_satisfied(dimension);
         let hovered = pointer.is_some_and(|position| {
             distance_to_segment(position, line_start, line_end) < 7.0
                 || dimension_label_rect(line_start, line_end).contains(position)
         });
-        let color = if selected {
+        let color = if unsatisfied {
+            Color32::from_rgb(172, 54, 48)
+        } else if selected {
             Color32::from_rgb(35, 94, 150)
         } else if dimension.kind == DimensionKind::Reference {
             Color32::from_rgb(93, 100, 103)
@@ -2561,11 +2565,16 @@ fn dimension_label_rect(start: Pos2, end: Pos2) -> Rect {
 fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstraint) -> String {
     let measured = wall.dimension_measurement(dimension);
     match dimension.kind {
-        DimensionKind::Driving => dimension
-            .value
-            .or(measured)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "?".to_owned()),
+        DimensionKind::Driving => dimension.value.or(measured).map_or_else(
+            || "?".to_owned(),
+            |value| {
+                if wall.is_driving_dimension_satisfied(dimension) {
+                    value.to_string()
+                } else {
+                    format!("! {value}")
+                }
+            },
+        ),
         DimensionKind::Reference => measured
             .map(|value| format!("({value})"))
             .unwrap_or_else(|| "(?)".to_owned()),

@@ -492,7 +492,7 @@ impl FramerApp {
         } else {
             None
         };
-        wall.dimensions.push(DimensionConstraint::new(
+        let dimension = DimensionConstraint::new(
             id.clone(),
             format!("Dimension {index}"),
             kind,
@@ -500,7 +500,13 @@ impl FramerApp {
             pick.anchor,
             direction,
             value,
-        ));
+        );
+        if wall.would_overconstrain_driving_dimension(&dimension) {
+            self.dimension_status =
+                Some("Driving dimension would overconstrain this wall".to_owned());
+            return;
+        }
+        wall.dimensions.push(dimension);
 
         self.selected_wall = wall_index;
         self.selected = Selection::Dimension(id);
@@ -813,5 +819,55 @@ mod tests {
         let dimension = &app.model.walls[0].dimensions[0];
         assert_eq!(dimension.kind, DimensionKind::Reference);
         assert_eq!(dimension.value, None);
+    }
+
+    #[test]
+    fn dimension_tool_rejects_overconstrained_driving_dimension_on_creation() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.kind = DimensionKind::Driving;
+        let opening = app.model.walls[0].openings[0].id.clone();
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningLeft {
+                opening: opening.clone(),
+            },
+        });
+        assert_eq!(app.model.walls[0].dimensions.len(), 1);
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningRight {
+                opening: opening.clone(),
+            },
+        });
+        assert_eq!(app.model.walls[0].dimensions.len(), 2);
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningLeft {
+                opening: opening.clone(),
+            },
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningRight { opening },
+        });
+
+        assert_eq!(app.model.walls[0].dimensions.len(), 2);
+        assert!(
+            app.dimension_status
+                .as_deref()
+                .is_some_and(|status| status.contains("overconstrain"))
+        );
     }
 }

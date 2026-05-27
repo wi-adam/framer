@@ -945,6 +945,8 @@ fn dimension_inspector(
     let measured = wall
         .dimension_measurement(&wall.dimensions[dimension_index])
         .unwrap_or(Length::ZERO);
+    let unsatisfied = wall.dimensions[dimension_index].kind == DimensionKind::Driving
+        && !wall.is_driving_dimension_satisfied(&wall.dimensions[dimension_index]);
     let wall_length_inches = wall.length.inches().max(1.0);
     let mut changed = false;
     let mut apply_driving = false;
@@ -993,6 +995,12 @@ fn dimension_inspector(
                 changed = true;
                 apply_driving = true;
             }
+            if unsatisfied {
+                ui.colored_label(
+                    Color32::from_rgb(214, 104, 96),
+                    "Unsatisfied driving dimension",
+                );
+            }
         }
 
         ui.separator();
@@ -1028,6 +1036,11 @@ fn dimension_summary(ui: &mut Ui, wall: &Wall, dimension: &DimensionConstraint) 
             summary_row(ui, "Measured", measured);
             if let Some(value) = dimension.value {
                 summary_row(ui, "Target", value.to_string());
+            }
+            if dimension.kind == DimensionKind::Driving
+                && !wall.is_driving_dimension_satisfied(dimension)
+            {
+                summary_row(ui, "Status", "Unsatisfied");
             }
         });
 }

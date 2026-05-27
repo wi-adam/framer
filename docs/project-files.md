@@ -119,6 +119,12 @@ annotations that display the current measured distance. Cross-wall projections
 and alignment/offset constraints are future schema extensions, not implicit
 behavior in v3.
 
+Driving dimensions must be simultaneously satisfied by the authored wall and
+opening geometry. If a new or edited driving dimension contradicts another
+driving dimension on the same wall, the app rejects it during creation or
+validation reports the dimension set as overconstrained instead of silently
+choosing one target over another.
+
 Each wall join stores:
 
 - `kind`: currently `Corner`, `EndToEnd`, `Tee`, or `Cross`.
