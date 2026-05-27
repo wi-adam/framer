@@ -7,7 +7,10 @@ mod viewport;
 use std::fs;
 use std::path::PathBuf;
 
-use eframe::egui::{self, CentralPanel, Panel, ScrollArea};
+use eframe::egui::{
+    self, CentralPanel, Color32, CornerRadius, FontFamily, FontId, Panel, ScrollArea, Stroke,
+    TextStyle, Vec2,
+};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionConstraint, DimensionDirection, DimensionKind, Length,
     Opening, OpeningKind, Wall, load_project as load_project_document,
@@ -17,7 +20,10 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
-use model_edit::{next_dimension_id, next_opening_id};
+use model_edit::{
+    OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
+    next_dimension_id, next_opening_id,
+};
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::View3dState;
 
@@ -35,6 +41,7 @@ pub(crate) struct FramerApp {
     viewport_mode: ViewportMode,
     view_3d: View3dState,
     dimension_tool: DimensionToolState,
+    opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     show_section: bool,
 }
@@ -139,6 +146,7 @@ impl Default for FramerApp {
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
             dimension_tool: DimensionToolState::default(),
+            opening_drag: None,
             gpu_target_format: None,
             show_section: true,
         };
@@ -149,6 +157,8 @@ impl Default for FramerApp {
 
 impl FramerApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        configure_app_style(&cc.egui_ctx);
+
         Self {
             gpu_target_format: cc
                 .wgpu_render_state
@@ -195,6 +205,7 @@ impl FramerApp {
         self.artifact_status = None;
         self.dimension_status = None;
         self.dimension_tool = DimensionToolState::default();
+        self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -208,6 +219,7 @@ impl FramerApp {
         self.artifact_status = None;
         self.dimension_status = None;
         self.dimension_tool = DimensionToolState::default();
+        self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -221,6 +233,7 @@ impl FramerApp {
         self.artifact_status = None;
         self.dimension_status = None;
         self.dimension_tool = DimensionToolState::default();
+        self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.rebuild();
     }
@@ -264,6 +277,7 @@ impl FramerApp {
                 self.artifact_status = None;
                 self.dimension_status = None;
                 self.dimension_tool = DimensionToolState::default();
+                self.opening_drag = None;
             }
             Err(error) => {
                 self.file_status = Some(format!("Open failed: {error}"));
@@ -295,6 +309,7 @@ impl FramerApp {
         }
 
         self.workspace_mode = mode;
+        self.opening_drag = None;
         match mode {
             WorkspaceMode::Design => self.select_authored_for_design_mode(),
             WorkspaceMode::Plan => {
@@ -367,6 +382,59 @@ impl FramerApp {
         self.selected = Selection::Opening(opening.id.0.clone());
         wall.openings.push(opening);
         self.rebuild();
+    }
+
+    fn begin_opening_drag(
+        &mut self,
+        wall_index: usize,
+        opening_id: String,
+        handle: OpeningEditHandle,
+    ) {
+        let Some(wall) = self.model.walls.get(wall_index) else {
+            return;
+        };
+        let Some(opening) = wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == opening_id)
+        else {
+            return;
+        };
+
+        self.selected_wall = wall_index;
+        self.selected = Selection::Opening(opening_id.clone());
+        self.opening_drag = Some(OpeningDragState::new(
+            wall_index, opening_id, handle, opening,
+        ));
+    }
+
+    fn update_opening_drag(&mut self, delta_x: Length, delta_y: Length) {
+        let Some(drag) = self.opening_drag.clone() else {
+            return;
+        };
+        let constraints = OpeningDragConstraints::from_code(&self.model.code);
+        let Some(wall) = self.model.walls.get_mut(drag.wall_index) else {
+            self.opening_drag = None;
+            return;
+        };
+
+        if apply_opening_drag(
+            wall,
+            &drag.opening_id,
+            drag.handle,
+            drag.start,
+            delta_x,
+            delta_y,
+            constraints,
+        ) {
+            self.selected_wall = drag.wall_index;
+            self.selected = Selection::Opening(drag.opening_id);
+            self.rebuild();
+        }
+    }
+
+    fn finish_opening_drag(&mut self) {
+        self.opening_drag = None;
     }
 
     fn handle_dimension_anchor_click(&mut self, wall_index: usize, anchor: DimensionAnchor) {
@@ -452,6 +520,7 @@ impl FramerApp {
     }
 
     fn handle_view_click(&mut self, click: ViewClick) {
+        self.opening_drag = None;
         match click {
             ViewClick::Wall(index) => {
                 self.selected_wall = index;
@@ -498,6 +567,68 @@ impl FramerApp {
             self.viewport_mode = ViewportMode::Elevation;
         }
     }
+}
+
+fn configure_app_style(ctx: &egui::Context) {
+    let mut style = (*ctx.global_style()).clone();
+    style.text_styles.insert(
+        TextStyle::Heading,
+        FontId::new(16.0, FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Button,
+        FontId::new(12.5, FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Small,
+        FontId::new(10.0, FontFamily::Proportional),
+    );
+    style.spacing.item_spacing = Vec2::new(8.0, 4.0);
+    style.spacing.button_padding = Vec2::new(7.0, 3.0);
+    style.spacing.interact_size = Vec2::new(40.0, 22.0);
+    style.spacing.window_margin = egui::Margin::symmetric(8, 6);
+    style.visuals.panel_fill = Color32::from_rgb(24, 26, 27);
+    style.visuals.window_fill = Color32::from_rgb(29, 31, 32);
+    style.visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(61, 66, 68));
+    style.visuals.extreme_bg_color = Color32::from_rgb(11, 12, 12);
+    style.visuals.faint_bg_color = Color32::from_rgb(35, 38, 39);
+    style.visuals.text_edit_bg_color = Some(Color32::from_rgb(13, 14, 14));
+    style.visuals.selection.bg_fill = Color32::from_rgb(0, 114, 160);
+    style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(239, 250, 253));
+    style.visuals.hyperlink_color = Color32::from_rgb(82, 184, 222);
+    style.visuals.warn_fg_color = Color32::from_rgb(229, 169, 77);
+    style.visuals.error_fg_color = Color32::from_rgb(229, 96, 88);
+    style.visuals.button_frame = true;
+    style.visuals.collapsing_header_frame = false;
+    style.visuals.indent_has_left_vline = true;
+
+    let radius = CornerRadius::same(3);
+    style.visuals.widgets.noninteractive.corner_radius = radius;
+    style.visuals.widgets.inactive.corner_radius = radius;
+    style.visuals.widgets.hovered.corner_radius = radius;
+    style.visuals.widgets.active.corner_radius = radius;
+    style.visuals.widgets.open.corner_radius = radius;
+    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(32, 35, 36);
+    style.visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(34, 37, 38);
+    style.visuals.widgets.noninteractive.bg_stroke =
+        Stroke::new(1.0, Color32::from_rgb(56, 61, 63));
+    style.visuals.widgets.noninteractive.fg_stroke =
+        Stroke::new(1.0, Color32::from_rgb(216, 221, 220));
+    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(42, 45, 47);
+    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(45, 48, 50);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(72, 78, 82));
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(218, 223, 222));
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(54, 59, 61);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 64, 66);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 98, 102));
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(244, 247, 247));
+    style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0, 91, 128);
+    style.visuals.widgets.active.bg_fill = Color32::from_rgb(0, 114, 160);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(74, 190, 229));
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(250, 253, 253));
+    style.visuals.widgets.open = style.visuals.widgets.hovered;
+
+    ctx.set_global_style(style);
 }
 
 impl eframe::App for FramerApp {

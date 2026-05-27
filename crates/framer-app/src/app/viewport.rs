@@ -7,8 +7,8 @@ use std::{
 
 use bytemuck::{Pod, Zeroable};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
-    epaint::Vertex,
+    self, Align2, Color32, CursorIcon, FontId, Frame, Margin, Mesh, Pos2, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, Ui, Vec2, epaint::Vertex,
 };
 use eframe::{egui_wgpu, wgpu};
 use framer_core::{
@@ -18,6 +18,7 @@ use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan
 use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
+use super::model_edit::{OpeningDragState, OpeningEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode};
 
 #[derive(Debug, Clone, Copy)]
@@ -153,20 +154,13 @@ impl View3dState {
 
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(match self.workspace_mode {
-                WorkspaceMode::Design => "Design Workspace",
-                WorkspaceMode::Plan => "Plan Workspace",
-            });
-            ui.separator();
-            ui.label(self.model.code.display_name.as_str());
-        });
+        workspace_header(
+            ui,
+            self.workspace_mode,
+            self.viewport_mode,
+            self.model.code.display_name.as_str(),
+        );
         ui.add_space(8.0);
-
-        let Some(plan) = &self.project_plan else {
-            ui.label("No valid framing plan");
-            return;
-        };
 
         let click = match self.viewport_mode {
             ViewportMode::Plan => {
@@ -192,31 +186,41 @@ impl FramerApp {
                         .as_ref()
                         .filter(|pick| pick.wall_index == self.selected_wall)
                         .map(|pick| &pick.anchor);
-                    draw_wall_design_elevation(
+                    let active_opening_drag = self
+                        .opening_drag
+                        .as_ref()
+                        .filter(|drag| drag.wall_index == self.selected_wall);
+                    let wall_index = self.selected_wall;
+                    let elevation_response = draw_wall_design_elevation(
                         ui,
                         wall,
                         selected_opening,
                         selected_dimension,
                         self.dimension_tool.active,
                         first_anchor,
-                    )
-                    .map(|click| match click {
+                        active_opening_drag,
+                    );
+                    if let Some(event) = elevation_response.opening_drag {
+                        self.handle_opening_drag_event(wall_index, event);
+                    }
+                    elevation_response.click.map(|click| match click {
                         DesignElevationClick::Opening(opening_id) => ViewClick::Opening {
-                            wall_index: self.selected_wall,
+                            wall_index,
                             opening_id,
                         },
                         DesignElevationClick::Dimension(dimension_id) => ViewClick::Dimension {
-                            wall_index: self.selected_wall,
+                            wall_index,
                             dimension_id,
                         },
                         DesignElevationClick::DimensionAnchor(anchor) => {
-                            ViewClick::DimensionAnchor {
-                                wall_index: self.selected_wall,
-                                anchor,
-                            }
+                            ViewClick::DimensionAnchor { wall_index, anchor }
                         }
                     })
                 } else {
+                    let Some(plan) = &self.project_plan else {
+                        ui.label("No valid framing plan");
+                        return;
+                    };
                     let Some(wall_plan) = plan.wall_plan(&wall.id) else {
                         ui.label("No generated framing for selected wall");
                         return;
@@ -239,22 +243,91 @@ impl FramerApp {
                         })
                 }
             }
-            ViewportMode::Axonometric => draw_project_axonometric(
-                ui,
-                AxonometricView {
-                    model: &self.model,
-                    plan,
-                    selected_wall: self.selected_wall,
-                    selection: &self.selected,
-                    workspace_mode: self.workspace_mode,
-                    gpu_target_format: self.gpu_target_format,
-                },
-                &mut self.view_3d,
-            ),
+            ViewportMode::Axonometric => {
+                let Some(plan) = &self.project_plan else {
+                    ui.label("No valid framing plan");
+                    return;
+                };
+                draw_project_axonometric(
+                    ui,
+                    AxonometricView {
+                        model: &self.model,
+                        plan,
+                        selected_wall: self.selected_wall,
+                        selection: &self.selected,
+                        workspace_mode: self.workspace_mode,
+                        gpu_target_format: self.gpu_target_format,
+                    },
+                    &mut self.view_3d,
+                )
+            }
         };
 
         if let Some(click) = click {
             self.handle_view_click(click);
+        }
+    }
+}
+
+fn workspace_header(
+    ui: &mut Ui,
+    workspace_mode: WorkspaceMode,
+    viewport_mode: ViewportMode,
+    code_name: &str,
+) {
+    Frame::new()
+        .fill(Color32::from_rgb(31, 34, 35))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(55, 60, 62)))
+        .inner_margin(Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(workspace_mode_title(workspace_mode))
+                        .strong()
+                        .size(15.0)
+                        .color(Color32::from_rgb(232, 235, 234)),
+                );
+                ui.separator();
+                ui.label(
+                    RichText::new(viewport_mode_title(workspace_mode, viewport_mode))
+                        .strong()
+                        .color(Color32::from_rgb(117, 210, 238)),
+                );
+                ui.separator();
+                ui.label(RichText::new(code_name).color(Color32::from_rgb(164, 170, 170)));
+            });
+        });
+}
+
+fn workspace_mode_title(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::Design => "Design Workspace",
+        WorkspaceMode::Plan => "Plan Workspace",
+    }
+}
+
+fn viewport_mode_title(workspace_mode: WorkspaceMode, viewport_mode: ViewportMode) -> &'static str {
+    match (workspace_mode, viewport_mode) {
+        (WorkspaceMode::Design, ViewportMode::Plan) => "Shell",
+        (WorkspaceMode::Design, ViewportMode::Elevation) => "Wall",
+        (_, ViewportMode::Plan) => "Plan",
+        (_, ViewportMode::Elevation) => "Elevation",
+        (_, ViewportMode::Axonometric) => "3D",
+    }
+}
+
+impl FramerApp {
+    fn handle_opening_drag_event(&mut self, wall_index: usize, event: OpeningDragEvent) {
+        match event {
+            OpeningDragEvent::Started { opening_id, handle } => {
+                self.begin_opening_drag(wall_index, opening_id, handle);
+            }
+            OpeningDragEvent::Updated { delta_x, delta_y } => {
+                self.update_opening_drag(delta_x, delta_y);
+            }
+            OpeningDragEvent::Stopped => {
+                self.finish_opening_drag();
+            }
         }
     }
 }
@@ -2198,6 +2271,30 @@ enum DesignElevationClick {
     DimensionAnchor(DimensionAnchor),
 }
 
+#[derive(Default)]
+struct DesignElevationResponse {
+    click: Option<DesignElevationClick>,
+    opening_drag: Option<OpeningDragEvent>,
+}
+
+enum OpeningDragEvent {
+    Started {
+        opening_id: String,
+        handle: OpeningEditHandle,
+    },
+    Updated {
+        delta_x: Length,
+        delta_y: Length,
+    },
+    Stopped,
+}
+
+#[derive(Clone)]
+struct OpeningHandleHit {
+    opening_id: String,
+    handle: OpeningEditHandle,
+}
+
 fn draw_wall_design_elevation(
     ui: &mut Ui,
     wall: &Wall,
@@ -2205,10 +2302,11 @@ fn draw_wall_design_elevation(
     selected_dimension: Option<&str>,
     dimension_tool_active: bool,
     first_dimension_anchor: Option<&DimensionAnchor>,
-) -> Option<DesignElevationClick> {
+    active_opening_drag: Option<&OpeningDragState>,
+) -> DesignElevationResponse {
     let available = ui.available_size();
     let desired = Vec2::new(available.x.max(420.0), (available.y - 16.0).max(420.0));
-    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
     let side_margin = 52.0;
@@ -2224,7 +2322,17 @@ fn draw_wall_design_elevation(
     painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
     draw_view_border(&painter, drawing);
     let pointer = response.interact_pointer_pos();
-    let mut clicked = None;
+    let press_origin = ui.input(|input| input.pointer.press_origin());
+    let mut output = DesignElevationResponse::default();
+    let mut hovered_handle = None;
+    let mut hovered_dimension_move = None;
+    if let Some(position) = pointer {
+        if dimension_tool_active {
+            hovered_dimension_move = hit_opening_move_target(wall_rect, scale, wall, position);
+        } else {
+            hovered_handle = hit_opening_edit_target(wall_rect, scale, wall, position);
+        }
+    }
 
     painter.rect_filled(
         wall_rect,
@@ -2235,11 +2343,73 @@ fn draw_wall_design_elevation(
     for opening in &wall.openings {
         let opening_rect = opening_rect(wall_rect, scale, scale, opening);
         let hovered = pointer.is_some_and(|position| opening_rect.contains(position));
+        let handle_hovered = hovered_handle
+            .as_ref()
+            .is_some_and(|hit| hit.opening_id == opening.id.0)
+            || hovered_dimension_move
+                .as_ref()
+                .is_some_and(|hit| hit.opening_id == opening.id.0);
+        let active = active_opening_drag
+            .as_ref()
+            .is_some_and(|drag| drag.opening_id == opening.id.0);
         let selected = selected_opening == Some(opening.id.0.as_str());
-        draw_opening_guide(&painter, opening_rect, opening.kind, selected, hovered);
-        if hovered && response.clicked() && !dimension_tool_active {
-            clicked = Some(DesignElevationClick::Opening(opening.id.0.clone()));
+        draw_opening_guide(
+            &painter,
+            opening_rect,
+            opening.kind,
+            selected || active,
+            hovered || handle_hovered,
+        );
+        if !dimension_tool_active && (selected || hovered || active || handle_hovered) {
+            draw_opening_edit_handles(
+                &painter,
+                opening_rect,
+                selected || active,
+                hovered_handle
+                    .as_ref()
+                    .filter(|hit| hit.opening_id == opening.id.0)
+                    .map(|hit| hit.handle),
+            );
         }
+        if hovered && response.clicked() && !dimension_tool_active {
+            output.click = Some(DesignElevationClick::Opening(opening.id.0.clone()));
+        }
+    }
+
+    if let Some(active) = active_opening_drag {
+        if response.drag_stopped() {
+            output.opening_drag = Some(OpeningDragEvent::Stopped);
+        } else if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(delta) = response.total_drag_delta()
+        {
+            let (delta_x, delta_y) = opening_drag_delta(delta, scale);
+            output.opening_drag = Some(OpeningDragEvent::Updated { delta_x, delta_y });
+            ui.ctx()
+                .set_cursor_icon(cursor_for_opening_handle(active.handle, true));
+        }
+    } else if response.drag_started_by(egui::PointerButton::Primary) {
+        let hit = press_origin.and_then(|position| {
+            if dimension_tool_active {
+                hit_opening_move_target(wall_rect, scale, wall, position)
+            } else {
+                hit_opening_edit_target(wall_rect, scale, wall, position)
+            }
+        });
+        if let Some(hit) = hit {
+            output.click = None;
+            output.opening_drag = Some(OpeningDragEvent::Started {
+                opening_id: hit.opening_id,
+                handle: hit.handle,
+            });
+            ui.ctx()
+                .set_cursor_icon(cursor_for_opening_handle(hit.handle, true));
+        }
+    } else if let Some(hit) = hovered_handle {
+        ui.ctx()
+            .set_cursor_icon(cursor_for_opening_handle(hit.handle, false));
+    } else if let Some(hit) = hovered_dimension_move {
+        ui.ctx()
+            .set_cursor_icon(cursor_for_opening_handle(hit.handle, false));
     }
 
     let dimension_click = draw_wall_dimension_annotations(
@@ -2252,7 +2422,7 @@ fn draw_wall_design_elevation(
         response.clicked() && !dimension_tool_active,
     );
     if let Some(dimension_id) = dimension_click {
-        clicked = Some(DesignElevationClick::Dimension(dimension_id));
+        output.click = Some(DesignElevationClick::Dimension(dimension_id));
     }
 
     if dimension_tool_active {
@@ -2268,7 +2438,7 @@ fn draw_wall_design_elevation(
             && response.clicked()
             && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
         {
-            clicked = Some(DesignElevationClick::DimensionAnchor(anchor));
+            output.click = Some(DesignElevationClick::DimensionAnchor(anchor));
         }
     }
 
@@ -2280,7 +2450,7 @@ fn draw_wall_design_elevation(
         Color32::from_rgb(70, 67, 61),
     );
 
-    clicked
+    output
 }
 
 #[derive(Clone, Copy)]
@@ -2590,6 +2760,179 @@ fn opening_rect(drawing: Rect, sx: f32, sy: f32, opening: &Opening) -> Rect {
     Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
 }
 
+fn hit_opening_edit_target(
+    drawing: Rect,
+    scale: f32,
+    wall: &Wall,
+    position: Pos2,
+) -> Option<OpeningHandleHit> {
+    wall.openings.iter().rev().find_map(|opening| {
+        let rect = opening_rect(drawing, scale, scale, opening);
+        hit_opening_edit_handle(rect, position).map(|handle| OpeningHandleHit {
+            opening_id: opening.id.0.clone(),
+            handle,
+        })
+    })
+}
+
+fn hit_opening_move_target(
+    drawing: Rect,
+    scale: f32,
+    wall: &Wall,
+    position: Pos2,
+) -> Option<OpeningHandleHit> {
+    wall.openings.iter().rev().find_map(|opening| {
+        let rect = opening_rect(drawing, scale, scale, opening);
+        hit_opening_move_handle(rect, position).then(|| OpeningHandleHit {
+            opening_id: opening.id.0.clone(),
+            handle: OpeningEditHandle::Move,
+        })
+    })
+}
+
+fn hit_opening_move_handle(rect: Rect, position: Pos2) -> bool {
+    rect.expand(11.0).contains(position)
+}
+
+fn hit_opening_edit_handle(rect: Rect, position: Pos2) -> Option<OpeningEditHandle> {
+    const HANDLE_HIT_RADIUS: f32 = 10.0;
+    const EDGE_HIT_RADIUS: f32 = 7.0;
+
+    let corner_hits = [
+        (OpeningEditHandle::TopLeft, rect.left_top()),
+        (OpeningEditHandle::TopRight, rect.right_top()),
+        (OpeningEditHandle::BottomLeft, rect.left_bottom()),
+        (OpeningEditHandle::BottomRight, rect.right_bottom()),
+    ]
+    .into_iter()
+    .filter_map(|(handle, point)| {
+        let distance = position.distance(point);
+        (distance <= HANDLE_HIT_RADIUS).then_some((handle, distance))
+    })
+    .min_by(|(_, left), (_, right)| left.total_cmp(right))
+    .map(|(handle, _)| handle);
+    if corner_hits.is_some() {
+        return corner_hits;
+    }
+
+    let within_y =
+        position.y >= rect.top() - EDGE_HIT_RADIUS && position.y <= rect.bottom() + EDGE_HIT_RADIUS;
+    let within_x =
+        position.x >= rect.left() - EDGE_HIT_RADIUS && position.x <= rect.right() + EDGE_HIT_RADIUS;
+    let edge_hits = [
+        (
+            OpeningEditHandle::Left,
+            (position.x - rect.left()).abs(),
+            within_y,
+        ),
+        (
+            OpeningEditHandle::Right,
+            (position.x - rect.right()).abs(),
+            within_y,
+        ),
+        (
+            OpeningEditHandle::Top,
+            (position.y - rect.top()).abs(),
+            within_x,
+        ),
+        (
+            OpeningEditHandle::Bottom,
+            (position.y - rect.bottom()).abs(),
+            within_x,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, distance, in_range)| *in_range && *distance <= EDGE_HIT_RADIUS)
+    .min_by(|(_, left, _), (_, right, _)| left.total_cmp(right))
+    .map(|(handle, _, _)| handle);
+    if edge_hits.is_some() {
+        return edge_hits;
+    }
+
+    rect.contains(position).then_some(OpeningEditHandle::Move)
+}
+
+fn draw_opening_edit_handles(
+    painter: &egui::Painter,
+    rect: Rect,
+    selected: bool,
+    hovered_handle: Option<OpeningEditHandle>,
+) {
+    for handle in [
+        OpeningEditHandle::TopLeft,
+        OpeningEditHandle::Top,
+        OpeningEditHandle::TopRight,
+        OpeningEditHandle::Right,
+        OpeningEditHandle::BottomRight,
+        OpeningEditHandle::Bottom,
+        OpeningEditHandle::BottomLeft,
+        OpeningEditHandle::Left,
+    ] {
+        let center = opening_handle_position(rect, handle);
+        let hovered = hovered_handle == Some(handle);
+        let size = if hovered { 7.5 } else { 6.0 };
+        let fill = if selected {
+            Color32::from_rgb(35, 94, 150)
+        } else {
+            Color32::from_rgb(247, 247, 242)
+        };
+        let stroke = if hovered {
+            Stroke::new(2.0, Color32::from_rgb(35, 94, 150))
+        } else {
+            Stroke::new(1.25, Color32::from_rgb(35, 94, 150))
+        };
+        painter.rect_filled(Rect::from_center_size(center, Vec2::splat(size)), 1.0, fill);
+        painter.rect_stroke(
+            Rect::from_center_size(center, Vec2::splat(size)),
+            1.0,
+            stroke,
+            StrokeKind::Outside,
+        );
+    }
+}
+
+fn opening_handle_position(rect: Rect, handle: OpeningEditHandle) -> Pos2 {
+    match handle {
+        OpeningEditHandle::Move => rect.center(),
+        OpeningEditHandle::Left => Pos2::new(rect.left(), rect.center().y),
+        OpeningEditHandle::Right => Pos2::new(rect.right(), rect.center().y),
+        OpeningEditHandle::Top => Pos2::new(rect.center().x, rect.top()),
+        OpeningEditHandle::Bottom => Pos2::new(rect.center().x, rect.bottom()),
+        OpeningEditHandle::TopLeft => rect.left_top(),
+        OpeningEditHandle::TopRight => rect.right_top(),
+        OpeningEditHandle::BottomLeft => rect.left_bottom(),
+        OpeningEditHandle::BottomRight => rect.right_bottom(),
+    }
+}
+
+fn opening_drag_delta(delta: Vec2, scale: f32) -> (Length, Length) {
+    let scale = scale.max(0.001) as f64;
+    (
+        Length::from_inches(delta.x as f64 / scale),
+        Length::from_inches(-(delta.y as f64) / scale),
+    )
+}
+
+fn cursor_for_opening_handle(handle: OpeningEditHandle, active: bool) -> CursorIcon {
+    match handle {
+        OpeningEditHandle::Move => {
+            if active {
+                CursorIcon::Grabbing
+            } else {
+                CursorIcon::Grab
+            }
+        }
+        OpeningEditHandle::Left => CursorIcon::ResizeWest,
+        OpeningEditHandle::Right => CursorIcon::ResizeEast,
+        OpeningEditHandle::Top => CursorIcon::ResizeNorth,
+        OpeningEditHandle::Bottom => CursorIcon::ResizeSouth,
+        OpeningEditHandle::TopLeft => CursorIcon::ResizeNorthWest,
+        OpeningEditHandle::TopRight => CursorIcon::ResizeNorthEast,
+        OpeningEditHandle::BottomLeft => CursorIcon::ResizeSouthWest,
+        OpeningEditHandle::BottomRight => CursorIcon::ResizeSouthEast,
+    }
+}
+
 fn draw_opening_guide(
     painter: &egui::Painter,
     rect: Rect,
@@ -2802,6 +3145,54 @@ mod tests {
         );
         assert_close(layout.wall_rect.center().x, available.center().x);
         assert_close(layout.wall_rect.center().y, available.center().y);
+    }
+
+    #[test]
+    fn opening_edit_hit_testing_prioritizes_resize_handles() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(120.0, 72.0));
+
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.right_top()),
+            Some(OpeningEditHandle::TopRight)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.right(), rect.center().y)),
+            Some(OpeningEditHandle::Right)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.center()),
+            Some(OpeningEditHandle::Move)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.right_bottom() + Vec2::splat(16.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn opening_move_hit_testing_includes_dimension_anchor_rim() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(120.0, 72.0));
+
+        assert!(hit_opening_move_handle(
+            rect,
+            Pos2::new(rect.left() - 8.0, rect.center().y)
+        ));
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.left() - 8.0, rect.center().y)),
+            None
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.left(), rect.center().y)),
+            Some(OpeningEditHandle::Left)
+        );
+    }
+
+    #[test]
+    fn opening_drag_delta_maps_screen_motion_to_wall_axes() {
+        let (delta_x, delta_y) = opening_drag_delta(Vec2::new(20.0, -12.0), 2.0);
+
+        assert_eq!(delta_x, Length::from_inches(10.0));
+        assert_eq!(delta_y, Length::from_inches(6.0));
     }
 
     #[test]

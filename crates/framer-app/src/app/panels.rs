@@ -1,4 +1,7 @@
-use eframe::egui::{self, Color32, ComboBox, ScrollArea, Ui};
+use eframe::egui::{
+    self, Align, Color32, ComboBox, Frame, Layout, Margin, Response, RichText, ScrollArea, Stroke,
+    Ui, Vec2,
+};
 use framer_core::{
     DimensionAnchor, DimensionConstraint, DimensionKind, ElementId, Length, Level, Opening,
     OpeningKind, Wall, WallJoin, WallJoinKind,
@@ -6,119 +9,191 @@ use framer_core::{
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
 use super::labels::{diagnostic_code_prefix, dimension_kind_label, join_kind_label, kind_label};
-use super::model_edit::set_wall_length_keep_direction;
+use super::model_edit::{
+    opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
+};
 use super::{FramerApp, Selection, ViewportMode, WorkspaceMode};
 
 impl FramerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Framer");
-            ui.separator();
-            if ui.button("New").clicked() {
-                self.new_project();
-            }
-            if ui.button("Shell Demo").clicked() {
-                self.reset_demo();
-            }
-            if ui.button("Wall Demo").clicked() {
-                self.reset_wall_demo();
-            }
-            if ui.button("Open").clicked() {
-                self.load_project_file();
-            }
-            if ui.button("Save").clicked() {
-                self.save_project_file();
-            }
-            if ui
-                .add_enabled(
-                    self.workspace_mode.shows_generated_plan(),
-                    egui::Button::new("Export"),
-                )
-                .clicked()
-            {
-                self.export_current_artifacts();
-            }
-            ui.add(egui::TextEdit::singleline(&mut self.project_path).desired_width(340.0));
-            ui.separator();
-            let mut next_mode = self.workspace_mode;
-            ui.selectable_value(&mut next_mode, WorkspaceMode::Design, "Design");
-            ui.selectable_value(&mut next_mode, WorkspaceMode::Plan, "Plan");
-            if next_mode != self.workspace_mode {
-                self.set_workspace_mode(next_mode);
-            }
-            ui.separator();
-            let shell_label = if self.workspace_mode.allows_design_edits() {
-                "Shell"
-            } else {
-                "Plan"
-            };
-            let wall_label = if self.workspace_mode.allows_design_edits() {
-                "Wall"
-            } else {
-                "Elevation"
-            };
-            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Plan, shell_label);
-            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Elevation, wall_label);
-            ui.selectable_value(&mut self.viewport_mode, ViewportMode::Axonometric, "3D");
-            if self.workspace_mode.shows_generated_plan() {
-                ui.checkbox(&mut self.show_section, "Section");
-            } else {
-                ui.separator();
-                if ui
-                    .selectable_label(self.dimension_tool.active, "Dimension")
-                    .clicked()
-                {
-                    self.dimension_tool.active = !self.dimension_tool.active;
-                    self.dimension_tool.first_anchor = None;
-                    self.dimension_status = if self.dimension_tool.active {
-                        Some("Pick two anchors in the wall view".to_owned())
-                    } else {
-                        None
-                    };
-                    if self.dimension_tool.active {
-                        self.viewport_mode = ViewportMode::Elevation;
-                    }
-                }
-                if self.dimension_tool.active {
-                    ComboBox::from_id_salt("dimension-tool-kind")
-                        .selected_text(dimension_kind_label(self.dimension_tool.kind))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.dimension_tool.kind,
-                                DimensionKind::Driving,
-                                "Driving",
-                            );
-                            ui.selectable_value(
-                                &mut self.dimension_tool.kind,
-                                DimensionKind::Reference,
-                                "Reference",
-                            );
+        command_bar_frame().show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Framer")
+                            .strong()
+                            .size(18.0)
+                            .color(Color32::from_rgb(238, 241, 240)),
+                    );
+                    toolbar_divider(ui);
+                    ui.label(RichText::new("Project").small().color(toolbar_muted_text()));
+                    let path_width = (ui.available_width() * 0.48).clamp(300.0, 620.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.project_path)
+                            .desired_width(path_width)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        status_chip(
+                            ui,
+                            self.model.code.display_name.as_str(),
+                            StatusTone::Neutral,
+                        );
+                    });
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    toolbar_group(ui, "PROJECT", |ui| {
+                        if command_button(ui, "New", 48.0)
+                            .on_hover_text("Start an empty wall project")
+                            .clicked()
+                        {
+                            self.new_project();
+                        }
+                        if command_button(ui, "Open", 50.0)
+                            .on_hover_text("Open the project path")
+                            .clicked()
+                        {
+                            self.load_project_file();
+                        }
+                        if command_button(ui, "Save", 50.0)
+                            .on_hover_text("Save the current model")
+                            .clicked()
+                        {
+                            self.save_project_file();
+                        }
+                        if enabled_command_button(
+                            ui,
+                            self.workspace_mode.shows_generated_plan(),
+                            "Export",
+                            58.0,
+                        )
+                        .on_hover_text("Export plan artifacts from Plan workspace")
+                        .clicked()
+                        {
+                            self.export_current_artifacts();
+                        }
+                    });
+                    toolbar_divider(ui);
+
+                    toolbar_group(ui, "SAMPLES", |ui| {
+                        if command_button(ui, "Shell", 54.0)
+                            .on_hover_text("Load the multi-wall shell demo")
+                            .clicked()
+                        {
+                            self.reset_demo();
+                        }
+                        if command_button(ui, "Wall", 52.0)
+                            .on_hover_text("Load the single-wall demo")
+                            .clicked()
+                        {
+                            self.reset_wall_demo();
+                        }
+                    });
+                    toolbar_divider(ui);
+
+                    toolbar_group(ui, "WORKSPACE", |ui| {
+                        let mut next_mode = self.workspace_mode;
+                        workspace_segment(ui, &mut next_mode, WorkspaceMode::Design, "Design");
+                        workspace_segment(ui, &mut next_mode, WorkspaceMode::Plan, "Plan");
+                        if next_mode != self.workspace_mode {
+                            self.set_workspace_mode(next_mode);
+                        }
+                    });
+                    toolbar_divider(ui);
+
+                    toolbar_group(ui, "VIEW", |ui| {
+                        let shell_label = if self.workspace_mode.allows_design_edits() {
+                            "Shell"
+                        } else {
+                            "Plan"
+                        };
+                        let wall_label = if self.workspace_mode.allows_design_edits() {
+                            "Wall"
+                        } else {
+                            "Elevation"
+                        };
+                        view_segment(ui, &mut self.viewport_mode, ViewportMode::Plan, shell_label);
+                        view_segment(
+                            ui,
+                            &mut self.viewport_mode,
+                            ViewportMode::Elevation,
+                            wall_label,
+                        );
+                        view_segment(ui, &mut self.viewport_mode, ViewportMode::Axonometric, "3D");
+                        if self.workspace_mode.shows_generated_plan() {
+                            ui.checkbox(&mut self.show_section, "Section");
+                        }
+                    });
+
+                    if self.workspace_mode.allows_design_edits() {
+                        toolbar_divider(ui);
+                        toolbar_group(ui, "TOOLS", |ui| {
+                            if segment_button(ui, self.dimension_tool.active, "Dimension", 84.0)
+                                .on_hover_text("Place a wall dimension")
+                                .clicked()
+                            {
+                                self.dimension_tool.active = !self.dimension_tool.active;
+                                self.dimension_tool.first_anchor = None;
+                                self.opening_drag = None;
+                                self.dimension_status = if self.dimension_tool.active {
+                                    Some("Pick two anchors in the wall view".to_owned())
+                                } else {
+                                    None
+                                };
+                                if self.dimension_tool.active {
+                                    self.viewport_mode = ViewportMode::Elevation;
+                                }
+                            }
+                            if self.dimension_tool.active {
+                                ComboBox::from_id_salt("dimension-tool-kind")
+                                    .selected_text(dimension_kind_label(self.dimension_tool.kind))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.dimension_tool.kind,
+                                            DimensionKind::Driving,
+                                            "Driving",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.dimension_tool.kind,
+                                            DimensionKind::Reference,
+                                            "Reference",
+                                        );
+                                    });
+                            }
                         });
-                }
-            }
+                    }
+                });
+            });
         });
 
         if self.file_status.is_some()
             || self.artifact_status.is_some()
             || self.dimension_status.is_some()
         {
-            ui.horizontal_wrapped(|ui| {
-                if let Some(status) = &self.file_status {
-                    ui.label(status);
-                }
-                if let Some(status) = &self.artifact_status {
-                    ui.label(status);
-                }
-                if let Some(status) = &self.dimension_status {
-                    ui.label(status);
-                }
-            });
+            Frame::new()
+                .fill(Color32::from_rgb(29, 32, 33))
+                .inner_margin(Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
+                        if let Some(status) = &self.file_status {
+                            status_chip(ui, status, StatusTone::Info);
+                        }
+                        if let Some(status) = &self.artifact_status {
+                            status_chip(ui, status, StatusTone::Success);
+                        }
+                        if let Some(status) = &self.dimension_status {
+                            status_chip(ui, status, StatusTone::Warning);
+                        }
+                    });
+                });
         }
     }
 
     pub(super) fn model_tree(&mut self, ui: &mut Ui) {
-        ui.heading("Model Tree");
-        ui.separator();
+        panel_header(ui, "Model Tree", self.workspace_badge());
 
         ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new("Authored")
@@ -338,7 +413,7 @@ impl FramerApp {
                     });
             } else {
                 ui.separator();
-                ui.heading("Catalog");
+                panel_subheader(ui, "Catalog");
                 if ui.button("+ Door").clicked() {
                     self.add_opening(OpeningKind::Door);
                 }
@@ -369,8 +444,7 @@ impl FramerApp {
             .map(|wall| (wall.id.0.clone(), wall.name.clone()))
             .collect::<Vec<_>>();
 
-        ui.heading("Inspector");
-        ui.separator();
+        panel_header(ui, "Inspector", selection_badge(&selection));
 
         match selection {
             Selection::Level(id) => {
@@ -437,8 +511,10 @@ impl FramerApp {
                 }
             }
             Selection::Opening(id) => {
+                let top_clearance = opening_top_clearance(&self.model.code);
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     let mut remove = false;
+                    let wall_height = wall.height;
                     if let Some(opening) =
                         wall.openings.iter_mut().find(|opening| opening.id.0 == id)
                     {
@@ -476,19 +552,15 @@ impl FramerApp {
                                 length_drag(ui, "Width", &mut opening.width, 12.0, 240.0, "in");
                             changed |=
                                 length_drag(ui, "Height", &mut opening.height, 12.0, 120.0, "in");
-                            if opening.has_sill() {
-                                changed |= length_drag(
-                                    ui,
-                                    "Sill",
-                                    &mut opening.sill_height,
-                                    0.0,
-                                    96.0,
-                                    "in",
-                                );
-                            } else if opening.sill_height != Length::ZERO {
-                                opening.sill_height = Length::ZERO;
-                                changed = true;
-                            }
+                            changed |= length_drag(
+                                ui,
+                                "Bottom",
+                                &mut opening.sill_height,
+                                0.0,
+                                opening_max_bottom(wall_height, opening.height, top_clearance)
+                                    .inches(),
+                                "in",
+                            );
 
                             ui.separator();
                             if ui.button("Remove Opening").clicked() {
@@ -625,10 +697,192 @@ impl FramerApp {
             bom_panel(ui, self.project_plan.as_ref());
         } else if let Some(error) = self.error.as_deref() {
             ui.separator();
-            ui.heading("Validation");
-            ui.colored_label(Color32::from_rgb(185, 65, 65), error);
+            panel_subheader(ui, "Validation");
+            ui.colored_label(Color32::from_rgb(214, 104, 96), error);
         }
     }
+
+    fn workspace_badge(&self) -> &'static str {
+        match self.workspace_mode {
+            WorkspaceMode::Design => "Design",
+            WorkspaceMode::Plan => "Plan",
+        }
+    }
+}
+
+fn command_bar_frame() -> Frame {
+    Frame::new()
+        .fill(Color32::from_rgb(25, 27, 28))
+        .inner_margin(Margin::symmetric(10, 6))
+}
+
+fn toolbar_group(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new(label)
+                .size(9.0)
+                .strong()
+                .color(toolbar_muted_text()),
+        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+            add_contents(ui);
+        });
+    });
+}
+
+fn command_button(ui: &mut Ui, label: &str, min_width: f32) -> Response {
+    ui.add_sized(
+        [min_width, 24.0],
+        egui::Button::new(label)
+            .fill(Color32::from_rgb(43, 46, 48))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 78, 82)))
+            .corner_radius(3),
+    )
+}
+
+fn enabled_command_button(ui: &mut Ui, enabled: bool, label: &str, min_width: f32) -> Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(label)
+            .min_size(Vec2::new(min_width, 24.0))
+            .fill(Color32::from_rgb(43, 46, 48))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 78, 82)))
+            .corner_radius(3),
+    )
+}
+
+fn workspace_segment(ui: &mut Ui, mode: &mut WorkspaceMode, value: WorkspaceMode, label: &str) {
+    if segment_button(ui, *mode == value, label, 68.0).clicked() {
+        *mode = value;
+    }
+}
+
+fn view_segment(ui: &mut Ui, mode: &mut ViewportMode, value: ViewportMode, label: &str) {
+    if segment_button(ui, *mode == value, label, 70.0).clicked() {
+        *mode = value;
+    }
+}
+
+fn segment_button(ui: &mut Ui, selected: bool, label: &str, min_width: f32) -> Response {
+    let fill = if selected {
+        Color32::from_rgb(0, 114, 160)
+    } else {
+        Color32::from_rgb(37, 40, 42)
+    };
+    let stroke = if selected {
+        Stroke::new(1.0, Color32::from_rgb(49, 176, 222))
+    } else {
+        Stroke::new(1.0, Color32::from_rgb(66, 71, 75))
+    };
+    let text = if selected {
+        RichText::new(label)
+            .strong()
+            .color(Color32::from_rgb(248, 251, 252))
+    } else {
+        RichText::new(label).color(Color32::from_rgb(211, 216, 216))
+    };
+
+    ui.add_sized(
+        [min_width, 24.0],
+        egui::Button::new(text)
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(3),
+    )
+}
+
+fn toolbar_divider(ui: &mut Ui) {
+    ui.separator();
+}
+
+fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
+    Frame::new()
+        .fill(Color32::from_rgb(31, 34, 35))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(55, 60, 62)))
+        .inner_margin(Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .strong()
+                        .size(15.0)
+                        .color(Color32::from_rgb(232, 235, 234)),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    status_chip(ui, badge, StatusTone::Neutral);
+                });
+            });
+        });
+    ui.add_space(6.0);
+}
+
+fn panel_subheader(ui: &mut Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .size(12.0)
+            .color(toolbar_muted_text()),
+    );
+    ui.add_space(2.0);
+}
+
+fn selection_badge(selection: &Selection) -> &'static str {
+    match selection {
+        Selection::Level(_) => "Level",
+        Selection::Wall => "Wall",
+        Selection::Opening(_) => "Opening",
+        Selection::Dimension(_) => "Dimension",
+        Selection::Join(_) => "Join",
+        Selection::Member { .. } => "Member",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StatusTone {
+    Neutral,
+    Info,
+    Success,
+    Warning,
+}
+
+fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
+    let (fill, stroke, text_color) = match tone {
+        StatusTone::Neutral => (
+            Color32::from_rgb(43, 47, 49),
+            Color32::from_rgb(70, 76, 79),
+            Color32::from_rgb(206, 212, 212),
+        ),
+        StatusTone::Info => (
+            Color32::from_rgb(22, 61, 78),
+            Color32::from_rgb(38, 118, 150),
+            Color32::from_rgb(212, 238, 247),
+        ),
+        StatusTone::Success => (
+            Color32::from_rgb(36, 70, 50),
+            Color32::from_rgb(75, 136, 96),
+            Color32::from_rgb(219, 242, 226),
+        ),
+        StatusTone::Warning => (
+            Color32::from_rgb(82, 65, 30),
+            Color32::from_rgb(154, 119, 49),
+            Color32::from_rgb(248, 231, 190),
+        ),
+    };
+
+    Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(3)
+        .inner_margin(Margin::symmetric(7, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.0).color(text_color));
+        });
+}
+
+fn toolbar_muted_text() -> Color32 {
+    Color32::from_rgb(150, 158, 158)
 }
 
 fn level_summary(ui: &mut Ui, level: &Level) {
@@ -841,9 +1095,9 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
 }
 
 fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFramePlan>) {
-    ui.heading("Diagnostics");
+    panel_subheader(ui, "Diagnostics");
     if let Some(error) = error {
-        ui.colored_label(Color32::from_rgb(185, 65, 65), error);
+        ui.colored_label(Color32::from_rgb(214, 104, 96), error);
     }
 
     if let Some(plan) = plan {
@@ -920,7 +1174,7 @@ fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
 }
 
 fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
-    ui.heading("BOM");
+    panel_subheader(ui, "BOM");
     if let Some(plan) = plan {
         egui::Grid::new("bom-grid")
             .num_columns(5)
