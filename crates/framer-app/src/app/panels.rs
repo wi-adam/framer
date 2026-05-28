@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use eframe::egui::{
     self, Align, Color32, ComboBox, Frame, Layout, Margin, Response, RichText, ScrollArea, Stroke,
     Ui, Vec2,
@@ -461,6 +463,11 @@ impl FramerApp {
                 }
             }
             Selection::Wall => {
+                let wall_length_driver =
+                    self.model.walls.get(self.selected_wall).and_then(|wall| {
+                        driven_length_field(wall, DimensionVariableKey::WallLength)
+                    });
+                let mut select_dimension = None;
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     if can_edit {
                         ui.label(&wall.id.0);
@@ -480,18 +487,32 @@ impl FramerApp {
                         }
 
                         let mut wall_length = wall.length;
-                        if length_drag(ui, "Length", &mut wall_length, 24.0, 480.0, "ft") {
+                        if driven_length_drag(
+                            ui,
+                            "Length",
+                            &mut wall_length,
+                            length_drag_spec(24.0, 480.0, "ft"),
+                            wall_length_driver.as_ref(),
+                            &mut select_dimension,
+                        ) {
                             set_wall_length_keep_direction(wall, wall_length);
                             changed = true;
                         }
-                        changed |= length_drag(ui, "Height", &mut wall.height, 48.0, 168.0, "ft");
-                        changed |= length_drag(
+                        changed |= driven_length_drag(
+                            ui,
+                            "Height",
+                            &mut wall.height,
+                            length_drag_spec(48.0, 168.0, "ft"),
+                            None,
+                            &mut select_dimension,
+                        );
+                        changed |= driven_length_drag(
                             ui,
                             "Stud spacing",
                             &mut wall.stud_spacing,
-                            8.0,
-                            32.0,
-                            "in",
+                            length_drag_spec(8.0, 32.0, "in"),
+                            None,
+                            &mut select_dimension,
                         );
                         ui.separator();
                         ui.strong("Placement");
@@ -509,9 +530,20 @@ impl FramerApp {
                         wall_summary(ui, wall, &level_options);
                     }
                 }
+
+                if let Some(dimension_id) = select_dimension {
+                    self.selected = Selection::Dimension(dimension_id);
+                }
             }
             Selection::Opening(id) => {
                 let top_clearance = opening_top_clearance(&self.model.code);
+                let driven_fields = self
+                    .model
+                    .walls
+                    .get(self.selected_wall)
+                    .map(|wall| opening_driven_fields(wall, &id))
+                    .unwrap_or_default();
+                let mut select_dimension = None;
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     let mut remove = false;
                     let wall_height = wall.height;
@@ -546,20 +578,42 @@ impl FramerApp {
                                         )
                                         .changed();
                                 });
-                            changed |=
-                                length_drag(ui, "Center", &mut opening.center, 0.0, 480.0, "ft");
-                            changed |=
-                                length_drag(ui, "Width", &mut opening.width, 12.0, 240.0, "in");
-                            changed |=
-                                length_drag(ui, "Height", &mut opening.height, 12.0, 120.0, "in");
-                            changed |= length_drag(
+                            changed |= driven_length_drag(
+                                ui,
+                                "Center",
+                                &mut opening.center,
+                                length_drag_spec(0.0, 480.0, "ft"),
+                                driven_fields.center.as_ref(),
+                                &mut select_dimension,
+                            );
+                            changed |= driven_length_drag(
+                                ui,
+                                "Width",
+                                &mut opening.width,
+                                length_drag_spec(12.0, 240.0, "in"),
+                                driven_fields.width.as_ref(),
+                                &mut select_dimension,
+                            );
+                            changed |= driven_length_drag(
+                                ui,
+                                "Height",
+                                &mut opening.height,
+                                length_drag_spec(12.0, 120.0, "in"),
+                                None,
+                                &mut select_dimension,
+                            );
+                            changed |= driven_length_drag(
                                 ui,
                                 "Bottom",
                                 &mut opening.sill_height,
-                                0.0,
-                                opening_max_bottom(wall_height, opening.height, top_clearance)
-                                    .inches(),
-                                "in",
+                                length_drag_spec(
+                                    0.0,
+                                    opening_max_bottom(wall_height, opening.height, top_clearance)
+                                        .inches(),
+                                    "in",
+                                ),
+                                None,
+                                &mut select_dimension,
                             );
 
                             ui.separator();
@@ -578,6 +632,10 @@ impl FramerApp {
                         self.selected = Selection::Wall;
                         changed = true;
                     }
+                }
+
+                if let Some(dimension_id) = select_dimension {
+                    self.selected = Selection::Dimension(dimension_id);
                 }
             }
             Selection::Dimension(id) => {
@@ -1262,6 +1320,391 @@ fn opening_display_name(wall: &Wall, id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OpeningDrivenFields {
+    center: Option<DrivenField>,
+    width: Option<DrivenField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrivenField {
+    dimension_ids: Vec<String>,
+    labels: Vec<String>,
+}
+
+impl DrivenField {
+    fn hover_text(&self) -> String {
+        if self.labels.is_empty() {
+            return "Read-only: driven by active dimensions".to_owned();
+        }
+
+        let mut lines = vec!["Read-only: driven by dimensions".to_owned()];
+        lines.push("Open the Driven menu to choose a source dimension".to_owned());
+        if !self.dimension_ids.is_empty() {
+            lines.push("Cmd/Ctrl-click the field to select the first driver".to_owned());
+        }
+        lines.extend(self.labels.iter().map(|label| format!("- {label}")));
+        lines.join("\n")
+    }
+
+    fn first_dimension_id(&self) -> Option<&str> {
+        self.dimension_ids.first().map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DimensionVariableKey {
+    WallLength,
+    OpeningCenter(String),
+    OpeningWidth(String),
+}
+
+fn opening_driven_fields(wall: &Wall, opening_id: &str) -> OpeningDrivenFields {
+    OpeningDrivenFields {
+        center: driven_length_field(
+            wall,
+            DimensionVariableKey::OpeningCenter(opening_id.to_owned()),
+        ),
+        width: driven_length_field(
+            wall,
+            DimensionVariableKey::OpeningWidth(opening_id.to_owned()),
+        ),
+    }
+}
+
+fn driven_length_field(wall: &Wall, key: DimensionVariableKey) -> Option<DrivenField> {
+    dimension_variable_is_driven(wall, &key).then(|| driven_field_sources(wall, key))
+}
+
+fn dimension_variable_is_driven(wall: &Wall, key: &DimensionVariableKey) -> bool {
+    if wall
+        .dimensions
+        .iter()
+        .all(|dimension| dimension.kind != DimensionKind::Driving)
+    {
+        return false;
+    }
+
+    let Some(probe_value) = dimension_variable_probe_value(wall, key) else {
+        return false;
+    };
+    let mut probed_wall = wall.clone();
+    if !set_dimension_variable_value(&mut probed_wall, key, probe_value) {
+        return false;
+    }
+
+    probed_wall.apply_driving_dimensions();
+    dimension_variable_value(&probed_wall, key)
+        .is_some_and(|solved_value| solved_value != probe_value)
+}
+
+fn dimension_variable_probe_value(wall: &Wall, key: &DimensionVariableKey) -> Option<Length> {
+    let value = dimension_variable_value(wall, key)?;
+    let step = Length::from_whole_inches(12);
+
+    match key {
+        DimensionVariableKey::WallLength => {
+            alternate_length(value, Length::from_whole_inches(1), value + step, step)
+        }
+        DimensionVariableKey::OpeningCenter(opening_id) => {
+            let opening = wall
+                .openings
+                .iter()
+                .find(|opening| opening.id.0 == *opening_id)?;
+            let half_width = opening.width / 2;
+            alternate_length(value, half_width, wall.length - half_width, step)
+        }
+        DimensionVariableKey::OpeningWidth(opening_id) => {
+            let opening = wall
+                .openings
+                .iter()
+                .find(|opening| opening.id.0 == *opening_id)?;
+            let max_width = opening.center.min(wall.length - opening.center) * 2;
+            alternate_length(value, Length::from_whole_inches(12), max_width, step)
+        }
+    }
+}
+
+fn dimension_variable_value(wall: &Wall, key: &DimensionVariableKey) -> Option<Length> {
+    match key {
+        DimensionVariableKey::WallLength => Some(wall.length),
+        DimensionVariableKey::OpeningCenter(opening_id) => wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == *opening_id)
+            .map(|opening| opening.center),
+        DimensionVariableKey::OpeningWidth(opening_id) => wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == *opening_id)
+            .map(|opening| opening.width),
+    }
+}
+
+fn set_dimension_variable_value(
+    wall: &mut Wall,
+    key: &DimensionVariableKey,
+    value: Length,
+) -> bool {
+    match key {
+        DimensionVariableKey::WallLength => {
+            set_wall_length_keep_direction(wall, value);
+            true
+        }
+        DimensionVariableKey::OpeningCenter(opening_id) => {
+            let Some(opening) = wall
+                .openings
+                .iter_mut()
+                .find(|opening| opening.id.0 == *opening_id)
+            else {
+                return false;
+            };
+            opening.center = value;
+            true
+        }
+        DimensionVariableKey::OpeningWidth(opening_id) => {
+            let Some(opening) = wall
+                .openings
+                .iter_mut()
+                .find(|opening| opening.id.0 == *opening_id)
+            else {
+                return false;
+            };
+            opening.width = value;
+            true
+        }
+    }
+}
+
+fn alternate_length(value: Length, min: Length, max: Length, step: Length) -> Option<Length> {
+    if max < min {
+        return None;
+    }
+
+    let larger = (value + step).min(max);
+    if larger != value {
+        return Some(larger);
+    }
+
+    let smaller = (value - step).max(min);
+    (smaller != value).then_some(smaller)
+}
+
+fn driven_field_sources(wall: &Wall, target: DimensionVariableKey) -> DrivenField {
+    let mut variables = BTreeSet::from([target]);
+    let mut dimension_indices = BTreeSet::new();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        for (index, dimension) in wall.dimensions.iter().enumerate() {
+            if dimension.kind != DimensionKind::Driving {
+                continue;
+            }
+
+            let dimension_variables = dimension_constraint_variables(dimension);
+            if dimension_variables
+                .iter()
+                .any(|variable| variables.contains(variable))
+            {
+                changed |= dimension_indices.insert(index);
+                for variable in dimension_variables {
+                    changed |= variables.insert(variable);
+                }
+            }
+        }
+    }
+
+    let dimensions = dimension_indices
+        .into_iter()
+        .map(|index| &wall.dimensions[index])
+        .collect::<Vec<_>>();
+
+    DrivenField {
+        dimension_ids: dimensions
+            .iter()
+            .map(|dimension| dimension.id.0.clone())
+            .collect(),
+        labels: dimensions
+            .iter()
+            .map(|dimension| driving_dimension_source_label(wall, dimension))
+            .collect(),
+    }
+}
+
+fn dimension_constraint_variables(
+    dimension: &DimensionConstraint,
+) -> BTreeSet<DimensionVariableKey> {
+    let mut variables = BTreeSet::new();
+    add_anchor_variables(&dimension.start, &mut variables);
+    add_anchor_variables(&dimension.end, &mut variables);
+    variables
+}
+
+fn add_anchor_variables(anchor: &DimensionAnchor, variables: &mut BTreeSet<DimensionVariableKey>) {
+    match anchor {
+        DimensionAnchor::WallStart => {}
+        DimensionAnchor::WallEnd => {
+            variables.insert(DimensionVariableKey::WallLength);
+        }
+        DimensionAnchor::OpeningCenter { opening } => {
+            variables.insert(DimensionVariableKey::OpeningCenter(opening.0.clone()));
+        }
+        DimensionAnchor::OpeningLeft { opening } | DimensionAnchor::OpeningRight { opening } => {
+            variables.insert(DimensionVariableKey::OpeningCenter(opening.0.clone()));
+            variables.insert(DimensionVariableKey::OpeningWidth(opening.0.clone()));
+        }
+    }
+}
+
+fn driving_dimension_source_label(wall: &Wall, dimension: &DimensionConstraint) -> String {
+    let mut label = format!(
+        "{}: {} to {}",
+        dimension.name,
+        dimension_anchor_label(wall, &dimension.start),
+        dimension_anchor_label(wall, &dimension.end)
+    );
+    if let Some(value) = dimension.value {
+        label.push_str(&format!(" = {value}"));
+    }
+    label
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LengthDragSpec {
+    min_inches: f64,
+    max_inches: f64,
+    display_unit: &'static str,
+}
+
+fn length_drag_spec(
+    min_inches: f64,
+    max_inches: f64,
+    display_unit: &'static str,
+) -> LengthDragSpec {
+    LengthDragSpec {
+        min_inches,
+        max_inches,
+        display_unit,
+    }
+}
+
+fn driven_length_drag(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Length,
+    spec: LengthDragSpec,
+    driver: Option<&DrivenField>,
+    select_dimension: &mut Option<String>,
+) -> bool {
+    if let Some(driver) = driver {
+        readonly_length_field(
+            ui,
+            label,
+            *value,
+            spec.display_unit,
+            driver,
+            select_dimension,
+        );
+        false
+    } else {
+        length_drag(
+            ui,
+            label,
+            value,
+            spec.min_inches,
+            spec.max_inches,
+            spec.display_unit,
+        )
+    }
+}
+
+fn readonly_length_field(
+    ui: &mut Ui,
+    label: &str,
+    value: Length,
+    display_unit: &str,
+    driver: &DrivenField,
+    select_dimension: &mut Option<String>,
+) {
+    let mut display_value = if display_unit == "ft" {
+        value.feet()
+    } else {
+        value.inches()
+    };
+    let hover_text = driver.hover_text();
+
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let value_response = ui.add_enabled(
+            false,
+            egui::DragValue::new(&mut display_value)
+                .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
+                .suffix(format!(" {display_unit}")),
+        );
+        let value_response = ui
+            .interact(
+                value_response.rect,
+                value_response.id.with("driver-shortcut"),
+                egui::Sense::click(),
+            )
+            .on_hover_text(hover_text.clone());
+        select_first_driver_on_shortcut(ui, &value_response, driver, select_dimension);
+
+        let chip_response =
+            driven_field_menu(ui, driver, select_dimension).on_hover_text(hover_text);
+        select_first_driver_on_shortcut(ui, &chip_response, driver, select_dimension);
+    });
+}
+
+fn driven_field_menu(
+    ui: &mut Ui,
+    driver: &DrivenField,
+    select_dimension: &mut Option<String>,
+) -> Response {
+    let label = if driver.dimension_ids.len() > 1 {
+        format!("Driven ({})", driver.dimension_ids.len())
+    } else {
+        "Driven".to_owned()
+    };
+
+    let menu = ui.menu_button(
+        RichText::new(label)
+            .size(11.0)
+            .color(Color32::from_rgb(248, 231, 190)),
+        |ui| {
+            ui.set_min_width(220.0);
+            if driver.dimension_ids.is_empty() {
+                ui.add_enabled(false, egui::Button::new("No active dimensions"));
+                return;
+            }
+
+            for (dimension_id, label) in driver.dimension_ids.iter().zip(driver.labels.iter()) {
+                if ui.button(label).on_hover_text(dimension_id).clicked() {
+                    *select_dimension = Some(dimension_id.clone());
+                    ui.close();
+                }
+            }
+        },
+    );
+    menu.response
+}
+
+fn select_first_driver_on_shortcut(
+    ui: &Ui,
+    response: &Response,
+    driver: &DrivenField,
+    select_dimension: &mut Option<String>,
+) {
+    let modifier_pressed = ui.input(|input| input.modifiers.command || input.modifiers.ctrl);
+    if response.clicked()
+        && modifier_pressed
+        && let Some(dimension_id) = driver.first_dimension_id()
+    {
+        *select_dimension = Some(dimension_id.to_owned());
+    }
+}
+
 fn length_drag(
     ui: &mut Ui,
     label: &str,
@@ -1320,5 +1763,162 @@ fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use framer_core::{CodeProfile, DimensionDirection};
+
+    #[derive(Debug, Clone, Copy)]
+    enum WindowAnchor {
+        Left,
+        Center,
+        Right,
+    }
+
+    fn wall_with_window(center: Length, width: Length) -> Wall {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            center,
+            width,
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall
+    }
+
+    fn window_anchor(anchor: WindowAnchor) -> DimensionAnchor {
+        let opening = ElementId::new("window");
+        match anchor {
+            WindowAnchor::Left => DimensionAnchor::OpeningLeft { opening },
+            WindowAnchor::Center => DimensionAnchor::OpeningCenter { opening },
+            WindowAnchor::Right => DimensionAnchor::OpeningRight { opening },
+        }
+    }
+
+    fn driving_dimension(
+        id: &str,
+        start: DimensionAnchor,
+        end: DimensionAnchor,
+        value: Length,
+    ) -> DimensionConstraint {
+        DimensionConstraint::new(
+            id,
+            id.replace('-', " "),
+            DimensionKind::Driving,
+            start,
+            end,
+            DimensionDirection::Forward,
+            Some(value),
+        )
+    }
+
+    #[test]
+    fn wall_length_dimension_marks_wall_length_driven() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(driving_dimension(
+            "wall-length",
+            DimensionAnchor::WallStart,
+            DimensionAnchor::WallEnd,
+            Length::from_feet(12.0),
+        ));
+
+        let driver = driven_length_field(&wall, DimensionVariableKey::WallLength);
+
+        assert_eq!(
+            driver.map(|driver| driver.dimension_ids),
+            Some(vec!["wall-length".to_owned()])
+        );
+    }
+
+    #[test]
+    fn paired_edge_offsets_mark_opening_center_and_width_driven() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(driving_dimension(
+            "left-offset",
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Left),
+            Length::from_feet(5.0),
+        ));
+        wall.dimensions.push(driving_dimension(
+            "right-offset",
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Right),
+            Length::from_feet(10.0),
+        ));
+        wall.apply_driving_dimensions();
+
+        let fields = opening_driven_fields(&wall, "window");
+
+        assert_eq!(
+            fields
+                .center
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["left-offset".to_owned(), "right-offset".to_owned()])
+        );
+        assert_eq!(
+            fields
+                .width
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["left-offset".to_owned(), "right-offset".to_owned()])
+        );
+    }
+
+    #[test]
+    fn single_edge_offset_leaves_width_editable() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(driving_dimension(
+            "left-offset",
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Left),
+            Length::from_feet(5.0),
+        ));
+        wall.apply_driving_dimensions();
+
+        let fields = opening_driven_fields(&wall, "window");
+
+        assert_eq!(
+            fields
+                .center
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["left-offset".to_owned()])
+        );
+        assert!(fields.width.is_none());
+    }
+
+    #[test]
+    fn width_driver_includes_indirect_center_dimension() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(driving_dimension(
+            "center",
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Center),
+            Length::from_feet(7.0),
+        ));
+        wall.dimensions.push(driving_dimension(
+            "right-offset",
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Right),
+            Length::from_feet(9.0),
+        ));
+        wall.apply_driving_dimensions();
+
+        let fields = opening_driven_fields(&wall, "window");
+
+        assert_eq!(
+            fields
+                .width
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["center".to_owned(), "right-offset".to_owned()])
+        );
     }
 }
