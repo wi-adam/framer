@@ -94,6 +94,10 @@ enum ViewClick {
         wall_index: usize,
         anchor: DimensionAnchor,
     },
+    DimensionPlacement {
+        wall_index: usize,
+        axis: DimensionAxis,
+    },
     Member {
         wall_id: String,
         member_id: String,
@@ -106,6 +110,7 @@ struct DimensionToolState {
     kind: DimensionKind,
     axis: DimensionAxis,
     first_anchor: Option<DimensionAnchorPick>,
+    second_anchor: Option<DimensionAnchorPick>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +126,15 @@ impl Default for DimensionToolState {
             kind: DimensionKind::Driving,
             axis: DimensionAxis::Horizontal,
             first_anchor: None,
+            second_anchor: None,
         }
+    }
+}
+
+impl DimensionToolState {
+    fn clear_picks(&mut self) {
+        self.first_anchor = None;
+        self.second_anchor = None;
     }
 }
 
@@ -323,7 +336,7 @@ impl FramerApp {
             WorkspaceMode::Design => self.select_authored_for_design_mode(),
             WorkspaceMode::Plan => {
                 self.dimension_tool.active = false;
-                self.dimension_tool.first_anchor = None;
+                self.dimension_tool.clear_picks();
                 self.rebuild();
             }
         }
@@ -354,9 +367,10 @@ impl FramerApp {
         }
 
         self.dimension_tool.active = true;
-        self.dimension_tool.first_anchor = None;
+        self.dimension_tool.clear_picks();
         self.opening_drag = None;
-        self.dimension_status = Some("Pick two anchors in the wall view".to_owned());
+        self.dimension_status =
+            Some("Pick two anchors, then move the pointer to place the dimension".to_owned());
         self.viewport_mode = ViewportMode::Elevation;
     }
 
@@ -369,7 +383,7 @@ impl FramerApp {
         let dimension_tool_was_active = self.dimension_tool.active;
         let dimension_was_selected = matches!(self.selected, Selection::Dimension(_));
         self.dimension_tool.active = false;
-        self.dimension_tool.first_anchor = None;
+        self.dimension_tool.clear_picks();
         if dimension_was_selected {
             self.dimension_status = None;
             self.selected = Selection::Wall;
@@ -523,9 +537,10 @@ impl FramerApp {
         }
 
         let pick = DimensionAnchorPick { wall_index, anchor };
-        let Some(first) = self.dimension_tool.first_anchor.take() else {
+        let Some(first) = self.dimension_tool.first_anchor.clone() else {
             self.dimension_status = Some("Pick a second dimension anchor".to_owned());
             self.dimension_tool.first_anchor = Some(pick);
+            self.dimension_tool.second_anchor = None;
             return;
         };
 
@@ -533,31 +548,55 @@ impl FramerApp {
             self.dimension_status =
                 Some("Dimension anchors must be on the same wall for now".to_owned());
             self.dimension_tool.first_anchor = Some(pick);
+            self.dimension_tool.second_anchor = None;
             return;
         }
 
         if first.anchor == pick.anchor {
             self.dimension_status = Some("Pick a different anchor".to_owned());
-            self.dimension_tool.first_anchor = Some(first);
+            self.dimension_tool.second_anchor = None;
+            return;
+        }
+
+        self.dimension_tool.second_anchor = Some(pick);
+        self.dimension_status = Some(
+            "Move the pointer to choose horizontal or vertical, then click to place".to_owned(),
+        );
+    }
+
+    fn handle_dimension_placement_click(&mut self, wall_index: usize, axis: DimensionAxis) {
+        if !self.workspace_mode.allows_design_edits() || !self.dimension_tool.active {
+            return;
+        }
+
+        let Some(first) = self.dimension_tool.first_anchor.clone() else {
+            return;
+        };
+        let Some(second) = self.dimension_tool.second_anchor.clone() else {
+            return;
+        };
+        if first.wall_index != wall_index || second.wall_index != wall_index {
+            self.dimension_status =
+                Some("Dimension anchors must be on the same wall for now".to_owned());
+            self.dimension_tool.clear_picks();
             return;
         }
 
         let Some(wall) = self.model.walls.get_mut(wall_index) else {
             return;
         };
-        let axis = self.dimension_tool.axis;
         let Some(start_coordinate) = first.anchor.coordinate(wall, axis) else {
             self.dimension_status = Some("The first dimension anchor no longer exists".to_owned());
             return;
         };
-        let Some(end_coordinate) = pick.anchor.coordinate(wall, axis) else {
+        let Some(end_coordinate) = second.anchor.coordinate(wall, axis) else {
             self.dimension_status = Some("The second dimension anchor no longer exists".to_owned());
             return;
         };
         let measured = (end_coordinate - start_coordinate).abs();
         if measured <= Length::ZERO {
-            self.dimension_status = Some("Dimension anchors are coincident".to_owned());
-            self.dimension_tool.first_anchor = Some(first);
+            self.dimension_status =
+                Some("Move the pointer to place a non-zero dimension".to_owned());
             return;
         }
 
@@ -578,7 +617,7 @@ impl FramerApp {
             format!("Dimension {index}"),
             kind,
             first.anchor,
-            pick.anchor,
+            second.anchor,
             direction,
             value,
         )
@@ -589,6 +628,8 @@ impl FramerApp {
             return;
         }
         wall.dimensions.push(dimension);
+        self.dimension_tool.axis = axis;
+        self.dimension_tool.clear_picks();
 
         self.selected_wall = wall_index;
         self.selected = Selection::Dimension(id);
@@ -637,6 +678,9 @@ impl FramerApp {
             }
             ViewClick::DimensionAnchor { wall_index, anchor } => {
                 self.handle_dimension_anchor_click(wall_index, anchor);
+            }
+            ViewClick::DimensionPlacement { wall_index, axis } => {
+                self.handle_dimension_placement_click(wall_index, axis);
             }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {
@@ -755,6 +799,13 @@ mod tests {
     use framer_core::{DimensionHorizontalReference, DimensionVerticalReference};
 
     use super::*;
+
+    fn place_pending_dimension(app: &mut FramerApp, axis: DimensionAxis) {
+        app.handle_view_click(ViewClick::DimensionPlacement {
+            wall_index: 0,
+            axis,
+        });
+    }
 
     #[test]
     fn app_saves_and_reopens_demo_project() {
@@ -884,6 +935,7 @@ mod tests {
 
         assert!(app.dimension_tool.active);
         assert_eq!(app.dimension_tool.first_anchor, None);
+        assert_eq!(app.dimension_tool.second_anchor, None);
         assert_eq!(app.viewport_mode, ViewportMode::Elevation);
         assert!(
             app.dimension_status
@@ -907,6 +959,7 @@ mod tests {
 
         assert!(!app.dimension_tool.active);
         assert_eq!(app.dimension_tool.first_anchor, None);
+        assert_eq!(app.dimension_tool.second_anchor, None);
         assert_eq!(app.selected, Selection::Wall);
         assert_eq!(app.dimension_status, None);
     }
@@ -942,10 +995,17 @@ mod tests {
             wall_index: 0,
             anchor: DimensionAnchor::OpeningCenter { opening },
         });
+        assert_eq!(app.model.walls[0].dimensions.len(), 0);
+        assert!(app.dimension_tool.second_anchor.is_some());
+
+        place_pending_dimension(&mut app, DimensionAxis::Horizontal);
 
         let dimension = &app.model.walls[0].dimensions[0];
+        assert_eq!(dimension.axis, DimensionAxis::Horizontal);
         assert_eq!(dimension.kind, DimensionKind::Driving);
         assert_eq!(dimension.value, Some(expected));
+        assert_eq!(app.dimension_tool.first_anchor, None);
+        assert_eq!(app.dimension_tool.second_anchor, None);
         assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
     }
 
@@ -964,6 +1024,7 @@ mod tests {
             wall_index: 0,
             anchor: DimensionAnchor::OpeningLeft { opening },
         });
+        place_pending_dimension(&mut app, DimensionAxis::Horizontal);
 
         let dimension = &app.model.walls[0].dimensions[0];
         assert_eq!(dimension.kind, DimensionKind::Reference);
@@ -995,12 +1056,53 @@ mod tests {
                 vertical: DimensionVerticalReference::Top,
             },
         });
+        place_pending_dimension(&mut app, DimensionAxis::Vertical);
 
         let dimension = &app.model.walls[0].dimensions[0];
         assert_eq!(dimension.axis, DimensionAxis::Vertical);
         assert_eq!(dimension.kind, DimensionKind::Driving);
         assert_eq!(dimension.value, Some(expected));
         assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
+    }
+
+    #[test]
+    fn dimension_tool_uses_placement_axis_for_pending_dimension() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.kind = DimensionKind::Driving;
+        app.dimension_tool.axis = DimensionAxis::Horizontal;
+        let opening = app.model.walls[0].openings[0].id.clone();
+        let expected =
+            (app.model.walls[0].height - app.model.walls[0].openings[0].sill_height).abs();
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallPoint {
+                horizontal: DimensionHorizontalReference::Left,
+                vertical: DimensionVerticalReference::Top,
+            },
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningPoint {
+                opening,
+                horizontal: DimensionHorizontalReference::Center,
+                vertical: DimensionVerticalReference::Bottom,
+            },
+        });
+        assert_eq!(app.model.walls[0].dimensions.len(), 0);
+
+        place_pending_dimension(&mut app, DimensionAxis::Vertical);
+
+        let dimension = &app.model.walls[0].dimensions[0];
+        assert_eq!(dimension.axis, DimensionAxis::Vertical);
+        assert_eq!(dimension.value, Some(expected));
+        assert_eq!(app.dimension_tool.axis, DimensionAxis::Vertical);
+        assert!(
+            app.dimension_status
+                .as_deref()
+                .is_some_and(|status| status.contains("vertical"))
+        );
     }
 
     #[test]
@@ -1020,6 +1122,7 @@ mod tests {
                 opening: opening.clone(),
             },
         });
+        place_pending_dimension(&mut app, DimensionAxis::Horizontal);
         assert_eq!(app.model.walls[0].dimensions.len(), 1);
 
         app.handle_view_click(ViewClick::DimensionAnchor {
@@ -1032,6 +1135,7 @@ mod tests {
                 opening: opening.clone(),
             },
         });
+        place_pending_dimension(&mut app, DimensionAxis::Horizontal);
         assert_eq!(app.model.walls[0].dimensions.len(), 2);
 
         app.handle_view_click(ViewClick::DimensionAnchor {
@@ -1044,6 +1148,7 @@ mod tests {
             wall_index: 0,
             anchor: DimensionAnchor::OpeningRight { opening },
         });
+        place_pending_dimension(&mut app, DimensionAxis::Horizontal);
 
         assert_eq!(app.model.walls[0].dimensions.len(), 2);
         assert!(

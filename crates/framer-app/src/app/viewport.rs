@@ -187,6 +187,12 @@ impl FramerApp {
                         .as_ref()
                         .filter(|pick| pick.wall_index == self.selected_wall)
                         .map(|pick| &pick.anchor);
+                    let second_anchor = self
+                        .dimension_tool
+                        .second_anchor
+                        .as_ref()
+                        .filter(|pick| pick.wall_index == self.selected_wall)
+                        .map(|pick| &pick.anchor);
                     let active_opening_drag = self
                         .opening_drag
                         .as_ref()
@@ -201,6 +207,7 @@ impl FramerApp {
                             dimension_tool_active: self.dimension_tool.active,
                             dimension_tool_axis: self.dimension_tool.axis,
                             first_dimension_anchor: first_anchor,
+                            second_dimension_anchor: second_anchor,
                             active_opening_drag,
                         },
                     );
@@ -218,6 +225,9 @@ impl FramerApp {
                         },
                         DesignElevationClick::DimensionAnchor(anchor) => {
                             ViewClick::DimensionAnchor { wall_index, anchor }
+                        }
+                        DesignElevationClick::DimensionPlacement { axis } => {
+                            ViewClick::DimensionPlacement { wall_index, axis }
                         }
                     })
                 } else {
@@ -2273,6 +2283,7 @@ enum DesignElevationClick {
     Opening(String),
     Dimension(String),
     DimensionAnchor(DimensionAnchor),
+    DimensionPlacement { axis: DimensionAxis },
 }
 
 #[derive(Default)]
@@ -2305,6 +2316,7 @@ struct DesignElevationView<'a> {
     dimension_tool_active: bool,
     dimension_tool_axis: DimensionAxis,
     first_dimension_anchor: Option<&'a DimensionAnchor>,
+    second_dimension_anchor: Option<&'a DimensionAnchor>,
     active_opening_drag: Option<&'a OpeningDragState>,
 }
 
@@ -2319,6 +2331,7 @@ fn draw_wall_design_elevation(
         dimension_tool_active,
         dimension_tool_axis,
         first_dimension_anchor,
+        second_dimension_anchor,
         active_opening_drag,
     } = view;
     let available = ui.available_size();
@@ -2349,16 +2362,21 @@ fn draw_wall_design_elevation(
 
     painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
     draw_view_border(&painter, drawing);
-    let pointer = response.interact_pointer_pos();
+    let pointer = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos());
     let press_origin = ui.input(|input| input.pointer.press_origin());
     let mut output = DesignElevationResponse::default();
+    let pending_dimension_active = dimension_tool_active
+        && first_dimension_anchor.is_some()
+        && second_dimension_anchor.is_some();
     let mut hovered_handle = None;
     let mut hovered_dimension_move = None;
     if let Some(position) = pointer {
-        if dimension_tool_active {
-            hovered_dimension_move = hit_opening_move_target(wall_rect, scale, wall, position);
-        } else {
+        if !dimension_tool_active {
             hovered_handle = hit_opening_edit_target(wall_rect, scale, wall, position);
+        } else if !pending_dimension_active {
+            hovered_dimension_move = hit_opening_move_target(wall_rect, scale, wall, position);
         }
     }
 
@@ -2417,7 +2435,9 @@ fn draw_wall_design_elevation(
         }
     } else if response.drag_started_by(egui::PointerButton::Primary) {
         let hit = press_origin.and_then(|position| {
-            if dimension_tool_active {
+            if pending_dimension_active {
+                None
+            } else if dimension_tool_active {
                 hit_opening_move_target(wall_rect, scale, wall, position)
             } else {
                 hit_opening_edit_target(wall_rect, scale, wall, position)
@@ -2454,20 +2474,49 @@ fn draw_wall_design_elevation(
     }
 
     if dimension_tool_active {
+        let placement_axis = if let (Some(first_anchor), Some(second_anchor)) =
+            (first_dimension_anchor, second_dimension_anchor)
+        {
+            draw_pending_dimension_preview(
+                &painter,
+                wall_rect,
+                scale,
+                scale,
+                wall,
+                PendingDimensionPreview {
+                    first_anchor,
+                    second_anchor,
+                    pointer,
+                    fallback_axis: dimension_tool_axis,
+                },
+            )
+        } else {
+            None
+        };
         draw_dimension_anchors(
             &painter,
             wall_rect,
             scale,
             scale,
             wall,
-            dimension_tool_axis,
-            first_dimension_anchor,
+            DimensionAnchorSelection {
+                axis: placement_axis.unwrap_or(dimension_tool_axis),
+                first_anchor: first_dimension_anchor,
+                second_anchor: second_dimension_anchor,
+            },
         );
-        if let Some(position) = pointer
-            && response.clicked()
-            && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
-        {
-            output.click = Some(DesignElevationClick::DimensionAnchor(anchor));
+        let should_place_dimension =
+            response.clicked() || response.drag_stopped_by(egui::PointerButton::Primary);
+        if let Some(position) = pointer {
+            if let Some(axis) = placement_axis {
+                if should_place_dimension {
+                    output.click = Some(DesignElevationClick::DimensionPlacement { axis });
+                }
+            } else if response.clicked()
+                && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
+            {
+                output.click = Some(DesignElevationClick::DimensionAnchor(anchor));
+            }
         }
     }
 
@@ -2657,18 +2706,139 @@ fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstr
     }
 }
 
+struct PendingDimensionPreview<'a> {
+    first_anchor: &'a DimensionAnchor,
+    second_anchor: &'a DimensionAnchor,
+    pointer: Option<Pos2>,
+    fallback_axis: DimensionAxis,
+}
+
+fn draw_pending_dimension_preview(
+    painter: &egui::Painter,
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+    preview: PendingDimensionPreview<'_>,
+) -> Option<DimensionAxis> {
+    let first_position = dimension_anchor_position(drawing, sx, sy, wall, preview.first_anchor)?;
+    let second_position = dimension_anchor_position(drawing, sx, sy, wall, preview.second_anchor)?;
+    let axis = dimension_axis_for_placement_position(
+        first_position,
+        second_position,
+        preview.pointer,
+        preview.fallback_axis,
+    );
+    let color = Color32::from_rgb(35, 94, 150);
+    let stroke = Stroke::new(1.75, color);
+
+    let (line_start, line_end) = match axis {
+        DimensionAxis::Horizontal => {
+            let y = preview
+                .pointer
+                .map_or(drawing.top() - 24.0, |position| position.y);
+            (
+                Pos2::new(first_position.x, y),
+                Pos2::new(second_position.x, y),
+            )
+        }
+        DimensionAxis::Vertical => {
+            let x = preview
+                .pointer
+                .map_or(drawing.right() + 56.0, |position| position.x);
+            (
+                Pos2::new(x, first_position.y),
+                Pos2::new(x, second_position.y),
+            )
+        }
+    };
+
+    painter.line_segment([line_start, line_end], stroke);
+    match axis {
+        DimensionAxis::Horizontal => {
+            painter.line_segment([first_position, line_start], Stroke::new(0.75, color));
+            painter.line_segment([second_position, line_end], Stroke::new(0.75, color));
+        }
+        DimensionAxis::Vertical => {
+            painter.line_segment([first_position, line_start], Stroke::new(0.75, color));
+            painter.line_segment([second_position, line_end], Stroke::new(0.75, color));
+        }
+    }
+    draw_dimension_tick(painter, line_start, axis, color);
+    draw_dimension_tick(painter, line_end, axis, color);
+
+    let label = preview
+        .first_anchor
+        .coordinate(wall, axis)
+        .zip(preview.second_anchor.coordinate(wall, axis))
+        .map(|(start, end)| (end - start).abs().to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let label_rect = dimension_label_rect(line_start, line_end, axis);
+    painter.rect_filled(label_rect, 2.0, Color32::from_rgb(246, 244, 239));
+    painter.text(
+        dimension_label_position(line_start, line_end, axis),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(11.0),
+        color,
+    );
+
+    Some(axis)
+}
+
+fn dimension_anchor_position(
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+    anchor: &DimensionAnchor,
+) -> Option<Pos2> {
+    let (x, y) = anchor.point(wall)?;
+    Some(Pos2::new(
+        drawing.left() + x.inches() as f32 * sx,
+        drawing.bottom() - y.inches() as f32 * sy,
+    ))
+}
+
+fn dimension_axis_for_placement_position(
+    first_position: Pos2,
+    second_position: Pos2,
+    pointer: Option<Pos2>,
+    fallback_axis: DimensionAxis,
+) -> DimensionAxis {
+    let Some(pointer) = pointer else {
+        return fallback_axis;
+    };
+    let midpoint = first_position + (second_position - first_position) * 0.5;
+    let offset = pointer - midpoint;
+    if offset.x.abs() <= 4.0 && offset.y.abs() <= 4.0 {
+        return fallback_axis;
+    }
+    if offset.x.abs() > offset.y.abs() {
+        DimensionAxis::Vertical
+    } else {
+        DimensionAxis::Horizontal
+    }
+}
+
+struct DimensionAnchorSelection<'a> {
+    axis: DimensionAxis,
+    first_anchor: Option<&'a DimensionAnchor>,
+    second_anchor: Option<&'a DimensionAnchor>,
+}
+
 fn draw_dimension_anchors(
     painter: &egui::Painter,
     drawing: Rect,
     sx: f32,
     sy: f32,
     wall: &Wall,
-    tool_axis: DimensionAxis,
-    first_anchor: Option<&DimensionAnchor>,
+    selection: DimensionAnchorSelection<'_>,
 ) {
     for marker in dimension_anchor_markers(drawing, sx, sy, wall) {
-        let selected = first_anchor == Some(&marker.anchor);
-        let on_axis = marker.anchor.coordinate(wall, tool_axis).is_some();
+        let selected = selection.first_anchor == Some(&marker.anchor)
+            || selection.second_anchor == Some(&marker.anchor);
+        let on_axis = marker.anchor.coordinate(wall, selection.axis).is_some();
         let radius = if selected { 5.5 } else { marker.kind.radius() };
         let fill = if selected {
             Color32::from_rgb(35, 94, 150)
@@ -3310,6 +3480,41 @@ mod tests {
         );
         assert_close(layout.wall_rect.center().x, available.center().x);
         assert_close(layout.wall_rect.center().y, available.center().y);
+    }
+
+    #[test]
+    fn dimension_placement_pointer_chooses_closest_axis() {
+        let first = Pos2::new(100.0, 180.0);
+        let second = Pos2::new(240.0, 120.0);
+        let midpoint = first + (second - first) * 0.5;
+
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint + Vec2::new(160.0, 20.0)),
+                DimensionAxis::Horizontal,
+            ),
+            DimensionAxis::Vertical
+        );
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint + Vec2::new(20.0, -160.0)),
+                DimensionAxis::Vertical,
+            ),
+            DimensionAxis::Horizontal
+        );
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint),
+                DimensionAxis::Vertical,
+            ),
+            DimensionAxis::Vertical
+        );
     }
 
     #[test]

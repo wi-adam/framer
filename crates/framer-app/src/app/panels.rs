@@ -140,10 +140,13 @@ impl FramerApp {
                                 .clicked()
                             {
                                 self.dimension_tool.active = !self.dimension_tool.active;
-                                self.dimension_tool.first_anchor = None;
+                                self.dimension_tool.clear_picks();
                                 self.opening_drag = None;
                                 self.dimension_status = if self.dimension_tool.active {
-                                    Some("Pick two anchors in the wall view".to_owned())
+                                    Some(
+                                        "Pick two anchors, then move the pointer to place the dimension"
+                                            .to_owned(),
+                                    )
                                 } else {
                                     None
                                 };
