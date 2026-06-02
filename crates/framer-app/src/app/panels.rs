@@ -5,12 +5,15 @@ use eframe::egui::{
     Ui, Vec2,
 };
 use framer_core::{
-    DimensionAnchor, DimensionConstraint, DimensionKind, ElementId, Length, Level, Opening,
-    OpeningKind, Wall, WallJoin, WallJoinKind,
+    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
+    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind,
+    Wall, WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
-use super::labels::{diagnostic_code_prefix, dimension_kind_label, join_kind_label, kind_label};
+use super::labels::{
+    diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
+};
 use super::model_edit::{
     opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
@@ -133,7 +136,7 @@ impl FramerApp {
                         toolbar_divider(ui);
                         toolbar_group(ui, "TOOLS", |ui| {
                             if segment_button(ui, self.dimension_tool.active, "Dimension", 84.0)
-                                .on_hover_text("Place a wall dimension")
+                                .on_hover_text("Place a wall dimension (D)")
                                 .clicked()
                             {
                                 self.dimension_tool.active = !self.dimension_tool.active;
@@ -161,6 +164,20 @@ impl FramerApp {
                                             &mut self.dimension_tool.kind,
                                             DimensionKind::Reference,
                                             "Reference",
+                                        );
+                                    });
+                                ComboBox::from_id_salt("dimension-tool-axis")
+                                    .selected_text(dimension_axis_label(self.dimension_tool.axis))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.dimension_tool.axis,
+                                            DimensionAxis::Horizontal,
+                                            "Horizontal",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.dimension_tool.axis,
+                                            DimensionAxis::Vertical,
+                                            "Vertical",
                                         );
                                     });
                             }
@@ -463,10 +480,17 @@ impl FramerApp {
                 }
             }
             Selection::Wall => {
-                let wall_length_driver =
-                    self.model.walls.get(self.selected_wall).and_then(|wall| {
-                        driven_length_field(wall, DimensionVariableKey::WallLength)
-                    });
+                let (wall_length_driver, wall_height_driver) = self
+                    .model
+                    .walls
+                    .get(self.selected_wall)
+                    .map(|wall| {
+                        (
+                            driven_length_field(wall, DimensionVariableKey::WallLength),
+                            driven_length_field(wall, DimensionVariableKey::WallHeight),
+                        )
+                    })
+                    .unwrap_or_default();
                 let mut select_dimension = None;
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     if can_edit {
@@ -503,7 +527,7 @@ impl FramerApp {
                             "Height",
                             &mut wall.height,
                             length_drag_spec(48.0, 168.0, "ft"),
-                            None,
+                            wall_height_driver.as_ref(),
                             &mut select_dimension,
                         );
                         changed |= driven_length_drag(
@@ -599,7 +623,7 @@ impl FramerApp {
                                 "Height",
                                 &mut opening.height,
                                 length_drag_spec(12.0, 120.0, "in"),
-                                None,
+                                driven_fields.height.as_ref(),
                                 &mut select_dimension,
                             );
                             changed |= driven_length_drag(
@@ -612,7 +636,7 @@ impl FramerApp {
                                         .inches(),
                                     "in",
                                 ),
-                                None,
+                                driven_fields.bottom.as_ref(),
                                 &mut select_dimension,
                             );
 
@@ -628,9 +652,11 @@ impl FramerApp {
                     }
 
                     if remove {
-                        wall.openings.retain(|opening| opening.id.0 != id);
-                        self.selected = Selection::Wall;
-                        changed = true;
+                        let opening_id = ElementId::new(id.as_str());
+                        if wall.remove_opening(&opening_id) {
+                            self.selected = Selection::Wall;
+                            changed = true;
+                        }
                     }
                 }
 
@@ -1006,8 +1032,10 @@ fn dimension_inspector(
     let unsatisfied = wall.dimensions[dimension_index].kind == DimensionKind::Driving
         && !wall.is_driving_dimension_satisfied(&wall.dimensions[dimension_index]);
     let wall_length_inches = wall.length.inches().max(1.0);
+    let wall_height_inches = wall.height.inches().max(1.0);
     let mut changed = false;
     let mut apply_driving = false;
+    let axis_changed;
 
     {
         let dimension = &mut wall.dimensions[dimension_index];
@@ -1037,10 +1065,24 @@ fn dimension_inspector(
             }
         }
 
+        let previous_axis = dimension.axis;
+        ComboBox::from_label("Axis")
+            .selected_text(dimension_axis_label(dimension.axis))
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut dimension.axis, DimensionAxis::Horizontal, "Horizontal")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut dimension.axis, DimensionAxis::Vertical, "Vertical")
+                    .changed();
+            });
+        axis_changed = dimension.axis != previous_axis;
+
         egui::Grid::new("dimension-inspector")
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
+                summary_row(ui, "Axis", dimension_axis_label(dimension.axis));
                 summary_row(ui, "From", &start_label);
                 summary_row(ui, "To", &end_label);
                 summary_row(ui, "Measured", measured.to_string());
@@ -1048,7 +1090,11 @@ fn dimension_inspector(
 
         if dimension.kind == DimensionKind::Driving {
             let mut value = dimension.value.unwrap_or(measured);
-            if length_drag(ui, "Distance", &mut value, 1.0, wall_length_inches, "in") {
+            let axis_bound_inches = match dimension.axis {
+                DimensionAxis::Horizontal => wall_length_inches,
+                DimensionAxis::Vertical => wall_height_inches,
+            };
+            if length_drag(ui, "Distance", &mut value, 1.0, axis_bound_inches, "in") {
                 dimension.value = Some(value);
                 changed = true;
                 apply_driving = true;
@@ -1064,6 +1110,18 @@ fn dimension_inspector(
         ui.separator();
         if ui.button("Remove Dimension").clicked() {
             *remove = true;
+        }
+    }
+
+    if axis_changed {
+        changed = true;
+        if wall.dimensions[dimension_index].kind == DimensionKind::Driving {
+            let measured = wall
+                .dimension_measurement(&wall.dimensions[dimension_index])
+                .unwrap_or(Length::ZERO)
+                .max(Length::from_whole_inches(1));
+            wall.dimensions[dimension_index].value = Some(measured);
+            apply_driving = true;
         }
     }
 
@@ -1089,6 +1147,7 @@ fn dimension_summary(ui: &mut Ui, wall: &Wall, dimension: &DimensionConstraint) 
         .show(ui, |ui| {
             summary_row(ui, "Name", &dimension.name);
             summary_row(ui, "Kind", dimension_kind_label(dimension.kind));
+            summary_row(ui, "Axis", dimension_axis_label(dimension.axis));
             summary_row(ui, "From", dimension_anchor_label(wall, &dimension.start));
             summary_row(ui, "To", dimension_anchor_label(wall, &dimension.end));
             summary_row(ui, "Measured", measured);
@@ -1309,6 +1368,39 @@ fn dimension_anchor_label(wall: &Wall, anchor: &DimensionAnchor) -> String {
         DimensionAnchor::OpeningRight { opening } => {
             format!("{} right", opening_display_name(wall, &opening.0))
         }
+        DimensionAnchor::WallPoint {
+            horizontal,
+            vertical,
+        } => format!(
+            "Wall {}",
+            point_anchor_label(*horizontal, *vertical).to_ascii_lowercase()
+        ),
+        DimensionAnchor::OpeningPoint {
+            opening,
+            horizontal,
+            vertical,
+        } => format!(
+            "{} {}",
+            opening_display_name(wall, &opening.0),
+            point_anchor_label(*horizontal, *vertical).to_ascii_lowercase()
+        ),
+    }
+}
+
+fn point_anchor_label(
+    horizontal: DimensionHorizontalReference,
+    vertical: DimensionVerticalReference,
+) -> &'static str {
+    match (horizontal, vertical) {
+        (DimensionHorizontalReference::Left, DimensionVerticalReference::Bottom) => "Bottom left",
+        (DimensionHorizontalReference::Center, DimensionVerticalReference::Bottom) => "Bottom edge",
+        (DimensionHorizontalReference::Right, DimensionVerticalReference::Bottom) => "Bottom right",
+        (DimensionHorizontalReference::Left, DimensionVerticalReference::Center) => "Left edge",
+        (DimensionHorizontalReference::Center, DimensionVerticalReference::Center) => "Center",
+        (DimensionHorizontalReference::Right, DimensionVerticalReference::Center) => "Right edge",
+        (DimensionHorizontalReference::Left, DimensionVerticalReference::Top) => "Top left",
+        (DimensionHorizontalReference::Center, DimensionVerticalReference::Top) => "Top edge",
+        (DimensionHorizontalReference::Right, DimensionVerticalReference::Top) => "Top right",
     }
 }
 
@@ -1324,6 +1416,8 @@ fn opening_display_name(wall: &Wall, id: &str) -> String {
 struct OpeningDrivenFields {
     center: Option<DrivenField>,
     width: Option<DrivenField>,
+    bottom: Option<DrivenField>,
+    height: Option<DrivenField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1355,8 +1449,11 @@ impl DrivenField {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DimensionVariableKey {
     WallLength,
+    WallHeight,
     OpeningCenter(String),
     OpeningWidth(String),
+    OpeningBottom(String),
+    OpeningHeight(String),
 }
 
 fn opening_driven_fields(wall: &Wall, opening_id: &str) -> OpeningDrivenFields {
@@ -1368,6 +1465,14 @@ fn opening_driven_fields(wall: &Wall, opening_id: &str) -> OpeningDrivenFields {
         width: driven_length_field(
             wall,
             DimensionVariableKey::OpeningWidth(opening_id.to_owned()),
+        ),
+        bottom: driven_length_field(
+            wall,
+            DimensionVariableKey::OpeningBottom(opening_id.to_owned()),
+        ),
+        height: driven_length_field(
+            wall,
+            DimensionVariableKey::OpeningHeight(opening_id.to_owned()),
         ),
     }
 }
@@ -1406,6 +1511,9 @@ fn dimension_variable_probe_value(wall: &Wall, key: &DimensionVariableKey) -> Op
         DimensionVariableKey::WallLength => {
             alternate_length(value, Length::from_whole_inches(1), value + step, step)
         }
+        DimensionVariableKey::WallHeight => {
+            alternate_length(value, Length::from_whole_inches(48), value + step, step)
+        }
         DimensionVariableKey::OpeningCenter(opening_id) => {
             let opening = wall
                 .openings
@@ -1422,12 +1530,32 @@ fn dimension_variable_probe_value(wall: &Wall, key: &DimensionVariableKey) -> Op
             let max_width = opening.center.min(wall.length - opening.center) * 2;
             alternate_length(value, Length::from_whole_inches(12), max_width, step)
         }
+        DimensionVariableKey::OpeningBottom(opening_id) => {
+            let opening = wall
+                .openings
+                .iter()
+                .find(|opening| opening.id.0 == *opening_id)?;
+            alternate_length(value, Length::ZERO, wall.height - opening.height, step)
+        }
+        DimensionVariableKey::OpeningHeight(opening_id) => {
+            let opening = wall
+                .openings
+                .iter()
+                .find(|opening| opening.id.0 == *opening_id)?;
+            alternate_length(
+                value,
+                Length::from_whole_inches(12),
+                wall.height - opening.sill_height,
+                step,
+            )
+        }
     }
 }
 
 fn dimension_variable_value(wall: &Wall, key: &DimensionVariableKey) -> Option<Length> {
     match key {
         DimensionVariableKey::WallLength => Some(wall.length),
+        DimensionVariableKey::WallHeight => Some(wall.height),
         DimensionVariableKey::OpeningCenter(opening_id) => wall
             .openings
             .iter()
@@ -1438,6 +1566,16 @@ fn dimension_variable_value(wall: &Wall, key: &DimensionVariableKey) -> Option<L
             .iter()
             .find(|opening| opening.id.0 == *opening_id)
             .map(|opening| opening.width),
+        DimensionVariableKey::OpeningBottom(opening_id) => wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == *opening_id)
+            .map(|opening| opening.sill_height),
+        DimensionVariableKey::OpeningHeight(opening_id) => wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == *opening_id)
+            .map(|opening| opening.height),
     }
 }
 
@@ -1449,6 +1587,10 @@ fn set_dimension_variable_value(
     match key {
         DimensionVariableKey::WallLength => {
             set_wall_length_keep_direction(wall, value);
+            true
+        }
+        DimensionVariableKey::WallHeight => {
+            wall.height = value;
             true
         }
         DimensionVariableKey::OpeningCenter(opening_id) => {
@@ -1471,6 +1613,28 @@ fn set_dimension_variable_value(
                 return false;
             };
             opening.width = value;
+            true
+        }
+        DimensionVariableKey::OpeningBottom(opening_id) => {
+            let Some(opening) = wall
+                .openings
+                .iter_mut()
+                .find(|opening| opening.id.0 == *opening_id)
+            else {
+                return false;
+            };
+            opening.sill_height = value;
+            true
+        }
+        DimensionVariableKey::OpeningHeight(opening_id) => {
+            let Some(opening) = wall
+                .openings
+                .iter_mut()
+                .find(|opening| opening.id.0 == *opening_id)
+            else {
+                return false;
+            };
+            opening.height = value;
             true
         }
     }
@@ -1536,31 +1700,119 @@ fn dimension_constraint_variables(
     dimension: &DimensionConstraint,
 ) -> BTreeSet<DimensionVariableKey> {
     let mut variables = BTreeSet::new();
-    add_anchor_variables(&dimension.start, &mut variables);
-    add_anchor_variables(&dimension.end, &mut variables);
+    add_anchor_variables(&dimension.start, dimension.axis, &mut variables);
+    add_anchor_variables(&dimension.end, dimension.axis, &mut variables);
     variables
 }
 
-fn add_anchor_variables(anchor: &DimensionAnchor, variables: &mut BTreeSet<DimensionVariableKey>) {
-    match anchor {
-        DimensionAnchor::WallStart => {}
-        DimensionAnchor::WallEnd => {
+fn add_anchor_variables(
+    anchor: &DimensionAnchor,
+    axis: DimensionAxis,
+    variables: &mut BTreeSet<DimensionVariableKey>,
+) {
+    match axis {
+        DimensionAxis::Horizontal => match anchor {
+            DimensionAnchor::WallStart => {}
+            DimensionAnchor::WallEnd => {
+                variables.insert(DimensionVariableKey::WallLength);
+            }
+            DimensionAnchor::WallPoint { horizontal, .. } => {
+                add_horizontal_wall_variables(*horizontal, variables);
+            }
+            DimensionAnchor::OpeningCenter { opening } => {
+                variables.insert(DimensionVariableKey::OpeningCenter(opening.0.clone()));
+            }
+            DimensionAnchor::OpeningLeft { opening }
+            | DimensionAnchor::OpeningRight { opening } => {
+                add_horizontal_opening_variables(&opening.0, variables);
+            }
+            DimensionAnchor::OpeningPoint {
+                opening,
+                horizontal,
+                ..
+            } => {
+                add_horizontal_opening_variables_for_reference(&opening.0, *horizontal, variables);
+            }
+        },
+        DimensionAxis::Vertical => match anchor {
+            DimensionAnchor::WallStart | DimensionAnchor::WallEnd => {}
+            DimensionAnchor::WallPoint { vertical, .. } => {
+                add_vertical_wall_variables(*vertical, variables);
+            }
+            DimensionAnchor::OpeningLeft { opening }
+            | DimensionAnchor::OpeningCenter { opening }
+            | DimensionAnchor::OpeningRight { opening } => {
+                add_vertical_opening_variables_for_reference(
+                    &opening.0,
+                    DimensionVerticalReference::Center,
+                    variables,
+                );
+            }
+            DimensionAnchor::OpeningPoint {
+                opening, vertical, ..
+            } => {
+                add_vertical_opening_variables_for_reference(&opening.0, *vertical, variables);
+            }
+        },
+    }
+}
+
+fn add_horizontal_wall_variables(
+    horizontal: DimensionHorizontalReference,
+    variables: &mut BTreeSet<DimensionVariableKey>,
+) {
+    match horizontal {
+        DimensionHorizontalReference::Left => {}
+        DimensionHorizontalReference::Center | DimensionHorizontalReference::Right => {
             variables.insert(DimensionVariableKey::WallLength);
         }
-        DimensionAnchor::OpeningCenter { opening } => {
-            variables.insert(DimensionVariableKey::OpeningCenter(opening.0.clone()));
+    }
+}
+
+fn add_vertical_wall_variables(
+    vertical: DimensionVerticalReference,
+    variables: &mut BTreeSet<DimensionVariableKey>,
+) {
+    match vertical {
+        DimensionVerticalReference::Bottom => {}
+        DimensionVerticalReference::Center | DimensionVerticalReference::Top => {
+            variables.insert(DimensionVariableKey::WallHeight);
         }
-        DimensionAnchor::OpeningLeft { opening } | DimensionAnchor::OpeningRight { opening } => {
-            variables.insert(DimensionVariableKey::OpeningCenter(opening.0.clone()));
-            variables.insert(DimensionVariableKey::OpeningWidth(opening.0.clone()));
-        }
+    }
+}
+
+fn add_horizontal_opening_variables(id: &str, variables: &mut BTreeSet<DimensionVariableKey>) {
+    variables.insert(DimensionVariableKey::OpeningCenter(id.to_owned()));
+    variables.insert(DimensionVariableKey::OpeningWidth(id.to_owned()));
+}
+
+fn add_horizontal_opening_variables_for_reference(
+    id: &str,
+    horizontal: DimensionHorizontalReference,
+    variables: &mut BTreeSet<DimensionVariableKey>,
+) {
+    variables.insert(DimensionVariableKey::OpeningCenter(id.to_owned()));
+    if !matches!(horizontal, DimensionHorizontalReference::Center) {
+        variables.insert(DimensionVariableKey::OpeningWidth(id.to_owned()));
+    }
+}
+
+fn add_vertical_opening_variables_for_reference(
+    id: &str,
+    vertical: DimensionVerticalReference,
+    variables: &mut BTreeSet<DimensionVariableKey>,
+) {
+    variables.insert(DimensionVariableKey::OpeningBottom(id.to_owned()));
+    if !matches!(vertical, DimensionVerticalReference::Bottom) {
+        variables.insert(DimensionVariableKey::OpeningHeight(id.to_owned()));
     }
 }
 
 fn driving_dimension_source_label(wall: &Wall, dimension: &DimensionConstraint) -> String {
     let mut label = format!(
-        "{}: {} to {}",
+        "{}: {} {} to {}",
         dimension.name,
+        dimension_axis_label(dimension.axis).to_ascii_lowercase(),
         dimension_anchor_label(wall, &dimension.start),
         dimension_anchor_label(wall, &dimension.end)
     );
@@ -1769,7 +2021,10 @@ fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framer_core::{CodeProfile, DimensionDirection};
+    use framer_core::{
+        CodeProfile, DimensionAxis, DimensionDirection, DimensionHorizontalReference,
+        DimensionVerticalReference,
+    };
 
     #[derive(Debug, Clone, Copy)]
     enum WindowAnchor {
@@ -1920,5 +2175,72 @@ mod tests {
                 .map(|driver| driver.dimension_ids.clone()),
             Some(vec!["center".to_owned(), "right-offset".to_owned()])
         );
+    }
+
+    #[test]
+    fn vertical_height_dimension_marks_opening_height_driven() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(
+            driving_dimension(
+                "height",
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Bottom,
+                },
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Top,
+                },
+                Length::from_feet(4.0),
+            )
+            .with_axis(DimensionAxis::Vertical),
+        );
+        wall.apply_driving_dimensions();
+
+        let fields = opening_driven_fields(&wall, "window");
+
+        assert_eq!(
+            fields
+                .height
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["height".to_owned()])
+        );
+        assert!(fields.bottom.is_none());
+    }
+
+    #[test]
+    fn vertical_bottom_offset_marks_opening_bottom_driven() {
+        let mut wall = wall_with_window(Length::from_feet(6.0), Length::from_feet(3.0));
+        wall.dimensions.push(
+            driving_dimension(
+                "bottom-offset",
+                DimensionAnchor::WallPoint {
+                    horizontal: DimensionHorizontalReference::Left,
+                    vertical: DimensionVerticalReference::Bottom,
+                },
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Bottom,
+                },
+                Length::from_feet(4.0),
+            )
+            .with_axis(DimensionAxis::Vertical),
+        );
+        wall.apply_driving_dimensions();
+
+        let fields = opening_driven_fields(&wall, "window");
+
+        assert_eq!(
+            fields
+                .bottom
+                .as_ref()
+                .map(|driver| driver.dimension_ids.clone()),
+            Some(vec!["bottom-offset".to_owned()])
+        );
+        assert!(fields.height.is_none());
     }
 }

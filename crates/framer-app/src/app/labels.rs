@@ -1,4 +1,4 @@
-use framer_core::{DimensionKind, OpeningKind, WallJoinKind};
+use framer_core::{DimensionAxis, DimensionKind, OpeningKind, WallJoinKind};
 use framer_solver::DiagnosticSeverity;
 
 pub(super) fn kind_label(kind: OpeningKind) -> &'static str {
@@ -24,6 +24,13 @@ pub(super) fn dimension_kind_label(kind: DimensionKind) -> &'static str {
     match kind {
         DimensionKind::Driving => "Driving",
         DimensionKind::Reference => "Reference",
+    }
+}
+
+pub(super) fn dimension_axis_label(axis: DimensionAxis) -> &'static str {
+    match axis {
+        DimensionAxis::Horizontal => "Horizontal",
+        DimensionAxis::Vertical => "Vertical",
     }
 }
 

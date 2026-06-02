@@ -155,7 +155,7 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v3 `.framer` format is documented in
+The current v4 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only;
 derived framing plans, cached view state, and exports remain disposable outputs
 that are regenerated from the project.

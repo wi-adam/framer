@@ -503,7 +503,7 @@ impl Wall {
 
         let mut dimension_ids = BTreeSet::new();
         for dimension in &self.dimensions {
-            dimension.validate(&opening_ids, self.length)?;
+            dimension.validate(&opening_ids, self.length, self.height)?;
             insert_unique_id(&mut dimension_ids, &dimension.id)?;
             if self.would_overconstrain_driving_dimension(dimension) {
                 return Err(ModelError::OverconstrainedDimension {
@@ -582,9 +582,21 @@ impl Wall {
     }
 
     pub fn dimension_measurement(&self, dimension: &DimensionConstraint) -> Option<Length> {
-        let start = dimension.start.local_x(self)?;
-        let end = dimension.end.local_x(self)?;
+        let start = dimension.start.coordinate(self, dimension.axis)?;
+        let end = dimension.end.coordinate(self, dimension.axis)?;
         Some((end - start).abs())
+    }
+
+    pub fn remove_opening(&mut self, opening: &ElementId) -> bool {
+        let previous_opening_count = self.openings.len();
+        self.openings.retain(|candidate| candidate.id != *opening);
+        if self.openings.len() == previous_opening_count {
+            return false;
+        }
+
+        self.dimensions
+            .retain(|dimension| !dimension.references_opening(opening));
+        true
     }
 
     pub fn is_driving_dimension_satisfied(&self, dimension: &DimensionConstraint) -> bool {
@@ -614,8 +626,8 @@ impl Wall {
         }
 
         let value = dimension.value?;
-        let start = dimension.start.local_x(self)?;
-        let end = dimension.end.local_x(self)?;
+        let start = dimension.start.coordinate(self, dimension.axis)?;
+        let end = dimension.end.coordinate(self, dimension.axis)?;
         let expected = match dimension.direction {
             DimensionDirection::Forward => value,
             DimensionDirection::Backward => Length::ZERO - value,
@@ -655,9 +667,12 @@ impl Wall {
     fn dimension_variables(&self) -> BTreeSet<ConstraintVariable> {
         let mut variables = BTreeSet::new();
         variables.insert(wall_constraint_variable(&self.id, "length"));
+        variables.insert(wall_constraint_variable(&self.id, "height"));
         for opening in &self.openings {
             variables.insert(opening_constraint_variable(&opening.id, "center-x"));
             variables.insert(opening_constraint_variable(&opening.id, "width"));
+            variables.insert(opening_constraint_variable(&opening.id, "bottom"));
+            variables.insert(opening_constraint_variable(&opening.id, "height"));
         }
         variables
     }
@@ -671,8 +686,8 @@ impl Wall {
         }
 
         let value = dimension.value?;
-        let start = self.dimension_anchor_expression(&dimension.start)?;
-        let mut expression = self.dimension_anchor_expression(&dimension.end)?;
+        let start = self.dimension_anchor_expression(&dimension.start, dimension.axis)?;
+        let mut expression = self.dimension_anchor_expression(&dimension.end, dimension.axis)?;
         expression.add_expression(&start, -1);
         let target = match dimension.direction {
             DimensionDirection::Forward => value * 2,
@@ -685,31 +700,87 @@ impl Wall {
         ))
     }
 
-    fn dimension_anchor_expression(&self, anchor: &DimensionAnchor) -> Option<LinearExpression> {
+    fn dimension_anchor_expression(
+        &self,
+        anchor: &DimensionAnchor,
+        axis: DimensionAxis,
+    ) -> Option<LinearExpression> {
         let mut expression = LinearExpression::new();
-        match anchor {
-            DimensionAnchor::WallStart => {}
-            DimensionAnchor::WallEnd => {
-                expression.add_term(wall_constraint_variable(&self.id, "length"), 2);
-            }
-            DimensionAnchor::OpeningLeft { opening } => {
-                self.add_opening_anchor_terms(&mut expression, opening, -1)?;
-            }
-            DimensionAnchor::OpeningCenter { opening } => {
-                self.add_opening_anchor_terms(&mut expression, opening, 0)?;
-            }
-            DimensionAnchor::OpeningRight { opening } => {
-                self.add_opening_anchor_terms(&mut expression, opening, 1)?;
-            }
+        match axis {
+            DimensionAxis::Horizontal => match anchor {
+                DimensionAnchor::WallStart => {}
+                DimensionAnchor::WallEnd => {
+                    add_wall_horizontal_anchor_terms(
+                        &mut expression,
+                        &self.id,
+                        DimensionHorizontalReference::Right,
+                    );
+                }
+                DimensionAnchor::OpeningLeft { opening } => {
+                    self.add_opening_horizontal_anchor_terms(
+                        &mut expression,
+                        opening,
+                        DimensionHorizontalReference::Left,
+                    )?;
+                }
+                DimensionAnchor::OpeningCenter { opening } => {
+                    self.add_opening_horizontal_anchor_terms(
+                        &mut expression,
+                        opening,
+                        DimensionHorizontalReference::Center,
+                    )?;
+                }
+                DimensionAnchor::OpeningRight { opening } => {
+                    self.add_opening_horizontal_anchor_terms(
+                        &mut expression,
+                        opening,
+                        DimensionHorizontalReference::Right,
+                    )?;
+                }
+                DimensionAnchor::WallPoint { horizontal, .. } => {
+                    add_wall_horizontal_anchor_terms(&mut expression, &self.id, *horizontal);
+                }
+                DimensionAnchor::OpeningPoint {
+                    opening,
+                    horizontal,
+                    ..
+                } => {
+                    self.add_opening_horizontal_anchor_terms(
+                        &mut expression,
+                        opening,
+                        *horizontal,
+                    )?;
+                }
+            },
+            DimensionAxis::Vertical => match anchor {
+                DimensionAnchor::WallStart | DimensionAnchor::WallEnd => {}
+                DimensionAnchor::OpeningLeft { opening }
+                | DimensionAnchor::OpeningCenter { opening }
+                | DimensionAnchor::OpeningRight { opening } => {
+                    self.add_opening_vertical_anchor_terms(
+                        &mut expression,
+                        opening,
+                        DimensionVerticalReference::Center,
+                    )?;
+                }
+                DimensionAnchor::WallPoint { vertical, .. } => {
+                    add_wall_vertical_anchor_terms(&mut expression, &self.id, *vertical);
+                }
+                DimensionAnchor::OpeningPoint {
+                    opening, vertical, ..
+                } => {
+                    self.add_opening_vertical_anchor_terms(&mut expression, opening, *vertical)?;
+                }
+            },
         }
         Some(expression)
     }
 
-    fn add_opening_anchor_terms(
+    fn add_opening_horizontal_anchor_terms(
         &self,
         expression: &mut LinearExpression,
         opening: &ElementId,
-        width_coefficient: i64,
+        horizontal: DimensionHorizontalReference,
     ) -> Option<()> {
         if !self
             .openings
@@ -720,11 +791,41 @@ impl Wall {
         }
 
         expression.add_term(opening_constraint_variable(opening, "center-x"), 2);
-        if width_coefficient != 0 {
-            expression.add_term(
-                opening_constraint_variable(opening, "width"),
-                width_coefficient,
-            );
+        match horizontal {
+            DimensionHorizontalReference::Left => {
+                expression.add_term(opening_constraint_variable(opening, "width"), -1);
+            }
+            DimensionHorizontalReference::Center => {}
+            DimensionHorizontalReference::Right => {
+                expression.add_term(opening_constraint_variable(opening, "width"), 1);
+            }
+        }
+        Some(())
+    }
+
+    fn add_opening_vertical_anchor_terms(
+        &self,
+        expression: &mut LinearExpression,
+        opening: &ElementId,
+        vertical: DimensionVerticalReference,
+    ) -> Option<()> {
+        if !self
+            .openings
+            .iter()
+            .any(|candidate| candidate.id == *opening)
+        {
+            return None;
+        }
+
+        expression.add_term(opening_constraint_variable(opening, "bottom"), 2);
+        match vertical {
+            DimensionVerticalReference::Bottom => {}
+            DimensionVerticalReference::Center => {
+                expression.add_term(opening_constraint_variable(opening, "height"), 1);
+            }
+            DimensionVerticalReference::Top => {
+                expression.add_term(opening_constraint_variable(opening, "height"), 2);
+            }
         }
         Some(())
     }
@@ -780,6 +881,7 @@ impl Wall {
     fn dimension_current_values(&self) -> BTreeMap<ConstraintVariable, Length> {
         let mut values = BTreeMap::new();
         values.insert(wall_constraint_variable(&self.id, "length"), self.length);
+        values.insert(wall_constraint_variable(&self.id, "height"), self.height);
         for opening in &self.openings {
             values.insert(
                 opening_constraint_variable(&opening.id, "center-x"),
@@ -788,6 +890,14 @@ impl Wall {
             values.insert(
                 opening_constraint_variable(&opening.id, "width"),
                 opening.width,
+            );
+            values.insert(
+                opening_constraint_variable(&opening.id, "bottom"),
+                opening.sill_height,
+            );
+            values.insert(
+                opening_constraint_variable(&opening.id, "height"),
+                opening.height,
             );
         }
         values
@@ -801,6 +911,13 @@ impl Wall {
         if next_length <= Length::ZERO {
             return false;
         }
+        let next_height = values
+            .get(&wall_constraint_variable(&self.id, "height"))
+            .copied()
+            .unwrap_or(self.height);
+        if next_height <= Length::ZERO {
+            return false;
+        }
 
         let mut next_openings = self.openings.clone();
         for opening in &mut next_openings {
@@ -812,17 +929,31 @@ impl Wall {
                 .get(&opening_constraint_variable(&opening.id, "width"))
                 .copied()
                 .unwrap_or(opening.width);
+            opening.sill_height = values
+                .get(&opening_constraint_variable(&opening.id, "bottom"))
+                .copied()
+                .unwrap_or(opening.sill_height);
+            opening.height = values
+                .get(&opening_constraint_variable(&opening.id, "height"))
+                .copied()
+                .unwrap_or(opening.height);
 
             if opening.width <= Length::ZERO
+                || opening.height <= Length::ZERO
                 || opening.left() < Length::ZERO
                 || opening.right() > next_length
+                || opening.sill_height < Length::ZERO
+                || opening.top() > next_height
             {
                 return false;
             }
         }
 
-        let changed = self.length != next_length || self.openings != next_openings;
+        let changed = self.length != next_length
+            || self.height != next_height
+            || self.openings != next_openings;
         self.set_length_keep_direction(next_length);
+        self.height = next_height;
         self.openings = next_openings;
         changed
     }
@@ -847,6 +978,8 @@ pub struct DimensionConstraint {
     pub id: ElementId,
     pub name: String,
     pub kind: DimensionKind,
+    #[serde(default, skip_serializing_if = "DimensionAxis::is_horizontal")]
+    pub axis: DimensionAxis,
     pub start: DimensionAnchor,
     pub end: DimensionAnchor,
     #[serde(default)]
@@ -869,6 +1002,7 @@ impl DimensionConstraint {
             id: ElementId::new(id),
             name: name.into(),
             kind,
+            axis: DimensionAxis::Horizontal,
             start,
             end,
             direction,
@@ -876,10 +1010,16 @@ impl DimensionConstraint {
         }
     }
 
+    pub fn with_axis(mut self, axis: DimensionAxis) -> Self {
+        self.axis = axis;
+        self
+    }
+
     fn validate(
         &self,
         opening_ids: &BTreeSet<ElementId>,
         wall_length: Length,
+        wall_height: Length,
     ) -> Result<(), ModelError> {
         validate_element_id(&self.id)?;
         self.start.validate(opening_ids)?;
@@ -898,7 +1038,11 @@ impl DimensionConstraint {
                         dimension: self.id.clone(),
                     });
                 };
-                if value <= Length::ZERO || value > wall_length {
+                let wall_bound = match self.axis {
+                    DimensionAxis::Horizontal => wall_length,
+                    DimensionAxis::Vertical => wall_height,
+                };
+                if value <= Length::ZERO || value > wall_bound {
                     return Err(ModelError::InvalidDimensionValue {
                         dimension: self.id.clone(),
                     });
@@ -915,6 +1059,10 @@ impl DimensionConstraint {
 
         Ok(())
     }
+
+    pub fn references_opening(&self, opening: &ElementId) -> bool {
+        self.start.references_opening(opening) || self.end.references_opening(opening)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -924,10 +1072,37 @@ pub enum DimensionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DimensionAxis {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+impl DimensionAxis {
+    pub fn is_horizontal(&self) -> bool {
+        matches!(self, Self::Horizontal)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DimensionDirection {
     #[default]
     Forward,
     Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DimensionHorizontalReference {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DimensionVerticalReference {
+    Bottom,
+    Center,
+    Top,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -935,12 +1110,34 @@ pub enum DimensionDirection {
 pub enum DimensionAnchor {
     WallStart,
     WallEnd,
-    OpeningLeft { opening: ElementId },
-    OpeningCenter { opening: ElementId },
-    OpeningRight { opening: ElementId },
+    OpeningLeft {
+        opening: ElementId,
+    },
+    OpeningCenter {
+        opening: ElementId,
+    },
+    OpeningRight {
+        opening: ElementId,
+    },
+    WallPoint {
+        horizontal: DimensionHorizontalReference,
+        vertical: DimensionVerticalReference,
+    },
+    OpeningPoint {
+        opening: ElementId,
+        horizontal: DimensionHorizontalReference,
+        vertical: DimensionVerticalReference,
+    },
 }
 
 impl DimensionAnchor {
+    pub fn coordinate(&self, wall: &Wall, axis: DimensionAxis) -> Option<Length> {
+        match axis {
+            DimensionAxis::Horizontal => self.local_x(wall),
+            DimensionAxis::Vertical => self.local_y(wall),
+        }
+    }
+
     pub fn local_x(&self, wall: &Wall) -> Option<Length> {
         match self {
             Self::WallStart => Some(Length::ZERO),
@@ -960,6 +1157,55 @@ impl DimensionAnchor {
                 .iter()
                 .find(|candidate| candidate.id == *opening)
                 .map(Opening::right),
+            Self::WallPoint { horizontal, .. } => {
+                Some(wall_horizontal_coordinate(wall, *horizontal))
+            }
+            Self::OpeningPoint {
+                opening,
+                horizontal,
+                ..
+            } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(|opening| opening_horizontal_coordinate(opening, *horizontal)),
+        }
+    }
+
+    pub fn local_y(&self, wall: &Wall) -> Option<Length> {
+        match self {
+            Self::WallStart | Self::WallEnd => Some(Length::ZERO),
+            Self::OpeningLeft { opening }
+            | Self::OpeningCenter { opening }
+            | Self::OpeningRight { opening } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(|opening| {
+                    opening_vertical_coordinate(opening, DimensionVerticalReference::Center)
+                }),
+            Self::WallPoint { vertical, .. } => Some(wall_vertical_coordinate(wall, *vertical)),
+            Self::OpeningPoint {
+                opening, vertical, ..
+            } => wall
+                .openings
+                .iter()
+                .find(|candidate| candidate.id == *opening)
+                .map(|opening| opening_vertical_coordinate(opening, *vertical)),
+        }
+    }
+
+    pub fn point(&self, wall: &Wall) -> Option<(Length, Length)> {
+        Some((self.local_x(wall)?, self.local_y(wall)?))
+    }
+
+    pub fn references_opening(&self, opening_id: &ElementId) -> bool {
+        match self {
+            Self::OpeningLeft { opening }
+            | Self::OpeningCenter { opening }
+            | Self::OpeningRight { opening }
+            | Self::OpeningPoint { opening, .. } => opening == opening_id,
+            Self::WallStart | Self::WallEnd | Self::WallPoint { .. } => false,
         }
     }
 
@@ -967,8 +1213,9 @@ impl DimensionAnchor {
         let opening = match self {
             Self::OpeningLeft { opening }
             | Self::OpeningCenter { opening }
-            | Self::OpeningRight { opening } => Some(opening),
-            Self::WallStart | Self::WallEnd => None,
+            | Self::OpeningRight { opening }
+            | Self::OpeningPoint { opening, .. } => Some(opening),
+            Self::WallStart | Self::WallEnd | Self::WallPoint { .. } => None,
         };
 
         if let Some(opening) = opening
@@ -1218,6 +1465,73 @@ fn opening_constraint_variable(opening: &ElementId, attribute: &str) -> Constrai
     ConstraintVariable::new(opening.0.clone(), attribute)
 }
 
+fn wall_horizontal_coordinate(wall: &Wall, horizontal: DimensionHorizontalReference) -> Length {
+    match horizontal {
+        DimensionHorizontalReference::Left => Length::ZERO,
+        DimensionHorizontalReference::Center => wall.length / 2,
+        DimensionHorizontalReference::Right => wall.length,
+    }
+}
+
+fn wall_vertical_coordinate(wall: &Wall, vertical: DimensionVerticalReference) -> Length {
+    match vertical {
+        DimensionVerticalReference::Bottom => Length::ZERO,
+        DimensionVerticalReference::Center => wall.height / 2,
+        DimensionVerticalReference::Top => wall.height,
+    }
+}
+
+fn opening_horizontal_coordinate(
+    opening: &Opening,
+    horizontal: DimensionHorizontalReference,
+) -> Length {
+    match horizontal {
+        DimensionHorizontalReference::Left => opening.left(),
+        DimensionHorizontalReference::Center => opening.center,
+        DimensionHorizontalReference::Right => opening.right(),
+    }
+}
+
+fn opening_vertical_coordinate(opening: &Opening, vertical: DimensionVerticalReference) -> Length {
+    match vertical {
+        DimensionVerticalReference::Bottom => opening.sill_height,
+        DimensionVerticalReference::Center => opening.sill_height + opening.height / 2,
+        DimensionVerticalReference::Top => opening.top(),
+    }
+}
+
+fn add_wall_horizontal_anchor_terms(
+    expression: &mut LinearExpression,
+    wall: &ElementId,
+    horizontal: DimensionHorizontalReference,
+) {
+    match horizontal {
+        DimensionHorizontalReference::Left => {}
+        DimensionHorizontalReference::Center => {
+            expression.add_term(wall_constraint_variable(wall, "length"), 1);
+        }
+        DimensionHorizontalReference::Right => {
+            expression.add_term(wall_constraint_variable(wall, "length"), 2);
+        }
+    }
+}
+
+fn add_wall_vertical_anchor_terms(
+    expression: &mut LinearExpression,
+    wall: &ElementId,
+    vertical: DimensionVerticalReference,
+) {
+    match vertical {
+        DimensionVerticalReference::Bottom => {}
+        DimensionVerticalReference::Center => {
+            expression.add_term(wall_constraint_variable(wall, "height"), 1);
+        }
+        DimensionVerticalReference::Top => {
+            expression.add_term(wall_constraint_variable(wall, "height"), 2);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,6 +1681,66 @@ mod tests {
     }
 
     #[test]
+    fn removing_opening_cascades_dimensions_that_reference_it() {
+        let mut wall = wall_with_window(Length::from_feet(4.0), Length::from_feet(3.0));
+        wall.openings.push(Opening::window(
+            "other-window",
+            "Other window",
+            Length::from_feet(9.0),
+            Length::from_feet(2.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "window-offset",
+            "Window offset",
+            DimensionKind::Reference,
+            DimensionAnchor::WallStart,
+            window_anchor(WindowAnchor::Left),
+            DimensionDirection::Forward,
+            None,
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "other-offset",
+            "Other offset",
+            DimensionKind::Reference,
+            DimensionAnchor::WallStart,
+            DimensionAnchor::OpeningLeft {
+                opening: ElementId::new("other-window"),
+            },
+            DimensionDirection::Forward,
+            None,
+        ));
+        wall.dimensions.push(DimensionConstraint::new(
+            "wall-length",
+            "Wall length",
+            DimensionKind::Reference,
+            DimensionAnchor::WallStart,
+            DimensionAnchor::WallEnd,
+            DimensionDirection::Forward,
+            None,
+        ));
+
+        assert!(wall.remove_opening(&ElementId::new("window")));
+
+        assert_eq!(
+            wall.openings
+                .iter()
+                .map(|opening| opening.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other-window"]
+        );
+        assert_eq!(
+            wall.dimensions
+                .iter()
+                .map(|dimension| dimension.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other-offset", "wall-length"]
+        );
+        wall.validate().unwrap();
+    }
+
+    #[test]
     fn driving_dimension_moves_opening_anchor() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
@@ -1436,6 +1810,68 @@ mod tests {
             .unwrap();
         assert_eq!(window.width, Length::from_feet(4.0));
         assert_eq!(window.center, Length::from_feet(4.0));
+    }
+
+    #[test]
+    fn vertical_driving_dimension_moves_opening_top_anchor() {
+        let mut wall = wall_with_window(Length::from_feet(4.0), Length::from_feet(3.0));
+        wall.dimensions.push(
+            DimensionConstraint::new(
+                "top-offset",
+                "Top offset",
+                DimensionKind::Driving,
+                DimensionAnchor::WallPoint {
+                    horizontal: DimensionHorizontalReference::Left,
+                    vertical: DimensionVerticalReference::Bottom,
+                },
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Top,
+                },
+                DimensionDirection::Forward,
+                Some(Length::from_feet(7.0)),
+            )
+            .with_axis(DimensionAxis::Vertical),
+        );
+
+        assert!(wall.apply_driving_dimensions());
+
+        let window = &wall.openings[0];
+        assert_eq!(window.top(), Length::from_feet(7.0));
+        assert_eq!(window.height, Length::from_feet(3.0));
+        assert_eq!(window.sill_height, Length::from_feet(4.0));
+    }
+
+    #[test]
+    fn vertical_driving_dimension_between_opening_edges_resizes_opening() {
+        let mut wall = wall_with_window(Length::from_feet(4.0), Length::from_feet(3.0));
+        wall.dimensions.push(
+            DimensionConstraint::new(
+                "opening-height",
+                "Opening height",
+                DimensionKind::Driving,
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Bottom,
+                },
+                DimensionAnchor::OpeningPoint {
+                    opening: ElementId::new("window"),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Top,
+                },
+                DimensionDirection::Forward,
+                Some(Length::from_feet(4.0)),
+            )
+            .with_axis(DimensionAxis::Vertical),
+        );
+
+        assert!(wall.apply_driving_dimensions());
+
+        let window = &wall.openings[0];
+        assert_eq!(window.height, Length::from_feet(4.0));
+        assert_eq!(window.sill_height, Length::from_feet(3.0));
     }
 
     #[test]

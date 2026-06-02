@@ -12,8 +12,8 @@ use eframe::egui::{
     TextStyle, Vec2,
 };
 use framer_core::{
-    BuildingModel, DimensionAnchor, DimensionConstraint, DimensionDirection, DimensionKind, Length,
-    Opening, OpeningKind, Wall, load_project as load_project_document,
+    BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
+    DimensionKind, Length, Opening, OpeningKind, Wall, load_project as load_project_document,
     save_project as save_project_document,
 };
 use framer_solver::{
@@ -104,6 +104,7 @@ enum ViewClick {
 struct DimensionToolState {
     active: bool,
     kind: DimensionKind,
+    axis: DimensionAxis,
     first_anchor: Option<DimensionAnchorPick>,
 }
 
@@ -118,6 +119,7 @@ impl Default for DimensionToolState {
         Self {
             active: false,
             kind: DimensionKind::Driving,
+            axis: DimensionAxis::Horizontal,
             first_anchor: None,
         }
     }
@@ -127,6 +129,13 @@ fn dimension_kind_name(kind: DimensionKind) -> &'static str {
     match kind {
         DimensionKind::Driving => "driving",
         DimensionKind::Reference => "reference",
+    }
+}
+
+fn dimension_axis_name(axis: DimensionAxis) -> &'static str {
+    match axis {
+        DimensionAxis::Horizontal => "horizontal",
+        DimensionAxis::Vertical => "vertical",
     }
 }
 
@@ -320,6 +329,77 @@ impl FramerApp {
         }
     }
 
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.text_edit_focused() {
+            return;
+        }
+
+        let (escape_pressed, dimension_pressed) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::D),
+            )
+        });
+
+        if escape_pressed {
+            self.exit_current_context();
+        } else if dimension_pressed {
+            self.activate_dimension_tool();
+        }
+    }
+
+    fn activate_dimension_tool(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            self.set_workspace_mode(WorkspaceMode::Design);
+        }
+
+        self.dimension_tool.active = true;
+        self.dimension_tool.first_anchor = None;
+        self.opening_drag = None;
+        self.dimension_status = Some("Pick two anchors in the wall view".to_owned());
+        self.viewport_mode = ViewportMode::Elevation;
+    }
+
+    fn exit_current_context(&mut self) {
+        if self.opening_drag.is_some() {
+            self.opening_drag = None;
+            return;
+        }
+
+        let dimension_tool_was_active = self.dimension_tool.active;
+        let dimension_was_selected = matches!(self.selected, Selection::Dimension(_));
+        self.dimension_tool.active = false;
+        self.dimension_tool.first_anchor = None;
+        if dimension_was_selected {
+            self.dimension_status = None;
+            self.selected = Selection::Wall;
+            return;
+        }
+        if dimension_tool_was_active {
+            self.dimension_status = None;
+            return;
+        }
+
+        match &self.selected {
+            Selection::Wall => {}
+            Selection::Member { wall_id, .. } => {
+                if let Some(index) = self
+                    .model
+                    .walls
+                    .iter()
+                    .position(|wall| wall.id.0 == *wall_id)
+                {
+                    self.selected_wall = index;
+                }
+                self.selected = Selection::Wall;
+            }
+            Selection::Level(_) | Selection::Opening(_) | Selection::Join(_) => {
+                self.selected = Selection::Wall;
+            }
+            Selection::Dimension(_) => unreachable!("dimension selections exit above"),
+        }
+    }
+
     fn select_authored_for_design_mode(&mut self) {
         if let Selection::Member { wall_id, .. } = &self.selected {
             if let Some(index) = self
@@ -465,15 +545,16 @@ impl FramerApp {
         let Some(wall) = self.model.walls.get_mut(wall_index) else {
             return;
         };
-        let Some(start_x) = first.anchor.local_x(wall) else {
+        let axis = self.dimension_tool.axis;
+        let Some(start_coordinate) = first.anchor.coordinate(wall, axis) else {
             self.dimension_status = Some("The first dimension anchor no longer exists".to_owned());
             return;
         };
-        let Some(end_x) = pick.anchor.local_x(wall) else {
+        let Some(end_coordinate) = pick.anchor.coordinate(wall, axis) else {
             self.dimension_status = Some("The second dimension anchor no longer exists".to_owned());
             return;
         };
-        let measured = (end_x - start_x).abs();
+        let measured = (end_coordinate - start_coordinate).abs();
         if measured <= Length::ZERO {
             self.dimension_status = Some("Dimension anchors are coincident".to_owned());
             self.dimension_tool.first_anchor = Some(first);
@@ -482,7 +563,7 @@ impl FramerApp {
 
         let kind = self.dimension_tool.kind;
         let (id, index) = next_dimension_id(wall);
-        let direction = if end_x >= start_x {
+        let direction = if end_coordinate >= start_coordinate {
             DimensionDirection::Forward
         } else {
             DimensionDirection::Backward
@@ -500,7 +581,8 @@ impl FramerApp {
             pick.anchor,
             direction,
             value,
-        );
+        )
+        .with_axis(axis);
         if wall.would_overconstrain_driving_dimension(&dimension) {
             self.dimension_status =
                 Some("Driving dimension would overconstrain this wall".to_owned());
@@ -510,7 +592,11 @@ impl FramerApp {
 
         self.selected_wall = wall_index;
         self.selected = Selection::Dimension(id);
-        self.dimension_status = Some(format!("Added {} dimension", dimension_kind_name(kind)));
+        self.dimension_status = Some(format!(
+            "Added {} {} dimension",
+            dimension_axis_name(axis),
+            dimension_kind_name(kind)
+        ));
         self.rebuild();
     }
 
@@ -638,6 +724,10 @@ fn configure_app_style(ctx: &egui::Context) {
 }
 
 impl eframe::App for FramerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_keyboard_shortcuts(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
         Panel::left("model-tree")
@@ -661,6 +751,8 @@ impl eframe::App for FramerApp {
 #[cfg(test)]
 mod tests {
     use std::{fs, process};
+
+    use framer_core::{DimensionHorizontalReference, DimensionVerticalReference};
 
     use super::*;
 
@@ -778,6 +870,63 @@ mod tests {
     }
 
     #[test]
+    fn dimension_shortcut_enters_dimension_tool_in_wall_view() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Plan,
+            ..Default::default()
+        };
+        app.dimension_tool.first_anchor = Some(DimensionAnchorPick {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+
+        app.activate_dimension_tool();
+
+        assert!(app.dimension_tool.active);
+        assert_eq!(app.dimension_tool.first_anchor, None);
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+        assert!(
+            app.dimension_status
+                .as_deref()
+                .is_some_and(|status| status.contains("Pick two anchors"))
+        );
+    }
+
+    #[test]
+    fn escape_exits_selected_dimension() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.first_anchor = Some(DimensionAnchorPick {
+            wall_index: 0,
+            anchor: DimensionAnchor::WallStart,
+        });
+        app.selected = Selection::Dimension("dimension-1".to_owned());
+        app.dimension_status = Some("Pick a second dimension anchor".to_owned());
+
+        app.exit_current_context();
+
+        assert!(!app.dimension_tool.active);
+        assert_eq!(app.dimension_tool.first_anchor, None);
+        assert_eq!(app.selected, Selection::Wall);
+        assert_eq!(app.dimension_status, None);
+    }
+
+    #[test]
+    fn escape_cancels_dimension_tool_without_dropping_other_selection() {
+        let mut app = FramerApp::default();
+        let opening = app.model.walls[0].openings[0].id.0.clone();
+        app.dimension_tool.active = true;
+        app.selected = Selection::Opening(opening.clone());
+        app.dimension_status = Some("Pick two anchors in the wall view".to_owned());
+
+        app.exit_current_context();
+
+        assert!(!app.dimension_tool.active);
+        assert_eq!(app.selected, Selection::Opening(opening));
+        assert_eq!(app.dimension_status, None);
+    }
+
+    #[test]
     fn dimension_tool_clicks_create_driving_dimension() {
         let mut app = FramerApp::default();
         app.dimension_tool.active = true;
@@ -819,6 +968,39 @@ mod tests {
         let dimension = &app.model.walls[0].dimensions[0];
         assert_eq!(dimension.kind, DimensionKind::Reference);
         assert_eq!(dimension.value, None);
+    }
+
+    #[test]
+    fn vertical_dimension_tool_clicks_create_height_dimension() {
+        let mut app = FramerApp::default();
+        app.dimension_tool.active = true;
+        app.dimension_tool.kind = DimensionKind::Driving;
+        app.dimension_tool.axis = DimensionAxis::Vertical;
+        let opening = app.model.walls[0].openings[0].id.clone();
+        let expected = app.model.walls[0].openings[0].height;
+
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningPoint {
+                opening: opening.clone(),
+                horizontal: DimensionHorizontalReference::Center,
+                vertical: DimensionVerticalReference::Bottom,
+            },
+        });
+        app.handle_view_click(ViewClick::DimensionAnchor {
+            wall_index: 0,
+            anchor: DimensionAnchor::OpeningPoint {
+                opening,
+                horizontal: DimensionHorizontalReference::Center,
+                vertical: DimensionVerticalReference::Top,
+            },
+        });
+
+        let dimension = &app.model.walls[0].dimensions[0];
+        assert_eq!(dimension.axis, DimensionAxis::Vertical);
+        assert_eq!(dimension.kind, DimensionKind::Driving);
+        assert_eq!(dimension.value, Some(expected));
+        assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
     }
 
     #[test]
