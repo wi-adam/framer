@@ -178,6 +178,50 @@ Material editor UI; framing/x-ray render overlay; textures/normal maps; HDRI
 environment maps; denoiser; reflections of interior furniture; multi-level
 stacking polish; roofs/floors as finished surfaces (walls + ground + sky first).
 
+## What shipped (2026-06-15)
+
+The first slice landed end-to-end:
+
+- **`framer-render`** crate: full CPU path tracer (Vec3/ONB, PCG32 RNG, BVH,
+  Möller–Trumbore, diffuse/metal/glass/emissive BSDFs, NEE sun + procedural sky,
+  Russian roulette, firefly clamp, ACES) — ~90 unit tests plus physical tests
+  (furnace/energy conservation), a golden-image regression test, and a CLI
+  integration test.
+- **Headless CLI** (`render`): path-traces a `.framer` file to PNG.
+- **In-app Render view** (`ViewportMode::Render`): background-thread progressive
+  path tracing displayed via an egui texture, with orbit/zoom and live
+  refinement, reusing the exact `framer-render` core.
+
+The renderer was tuned against real captures (warm sun, cool sky-lit shadows,
+glazed windows with visible glass caustics) until it reads as a credible
+architectural rendering.
+
+## GPU compute path tracer — next step
+
+The chosen long-term engine is a WGSL compute path tracer in the app for
+real-time refinement. The groundwork is in place:
+
+- The renderable `Scene` (triangles, flat BVH nodes, materials, camera, sun,
+  sky) is a plain-data structure that flattens directly to GPU storage buffers
+  (the BVH already uses a flat array with consecutive children + an iterative
+  traversal, exactly as WGSL requires).
+- `accumulate()` mirrors the GPU running-sum accumulator (`.xyz` = radiance sum,
+  `.w` = sample count), and the math (PCG, BSDFs, ACES) is written to be ported
+  verbatim to WGSL.
+- Validation plan: a headless `wgpu` readback test renders the golden reference
+  scene on the GPU and compares to the CPU reference within a looser MAE
+  (absorbing `f32`/algorithm differences). This validates the kernel without a
+  visible window. The `egui_wgpu::CallbackTrait` integration (compute recorded
+  in `prepare`, fullscreen blit in `paint`, progressive accumulation via
+  `request_repaint`) follows the version-correct wgpu-29 pattern captured during
+  research.
+
+Deferred deliberately this session: the `egui_wgpu` in-app integration can only
+be fully verified in the running app window, and macOS currently blocks
+screen capture, so shipping it unverified risked a broken path. The CPU-backed
+Render view is the proven baseline; the GPU path slots in behind the same
+`Scene`/camera with a CPU fallback.
+
 ## Risks & mitigations
 
 - **GPU integration is fiddly / unverifiable on screen** → CPU reference + the
