@@ -20,3 +20,4 @@ pub mod geom;
 pub mod math;
 pub mod ray;
 pub mod rng;
+pub mod sampling;
