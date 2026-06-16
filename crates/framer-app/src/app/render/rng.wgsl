@@ -135,3 +135,46 @@ fn pixel_rng(x: u32, y: u32, sample: u32, seed: vec2<u32>) -> Rng {
     let seq = uxor64(seed, vec2<u32>(0x94b95bdbu, 0xda3e39cbu));
     return pcg_seed(z, seq);
 }
+
+// ---- Low-discrepancy sub-pixel jitter (mirrors framer_render::rng) ----------
+
+const SCRAMBLE_SAMPLE: u32 = 0x00ffff00u;
+
+// Sobol' dimension 0: radical inverse base 2 (bit reversal), XOR-scrambled.
+fn van_der_corput(n: u32, scramble: u32) -> u32 {
+    return reverseBits(n) ^ scramble;
+}
+
+// Sobol' dimension 1 (Gray-code direction numbers 2^31, 2^30, ...), XOR-scrambled.
+fn sobol_dim1(n: u32, scramble: u32) -> u32 {
+    var v: u32 = 1u << 31u;
+    var i = n;
+    var r = scramble;
+    loop {
+        if (i == 0u) {
+            break;
+        }
+        if ((i & 1u) != 0u) {
+            r = r ^ v;
+        }
+        i = i >> 1u;
+        v = v ^ (v >> 1u);
+    }
+    return r;
+}
+
+fn sobol_to_f32(bits: u32) -> f32 {
+    return f32(bits >> 8u) * (1.0 / 16777216.0);
+}
+
+// Stratified sub-pixel jitter in [0,1)^2 for `sample`, from an XOR-scrambled
+// Sobol' (0,2)-sequence with a per-pixel scramble. Bit-identical to the CPU.
+fn stratified_jitter(x: u32, y: u32, sample: u32, seed: vec2<u32>) -> vec2<f32> {
+    var scramble = pixel_rng(x, y, SCRAMBLE_SAMPLE, seed);
+    let sx = pcg_next_u32(&scramble);
+    let sy = pcg_next_u32(&scramble);
+    return vec2<f32>(
+        sobol_to_f32(van_der_corput(sample, sx)),
+        sobol_to_f32(sobol_dim1(sample, sy)),
+    );
+}

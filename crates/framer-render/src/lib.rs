@@ -62,9 +62,10 @@ pub fn accumulate(
         let mut sum = Vec3::ZERO;
         for k in 0..samples {
             let sample = first_sample + k;
+            // Stratified (low-discrepancy) sub-pixel jitter; the PCG stream is
+            // reserved for the BSDF/light sampling inside `radiance`.
+            let (jx, jy) = rng::stratified_jitter(x, y, sample, seed);
             let mut rng = rng::pixel_rng(x, y, sample, seed);
-            let jx = rng.next_f32();
-            let jy = rng.next_f32();
             let ray = scene
                 .camera
                 .ray(x as f32 + jx, y as f32 + jy, width, height);

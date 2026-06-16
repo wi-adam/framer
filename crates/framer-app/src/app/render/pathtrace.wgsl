@@ -556,15 +556,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rad = vec3<f32>(0.0);
     var jx0 = 0.0;
     var jy0 = 0.0;
+    let seed = vec2<u32>(u.seed_lo, u.seed_hi);
     for (var s = 0u; s < spp; s = s + 1u) {
-        var rng = pixel_rng(gid.x, gid.y, u.frame + s, vec2<u32>(u.seed_lo, u.seed_hi));
-        let jx = pcg_next_f32(&rng);
-        let jy = pcg_next_f32(&rng);
+        let gsample = u.frame + s;
+        // Stratified sub-pixel jitter; the PCG stream is reserved for radiance().
+        let jitter = stratified_jitter(gid.x, gid.y, gsample, seed);
         if (s == 0u) {
-            jx0 = jx;
-            jy0 = jy;
+            jx0 = jitter.x;
+            jy0 = jitter.y;
         }
-        let ray = camera_ray(f32(gid.x) + jx, f32(gid.y) + jy);
+        var rng = pixel_rng(gid.x, gid.y, gsample, seed);
+        let ray = camera_ray(f32(gid.x) + jitter.x, f32(gid.y) + jitter.y);
         rad = rad + radiance(ray, &rng);
     }
 
