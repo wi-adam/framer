@@ -43,6 +43,8 @@ pub(crate) struct FramerApp {
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     show_section: bool,
+    grid: bool,
+    ortho: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +173,8 @@ impl Default for FramerApp {
             opening_drag: None,
             gpu_target_format: None,
             show_section: true,
+            grid: true,
+            ortho: true,
         };
         app.rebuild();
         app
@@ -722,8 +726,21 @@ impl eframe::App for FramerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let t = design::active();
+        Panel::top("app-header")
+            .frame(
+                Frame::new()
+                    .fill(t.title_bar)
+                    .inner_margin(egui::Margin::symmetric(8, 5)),
+            )
+            .show_inside(ui, |ui| self.app_header(ui));
         Panel::top("toolbar")
-            .frame(Frame::new().fill(theme::chrome_top()))
+            .frame(
+                Frame::new()
+                    .fill(t.toolbar)
+                    .stroke(t.soft_stroke())
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
             .show_inside(ui, |ui| self.toolbar(ui));
         Panel::bottom("status-bar")
             .frame(

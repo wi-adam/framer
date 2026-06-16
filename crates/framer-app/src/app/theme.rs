@@ -20,20 +20,8 @@ pub(super) fn panel_bg() -> Color32 {
     design::active().panel
 }
 
-pub(super) fn panel_header() -> Color32 {
-    design::active().panel_header
-}
-
 pub(super) fn workspace_bg() -> Color32 {
     design::active().canvas
-}
-
-pub(super) fn field_bg() -> Color32 {
-    design::active().field
-}
-
-pub(super) fn control_bg() -> Color32 {
-    design::active().control
 }
 
 pub(super) fn active_blue() -> Color32 {
@@ -54,10 +42,6 @@ pub(super) fn text_secondary() -> Color32 {
 
 pub(super) fn text_muted() -> Color32 {
     design::active().text_muted
-}
-
-pub(super) fn divider() -> Color32 {
-    design::active().divider
 }
 
 pub(super) fn success() -> Color32 {

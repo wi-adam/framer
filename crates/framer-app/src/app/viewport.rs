@@ -20,7 +20,7 @@ use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
-use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, theme};
+use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
@@ -293,27 +293,27 @@ fn workspace_header(
     viewport_mode: ViewportMode,
     code_name: &str,
 ) {
+    let t = design::active();
     Frame::new()
-        .fill(theme::panel_header())
-        .stroke(theme::soft_stroke())
-        .corner_radius(3)
-        .inner_margin(Margin::symmetric(10, 7))
+        .fill(t.panel)
+        .inner_margin(Margin::symmetric(6, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = design::space::LG;
                 ui.label(
                     RichText::new(workspace_mode_title(workspace_mode))
                         .strong()
-                        .size(15.0)
-                        .color(theme::text_primary()),
+                        .size(design::text_size::HEADING)
+                        .color(t.text),
                 );
-                ui.separator();
-                ui.label(
-                    RichText::new(viewport_mode_title(workspace_mode, viewport_mode))
-                        .strong()
-                        .color(theme::active_blue()),
-                );
-                ui.separator();
-                ui.label(RichText::new(code_name).color(theme::text_muted()));
+                design::widgets::tab(ui, viewport_mode_title(workspace_mode, viewport_mode), true);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(code_name)
+                            .size(design::text_size::LABEL)
+                            .color(t.text_muted),
+                    );
+                });
             });
         });
 }

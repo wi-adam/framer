@@ -11,6 +11,7 @@ use framer_core::{
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
+use super::design::{Icon, widgets};
 use super::labels::{
     diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
 };
@@ -20,208 +21,252 @@ use super::model_edit::{
 use super::{FramerApp, Selection, ViewportMode, WorkspaceMode, design, theme};
 
 impl FramerApp {
+    pub(super) fn app_header(&mut self, ui: &mut Ui) {
+        let head = design::studio_dark();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = design::space::MD;
+            ui.add_space(design::space::SM);
+            ui.label(
+                RichText::new("Framer")
+                    .strong()
+                    .size(design::text_size::TITLE)
+                    .color(head.text),
+            );
+            header_divider(ui, head.divider);
+            ui.label(
+                RichText::new("Project")
+                    .size(design::text_size::LABEL)
+                    .color(head.text_muted),
+            );
+            let path_width = (ui.available_width() * 0.40).clamp(240.0, 520.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.project_path)
+                    .desired_width(path_width)
+                    .font(egui::TextStyle::Monospace),
+            );
+            header_save_pill(ui, head, self.file_status.as_deref());
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(design::space::SM);
+                let theme_icon = if design::active().dark {
+                    Icon::ThemeDark
+                } else {
+                    Icon::ThemeLight
+                };
+                if widgets::ghost_icon_button(
+                    ui,
+                    theme_icon,
+                    head.text,
+                    "Toggle light / dark theme",
+                )
+                .clicked()
+                {
+                    design::toggle_theme(ui.ctx());
+                }
+                widgets::ghost_icon_button(ui, Icon::Help, head.text_secondary, "Framer help");
+                header_profile(ui, head, self.model.code.display_name.as_str());
+            });
+        });
+    }
+
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
-        command_bar_frame().show(ui, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(10.0, 6.0);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Framer")
-                            .strong()
-                            .size(18.5)
-                            .color(theme::text_primary()),
-                    );
-                    toolbar_divider(ui);
-                    ui.label(RichText::new("Project").small().color(theme::text_muted()));
-                    let path_width = (ui.available_width() * 0.48).clamp(300.0, 620.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.project_path)
-                            .desired_width(path_width)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    status_chip(ui, "Ready", StatusTone::Success);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let theme_icon = if design::active().dark {
-                            design::Icon::ThemeDark
-                        } else {
-                            design::Icon::ThemeLight
-                        };
-                        if design::widgets::icon_button(ui, theme_icon, "Toggle light / dark theme")
-                            .clicked()
-                        {
-                            design::toggle_theme(ui.ctx());
-                        }
-                        status_chip(
-                            ui,
-                            self.model.code.display_name.as_str(),
-                            StatusTone::Neutral,
-                        );
-                    });
-                });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
 
-                ui.horizontal_wrapped(|ui| {
-                    toolbar_group(ui, "PROJECT", |ui| {
-                        if command_button(ui, "New", 54.0)
-                            .on_hover_text("Start an empty wall project")
-                            .clicked()
-                        {
-                            self.new_project();
-                        }
-                        if command_button(ui, "Open", 56.0)
-                            .on_hover_text("Open the project path")
-                            .clicked()
-                        {
-                            self.load_project_file();
-                        }
-                        if command_button(ui, "Save", 56.0)
-                            .on_hover_text("Save the current model")
-                            .clicked()
-                        {
-                            self.save_project_file();
-                        }
-                        if enabled_command_button(
-                            ui,
-                            self.workspace_mode.shows_generated_plan(),
-                            "Export",
-                            62.0,
-                        )
-                        .on_hover_text("Export plan artifacts from Plan workspace")
+            widgets::tool_group(ui, "PROJECT", |ui| {
+                if widgets::tool_button(ui, Icon::New, "New", false, true)
+                    .on_hover_text("Start an empty wall project")
+                    .clicked()
+                {
+                    self.new_project();
+                }
+                if widgets::tool_button(ui, Icon::Open, "Open", false, true)
+                    .on_hover_text("Open the project path")
+                    .clicked()
+                {
+                    self.load_project_file();
+                }
+                if widgets::tool_button(ui, Icon::Save, "Save", false, true)
+                    .on_hover_text("Save the current model")
+                    .clicked()
+                {
+                    self.save_project_file();
+                }
+                let can_export = self.workspace_mode.shows_generated_plan();
+                if widgets::tool_button(ui, Icon::Export, "Export", false, can_export)
+                    .on_hover_text("Export plan artifacts from Plan workspace")
+                    .clicked()
+                {
+                    self.export_current_artifacts();
+                }
+            });
+            widgets::tool_divider(ui);
+
+            widgets::tool_group(ui, "SAMPLES", |ui| {
+                if widgets::tool_button(ui, Icon::Shell, "Shell", false, true)
+                    .on_hover_text("Load the multi-wall shell demo")
+                    .clicked()
+                {
+                    self.reset_demo();
+                }
+                if widgets::tool_button(ui, Icon::Wall, "Wall", false, true)
+                    .on_hover_text("Load the single-wall demo")
+                    .clicked()
+                {
+                    self.reset_wall_demo();
+                }
+            });
+            widgets::tool_divider(ui);
+
+            widgets::tool_group(ui, "WORKSPACE", |ui| {
+                if widgets::tool_button(
+                    ui,
+                    Icon::Design,
+                    "Design",
+                    self.workspace_mode == WorkspaceMode::Design,
+                    true,
+                )
+                .clicked()
+                {
+                    self.set_workspace_mode(WorkspaceMode::Design);
+                }
+                if widgets::tool_button(
+                    ui,
+                    Icon::Plan,
+                    "Plan",
+                    self.workspace_mode == WorkspaceMode::Plan,
+                    true,
+                )
+                .clicked()
+                {
+                    self.set_workspace_mode(WorkspaceMode::Plan);
+                }
+            });
+            widgets::tool_divider(ui);
+
+            widgets::tool_group(ui, "VIEW", |ui| {
+                let design_mode = self.workspace_mode.allows_design_edits();
+                let shell_label = if design_mode { "Shell" } else { "Plan" };
+                let wall_label = if design_mode { "Wall" } else { "Elevation" };
+                if widgets::tool_button(
+                    ui,
+                    Icon::Shell,
+                    shell_label,
+                    self.viewport_mode == ViewportMode::Plan,
+                    true,
+                )
+                .clicked()
+                {
+                    self.viewport_mode = ViewportMode::Plan;
+                }
+                if widgets::tool_button(
+                    ui,
+                    Icon::Wall,
+                    wall_label,
+                    self.viewport_mode == ViewportMode::Elevation,
+                    true,
+                )
+                .clicked()
+                {
+                    self.viewport_mode = ViewportMode::Elevation;
+                }
+                if widgets::tool_button(
+                    ui,
+                    Icon::View3d,
+                    "3D",
+                    self.viewport_mode == ViewportMode::Axonometric,
+                    true,
+                )
+                .clicked()
+                {
+                    self.viewport_mode = ViewportMode::Axonometric;
+                }
+            });
+
+            if self.workspace_mode.allows_design_edits() {
+                widgets::tool_divider(ui);
+                widgets::tool_group(ui, "BUILD", |ui| {
+                    if widgets::tool_button(ui, Icon::Door, "Door", false, true)
+                        .on_hover_text("Add a door to the selected wall")
                         .clicked()
-                        {
-                            self.export_current_artifacts();
-                        }
-                    });
-                    toolbar_divider(ui);
-
-                    toolbar_group(ui, "SAMPLES", |ui| {
-                        if command_button(ui, "Shell", 58.0)
-                            .on_hover_text("Load the multi-wall shell demo")
-                            .clicked()
-                        {
-                            self.reset_demo();
-                        }
-                        if command_button(ui, "Wall", 56.0)
-                            .on_hover_text("Load the single-wall demo")
-                            .clicked()
-                        {
-                            self.reset_wall_demo();
-                        }
-                    });
-                    toolbar_divider(ui);
-
-                    toolbar_group(ui, "WORKSPACE", |ui| {
-                        let mut next_mode = self.workspace_mode;
-                        workspace_segment(ui, &mut next_mode, WorkspaceMode::Design, "Design");
-                        workspace_segment(ui, &mut next_mode, WorkspaceMode::Plan, "Plan");
-                        if next_mode != self.workspace_mode {
-                            self.set_workspace_mode(next_mode);
-                        }
-                    });
-                    toolbar_divider(ui);
-
-                    toolbar_group(ui, "VIEW", |ui| {
-                        let shell_label = if self.workspace_mode.allows_design_edits() {
-                            "Shell"
-                        } else {
-                            "Plan"
-                        };
-                        let wall_label = if self.workspace_mode.allows_design_edits() {
-                            "Wall"
-                        } else {
-                            "Elevation"
-                        };
-                        view_segment(ui, &mut self.viewport_mode, ViewportMode::Plan, shell_label);
-                        view_segment(
-                            ui,
-                            &mut self.viewport_mode,
-                            ViewportMode::Elevation,
-                            wall_label,
-                        );
-                        view_segment(ui, &mut self.viewport_mode, ViewportMode::Axonometric, "3D");
-                    });
-
-                    if self.workspace_mode.allows_design_edits() {
-                        toolbar_divider(ui);
-                        toolbar_group(ui, "BUILD", |ui| {
-                            if command_button(ui, "Door", 54.0)
-                                .on_hover_text("Add a door to the selected wall")
-                                .clicked()
-                            {
-                                self.add_opening(OpeningKind::Door);
-                            }
-                            if command_button(ui, "Window", 70.0)
-                                .on_hover_text("Add a window to the selected wall")
-                                .clicked()
-                            {
-                                self.add_opening(OpeningKind::Window);
-                            }
-                            if command_button(ui, "Garage", 70.0)
-                                .on_hover_text("Add a garage door to the selected wall")
-                                .clicked()
-                            {
-                                self.add_opening(OpeningKind::GarageDoor);
-                            }
-                        });
-                        toolbar_divider(ui);
-                        toolbar_group(ui, "DIMENSION", |ui| {
-                            if segment_button(ui, self.dimension_tool.active, "Linear", 66.0)
-                                .on_hover_text("Place a wall dimension (D)")
-                                .clicked()
-                            {
-                                self.dimension_tool.active = !self.dimension_tool.active;
-                                self.dimension_tool.clear_picks();
-                                self.opening_drag = None;
-                                self.dimension_status = if self.dimension_tool.active {
-                                    Some(
-                                        "Pick two anchors, then move the pointer to place the dimension"
-                                            .to_owned(),
-                                    )
-                                } else {
-                                    None
-                                };
-                                if self.dimension_tool.active {
-                                    self.viewport_mode = ViewportMode::Elevation;
-                                }
-                            }
-                            if self.dimension_tool.active {
-                                ComboBox::from_id_salt("dimension-tool-kind")
-                                    .selected_text(dimension_kind_label(self.dimension_tool.kind))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.dimension_tool.kind,
-                                            DimensionKind::Driving,
-                                            "Driving",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.dimension_tool.kind,
-                                            DimensionKind::Reference,
-                                            "Reference",
-                                        );
-                                    });
-                                ComboBox::from_id_salt("dimension-tool-axis")
-                                    .selected_text(dimension_axis_label(self.dimension_tool.axis))
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut self.dimension_tool.axis,
-                                            DimensionAxis::Horizontal,
-                                            "Horizontal",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.dimension_tool.axis,
-                                            DimensionAxis::Vertical,
-                                            "Vertical",
-                                        );
-                                    });
-                            }
-                        });
-                    } else {
-                        toolbar_divider(ui);
-                        toolbar_group(ui, "TOOLS", |ui| {
-                            ui.checkbox(&mut self.show_section, "Section");
-                        });
+                    {
+                        self.add_opening(OpeningKind::Door);
+                    }
+                    if widgets::tool_button(ui, Icon::Window, "Window", false, true)
+                        .on_hover_text("Add a window to the selected wall")
+                        .clicked()
+                    {
+                        self.add_opening(OpeningKind::Window);
+                    }
+                    if widgets::tool_button(ui, Icon::GarageDoor, "Garage", false, true)
+                        .on_hover_text("Add a garage door to the selected wall")
+                        .clicked()
+                    {
+                        self.add_opening(OpeningKind::GarageDoor);
                     }
                 });
-            });
+                widgets::tool_divider(ui);
+                widgets::tool_group(ui, "DIMENSION", |ui| {
+                    if widgets::tool_button(
+                        ui,
+                        Icon::Linear,
+                        "Linear",
+                        self.dimension_tool.active,
+                        true,
+                    )
+                    .on_hover_text("Place a wall dimension (D)")
+                    .clicked()
+                    {
+                        self.toggle_dimension_tool();
+                    }
+                    if self.dimension_tool.active {
+                        ComboBox::from_id_salt("dimension-tool-kind")
+                            .selected_text(dimension_kind_label(self.dimension_tool.kind))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.dimension_tool.kind,
+                                    DimensionKind::Driving,
+                                    "Driving",
+                                );
+                                ui.selectable_value(
+                                    &mut self.dimension_tool.kind,
+                                    DimensionKind::Reference,
+                                    "Reference",
+                                );
+                            });
+                        ComboBox::from_id_salt("dimension-tool-axis")
+                            .selected_text(dimension_axis_label(self.dimension_tool.axis))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.dimension_tool.axis,
+                                    DimensionAxis::Horizontal,
+                                    "Horizontal",
+                                );
+                                ui.selectable_value(
+                                    &mut self.dimension_tool.axis,
+                                    DimensionAxis::Vertical,
+                                    "Vertical",
+                                );
+                            });
+                    }
+                });
+            } else {
+                widgets::tool_divider(ui);
+                widgets::tool_group(ui, "TOOLS", |ui| {
+                    if widgets::tool_button(
+                        ui,
+                        Icon::LayoutColumns,
+                        "Section",
+                        self.show_section,
+                        true,
+                    )
+                    .on_hover_text("Toggle the wall section preview")
+                    .clicked()
+                    {
+                        self.show_section = !self.show_section;
+                    }
+                });
+            }
         });
 
         if self.file_status.is_some()
@@ -246,6 +291,20 @@ impl FramerApp {
                         }
                     });
                 });
+        }
+    }
+
+    fn toggle_dimension_tool(&mut self) {
+        self.dimension_tool.active = !self.dimension_tool.active;
+        self.dimension_tool.clear_picks();
+        self.opening_drag = None;
+        self.dimension_status = if self.dimension_tool.active {
+            Some("Pick two anchors, then move the pointer to place the dimension".to_owned())
+        } else {
+            None
+        };
+        if self.dimension_tool.active {
+            self.viewport_mode = ViewportMode::Elevation;
         }
     }
 
@@ -532,7 +591,7 @@ impl FramerApp {
                 let mut select_dimension = None;
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     if can_edit {
-                        ui.label(&wall.id.0);
+                        inspector_object_id(ui, &wall.id.0);
                         changed |= text_edit(ui, "Name", &mut wall.name);
 
                         let mut level_id = wall.level.0.clone();
@@ -548,46 +607,50 @@ impl FramerApp {
                             changed = true;
                         }
 
-                        let mut wall_length = wall.length;
-                        if driven_length_drag(
-                            ui,
-                            "Length",
-                            &mut wall_length,
-                            length_drag_spec(24.0, 480.0, "ft"),
-                            wall_length_driver.as_ref(),
-                            &mut select_dimension,
-                        ) {
-                            set_wall_length_keep_direction(wall, wall_length);
-                            changed = true;
-                        }
-                        changed |= driven_length_drag(
-                            ui,
-                            "Height",
-                            &mut wall.height,
-                            length_drag_spec(48.0, 168.0, "ft"),
-                            wall_height_driver.as_ref(),
-                            &mut select_dimension,
-                        );
-                        changed |= driven_length_drag(
-                            ui,
-                            "Stud spacing",
-                            &mut wall.stud_spacing,
-                            length_drag_spec(8.0, 32.0, "in"),
-                            None,
-                            &mut select_dimension,
-                        );
-                        ui.separator();
-                        ui.strong("Placement");
-                        let placement_changed = coordinate_drag(ui, "Start X", &mut wall.start.x)
-                            | coordinate_drag(ui, "Start Y", &mut wall.start.y)
-                            | coordinate_drag(ui, "End X", &mut wall.end.x)
-                            | coordinate_drag(ui, "End Y", &mut wall.end.y);
-                        if placement_changed {
-                            if let Some(length) = wall.placement_length() {
-                                wall.length = length;
+                        widgets::section(ui, "wall-dimensions", "Dimensions", true, |ui| {
+                            let mut wall_length = wall.length;
+                            if driven_length_drag(
+                                ui,
+                                "Length",
+                                &mut wall_length,
+                                length_drag_spec(24.0, 480.0, "ft"),
+                                wall_length_driver.as_ref(),
+                                &mut select_dimension,
+                            ) {
+                                set_wall_length_keep_direction(wall, wall_length);
+                                changed = true;
                             }
-                            changed = true;
-                        }
+                            changed |= driven_length_drag(
+                                ui,
+                                "Height",
+                                &mut wall.height,
+                                length_drag_spec(48.0, 168.0, "ft"),
+                                wall_height_driver.as_ref(),
+                                &mut select_dimension,
+                            );
+                            changed |= driven_length_drag(
+                                ui,
+                                "Stud spacing",
+                                &mut wall.stud_spacing,
+                                length_drag_spec(8.0, 32.0, "in"),
+                                None,
+                                &mut select_dimension,
+                            );
+                        });
+
+                        widgets::section(ui, "wall-placement", "Placement", true, |ui| {
+                            let placement_changed =
+                                coordinate_drag(ui, "Start X", &mut wall.start.x)
+                                    | coordinate_drag(ui, "Start Y", &mut wall.start.y)
+                                    | coordinate_drag(ui, "End X", &mut wall.end.x)
+                                    | coordinate_drag(ui, "End Y", &mut wall.end.y);
+                            if placement_changed {
+                                if let Some(length) = wall.placement_length() {
+                                    wall.length = length;
+                                }
+                                changed = true;
+                            }
+                        });
                     } else {
                         wall_summary(ui, wall, &level_options);
                     }
@@ -832,48 +895,65 @@ impl FramerApp {
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
+        let t = design::active();
         let (unsupported, warnings, info) = self.diagnostic_counts();
         let error_count = usize::from(self.error.is_some());
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
-            status_chip(ui, "Ready", StatusTone::Success);
+            ui.spacing_mut().item_spacing = Vec2::new(design::space::MD, 2.0);
+            status_metric(ui, Icon::Ready, "Ready", t.success);
             toolbar_divider(ui);
             ui.label(
                 RichText::new(self.workspace_badge())
                     .strong()
-                    .color(theme::text_secondary()),
+                    .size(design::text_size::LABEL)
+                    .color(t.text_secondary),
             );
             if let Some(wall) = self.model.walls.get(self.selected_wall) {
-                ui.label(RichText::new(&wall.name).color(theme::text_muted()));
+                ui.label(
+                    RichText::new(&wall.name)
+                        .size(design::text_size::LABEL)
+                        .color(t.text_muted),
+                );
             }
             toolbar_divider(ui);
-            ui.label(RichText::new(self.selection_status()).color(theme::text_secondary()));
+            ui.label(
+                RichText::new(self.selection_status())
+                    .size(design::text_size::LABEL)
+                    .color(t.text_secondary),
+            );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                status_chip(ui, "100%", StatusTone::Neutral);
-                status_chip(ui, "Ortho", StatusTone::Info);
-                status_chip(ui, "Grid", StatusTone::Info);
-                status_chip(ui, "Snap 1 in", StatusTone::Info);
-                status_chip(ui, &format!("{info} info"), StatusTone::Neutral);
-                status_chip(ui, &format!("{warnings} warnings"), StatusTone::Warning);
-                status_chip(
-                    ui,
-                    &format!("{unsupported} unsupported"),
-                    if unsupported == 0 {
-                        StatusTone::Neutral
-                    } else {
-                        StatusTone::Warning
-                    },
+                ui.spacing_mut().item_spacing.x = design::space::MD;
+                ui.label(
+                    RichText::new("100%")
+                        .size(design::text_size::LABEL)
+                        .color(t.text_secondary),
                 );
-                status_chip(
+                toolbar_divider(ui);
+                widgets::toggle_switch(ui, &mut self.ortho, "Ortho");
+                widgets::toggle_switch(ui, &mut self.grid, "Grid");
+                status_metric(ui, Icon::Snap, "Snap 1 in", t.text_secondary);
+                toolbar_divider(ui);
+                let muted = t.text_muted;
+                status_metric(ui, Icon::Saved, &format!("{info} info"), muted);
+                status_metric(
                     ui,
+                    Icon::Warning,
+                    &format!("{unsupported} unsupported"),
+                    if unsupported == 0 { muted } else { t.warning },
+                );
+                status_metric(
+                    ui,
+                    Icon::Warning,
+                    &format!("{warnings} warnings"),
+                    if warnings == 0 { muted } else { t.warning },
+                );
+                status_metric(
+                    ui,
+                    Icon::Error,
                     &format!("{error_count} errors"),
-                    if error_count == 0 {
-                        StatusTone::Neutral
-                    } else {
-                        StatusTone::Warning
-                    },
+                    if error_count == 0 { muted } else { t.danger },
                 );
             });
         });
@@ -912,84 +992,84 @@ impl FramerApp {
     }
 }
 
-fn command_bar_frame() -> Frame {
+fn header_divider(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 20.0), egui::Sense::hover());
+    let x = rect.center().x;
+    ui.painter().line_segment(
+        [
+            egui::Pos2::new(x, rect.top()),
+            egui::Pos2::new(x, rect.bottom()),
+        ],
+        Stroke::new(1.0, color),
+    );
+}
+
+fn header_save_pill(ui: &mut Ui, head: design::Theme, status: Option<&str>) {
+    let (icon, text, color) = match status {
+        Some(s) if s.to_lowercase().contains("failed") => {
+            (Icon::Error, short_status(s), design::active().danger)
+        }
+        Some(s) => (Icon::Saved, short_status(s), design::active().success),
+        None => (Icon::Saved, "Ready".to_owned(), design::active().success),
+    };
     Frame::new()
-        .fill(theme::chrome_top())
-        .inner_margin(Margin::symmetric(12, 8))
-}
-
-fn toolbar_group(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui)) {
-    ui.vertical(|ui| {
-        ui.label(
-            RichText::new(label)
-                .size(9.5)
-                .strong()
-                .color(theme::text_muted()),
-        );
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(5.0, 2.0);
-            add_contents(ui);
+        .fill(Color32::from_white_alpha(16))
+        .corner_radius(design::radius::SM)
+        .inner_margin(Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(design::icon_text(icon, 12.0).color(color));
+                ui.label(
+                    RichText::new(text)
+                        .size(design::text_size::LABEL)
+                        .color(head.text),
+                );
+            });
         });
-    });
 }
 
-fn command_button(ui: &mut Ui, label: &str, min_width: f32) -> Response {
-    ui.add_sized(
-        [min_width, 28.0],
-        egui::Button::new(RichText::new(label).color(theme::text_secondary()))
-            .fill(theme::control_bg())
-            .stroke(theme::soft_stroke())
-            .corner_radius(3),
-    )
+fn header_profile(ui: &mut Ui, head: design::Theme, name: &str) {
+    let font = egui::FontId::proportional(design::text_size::LABEL);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), font, head.text);
+    let (pad, gap, chev) = (9.0, 7.0, 12.0);
+    let width = pad + galley.size().x + gap + chev + pad;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, design::control::ICON_BTN),
+        egui::Sense::click(),
+    );
+
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        design::radius::SM,
+        Color32::from_white_alpha(16),
+        Stroke::new(1.0, head.divider),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        egui::Pos2::new(rect.left() + pad, rect.center().y - galley.size().y / 2.0),
+        galley,
+        head.text,
+    );
+    painter.text(
+        egui::Pos2::new(rect.right() - pad - chev / 2.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        Icon::ChevronDown.glyph().to_string(),
+        design::icon_font(12.0),
+        head.text_secondary,
+    );
+    response.on_hover_text("Code profile");
 }
 
-fn enabled_command_button(ui: &mut Ui, enabled: bool, label: &str, min_width: f32) -> Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(label).color(theme::text_secondary()))
-            .min_size(Vec2::new(min_width, 28.0))
-            .fill(theme::control_bg())
-            .stroke(theme::soft_stroke())
-            .corner_radius(3),
-    )
-}
-
-fn workspace_segment(ui: &mut Ui, mode: &mut WorkspaceMode, value: WorkspaceMode, label: &str) {
-    if segment_button(ui, *mode == value, label, 68.0).clicked() {
-        *mode = value;
-    }
-}
-
-fn view_segment(ui: &mut Ui, mode: &mut ViewportMode, value: ViewportMode, label: &str) {
-    if segment_button(ui, *mode == value, label, 70.0).clicked() {
-        *mode = value;
-    }
-}
-
-fn segment_button(ui: &mut Ui, selected: bool, label: &str, min_width: f32) -> Response {
-    let fill = if selected {
-        theme::active_blue()
-    } else {
-        theme::field_bg()
-    };
-    let stroke = if selected {
-        Stroke::new(1.0, theme::active_blue())
-    } else {
-        theme::soft_stroke()
-    };
-    let text = if selected {
-        RichText::new(label).strong().color(theme::text_primary())
-    } else {
-        RichText::new(label).color(theme::text_secondary())
-    };
-
-    ui.add_sized(
-        [min_width, 28.0],
-        egui::Button::new(text)
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(3),
-    )
+fn short_status(status: &str) -> String {
+    status
+        .split_whitespace()
+        .next()
+        .unwrap_or("Ready")
+        .to_owned()
 }
 
 fn toolbar_divider(ui: &mut Ui) {
@@ -997,25 +1077,41 @@ fn toolbar_divider(ui: &mut Ui) {
 }
 
 fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
-    Frame::new()
-        .fill(theme::panel_header())
-        .stroke(theme::soft_stroke())
-        .corner_radius(3)
-        .inner_margin(Margin::symmetric(9, 7))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(title)
-                        .strong()
-                        .size(15.0)
-                        .color(theme::text_primary()),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    status_chip(ui, badge, StatusTone::Neutral);
+    let t = design::active();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).strong().size(17.0).color(t.text));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            Frame::new()
+                .fill(t.control)
+                .stroke(t.soft_stroke())
+                .corner_radius(design::radius::SM)
+                .inner_margin(Margin::symmetric(8, 2))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(badge)
+                            .size(design::text_size::LABEL)
+                            .color(t.text_secondary),
+                    );
                 });
-            });
         });
-    ui.add_space(6.0);
+    });
+    ui.add_space(design::space::SM);
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        t.divider_stroke(),
+    );
+    ui.add_space(design::space::MD);
+}
+
+fn inspector_object_id(ui: &mut Ui, id: &str) {
+    ui.label(
+        RichText::new(id)
+            .size(design::text_size::LABEL)
+            .color(design::active().text_muted),
+    );
+    ui.add_space(2.0);
 }
 
 fn panel_subheader(ui: &mut Ui, title: &str) {
@@ -1042,7 +1138,6 @@ fn selection_badge(selection: &Selection) -> &'static str {
 
 #[derive(Clone, Copy)]
 enum StatusTone {
-    Neutral,
     Info,
     Success,
     Warning,
@@ -1050,7 +1145,6 @@ enum StatusTone {
 
 fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
     let (fill, stroke, text_color) = match tone {
-        StatusTone::Neutral => (theme::field_bg(), theme::divider(), theme::text_secondary()),
         StatusTone::Info => (
             theme::active_blue_soft(),
             theme::active_blue(),
@@ -1076,6 +1170,19 @@ fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(11.0).color(text_color));
         });
+}
+
+/// An icon + text status-bar metric (used for Ready, diagnostics, snap).
+fn status_metric(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(design::icon_text(icon, 13.0).color(color));
+        ui.label(
+            RichText::new(text)
+                .size(design::text_size::LABEL)
+                .color(design::active().text_secondary),
+        );
+    });
 }
 
 fn level_summary(ui: &mut Ui, level: &Level) {
