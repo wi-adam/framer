@@ -17,7 +17,7 @@ use super::labels::{
 use super::model_edit::{
     opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
-use super::{FramerApp, Selection, ViewportMode, WorkspaceMode, theme};
+use super::{FramerApp, Selection, ViewportMode, WorkspaceMode, design, theme};
 
 impl FramerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
@@ -41,6 +41,16 @@ impl FramerApp {
                     );
                     status_chip(ui, "Ready", StatusTone::Success);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let theme_icon = if design::active().dark {
+                            design::Icon::ThemeDark
+                        } else {
+                            design::Icon::ThemeLight
+                        };
+                        if design::widgets::icon_button(ui, theme_icon, "Toggle light / dark theme")
+                            .clicked()
+                        {
+                            design::toggle_theme(ui.ctx());
+                        }
                         status_chip(
                             ui,
                             self.model.code.display_name.as_str(),

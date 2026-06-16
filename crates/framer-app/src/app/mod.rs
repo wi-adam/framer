@@ -1,3 +1,4 @@
+mod design;
 mod labels;
 mod model_edit;
 mod panels;
@@ -8,10 +9,7 @@ mod viewport;
 use std::fs;
 use std::path::PathBuf;
 
-use eframe::egui::{
-    self, CentralPanel, CornerRadius, FontFamily, FontId, Frame, Panel, ScrollArea, Stroke,
-    TextStyle, Vec2,
-};
+use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
     DimensionKind, Length, Opening, OpeningKind, Wall, load_project as load_project_document,
@@ -181,7 +179,7 @@ impl Default for FramerApp {
 
 impl FramerApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        configure_app_style(&cc.egui_ctx);
+        design::install(&cc.egui_ctx, design::studio_light());
 
         Self {
             gpu_target_format: cc
@@ -716,66 +714,6 @@ impl FramerApp {
             self.viewport_mode = ViewportMode::Elevation;
         }
     }
-}
-
-fn configure_app_style(ctx: &egui::Context) {
-    let mut style = (*ctx.global_style()).clone();
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(15.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Button,
-        FontId::new(12.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Small,
-        FontId::new(10.5, FontFamily::Proportional),
-    );
-    style.spacing.item_spacing = Vec2::new(8.0, 5.0);
-    style.spacing.button_padding = Vec2::new(8.0, 4.0);
-    style.spacing.interact_size = Vec2::new(40.0, 22.0);
-    style.spacing.window_margin = egui::Margin::symmetric(8, 6);
-    style.visuals.panel_fill = theme::shell_bg();
-    style.visuals.window_fill = theme::panel_bg();
-    style.visuals.window_stroke = theme::divider_stroke();
-    style.visuals.extreme_bg_color = theme::workspace_bg();
-    style.visuals.faint_bg_color = theme::chrome_mid();
-    style.visuals.text_edit_bg_color = Some(theme::field_bg());
-    style.visuals.selection.bg_fill = theme::active_blue();
-    style.visuals.selection.stroke = Stroke::new(1.0, theme::text_primary());
-    style.visuals.hyperlink_color = theme::active_blue();
-    style.visuals.warn_fg_color = theme::warning();
-    style.visuals.error_fg_color = theme::danger();
-    style.visuals.button_frame = true;
-    style.visuals.collapsing_header_frame = false;
-    style.visuals.indent_has_left_vline = true;
-
-    let radius = CornerRadius::same(3);
-    style.visuals.widgets.noninteractive.corner_radius = radius;
-    style.visuals.widgets.inactive.corner_radius = radius;
-    style.visuals.widgets.hovered.corner_radius = radius;
-    style.visuals.widgets.active.corner_radius = radius;
-    style.visuals.widgets.open.corner_radius = radius;
-    style.visuals.widgets.noninteractive.bg_fill = theme::chrome_mid();
-    style.visuals.widgets.noninteractive.weak_bg_fill = theme::panel_header();
-    style.visuals.widgets.noninteractive.bg_stroke = theme::soft_stroke();
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, theme::text_secondary());
-    style.visuals.widgets.inactive.weak_bg_fill = theme::control_bg();
-    style.visuals.widgets.inactive.bg_fill = theme::control_bg();
-    style.visuals.widgets.inactive.bg_stroke = theme::divider_stroke();
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, theme::text_secondary());
-    style.visuals.widgets.hovered.weak_bg_fill = theme::control_bg_hover();
-    style.visuals.widgets.hovered.bg_fill = theme::control_bg_hover();
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, theme::active_blue_soft());
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, theme::text_primary());
-    style.visuals.widgets.active.weak_bg_fill = theme::active_blue_soft();
-    style.visuals.widgets.active.bg_fill = theme::active_blue();
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, theme::active_blue());
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, theme::text_primary());
-    style.visuals.widgets.open = style.visuals.widgets.hovered;
-
-    ctx.set_global_style(style);
 }
 
 impl eframe::App for FramerApp {

@@ -1,109 +1,101 @@
+//! Backwards-compatible color accessors.
+//!
+//! These thin wrappers forward to the active [`super::design::Theme`] so existing
+//! call sites keep working while the design system drives the colors. New code
+//! should prefer `design::active()` / `design::theme(ui)` and read tokens by name.
+
 use eframe::egui::{Color32, Stroke};
 
-pub(super) fn shell_bg() -> Color32 {
-    Color32::from_rgb(18, 22, 24)
-}
+use super::design;
 
 pub(super) fn chrome_top() -> Color32 {
-    Color32::from_rgb(24, 29, 32)
+    design::active().toolbar
 }
 
 pub(super) fn chrome_mid() -> Color32 {
-    Color32::from_rgb(29, 35, 38)
+    design::active().chrome_alt
 }
 
 pub(super) fn panel_bg() -> Color32 {
-    Color32::from_rgb(22, 27, 30)
+    design::active().panel
 }
 
 pub(super) fn panel_header() -> Color32 {
-    Color32::from_rgb(29, 35, 39)
+    design::active().panel_header
 }
 
 pub(super) fn workspace_bg() -> Color32 {
-    Color32::from_rgb(15, 19, 21)
+    design::active().canvas
 }
 
 pub(super) fn field_bg() -> Color32 {
-    Color32::from_rgb(18, 22, 24)
+    design::active().field
 }
 
 pub(super) fn control_bg() -> Color32 {
-    Color32::from_rgb(35, 42, 46)
-}
-
-pub(super) fn control_bg_hover() -> Color32 {
-    Color32::from_rgb(45, 54, 59)
+    design::active().control
 }
 
 pub(super) fn active_blue() -> Color32 {
-    Color32::from_rgb(37, 119, 198)
+    design::active().accent
 }
 
 pub(super) fn active_blue_soft() -> Color32 {
-    Color32::from_rgb(30, 79, 123)
+    design::active().accent_soft
 }
 
 pub(super) fn text_primary() -> Color32 {
-    Color32::from_rgb(235, 239, 240)
+    design::active().text
 }
 
 pub(super) fn text_secondary() -> Color32 {
-    Color32::from_rgb(184, 193, 196)
+    design::active().text_secondary
 }
 
 pub(super) fn text_muted() -> Color32 {
-    Color32::from_rgb(128, 140, 145)
+    design::active().text_muted
 }
 
 pub(super) fn divider() -> Color32 {
-    Color32::from_rgb(49, 58, 63)
-}
-
-pub(super) fn divider_soft() -> Color32 {
-    Color32::from_rgb(37, 45, 49)
+    design::active().divider
 }
 
 pub(super) fn success() -> Color32 {
-    Color32::from_rgb(89, 190, 125)
+    design::active().success
 }
 
 pub(super) fn warning() -> Color32 {
-    Color32::from_rgb(224, 174, 74)
+    design::active().warning
 }
 
 pub(super) fn danger() -> Color32 {
-    Color32::from_rgb(220, 92, 82)
+    design::active().danger
 }
 
 pub(super) fn sheet() -> Color32 {
-    Color32::from_rgb(248, 248, 245)
+    design::active().paper
 }
 
 pub(super) fn sheet_grid() -> Color32 {
-    Color32::from_rgb(226, 229, 226)
+    design::active().grid_minor
 }
 
 pub(super) fn sheet_grid_major() -> Color32 {
-    Color32::from_rgb(205, 211, 210)
+    design::active().grid_major
 }
 
 pub(super) fn sheet_ruler() -> Color32 {
-    Color32::from_rgb(239, 241, 239)
+    design::active().ruler
 }
 
 pub(super) fn framing_line() -> Color32 {
-    Color32::from_rgb(123, 93, 55)
+    design::active().framing
 }
 
 pub(super) fn framing_line_dark() -> Color32 {
-    Color32::from_rgb(79, 70, 56)
-}
-
-pub(super) fn divider_stroke() -> Stroke {
-    Stroke::new(1.0, divider())
+    design::active().framing_dark
 }
 
 pub(super) fn soft_stroke() -> Stroke {
-    Stroke::new(1.0, divider_soft())
+    design::active().soft_stroke()
 }
