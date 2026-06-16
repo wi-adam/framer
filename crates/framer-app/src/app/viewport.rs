@@ -288,13 +288,20 @@ impl FramerApp {
                     &mut self.view_3d,
                 )
             }
+            ViewportMode::Render => {
+                self.draw_project_render(ui);
+                None
+            }
         };
 
         if let Some(click) = click {
             self.handle_view_click(click);
         }
 
-        if self.viewport_mode != ViewportMode::Axonometric {
+        if !matches!(
+            self.viewport_mode,
+            ViewportMode::Axonometric | ViewportMode::Render
+        ) {
             self.canvas_view_controls(ui, canvas);
         }
         if let Some(anchor) = toolbar_anchor {
@@ -341,6 +348,97 @@ impl FramerApp {
                             });
                     });
             });
+    }
+
+    /// Draws the path-traced Render view. Geometry, materials, and lighting come
+    /// from `framer-render`; the heavy work runs on a background thread
+    /// ([`super::render_job`]) and refines progressively while the camera is still.
+    fn draw_project_render(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let desired = viewport_size(ui);
+        let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+
+        draw_view_background(&painter, rect, theme::sheet());
+        let drawing = viewport_drawing_rect(rect, 42.0);
+        draw_view_border(&painter, drawing);
+
+        // Orbit + zoom, mirroring the 3D workspace controls.
+        if response.dragged_by(egui::PointerButton::Primary) {
+            self.view_3d.orbit(response.drag_delta());
+        }
+        if response.hovered() {
+            let zoom_factor = ui.input(|input| {
+                let wheel = (input.smooth_scroll_delta.y * 0.002).exp();
+                wheel * input.zoom_delta()
+            });
+            if (zoom_factor - 1.0).abs() > f32::EPSILON {
+                self.view_3d.zoom_by(zoom_factor);
+            }
+        }
+
+        if self.model.walls.is_empty() {
+            draw_view_empty(&painter, drawing, "No geometry to render");
+            return;
+        }
+
+        // Internal render resolution: device pixels, capped, aspect-matched.
+        let ppp = ui.ctx().pixels_per_point();
+        let aspect = (drawing.width() / drawing.height()).max(0.1);
+        let width = ((drawing.width() * ppp).round() as u32).clamp(64, 1000);
+        let height = ((width as f32 / aspect).round() as u32).clamp(64, 1000);
+
+        let opts = framer_render::RenderOptions {
+            yaw: self.view_3d.yaw,
+            pitch: self.view_3d.pitch,
+            zoom: self.view_3d.zoom,
+            aspect: width as f32 / height as f32,
+            ..framer_render::RenderOptions::default()
+        };
+
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            super::render_job::model_signature(&self.model).hash(&mut hasher);
+            ((self.view_3d.yaw * 2000.0) as i64).hash(&mut hasher);
+            ((self.view_3d.pitch * 2000.0) as i64).hash(&mut hasher);
+            ((self.view_3d.zoom * 1000.0) as i64).hash(&mut hasher);
+            width.hash(&mut hasher);
+            height.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        self.render_view
+            .update(&ctx, &self.model, opts, width, height, key);
+
+        if let Some(texture) = self.render_view.texture() {
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            painter.image(texture.id(), drawing, uv, Color32::WHITE);
+        } else {
+            draw_view_empty(&painter, drawing, "Preparing render…");
+        }
+
+        // Progress / quality readout.
+        let samples = self.render_view.samples();
+        let target = self.render_view.target_spp();
+        let label = if self.render_view.is_accumulating() {
+            format!("Rendering — {samples}/{target} spp")
+        } else {
+            format!("Render complete — {samples} spp")
+        };
+        painter.text(
+            drawing.left_bottom() + Vec2::new(8.0, -8.0),
+            Align2::LEFT_BOTTOM,
+            label,
+            FontId::proportional(11.0),
+            theme::text_muted(),
+        );
+        draw_view_title(&painter, drawing, "Render");
+
+        // Keep refining until converged (or while the user is interacting).
+        if self.render_view.is_accumulating() || response.dragged() {
+            ctx.request_repaint();
+        }
     }
 
     fn canvas_floating_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
@@ -481,6 +579,7 @@ fn viewport_mode_title(workspace_mode: WorkspaceMode, viewport_mode: ViewportMod
         (_, ViewportMode::Plan) => "Plan",
         (_, ViewportMode::Elevation) => "Elevation",
         (_, ViewportMode::Axonometric) => "3D",
+        (_, ViewportMode::Render) => "Render",
     }
 }
 

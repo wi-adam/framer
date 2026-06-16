@@ -181,6 +181,17 @@ impl FramerApp {
                 {
                     self.viewport_mode = ViewportMode::Axonometric;
                 }
+                if widgets::tool_button(
+                    ui,
+                    Icon::ThemeLight,
+                    "Render",
+                    self.viewport_mode == ViewportMode::Render,
+                    true,
+                )
+                .clicked()
+                {
+                    self.viewport_mode = ViewportMode::Render;
+                }
             });
 
             if self.workspace_mode.allows_design_edits() {

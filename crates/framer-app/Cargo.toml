@@ -10,4 +10,5 @@ bytemuck.workspace = true
 eframe.workspace = true
 env_logger.workspace = true
 framer-core.workspace = true
+framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true

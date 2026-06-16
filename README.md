@@ -16,10 +16,15 @@ multi-system CAD alpha. The repository currently contains:
 - `framer-solver`: deterministic wall and whole-project framing generation,
   join corner posts, grouped BOM, rule provenance, diagnostics, SVG project
   export, and CSV BOM export.
+- `framer-render`: a UI-agnostic, physically based path tracer. It extracts a
+  renderable scene from the building model (auto-derived materials: cladding,
+  drywall, glass, doors, ground, plus a procedural sky and sun), builds a BVH,
+  and path-traces it with diffuse / metal / dielectric-glass materials, soft sun
+  shadows, and ACES tone mapping. Includes a headless PNG render CLI.
 - `framer-app`: a native Rust desktop shell using `eframe`/`egui` with a model
   tree, object catalog, inspector, diagnostics, BOM, whole-shell plan view,
-  selected-wall elevation view, and a WGPU-backed 3D workspace with
-  depth-tested wall and framing member solids.
+  selected-wall elevation view, a WGPU-backed 3D workspace with depth-tested
+  wall and framing member solids, and a path-traced **Render** view mode.
 
 The completed Phase 1 workflow still frames one straight wall with doors,
 windows, or garage-door-style openings. The current beyond-Phase-1 alpha also
@@ -51,6 +56,23 @@ workflow is:
    the grouped BOM.
 6. Use `Save` to persist authored intent only.
 7. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
+8. Switch to the **Render** view (toolbar) for a path-traced architectural
+   rendering of the design — real raytraced lighting, glass, and soft shadows.
+   Drag to orbit and scroll to zoom; the image refines progressively while the
+   camera is still.
+
+## Render (headless)
+
+Path-trace a project straight to a PNG without opening the app:
+
+```sh
+cargo run -p framer-render --features cli --release --bin render -- \
+    examples/projects/demo-shell.framer out.png --width 1280 --height 720 --spp 256
+```
+
+Optional flags: `--yaw DEG --pitch DEG --zoom Z --exposure E --seed S`. The
+renderer is deterministic (a pure function of the seed) and parallelized across
+cores. The in-app Render view shares the exact same path-tracing core.
 
 ## Test
 
@@ -63,5 +85,6 @@ cargo test --workspace
 
 See [docs/vision.md](docs/vision.md),
 [docs/architecture.md](docs/architecture.md),
-[docs/project-files.md](docs/project-files.md), and
-[docs/plans/2026-05-21-phase-1.md](docs/plans/2026-05-21-phase-1.md).
+[docs/project-files.md](docs/project-files.md),
+[docs/plans/2026-05-21-phase-1.md](docs/plans/2026-05-21-phase-1.md), and
+[docs/plans/2026-06-15-render-view-mode-design.md](docs/plans/2026-06-15-render-view-mode-design.md).

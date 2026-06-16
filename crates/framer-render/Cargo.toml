@@ -1,0 +1,27 @@
+[package]
+name = "framer-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "framer_render"
+
+[features]
+default = []
+# Headless PNG export binary; pulls in the `image` codec and parallel rendering.
+cli = ["dep:image", "parallel"]
+# Multi-threaded CPU rendering. Determinism is preserved (per-pixel seeding),
+# so `parallel` and single-threaded renders are byte-identical.
+parallel = ["dep:rayon"]
+
+[dependencies]
+framer-core = { workspace = true }
+image = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+
+[[bin]]
+name = "render"
+path = "src/bin/render.rs"
+required-features = ["cli"]
