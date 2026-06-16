@@ -3,6 +3,7 @@ mod labels;
 mod model_edit;
 mod panels;
 mod project_io;
+mod render_job;
 mod theme;
 mod viewport;
 
@@ -39,6 +40,7 @@ pub(crate) struct FramerApp {
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
+    render_view: render_job::RenderViewState,
     dimension_tool: DimensionToolState,
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
@@ -80,6 +82,7 @@ enum ViewportMode {
     Plan,
     Elevation,
     Axonometric,
+    Render,
 }
 
 #[derive(Clone)]
@@ -171,6 +174,7 @@ impl Default for FramerApp {
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
+            render_view: render_job::RenderViewState::default(),
             dimension_tool: DimensionToolState::default(),
             opening_drag: None,
             gpu_target_format: None,
