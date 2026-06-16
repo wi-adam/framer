@@ -388,6 +388,108 @@ impl BoardProfile {
     }
 }
 
+/// Whether a wall faces the weather (drives sheathing intent and, later,
+/// generated sheathing zones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WallExposure {
+    Exterior,
+    Interior,
+}
+
+impl WallExposure {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Exterior => "Exterior",
+            Self::Interior => "Interior",
+        }
+    }
+}
+
+impl Default for WallExposure {
+    fn default() -> Self {
+        Self::Exterior
+    }
+}
+
+/// Authored sheathing intent for a wall. Quantities are not yet generated; this
+/// records the design decision for the BOM and future sheathing zones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Sheathing {
+    None,
+    Osb716,
+    Plywood12,
+    Plywood58,
+}
+
+impl Sheathing {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Osb716 => "7/16\" OSB",
+            Self::Plywood12 => "1/2\" Plywood",
+            Self::Plywood58 => "5/8\" Plywood",
+        }
+    }
+}
+
+impl Default for Sheathing {
+    fn default() -> Self {
+        Self::Osb716
+    }
+}
+
+/// Per-wall construction assembly: exposure, framing member size, and sheathing.
+/// Studs and plates follow `stud`; the header profile remains a code-profile
+/// default until span lookups exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WallAssembly {
+    #[serde(default)]
+    pub exposure: WallExposure,
+    #[serde(default = "default_assembly_stud")]
+    pub stud: BoardProfile,
+    #[serde(default)]
+    pub sheathing: Sheathing,
+}
+
+fn default_assembly_stud() -> BoardProfile {
+    BoardProfile::TwoByFour
+}
+
+impl Default for WallAssembly {
+    fn default() -> Self {
+        Self {
+            exposure: WallExposure::Exterior,
+            stud: default_assembly_stud(),
+            sheathing: Sheathing::Osb716,
+        }
+    }
+}
+
+impl WallAssembly {
+    /// An assembly seeded from a code profile (stud size from the code default).
+    pub fn from_code(code: &CodeProfile) -> Self {
+        Self {
+            stud: code.stud_profile,
+            ..Self::default()
+        }
+    }
+
+    pub fn stud_profile(&self) -> BoardProfile {
+        self.stud
+    }
+
+    /// Plates follow the stud profile (a 2x6 wall uses 2x6 plates).
+    pub fn plate_profile(&self) -> BoardProfile {
+        self.stud
+    }
+
+    /// Human-readable wall-type label, e.g. `Exterior - 2x6`.
+    pub fn display(&self) -> String {
+        format!("{} - {}", self.exposure.label(), self.stud.label())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wall {
@@ -402,9 +504,13 @@ pub struct Wall {
     pub length: Length,
     pub height: Length,
     pub stud_spacing: Length,
+    #[serde(default)]
+    pub assembly: WallAssembly,
     pub openings: Vec<Opening>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl Wall {
@@ -423,8 +529,10 @@ impl Wall {
             length,
             height: code.default_wall_height,
             stud_spacing: code.default_stud_spacing,
+            assembly: WallAssembly::from_code(code),
             openings: Vec::new(),
             dimensions: Vec::new(),
+            tags: Vec::new(),
         }
     }
 

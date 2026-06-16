@@ -5,9 +5,9 @@ use eframe::egui::{
     Ui, Vec2,
 };
 use framer_core::{
-    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
-    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind,
-    Wall, WallJoin, WallJoinKind,
+    BoardProfile, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId, Length,
+    Level, Opening, OpeningKind, Sheathing, Wall, WallExposure, WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -651,6 +651,87 @@ impl FramerApp {
                                 changed = true;
                             }
                         });
+
+                        changed |= widgets::section(ui, "wall-type", "Wall Type", true, |ui| {
+                            let mut c = false;
+                            ui.horizontal(|ui| {
+                                wall_type_swatch(ui);
+                                ui.label(
+                                    RichText::new(wall.assembly.display())
+                                        .strong()
+                                        .color(design::active().text),
+                                );
+                            });
+                            ui.add_space(design::space::XS);
+                            c |= property_row(ui, "Exposure", |ui| {
+                                let before = wall.assembly.exposure;
+                                ComboBox::from_id_salt("wall-exposure")
+                                    .selected_text(wall.assembly.exposure.label())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut wall.assembly.exposure,
+                                            WallExposure::Exterior,
+                                            "Exterior",
+                                        );
+                                        ui.selectable_value(
+                                            &mut wall.assembly.exposure,
+                                            WallExposure::Interior,
+                                            "Interior",
+                                        );
+                                    });
+                                wall.assembly.exposure != before
+                            });
+                            c |= property_row(ui, "Stud size", |ui| {
+                                let before = wall.assembly.stud;
+                                ComboBox::from_id_salt("wall-stud")
+                                    .selected_text(wall.assembly.stud.label())
+                                    .show_ui(ui, |ui| {
+                                        for profile in BOARD_PROFILES {
+                                            ui.selectable_value(
+                                                &mut wall.assembly.stud,
+                                                profile,
+                                                profile.label(),
+                                            );
+                                        }
+                                    });
+                                wall.assembly.stud != before
+                            });
+                            c
+                        })
+                        .unwrap_or(false);
+
+                        widgets::section(ui, "wall-materials", "Materials", false, |ui| {
+                            summary_row(ui, "Top Plate", wall.assembly.plate_profile().label());
+                            summary_row(ui, "Bottom Plate", wall.assembly.plate_profile().label());
+                            summary_row(ui, "Stud", wall.assembly.stud.label());
+                            changed |= property_row(ui, "Sheathing", |ui| {
+                                let before = wall.assembly.sheathing;
+                                ComboBox::from_id_salt("wall-sheathing")
+                                    .selected_text(wall.assembly.sheathing.label())
+                                    .show_ui(ui, |ui| {
+                                        for sheathing in SHEATHINGS {
+                                            ui.selectable_value(
+                                                &mut wall.assembly.sheathing,
+                                                sheathing,
+                                                sheathing.label(),
+                                            );
+                                        }
+                                    });
+                                wall.assembly.sheathing != before
+                            });
+                            ui.add_space(design::space::XS);
+                            ui.label(
+                                RichText::new(
+                                    "Sheathing is authored intent; not yet quantified in the BOM.",
+                                )
+                                .size(design::text_size::LABEL)
+                                .color(design::active().text_muted),
+                            );
+                        });
+
+                        widgets::section(ui, "wall-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut wall.tags);
+                        });
                     } else {
                         wall_summary(ui, wall, &level_options);
                     }
@@ -1112,6 +1193,105 @@ fn inspector_object_id(ui: &mut Ui, id: &str) {
             .color(design::active().text_muted),
     );
     ui.add_space(2.0);
+}
+
+const BOARD_PROFILES: [BoardProfile; 5] = [
+    BoardProfile::TwoByFour,
+    BoardProfile::TwoBySix,
+    BoardProfile::TwoByEight,
+    BoardProfile::TwoByTen,
+    BoardProfile::TwoByTwelve,
+];
+
+const SHEATHINGS: [Sheathing; 4] = [
+    Sheathing::None,
+    Sheathing::Osb716,
+    Sheathing::Plywood12,
+    Sheathing::Plywood58,
+];
+
+/// A small wall-type preview: a framed-stud pattern on a sheet.
+fn wall_type_swatch(ui: &mut Ui) {
+    let t = design::active();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(30.0, 18.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, design::radius::SM, t.field);
+    ui.painter().rect_stroke(
+        rect,
+        design::radius::SM,
+        t.soft_stroke(),
+        egui::StrokeKind::Inside,
+    );
+    let mut x = rect.left() + 4.0;
+    while x < rect.right() - 2.0 {
+        ui.painter().line_segment(
+            [
+                egui::Pos2::new(x, rect.top() + 3.0),
+                egui::Pos2::new(x, rect.bottom() - 3.0),
+            ],
+            Stroke::new(1.5, t.framing),
+        );
+        x += 5.0;
+    }
+}
+
+/// Removable tag chips plus an add field. Returns whether `tags` changed.
+fn tags_editor(ui: &mut Ui, tags: &mut Vec<String>) -> bool {
+    let t = design::active();
+    let mut changed = false;
+    let mut remove = None;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        for (index, tag) in tags.iter().enumerate() {
+            let response = Frame::new()
+                .fill(t.control)
+                .stroke(t.soft_stroke())
+                .corner_radius(design::radius::SM)
+                .inner_margin(Margin::symmetric(7, 2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(
+                            RichText::new(tag)
+                                .size(design::text_size::LABEL)
+                                .color(t.text_secondary),
+                        );
+                        ui.label(design::icon_text(Icon::Delete, 11.0).color(t.text_muted));
+                    });
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_text("Remove tag");
+            if response.clicked() {
+                remove = Some(index);
+            }
+        }
+    });
+
+    if let Some(index) = remove {
+        tags.remove(index);
+        changed = true;
+    }
+
+    let id = ui.id().with("tag-draft");
+    let mut draft = ui.data_mut(|data| data.get_temp::<String>(id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut draft)
+                .hint_text("Add tag…")
+                .desired_width(150.0),
+        );
+        let submit = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let add = widgets::icon_button(ui, Icon::Plus, "Add tag").clicked();
+        if (submit || add) && !draft.trim().is_empty() {
+            tags.push(draft.trim().to_owned());
+            draft.clear();
+            changed = true;
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(id, draft));
+
+    changed
 }
 
 fn panel_subheader(ui: &mut Ui, title: &str) {

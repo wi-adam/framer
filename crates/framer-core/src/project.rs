@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 4;
+pub const PROJECT_SCHEMA_VERSION: u32 = 5;
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 4,\n"));
+        assert!(json.contains("  \"schema_version\": 5,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -224,5 +224,79 @@ mod tests {
         assert_eq!(model.walls.len(), 4);
         assert_eq!(model.wall_joins.len(), 4);
         assert_eq!(save_project(&model).unwrap(), example);
+    }
+
+    #[test]
+    fn wall_assembly_and_tags_round_trip() {
+        use crate::{BoardProfile, Sheathing, WallExposure};
+
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
+        wall.assembly.exposure = WallExposure::Interior;
+        wall.assembly.stud = BoardProfile::TwoBySix;
+        wall.assembly.sheathing = Sheathing::Plywood12;
+        wall.tags = vec!["load-bearing".to_owned(), "shear".to_owned()];
+        model.walls.push(wall);
+
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"exposure\": \"Interior\""));
+        assert!(json.contains("\"stud\": \"TwoBySix\""));
+        assert!(json.contains("\"sheathing\": \"Plywood12\""));
+
+        let reloaded = load_project(&json).unwrap();
+        let wall = &reloaded.walls[0];
+        assert_eq!(wall.assembly.exposure, WallExposure::Interior);
+        assert_eq!(wall.assembly.stud, BoardProfile::TwoBySix);
+        assert_eq!(wall.assembly.sheathing, Sheathing::Plywood12);
+        assert_eq!(
+            wall.tags,
+            vec!["load-bearing".to_owned(), "shear".to_owned()]
+        );
+    }
+
+    #[test]
+    fn wall_without_assembly_loads_defaults() {
+        use crate::{BoardProfile, Sheathing, WallExposure};
+
+        let source = r#"{
+  "format": "framer.project",
+  "schema_version": 4,
+  "authored": {
+    "code": {
+      "code": "Irc2021",
+      "display_name": "IRC 2021 prescriptive starter profile",
+      "default_wall_height": {"ticks": 1536},
+      "default_stud_spacing": {"ticks": 256},
+      "double_top_plate": true,
+      "default_header_depth": {"ticks": 144},
+      "stud_profile": "TwoByFour",
+      "plate_profile": "TwoByFour",
+      "header_profile": "TwoByTen"
+    },
+    "levels": [{"id": "level-1", "name": "Level 1", "elevation": {"ticks": 0}}],
+    "walls": [
+      {
+        "id": "wall",
+        "name": "Wall",
+        "level": "level-1",
+        "start": {"x": {"ticks": 0}, "y": {"ticks": 0}},
+        "end": {"x": {"ticks": 2304}, "y": {"ticks": 0}},
+        "length": {"ticks": 2304},
+        "height": {"ticks": 1536},
+        "stud_spacing": {"ticks": 256},
+        "openings": []
+      }
+    ],
+    "wall_joins": []
+  }
+}"#;
+
+        let model = load_project(source).unwrap();
+        let assembly = &model.walls[0].assembly;
+        assert_eq!(assembly.exposure, WallExposure::Exterior);
+        assert_eq!(assembly.stud, BoardProfile::TwoByFour);
+        assert_eq!(assembly.sheathing, Sheathing::Osb716);
+        assert!(model.walls[0].tags.is_empty());
     }
 }

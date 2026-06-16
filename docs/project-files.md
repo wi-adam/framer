@@ -21,12 +21,12 @@ corner joins, doors, windows, and a garage-door-style opening. The Phase 1
 single-wall example remains checked in at
 [../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
 
-## V4 Shape
+## V5 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 4,
+  "schema_version": 5,
   "authored": {
     "code": {},
     "levels": [],
@@ -37,14 +37,22 @@ single-wall example remains checked in at
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `4` when saving from the current app.
+- `schema_version` must be `5` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected. Do not add `generated`, `cache`,
-  `exports`, or presentation data to v4 project files.
+  `exports`, or presentation data to project files.
 - Schema v1 single-wall files are accepted on load and migrated to the current
   placed-wall shape with a default `level-1` level and a straight wall segment.
 - Schema v2 and v3 shell files are accepted on load; missing wall dimensions
   default to an empty list and missing dimension axes default to horizontal.
+- Schema v4 files are accepted on load; each wall gains a default `assembly`
+  (`Exterior`, `TwoByFour` studs, `Osb716` sheathing) and an empty `tags` list.
+
+Each wall carries an `assembly` describing its construction: `exposure`
+(`Exterior`/`Interior`), `stud` (a board profile that also sizes the plates),
+and `sheathing`. The generated framing uses the wall's `stud` profile, so
+changing it re-sizes that wall's studs, plates, and corner posts in the plan and
+BOM. Optional `tags` are a free-form string list, omitted when empty.
 
 Lengths are exact integer ticks:
 
