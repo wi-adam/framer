@@ -17,6 +17,7 @@ pub mod aabb;
 pub mod bvh;
 pub mod color;
 pub mod geom;
+pub mod material;
 pub mod math;
 pub mod ray;
 pub mod rng;

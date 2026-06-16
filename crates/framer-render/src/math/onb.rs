@@ -40,6 +40,18 @@ impl Onb {
     pub fn to_world(&self, local: Vec3) -> Vec3 {
         self.tangent * local.x + self.bitangent * local.y + self.normal * local.z
     }
+
+    /// Transforms a world-space direction into the local frame (inverse of
+    /// [`Self::to_world`]; the basis is orthonormal so the inverse is the
+    /// transpose, i.e. a set of dot products).
+    #[inline]
+    pub fn to_local(&self, world: Vec3) -> Vec3 {
+        Vec3::new(
+            world.dot(self.tangent),
+            world.dot(self.bitangent),
+            world.dot(self.normal),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -94,5 +106,17 @@ mod tests {
         let onb = Onb::from_normal(n);
         let mapped = onb.to_world(Vec3::new(0.0, 0.0, 1.0));
         assert!((mapped - n).length() < EPS);
+    }
+
+    #[test]
+    fn to_local_is_inverse_of_to_world() {
+        let n = Vec3::new(-0.3, 0.7, 0.64).normalize();
+        let onb = Onb::from_normal(n);
+        let world = Vec3::new(0.5, -0.2, 0.84).normalize();
+        let round = onb.to_world(onb.to_local(world));
+        assert!((round - world).length() < EPS);
+        // The normal maps to local +Z.
+        let local_n = onb.to_local(n);
+        assert!((local_n - Vec3::new(0.0, 0.0, 1.0)).length() < EPS);
     }
 }
