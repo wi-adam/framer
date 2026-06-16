@@ -34,12 +34,21 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Pcg32, max_bounce: u32) -
     // directly when they escape — this is what makes glass and metal catch the
     // sun. Diffuse bounces already did NEE, so they exclude the sun disk.
     let mut specular_path = true;
+    // Whether the path has already undergone a non-specular (diffuse) bounce.
+    // Such a path can only reach the tiny, ~1400× bright sun disk through an
+    // unsampleable diffuse→specular caustic (e.g. floor→glass→sun); those rare,
+    // enormous samples are the firefly speckles. We suppress the disk pickup for
+    // these paths — the standard "no camera-visible caustics" regularization —
+    // which leaves direct glints (primary→glass/metal→sun, where this stays
+    // false) and NEE-lit diffuse surfaces untouched.
+    let mut prior_nonspecular = false;
 
     for bounce in 0..max_bounce {
         let Some(hit) = scene.intersect(&ray) else {
-            // The ray escaped: gather sky, plus the sun disk for specular paths.
+            // The ray escaped: gather sky, plus the sun disk for specular paths
+            // that never passed through a diffuse bounce (real glints, not caustics).
             let mut env = scene.sky.radiance(ray.dir);
-            if specular_path {
+            if specular_path && !prior_nonspecular {
                 env = env + scene.sun.disk_radiance(ray.dir);
             }
             accum = accum + throughput.mul(env);
@@ -63,6 +72,9 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Pcg32, max_bounce: u32) -
             break;
         };
         specular_path = scatter.specular;
+        if !scatter.specular {
+            prior_nonspecular = true;
+        }
         throughput = throughput.mul(scatter.throughput);
         if throughput.max_component() <= 0.0 {
             break;

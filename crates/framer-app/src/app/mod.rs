@@ -43,6 +43,10 @@ pub(crate) struct FramerApp {
     view_3d: View3dState,
     render_view: render_job::RenderViewState,
     render_gpu: render::GpuRenderState,
+    /// Frames remaining in "camera moving" mode (hysteresis after the last orbit/
+    /// zoom input), used to drop the Render view to a lower internal resolution
+    /// while interacting so orbiting stays smooth. 0 = settled / full resolution.
+    render_motion_cooldown: u32,
     dimension_tool: DimensionToolState,
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
@@ -184,6 +188,7 @@ impl Default for FramerApp {
             view_3d: View3dState::default(),
             render_view: render_job::RenderViewState::default(),
             render_gpu: render::GpuRenderState::default(),
+            render_motion_cooldown: 0,
             dimension_tool: DimensionToolState::default(),
             opening_drag: None,
             gpu_target_format: None,

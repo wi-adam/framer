@@ -22,6 +22,14 @@ use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
 
+/// Frames to stay in reduced-resolution "moving" mode after the last camera
+/// input, so a continuous orbit (which produces frequent tiny inputs) doesn't
+/// flicker between resolution modes.
+const MOTION_COOLDOWN_FRAMES: u32 = 6;
+/// Internal-resolution scale for the Render view while the camera is moving
+/// (0.5 ⇒ quarter the pixels, ~4× faster per frame).
+const MOTION_RESOLUTION_SCALE: f32 = 0.5;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
     yaw: f32,
@@ -364,9 +372,11 @@ impl FramerApp {
         draw_view_border(&painter, drawing);
 
         // Orbit + zoom, mirroring the 3D workspace controls.
-        if response.dragged_by(egui::PointerButton::Primary) {
+        let orbiting = response.dragged_by(egui::PointerButton::Primary);
+        if orbiting {
             self.view_3d.orbit(response.drag_delta());
         }
+        let mut zooming = false;
         if response.hovered() {
             let zoom_factor = ui.input(|input| {
                 let wheel = (input.smooth_scroll_delta.y * 0.002).exp();
@@ -374,18 +384,32 @@ impl FramerApp {
             });
             if (zoom_factor - 1.0).abs() > f32::EPSILON {
                 self.view_3d.zoom_by(zoom_factor);
+                zooming = true;
             }
         }
+        // Camera-motion hysteresis: while interacting (plus a short cooldown so a
+        // continuous orbit doesn't flicker between modes) render at a lower
+        // internal resolution to keep orbiting responsive; the denoiser keeps the
+        // resulting low-sample preview clean, and the still frame returns to full
+        // resolution and converges to the unbiased result.
+        if orbiting || zooming {
+            self.render_motion_cooldown = MOTION_COOLDOWN_FRAMES;
+        } else {
+            self.render_motion_cooldown = self.render_motion_cooldown.saturating_sub(1);
+        }
+        let moving = self.render_motion_cooldown > 0;
 
         if self.model.walls.is_empty() {
             draw_view_empty(&painter, drawing, "No geometry to render");
             return;
         }
 
-        // Internal render resolution: device pixels, capped, aspect-matched.
+        // Internal render resolution: device pixels, capped, aspect-matched, and
+        // scaled down while the camera moves (fewer pixels → smoother orbit).
         let ppp = ui.ctx().pixels_per_point();
+        let res_scale = if moving { MOTION_RESOLUTION_SCALE } else { 1.0 };
         let aspect = (drawing.width() / drawing.height()).max(0.1);
-        let width = ((drawing.width() * ppp).round() as u32).clamp(64, 1000);
+        let width = ((drawing.width() * ppp * res_scale).round() as u32).clamp(64, 1000);
         let height = ((width as f32 / aspect).round() as u32).clamp(64, 1000);
 
         let opts = framer_render::RenderOptions {
@@ -462,8 +486,9 @@ impl FramerApp {
         );
         draw_view_title(&painter, drawing, "Render");
 
-        // Keep refining until converged (or while the user is interacting).
-        if accumulating || response.dragged() {
+        // Keep refining until converged, while interacting, or while the motion
+        // cooldown is still ticking down (so it can settle back to full resolution).
+        if accumulating || response.dragged() || moving {
             ctx.request_repaint();
         }
     }

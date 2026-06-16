@@ -61,6 +61,59 @@ pub fn pixel_rng(x: u32, y: u32, sample: u32, seed: u64) -> Pcg32 {
     Pcg32::seed(z, seed ^ 0xDA3E_39CB_94B9_5BDB)
 }
 
+/// Sample index reserved for deriving a pixel's low-discrepancy scramble. It is
+/// far outside the range of real sample indices, so its PCG stream never collides
+/// with a sample's.
+const SCRAMBLE_SAMPLE: u32 = 0x00FF_FF00;
+
+/// A stratified sub-pixel jitter in `[0, 1)²` for `sample`, from an XOR-scrambled
+/// Sobol′ (0,2)-sequence. Successive samples of a pixel land on a low-discrepancy
+/// 2D lattice — cleaner antialiasing and faster pixel convergence than independent
+/// PCG jitter — while a per-pixel scramble (from [`pixel_rng`]) decorrelates the
+/// lattice between neighbours so the residual looks like noise, not a grid.
+///
+/// Built from integer ops only (`reverse_bits`, shifts, xor) plus the same 24-bit
+/// `f32` conversion as [`Pcg32::next_f32`], so the WGSL mirror is bit-identical.
+#[inline]
+pub fn stratified_jitter(x: u32, y: u32, sample: u32, seed: u64) -> (f32, f32) {
+    let mut scramble = pixel_rng(x, y, SCRAMBLE_SAMPLE, seed);
+    let sx = scramble.next_u32();
+    let sy = scramble.next_u32();
+    (
+        sobol_to_f32(van_der_corput(sample, sx)),
+        sobol_to_f32(sobol_dim1(sample, sy)),
+    )
+}
+
+/// Sobol′ dimension 0: the radical inverse base 2 (bit reversal), XOR-scrambled.
+#[inline]
+fn van_der_corput(n: u32, scramble: u32) -> u32 {
+    n.reverse_bits() ^ scramble
+}
+
+/// Sobol′ dimension 1 (Gray-code direction numbers `2^31, 2^30, …`), XOR-scrambled.
+#[inline]
+fn sobol_dim1(n: u32, scramble: u32) -> u32 {
+    let mut v: u32 = 1 << 31;
+    let mut i = n;
+    let mut r = scramble;
+    while i != 0 {
+        if i & 1 != 0 {
+            r ^= v;
+        }
+        i >>= 1;
+        v ^= v >> 1;
+    }
+    r
+}
+
+/// The top 24 bits of a scrambled Sobol′ integer as an `f32` in `[0, 1)`, matching
+/// [`Pcg32::next_f32`]'s conversion exactly.
+#[inline]
+fn sobol_to_f32(bits: u32) -> f32 {
+    (bits >> 8) as f32 * (1.0 / (1u32 << 24) as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +165,30 @@ mod tests {
         for _ in 0..1000 {
             assert_eq!(a.next_u32(), b.next_u32());
         }
+    }
+
+    #[test]
+    fn stratified_jitter_is_deterministic_in_range_and_stratified() {
+        // Deterministic and in [0, 1)².
+        assert_eq!(stratified_jitter(3, 4, 5, 9), stratified_jitter(3, 4, 5, 9));
+        for s in 0..256 {
+            let (jx, jy) = stratified_jitter(7, 11, s, 0xABCD);
+            assert!((0.0..1.0).contains(&jx) && (0.0..1.0).contains(&jy));
+        }
+        // Low-discrepancy: 16 samples of one pixel hit all 4×4 strata exactly once
+        // (the defining property of the Sobol′ (0,2)-sequence under XOR scramble).
+        let mut cells = [[0u32; 4]; 4];
+        for s in 0..16 {
+            let (jx, jy) = stratified_jitter(2, 9, s, 1);
+            cells[(jy * 4.0) as usize][(jx * 4.0) as usize] += 1;
+        }
+        for row in cells {
+            for c in row {
+                assert_eq!(c, 1, "(0,2)-sequence did not stratify the 4×4 grid");
+            }
+        }
+        // Neighbouring pixels get decorrelated lattices (different sample 0).
+        assert_ne!(stratified_jitter(0, 0, 0, 1), stratified_jitter(1, 0, 0, 1));
     }
 
     #[test]
