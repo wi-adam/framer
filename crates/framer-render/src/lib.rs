@@ -14,3 +14,4 @@
 #![forbid(unsafe_code)]
 
 pub mod math;
+pub mod rng;
