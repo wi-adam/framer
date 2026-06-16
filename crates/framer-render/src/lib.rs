@@ -35,21 +35,30 @@ use scene::Scene;
 /// Maximum path-tracing bounce depth.
 pub const MAX_BOUNCES: u32 = 8;
 
-/// Renders `scene` to a tightly-packed RGBA8 buffer (`width * height * 4` bytes,
-/// row-major, top row first). Each pixel averages `spp` jittered samples.
+/// Adds `samples` more path-traced samples per pixel into `accum` (an HDR
+/// linear-radiance sum, length `width * height`), using sample indices
+/// `[first_sample, first_sample + samples)`. This is the progressive primitive:
+/// the in-app renderer calls it repeatedly to refine an image, and [`render`]
+/// calls it once.
 ///
-/// The render is a pure function of `seed`: per-pixel seeding makes it
-/// **independent of thread scheduling**, so the `parallel` feature produces
-/// byte-identical output to the single-threaded path.
-pub fn render(scene: &Scene, width: u32, height: u32, spp: u32, seed: u64) -> Vec<u8> {
-    let count = width as usize * height as usize;
-    let spp = spp.max(1);
+/// Per-pixel seeding makes each pixel a pure function of `(x, y, sample, seed)`,
+/// so accumulation is **independent of thread scheduling** — `parallel` output
+/// is byte-identical to single-threaded.
+pub fn accumulate(
+    scene: &Scene,
+    width: u32,
+    height: u32,
+    samples: u32,
+    first_sample: u32,
+    seed: u64,
+    accum: &mut [Vec3],
+) {
+    assert_eq!(accum.len(), width as usize * height as usize);
 
-    let render_pixel = |i: usize| -> [u8; 4] {
-        let x = (i % width as usize) as u32;
-        let y = (i / width as usize) as u32;
+    let sample_pixel = |x: u32, y: u32| -> Vec3 {
         let mut sum = Vec3::ZERO;
-        for sample in 0..spp {
+        for k in 0..samples {
+            let sample = first_sample + k;
             let mut rng = rng::pixel_rng(x, y, sample, seed);
             let jx = rng.next_f32();
             let jy = rng.next_f32();
@@ -58,23 +67,49 @@ pub fn render(scene: &Scene, width: u32, height: u32, spp: u32, seed: u64) -> Ve
                 .ray(x as f32 + jx, y as f32 + jy, width, height);
             sum = sum + integrator::radiance(scene, ray, &mut rng, MAX_BOUNCES);
         }
-        let avg = sum * (1.0 / spp as f32);
-        let [r, g, b] = color::tonemap_to_u8(avg, scene.exposure);
-        [r, g, b, 255]
+        sum
     };
 
-    let pixels: Vec<[u8; 4]> = {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            (0..count).into_par_iter().map(render_pixel).collect()
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        accum.par_iter_mut().enumerate().for_each(|(i, pixel)| {
+            let x = (i % width as usize) as u32;
+            let y = (i / width as usize) as u32;
+            *pixel = *pixel + sample_pixel(x, y);
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for (i, pixel) in accum.iter_mut().enumerate() {
+            let x = (i % width as usize) as u32;
+            let y = (i / width as usize) as u32;
+            *pixel = *pixel + sample_pixel(x, y);
         }
-        #[cfg(not(feature = "parallel"))]
-        {
-            (0..count).map(render_pixel).collect()
-        }
-    };
-    pixels.into_iter().flatten().collect()
+    }
+}
+
+/// Averages an HDR accumulator over `total_samples` and encodes it to a
+/// tightly-packed RGBA8 buffer (exposure + ACES + sRGB).
+pub fn tonemap_accum(accum: &[Vec3], total_samples: u32, exposure: f32) -> Vec<u8> {
+    let inv = 1.0 / total_samples.max(1) as f32;
+    let mut out = Vec::with_capacity(accum.len() * 4);
+    for pixel in accum {
+        let [r, g, b] = color::tonemap_to_u8(*pixel * inv, exposure);
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+    out
+}
+
+/// Renders `scene` to a tightly-packed RGBA8 buffer (`width * height * 4` bytes,
+/// row-major, top row first). Each pixel averages `spp` jittered samples.
+///
+/// The render is a pure function of `seed` (see [`accumulate`]).
+pub fn render(scene: &Scene, width: u32, height: u32, spp: u32, seed: u64) -> Vec<u8> {
+    let spp = spp.max(1);
+    let mut accum = vec![Vec3::ZERO; width as usize * height as usize];
+    accumulate(scene, width, height, spp, 0, seed, &mut accum);
+    tonemap_accum(&accum, spp, scene.exposure)
 }
 
 #[cfg(test)]
@@ -132,5 +167,19 @@ mod tests {
         let scene = tiny_scene();
         let buf = render(&scene, 32, 24, 4, 7);
         assert!(buf.iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn progressive_accumulation_equals_single_render() {
+        // Two accumulate passes (4 + 4 samples) must equal one render at 8 spp:
+        // the in-app progressive renderer and the one-shot path agree exactly.
+        let scene = tiny_scene();
+        let (w, h, seed) = (20u32, 16u32, 5u64);
+        let mut accum = vec![Vec3::ZERO; (w * h) as usize];
+        accumulate(&scene, w, h, 4, 0, seed, &mut accum);
+        accumulate(&scene, w, h, 4, 4, seed, &mut accum);
+        let progressive = tonemap_accum(&accum, 8, scene.exposure);
+        let one_shot = render(&scene, w, h, 8, seed);
+        assert_eq!(progressive, one_shot);
     }
 }

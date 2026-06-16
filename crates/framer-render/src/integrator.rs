@@ -18,16 +18,31 @@ use crate::scene::Scene;
 const ORIGIN_OFFSET: f32 = 1.0e-2;
 /// Bounces that always survive before Russian roulette begins.
 const MIN_BOUNCES: u32 = 3;
+/// Per-sample radiance clamp. A specular path that happens to strike the tiny,
+/// extremely bright sun disk (e.g. sunlight refracting through glass) produces a
+/// huge single sample — a "firefly". Clamping the path's total radiance removes
+/// those white speckles at a negligible, barely-visible energy bias. Generous
+/// enough to keep bright highlights reading as white after tone mapping.
+const FIREFLY_CLAMP: f32 = 50.0;
 
 /// Estimates the radiance arriving along `ray` using path tracing.
 pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Pcg32, max_bounce: u32) -> Vec3 {
     let mut throughput = Vec3::ONE;
     let mut accum = Vec3::ZERO;
+    // Whether the previous bounce was specular (or this is the primary ray).
+    // Specular paths did not sample the sun via NEE, so they must pick it up
+    // directly when they escape — this is what makes glass and metal catch the
+    // sun. Diffuse bounces already did NEE, so they exclude the sun disk.
+    let mut specular_path = true;
 
     for bounce in 0..max_bounce {
         let Some(hit) = scene.intersect(&ray) else {
-            // The ray escaped to the sky.
-            accum = accum + throughput.mul(scene.sky.radiance(ray.dir));
+            // The ray escaped: gather sky, plus the sun disk for specular paths.
+            let mut env = scene.sky.radiance(ray.dir);
+            if specular_path {
+                env = env + scene.sun.disk_radiance(ray.dir);
+            }
+            accum = accum + throughput.mul(env);
             break;
         };
         let material = scene.material(&hit);
@@ -47,6 +62,7 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Pcg32, max_bounce: u32) -
         let Some(scatter) = material.scatter(wo, &hit, rng) else {
             break;
         };
+        specular_path = scatter.specular;
         throughput = throughput.mul(scatter.throughput);
         if throughput.max_component() <= 0.0 {
             break;
@@ -69,7 +85,8 @@ pub fn radiance(scene: &Scene, mut ray: Ray, rng: &mut Pcg32, max_bounce: u32) -
         ray = Ray::new(hit.point + offset_normal * ORIGIN_OFFSET, scatter.dir);
     }
 
-    accum
+    // Firefly suppression: clamp the path's total radiance.
+    accum.min(Vec3::splat(FIREFLY_CLAMP))
 }
 
 /// Direct illumination from the sun on a Lambertian surface. Returns the
@@ -239,6 +256,78 @@ mod tests {
         assert!(
             lit.max_component() > shadowed.max_component() + 0.1,
             "lit={lit:?} shadowed={shadowed:?}"
+        );
+    }
+
+    #[test]
+    fn specular_metal_catches_the_sun() {
+        // A mirror-like metal floor viewed from straight above reflects the
+        // overhead sun back into the camera, so it must be far brighter with the
+        // sun than without. (Regression for: specular surfaces got no direct sun.)
+        let metal = vec![Material::Metal {
+            albedo: Vec3::splat(0.95),
+            roughness: 0.08,
+        }];
+        let sun = DirectionalSun {
+            dir: Vec3::new(0.0, 0.0, 1.0),
+            irradiance: Vec3::splat(6.0),
+            angular_radius: 0.06,
+        };
+        let dim_sky = Sky::uniform(Vec3::splat(0.03));
+        let lit = average_radiance(
+            &Scene::new(floor(0), metal.clone(), sun, dim_sky, top_down_camera(), 1.0),
+            12_000,
+        );
+        let dark = average_radiance(
+            &Scene::new(
+                floor(0),
+                metal,
+                DirectionalSun::DARK,
+                dim_sky,
+                top_down_camera(),
+                1.0,
+            ),
+            12_000,
+        );
+        assert!(
+            lit.max_component() > dark.max_component() * 2.0 + 0.5,
+            "metal not sunlit: lit={lit:?} dark={dark:?}"
+        );
+    }
+
+    #[test]
+    fn glass_transmits_the_sun() {
+        // Looking straight down through a horizontal glass pane at a sun placed
+        // below: the refracted ray reaches the sun, so the glass is much brighter
+        // than with no sun.
+        let glass = vec![Material::Dielectric {
+            ior: 1.5,
+            tint: Vec3::ONE,
+        }];
+        let sun = DirectionalSun {
+            dir: Vec3::new(0.0, 0.0, -1.0), // below, seen through the pane
+            irradiance: Vec3::splat(6.0),
+            angular_radius: 0.08,
+        };
+        let dim_sky = Sky::uniform(Vec3::splat(0.03));
+        let lit = average_radiance(
+            &Scene::new(floor(0), glass.clone(), sun, dim_sky, top_down_camera(), 1.0),
+            12_000,
+        );
+        let dark = average_radiance(
+            &Scene::new(
+                floor(0),
+                glass,
+                DirectionalSun::DARK,
+                dim_sky,
+                top_down_camera(),
+                1.0,
+            ),
+            12_000,
+        );
+        assert!(
+            lit.max_component() > dark.max_component() * 2.0 + 0.5,
+            "glass did not transmit the sun: lit={lit:?} dark={dark:?}"
         );
     }
 

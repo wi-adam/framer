@@ -269,6 +269,35 @@ mod tests {
     }
 
     #[test]
+    fn dielectric_back_face_refracts_outward() {
+        // A ray exiting glass through a back face at shallow incidence must
+        // refract *outward* (continue past the surface), not flip back inside.
+        // `hit.normal` faces the ray (inward, -geom), which is exactly the normal
+        // `refract` expects — this guards against a "fix" that would break it.
+        let mat = Material::Dielectric {
+            ior: 1.5,
+            tint: Vec3::ONE,
+        };
+        // Real back-face exit through the +z face: geom normal = +z, so the
+        // ray-facing shading normal is -z (what the intersector produces).
+        let hit = hit_at(Vec3::new(0.0, 0.0, -1.0), false);
+        // Viewer is inside the glass; the ray travels outward (+z), near normal.
+        let wo = Vec3::new(0.2, 0.0, -0.98).normalize();
+        let mut rng = Pcg32::seed(21, 4);
+        let mut transmitted = 0;
+        for _ in 0..5000 {
+            let s = mat.scatter(wo, &hit, &mut rng).expect("scatters");
+            assert!((s.dir.length() - 1.0).abs() < 1e-3);
+            if s.dir.z > 0.0 {
+                transmitted += 1; // exited outward through the +z face
+            }
+        }
+        // Near-normal incidence transmits the large majority; none should be
+        // trapped flipping back inward incorrectly.
+        assert!(transmitted > 4000, "back-face refraction failed: {transmitted}/5000 exited");
+    }
+
+    #[test]
     fn metal_conserves_energy() {
         let mat = Material::Metal {
             albedo: Vec3::new(0.95, 0.93, 0.88),

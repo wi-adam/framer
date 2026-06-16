@@ -24,6 +24,30 @@ impl DirectionalSun {
         irradiance: Vec3::ZERO,
         angular_radius: 0.02,
     };
+
+    /// The sun's solid angle (steradians).
+    #[inline]
+    pub fn solid_angle(&self) -> f32 {
+        std::f32::consts::TAU * (1.0 - self.angular_radius.cos())
+    }
+
+    /// Radiance seen when looking *directly* at the sun disk along `dir`, else
+    /// zero. This is what **specular** bounces (and primary rays) pick up — the
+    /// integrator excludes it for diffuse bounces, which sample the sun via
+    /// next-event estimation instead (so there is no double counting). Radiance
+    /// is `irradiance / solid_angle`, the inverse of how a diffuse surface turns
+    /// the disk's radiance back into irradiance.
+    #[inline]
+    pub fn disk_radiance(&self, dir: Vec3) -> Vec3 {
+        if self.irradiance.max_component() <= 0.0 {
+            return Vec3::ZERO;
+        }
+        if dir.normalize().dot(self.dir) >= self.angular_radius.cos() {
+            self.irradiance * (1.0 / self.solid_angle().max(1.0e-6))
+        } else {
+            Vec3::ZERO
+        }
+    }
 }
 
 /// A simple analytic sky: a horizon→zenith gradient above, fading to a muted
