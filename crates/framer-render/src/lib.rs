@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aabb;
+pub mod bvh;
 pub mod geom;
 pub mod math;
 pub mod ray;
