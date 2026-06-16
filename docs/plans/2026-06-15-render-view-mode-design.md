@@ -199,7 +199,11 @@ architectural rendering.
 ## GPU compute path tracer — next step
 
 The chosen long-term engine is a WGSL compute path tracer in the app for
-real-time refinement. The groundwork is in place:
+real-time refinement. A concrete, version-correct implementation reference (the
+`egui_wgpu` integration pattern, storage-buffer layout, WGSL kernel snippets, and
+the wgpu-29 breaking-change checklist) lives in
+[2026-06-15-gpu-pathtracer-research.md](2026-06-15-gpu-pathtracer-research.md).
+The groundwork is in place:
 
 - The renderable `Scene` (triangles, flat BVH nodes, materials, camera, sun,
   sky) is a plain-data structure that flattens directly to GPU storage buffers
