@@ -19,7 +19,7 @@ use eframe::wgpu;
 use framer_core::BuildingModel;
 use framer_render::gpu::{GpuScene, GpuUniforms};
 use framer_render::scene::Scene;
-use framer_render::{MAX_BOUNCES, RenderOptions, scene_from_model};
+use framer_render::{MAX_BOUNCES, RenderOptions, SceneFraming, build_scene};
 
 use super::render_job::model_signature;
 
@@ -36,6 +36,17 @@ const WORKGROUP: u32 = 8;
 const SAMPLE_BUDGET_PER_DISPATCH: u64 = 8_000_000;
 /// Hard cap on the per-dispatch sample burst (also bounds small-window dispatches).
 const MAX_SPP_PER_DISPATCH: u32 = 32;
+/// Samples-per-dispatch cap while the camera is moving. A motion frame is a
+/// transient, denoised, reduced-resolution preview that is discarded next frame
+/// (the accumulation key changes every motion frame, so `frame` resets to 0), so
+/// a tiny burst trades preview grain for a large drop in dispatch time. The
+/// budget formula otherwise pins motion frames near ~20–32 spp regardless of
+/// resolution (`budget_cap = SAMPLE_BUDGET_PER_DISPATCH / pixels` simply lets spp
+/// climb to the cap as the resolution drops); capping it to 2 cuts that ~10–16×
+/// while still giving the denoiser enough signal to stay legible. Pure tuning
+/// knob — no parity impact, since it is gated strictly on `moving` and the
+/// still-image accumulation is left byte-for-byte unchanged.
+const MOTION_SPP_CAP: u32 = 2;
 
 const RNG_WGSL: &str = include_str!("rng.wgsl");
 const PATHTRACE_WGSL: &str = include_str!("pathtrace.wgsl");
@@ -56,7 +67,10 @@ pub(crate) struct GpuRenderState {
     /// Key over (geometry, camera, size): a change restarts accumulation.
     accum_key: u64,
     scene: Option<Scene>,
-    /// Geometry-only signature of the uploaded GPU buffers.
+    /// Orbit framing (pivot + radius) of the cached scene, used to re-aim the
+    /// camera on a view change without rebuilding triangles + BVH.
+    framing: Option<SceneFraming>,
+    /// Geometry-only signature of the cached scene + uploaded GPU buffers.
     scene_key: u64,
     gpu_scene: Option<Arc<GpuScene>>,
     /// Next sample index to dispatch (also the accumulated sample count).
@@ -78,18 +92,33 @@ impl GpuRenderState {
 
     /// Refreshes the cached scene for the current model + view, resetting the
     /// progressive counter when geometry, camera, or size changed.
+    ///
+    /// Triangles + BVH (and their GPU upload) are geometry-only, so they are
+    /// rebuilt only when the geometry signature changes. A pure camera move
+    /// (orbit/zoom/resize) re-aims the cached scene's camera from the cached
+    /// framing instead — avoiding a full `scene_from_model` rebuild + `Bvh::build`
+    /// every interactive frame.
     fn sync(&mut self, model: &BuildingModel, opts: &RenderOptions, width: u32, height: u32) {
         let geom_key = model_signature(model);
         let accum_key = accumulation_key(geom_key, opts, width, height);
-        if self.accum_key != accum_key || self.scene.is_none() {
-            self.scene = Some(scene_from_model(model, opts));
+
+        if self.scene_key != geom_key || self.scene.is_none() {
+            // Geometry changed: rebuild triangles + BVH and re-upload to the GPU.
+            let (scene, framing) = build_scene(model, opts);
+            self.gpu_scene = Some(Arc::new(scene.to_gpu()));
+            self.scene = Some(scene);
+            self.framing = Some(framing);
+            self.scene_key = geom_key;
+        } else if self.accum_key != accum_key {
+            // Same geometry, new view: re-aim the camera only.
+            if let (Some(framing), Some(scene)) = (self.framing, self.scene.as_mut()) {
+                scene.camera = framing.camera(opts);
+            }
+        }
+
+        if self.accum_key != accum_key {
             self.accum_key = accum_key;
             self.frame = 0;
-        }
-        if self.scene_key != geom_key || self.gpu_scene.is_none() {
-            let gpu_scene = self.scene.as_ref().expect("scene synced").to_gpu();
-            self.gpu_scene = Some(Arc::new(gpu_scene));
-            self.scene_key = geom_key;
         }
     }
 
@@ -100,6 +129,7 @@ impl GpuRenderState {
         width: u32,
         height: u32,
         srgb_target: bool,
+        moving: bool,
         target_format: wgpu::TextureFormat,
     ) -> Option<PathTraceCallback> {
         let scene = self.scene.as_ref()?;
@@ -110,11 +140,10 @@ impl GpuRenderState {
         // Progressive burst: trace several samples per dispatch so convergence is
         // bounded by GPU throughput, not the egui frame cadence. Each dispatch
         // traces sample indices `[frame, frame + spp)`, landing exactly on
-        // TARGET_SPP. The budget cap keeps a single dispatch from stalling the GPU.
+        // TARGET_SPP. The burst is capped while the camera moves so an interactive
+        // frame costs a fraction of the still-image convergence burst.
         let pixels = (width as u64 * height as u64).max(1);
-        let budget_cap =
-            (SAMPLE_BUDGET_PER_DISPATCH / pixels).clamp(1, MAX_SPP_PER_DISPATCH as u64) as u32;
-        let spp = TARGET_SPP.saturating_sub(frame).min(budget_cap).max(1);
+        let spp = dispatch_spp(frame, pixels, moving);
 
         let mut uniforms = GpuUniforms::new(scene, width, height, frame, SEED, MAX_BOUNCES);
         // The blit reads this spare lane to decide whether to apply the sRGB
@@ -150,6 +179,23 @@ impl GpuRenderState {
     }
 }
 
+/// Samples to trace in a single dispatch, given the progressive `frame` counter,
+/// the dispatch `pixels` count, and whether the camera is moving.
+///
+/// When still, this is the original budget-bounded burst: as many samples as fit
+/// in `SAMPLE_BUDGET_PER_DISPATCH` (capped by `MAX_SPP_PER_DISPATCH`), never
+/// overshooting `TARGET_SPP`. While moving, the result is further clamped to
+/// `MOTION_SPP_CAP` so a transient preview frame stays cheap. `samples_per_dispatch`
+/// only regroups the *same* per-sample math (each sample is seeded from its global
+/// index `frame + s`), so capping it during motion does not change the converged
+/// still image — see the `wgsl_burst_matches_single_sample` GPU parity test.
+fn dispatch_spp(frame: u32, pixels: u64, moving: bool) -> u32 {
+    let budget_cap =
+        (SAMPLE_BUDGET_PER_DISPATCH / pixels.max(1)).clamp(1, MAX_SPP_PER_DISPATCH as u64) as u32;
+    let spp = TARGET_SPP.saturating_sub(frame).min(budget_cap).max(1);
+    if moving { spp.min(MOTION_SPP_CAP) } else { spp }
+}
+
 fn accumulation_key(geom_key: u64, opts: &RenderOptions, width: u32, height: u32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -174,10 +220,12 @@ pub(crate) fn paint(
     opts: &RenderOptions,
     width: u32,
     height: u32,
+    moving: bool,
     target_format: wgpu::TextureFormat,
 ) -> bool {
     state.sync(model, opts, width, height);
-    let Some(callback) = state.callback(width, height, target_format.is_srgb(), target_format)
+    let Some(callback) =
+        state.callback(width, height, target_format.is_srgb(), moving, target_format)
     else {
         return false;
     };
@@ -754,4 +802,64 @@ fn make_atrous_bind_groups(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The original budget-bounded burst, kept here as the reference the still
+    /// path must continue to match exactly.
+    fn still_spp(frame: u32, pixels: u64) -> u32 {
+        let budget_cap = (SAMPLE_BUDGET_PER_DISPATCH / pixels.max(1))
+            .clamp(1, MAX_SPP_PER_DISPATCH as u64) as u32;
+        TARGET_SPP.saturating_sub(frame).min(budget_cap).max(1)
+    }
+
+    #[test]
+    fn moving_caps_spp_to_motion_budget() {
+        // A ~816×480 reduced-resolution motion frame: the still formula would
+        // burst ~20 spp (8M / 391_680 ≈ 20), pinning per-frame work near the 8M
+        // budget. A moving frame is clamped to the cheap motion cap instead.
+        let pixels = 816 * 480;
+        assert_eq!(still_spp(0, pixels), 20);
+        assert_eq!(dispatch_spp(0, pixels, false), 20);
+        assert_eq!(dispatch_spp(0, pixels, true), MOTION_SPP_CAP);
+
+        // Small windows pin the still burst at the 32-spp hard cap; motion still
+        // clamps to MOTION_SPP_CAP.
+        let small = 320 * 240;
+        assert_eq!(still_spp(0, small), MAX_SPP_PER_DISPATCH);
+        assert_eq!(dispatch_spp(0, small, true), MOTION_SPP_CAP);
+    }
+
+    #[test]
+    fn still_path_is_unchanged_by_motion_cap() {
+        // Across a sweep of sizes and progress, the non-moving spp is byte-for-byte
+        // the original budget-bounded formula — the converged still image is
+        // therefore untouched by the motion change.
+        for &pixels in &[64u64 * 64, 500 * 281, 816 * 480, 1000 * 1000, 2000 * 2000] {
+            for frame in [0u32, 1, 31, 100, 255, 256, 1000] {
+                assert_eq!(
+                    dispatch_spp(frame, pixels, false),
+                    still_spp(frame, pixels),
+                    "still spp diverged at pixels={pixels} frame={frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moving_spp_is_bounded_and_nonzero() {
+        for &pixels in &[64u64 * 64, 250_000, 391_680, 1_000_000, 16_000_000] {
+            for frame in [0u32, 1, 31, 255, 256, 1000] {
+                let spp = dispatch_spp(frame, pixels, true);
+                assert!(spp >= 1, "spp must stay >= 1 (pixels={pixels} frame={frame})");
+                assert!(
+                    spp <= MOTION_SPP_CAP,
+                    "moving spp must not exceed MOTION_SPP_CAP (pixels={pixels} frame={frame})"
+                );
+            }
+        }
+    }
 }

@@ -6,7 +6,7 @@ use crate::ray::Ray;
 
 /// A perspective pinhole camera. `forward`, `right`, and `up` form a right-handed
 /// view basis; `half_w`/`half_h` are the image-plane half-extents at unit depth.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub eye: Vec3,
     pub center: Vec3,

@@ -9,7 +9,7 @@ const PARALLEL_EPS: f32 = 1.0e-8;
 
 /// A triangle with precomputed edges and geometric normal. `material` indexes
 /// into the scene's material table.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Triangle {
     pub v0: Vec3,
     pub edge1: Vec3,

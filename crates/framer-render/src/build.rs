@@ -88,9 +88,35 @@ pub fn palette() -> Vec<Material> {
     ]
 }
 
-/// Builds a render scene from the model. The result always contains a ground
-/// plane and lighting even when the model has no walls.
-pub fn scene_from_model(model: &BuildingModel, opts: &RenderOptions) -> Scene {
+/// The orbit framing (pivot + bounding radius) implied by the model geometry.
+/// Derived from the triangle bounds alone — independent of the view — so it can
+/// be cached across camera moves and used to re-aim the camera without rebuilding
+/// triangles and the BVH (see [`SceneFraming::camera`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneFraming {
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+impl SceneFraming {
+    /// The orbit camera for this framing under the given view options.
+    pub fn camera(&self, opts: &RenderOptions) -> Camera {
+        Camera::orbit(
+            self.center,
+            self.radius,
+            opts.yaw,
+            opts.pitch,
+            opts.zoom,
+            opts.aspect,
+            opts.vfov_deg,
+        )
+    }
+}
+
+/// Builds the model's triangles and the orbit framing they imply. Geometry-only:
+/// the result depends on `model` but not on the view (yaw/pitch/zoom/aspect), so
+/// it is safe to cache across camera moves.
+fn geometry_from_model(model: &BuildingModel) -> (Vec<Triangle>, SceneFraming) {
     let mut tris: Vec<Triangle> = Vec::new();
     let mut bounds = Aabb::EMPTY;
 
@@ -114,17 +140,23 @@ pub fn scene_from_model(model: &BuildingModel, opts: &RenderOptions) -> Scene {
     };
     push_ground(&mut tris, center, radius, ground_z);
 
-    let camera = Camera::orbit(
-        center,
-        radius,
-        opts.yaw,
-        opts.pitch,
-        opts.zoom,
-        opts.aspect,
-        opts.vfov_deg,
-    );
+    (tris, SceneFraming { center, radius })
+}
 
-    Scene::new(tris, palette(), opts.sun, opts.sky, camera, opts.exposure)
+/// Builds a render scene **and** its orbit framing. The framing lets an
+/// interactive caller re-aim the camera on an orbit/zoom without rebuilding the
+/// triangles + BVH (which are geometry-only and unchanged by a camera move).
+pub fn build_scene(model: &BuildingModel, opts: &RenderOptions) -> (Scene, SceneFraming) {
+    let (tris, framing) = geometry_from_model(model);
+    let camera = framing.camera(opts);
+    let scene = Scene::new(tris, palette(), opts.sun, opts.sky, camera, opts.exposure);
+    (scene, framing)
+}
+
+/// Builds a render scene from the model. The result always contains a ground
+/// plane and lighting even when the model has no walls.
+pub fn scene_from_model(model: &BuildingModel, opts: &RenderOptions) -> Scene {
+    build_scene(model, opts).0
 }
 
 /// Wall-local basis: `along` runs start→end, `side` is the perpendicular.
@@ -354,6 +386,63 @@ mod tests {
         wall.openings = openings;
         model.walls.push(wall);
         model
+    }
+
+    #[test]
+    fn build_scene_matches_scene_from_model() {
+        // The split build path must produce exactly what the public entry point does.
+        let model = wall_model(WallExposure::Exterior, vec![]);
+        let opts = RenderOptions {
+            yaw: 0.7,
+            pitch: 0.3,
+            zoom: 1.5,
+            aspect: 1.4,
+            ..RenderOptions::default()
+        };
+        let (scene, _framing) = build_scene(&model, &opts);
+        let direct = scene_from_model(&model, &opts);
+        assert_eq!(scene.camera, direct.camera);
+        assert_eq!(scene.triangles, direct.triangles);
+        assert_eq!(scene.materials, direct.materials);
+    }
+
+    #[test]
+    fn reaiming_camera_matches_full_rebuild() {
+        // Cache geometry once for view A, then re-aim the camera to view B without
+        // rebuilding triangles/BVH — the result must match a full rebuild at B.
+        let model = wall_model(WallExposure::Exterior, vec![]);
+        let view_a = RenderOptions {
+            yaw: 0.3,
+            pitch: 0.4,
+            zoom: 1.0,
+            aspect: 1.6,
+            ..RenderOptions::default()
+        };
+        let view_b = RenderOptions {
+            yaw: 1.1,
+            pitch: 0.2,
+            zoom: 2.0,
+            aspect: 1.2,
+            ..RenderOptions::default()
+        };
+
+        let (mut scene, framing) = build_scene(&model, &view_a);
+        let tris_before = scene.triangles.clone();
+        scene.camera = framing.camera(&view_b);
+
+        let full = scene_from_model(&model, &view_b);
+        assert_eq!(
+            scene.camera, full.camera,
+            "re-aimed camera must equal a full rebuild at the new view"
+        );
+        assert_eq!(
+            scene.triangles, tris_before,
+            "re-aiming must not disturb the cached geometry"
+        );
+        assert_eq!(
+            scene.triangles, full.triangles,
+            "cached geometry must equal a fresh build's geometry"
+        );
     }
 
     #[test]
