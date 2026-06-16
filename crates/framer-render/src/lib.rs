@@ -13,5 +13,7 @@
 //! WGSL's precision.
 #![forbid(unsafe_code)]
 
+pub mod aabb;
 pub mod math;
+pub mod ray;
 pub mod rng;
