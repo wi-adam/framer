@@ -21,6 +21,7 @@ framer-core = { path = "crates/framer-core" }
 framer-render = { path = "crates/framer-render" }
 framer-solver = { path = "crates/framer-solver" }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+pollster = "0.4.0"
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

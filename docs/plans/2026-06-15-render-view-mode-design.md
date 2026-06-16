@@ -196,35 +196,44 @@ The renderer was tuned against real captures (warm sun, cool sky-lit shadows,
 glazed windows with visible glass caustics) until it reads as a credible
 architectural rendering.
 
-## GPU compute path tracer — next step
+## GPU compute path tracer — shipped (2026-06-16)
 
-The chosen long-term engine is a WGSL compute path tracer in the app for
-real-time refinement. A concrete, version-correct implementation reference (the
+The long-term engine — a WGSL compute path tracer in the app for real-time
+refinement — has landed, behind the same `Scene`/camera as the CPU tracer and
+with a CPU fallback. The version-correct implementation reference (the
 `egui_wgpu` integration pattern, storage-buffer layout, WGSL kernel snippets, and
 the wgpu-29 breaking-change checklist) lives in
 [2026-06-15-gpu-pathtracer-research.md](2026-06-15-gpu-pathtracer-research.md).
-The groundwork is in place:
+What shipped:
 
-- The renderable `Scene` (triangles, flat BVH nodes, materials, camera, sun,
-  sky) is a plain-data structure that flattens directly to GPU storage buffers
-  (the BVH already uses a flat array with consecutive children + an iterative
-  traversal, exactly as WGSL requires).
-- `accumulate()` mirrors the GPU running-sum accumulator (`.xyz` = radiance sum,
-  `.w` = sample count), and the math (PCG, BSDFs, ACES) is written to be ported
-  verbatim to WGSL.
-- Validation plan: a headless `wgpu` readback test renders the golden reference
-  scene on the GPU and compares to the CPU reference within a looser MAE
-  (absorbing `f32`/algorithm differences). This validates the kernel without a
-  visible window. The `egui_wgpu::CallbackTrait` integration (compute recorded
-  in `prepare`, fullscreen blit in `paint`, progressive accumulation via
-  `request_repaint`) follows the version-correct wgpu-29 pattern captured during
-  research.
-
-Deferred deliberately this session: the `egui_wgpu` in-app integration can only
-be fully verified in the running app window, and macOS currently blocks
-screen capture, so shipping it unverified risked a broken path. The CPU-backed
-Render view is the proven baseline; the GPU path slots in behind the same
-`Scene`/camera with a CPU fallback.
+- **Scene flattening** (`framer-render/src/gpu.rs`): `#[repr(C)] bytemuck::Pod`
+  mirror structs (`GpuTriangle`/`GpuBvhNode`/`GpuMaterial`/`GpuUniforms`, vec3
+  padded to vec4) with `size_of` asserts pinning the std430/std140 layout, and
+  `Scene::to_gpu()`. The flat BVH (consecutive children + iterative traversal)
+  ports verbatim; `bvh.indices` is uploaded alongside.
+- **WGSL kernel** (`framer-app/src/app/render/`): `rng.wgsl` emulates the 64-bit
+  PCG XSH-RR state with `vec2<u32>` (full 64-bit multiply/add/shift) so the GPU
+  stream is **bit-identical** to the CPU's; `pathtrace.wgsl` mirrors camera ray
+  gen, BVH + Möller–Trumbore, diffuse / metal-GGX-VNDF / dielectric BSDFs, NEE
+  sun + procedural sky + specular-sees-sun-disk, Russian roulette, and the
+  firefly clamp, in the exact same RNG draw order; `blit.wgsl` does the
+  fullscreen-triangle exposure + Narkowicz ACES + sRGB tonemap. A running-sum
+  `array<vec4<f32>>` accumulator needs no atomics or ping-pong.
+- **Integration** (`PathTraceCallback : egui_wgpu::CallbackTrait`): compute
+  dispatch recorded into egui's encoder in `prepare` (scoped so the pass drops
+  before `finish`), fullscreen blit in `paint`. Pipelines/buffers cached in
+  `CallbackResources`, rebuilt on target-format / scene-hash / resolution change;
+  progressive accumulation via `request_repaint`, reset on camera/model change.
+- **Validation** (`framer-app/tests/gpu_parity.rs`, headless `wgpu`, skips
+  gracefully without an adapter): (1) the GPU PCG reproduces the CPU canary +
+  `pixel_rng` bit-for-bit; (2) the compute kernel renders the golden reference
+  scene and matches `framer_render::render` (MAE ≈ 0.03, max < 48 at 64 spp);
+  (3) the actual blit shader renders to an offscreen target and matches the CPU
+  reference (validating Y-orientation, ACES, and sRGB). The in-app
+  `CallbackTrait` wiring is exercised by a `FRAMER_RENDER_SMOKE=<frames>` startup
+  hook that drives the Render view on the real device and closes cleanly. macOS
+  screen-capture is bypassed entirely — egui's framebuffer readback path is used,
+  not OS screen capture.
 
 ## Risks & mitigations
 

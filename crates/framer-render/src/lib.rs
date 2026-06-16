@@ -7,10 +7,11 @@
 //! importance sampling, and ACES tone mapping). The app's WGSL compute path
 //! tracer mirrors this exact math, fed by the same scene.
 //!
-//! The library has **zero runtime dependencies** beyond `framer-core`; `image`
-//! (PNG export) and `rayon` (parallel rendering) are optional and gated behind
-//! the `cli` and `parallel` features respectively. All math is `f32` to match
-//! WGSL's precision.
+//! The library's only runtime dependencies are `framer-core` and `bytemuck`
+//! (the latter just for the `#[repr(C)]` GPU-buffer mirror structs in [`gpu`]);
+//! `image` (PNG export) and `rayon` (parallel rendering) are optional and gated
+//! behind the `cli` and `parallel` features respectively. All math is `f32` to
+//! match WGSL's precision.
 #![forbid(unsafe_code)]
 
 pub mod aabb;
@@ -19,6 +20,7 @@ pub mod bvh;
 pub mod camera;
 pub mod color;
 pub mod geom;
+pub mod gpu;
 pub mod integrator;
 pub mod material;
 pub mod math;
@@ -26,6 +28,7 @@ pub mod ray;
 pub mod rng;
 pub mod sampling;
 pub mod scene;
+pub mod scenes;
 
 pub use build::{RenderOptions, scene_from_model};
 

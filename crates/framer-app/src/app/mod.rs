@@ -3,6 +3,7 @@ mod labels;
 mod model_edit;
 mod panels;
 mod project_io;
+mod render;
 mod render_job;
 mod theme;
 mod viewport;
@@ -41,9 +42,16 @@ pub(crate) struct FramerApp {
     viewport_mode: ViewportMode,
     view_3d: View3dState,
     render_view: render_job::RenderViewState,
+    render_gpu: render::GpuRenderState,
     dimension_tool: DimensionToolState,
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
+    /// Whether the active adapter supports compute shaders (GPU path tracer);
+    /// when false the Render view falls back to the CPU renderer.
+    gpu_compute_ok: bool,
+    /// Smoke test for the GPU path-trace callback: when `FRAMER_RENDER_SMOKE=N`
+    /// is set, force the Render view for N frames then close. `None` normally.
+    render_smoke: Option<u32>,
     show_section: bool,
     grid: bool,
     ortho: bool,
@@ -175,9 +183,12 @@ impl Default for FramerApp {
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
             render_view: render_job::RenderViewState::default(),
+            render_gpu: render::GpuRenderState::default(),
             dimension_tool: DimensionToolState::default(),
             opening_drag: None,
             gpu_target_format: None,
+            gpu_compute_ok: false,
+            render_smoke: None,
             show_section: true,
             grid: true,
             ortho: true,
@@ -193,11 +204,19 @@ impl FramerApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         design::install(&cc.egui_ctx, design::studio_light());
 
+        let render_state = cc.wgpu_render_state.as_ref();
         Self {
-            gpu_target_format: cc
-                .wgpu_render_state
-                .as_ref()
-                .map(|render_state| render_state.target_format),
+            gpu_target_format: render_state.map(|rs| rs.target_format),
+            // The GPU path tracer needs compute shaders; otherwise fall back to CPU.
+            gpu_compute_ok: render_state.is_some_and(|rs| {
+                rs.adapter
+                    .get_downlevel_capabilities()
+                    .flags
+                    .contains(eframe::wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            }),
+            render_smoke: std::env::var("FRAMER_RENDER_SMOKE")
+                .ok()
+                .map(|v| v.parse().unwrap_or(180)),
             ..Self::default()
         }
     }
@@ -779,6 +798,24 @@ impl FramerApp {
 impl eframe::App for FramerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keyboard_shortcuts(ctx);
+
+        // Smoke test: drive the GPU Render view for a fixed number of frames,
+        // then close. Exercises the egui_wgpu compute+blit callback on the real
+        // device (which the headless tests can't reach). Enable with
+        // `FRAMER_RENDER_SMOKE=<frames> cargo run -p framer-app`.
+        if let Some(frames_left) = self.render_smoke {
+            self.viewport_mode = ViewportMode::Render;
+            if frames_left == 0 {
+                eprintln!(
+                    "render smoke complete: {} samples accumulated",
+                    self.render_gpu.samples()
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.render_smoke = Some(frames_left - 1);
+                ctx.request_repaint();
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

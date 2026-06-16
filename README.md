@@ -24,7 +24,11 @@ multi-system CAD alpha. The repository currently contains:
 - `framer-app`: a native Rust desktop shell using `eframe`/`egui` with a model
   tree, object catalog, inspector, diagnostics, BOM, whole-shell plan view,
   selected-wall elevation view, a WGPU-backed 3D workspace with depth-tested
-  wall and framing member solids, and a path-traced **Render** view mode.
+  wall and framing member solids, and a path-traced **Render** view mode. The
+  Render view runs a real-time WGSL compute path tracer that mirrors
+  `framer-render`'s math (validated against the CPU reference by a headless
+  GPU↔CPU parity test), falling back to the CPU renderer when the GPU lacks
+  compute support.
 
 The completed Phase 1 workflow still frames one straight wall with doors,
 windows, or garage-door-style openings. The current beyond-Phase-1 alpha also
@@ -58,8 +62,8 @@ workflow is:
 7. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
 8. Switch to the **Render** view (toolbar) for a path-traced architectural
    rendering of the design — real raytraced lighting, glass, and soft shadows.
-   Drag to orbit and scroll to zoom; the image refines progressively while the
-   camera is still.
+   It runs on the GPU (WGSL compute) in real time, drag to orbit and scroll to
+   zoom; the image refines progressively while the camera is still.
 
 ## Render (headless)
 
@@ -72,7 +76,9 @@ cargo run -p framer-render --features cli --release --bin render -- \
 
 Optional flags: `--yaw DEG --pitch DEG --zoom Z --exposure E --seed S`. The
 renderer is deterministic (a pure function of the seed) and parallelized across
-cores. The in-app Render view shares the exact same path-tracing core.
+cores. The in-app Render view's WGSL compute path tracer mirrors this exact math
+— same PCG RNG, BVH traversal, BSDFs, and ACES — verified by a headless GPU↔CPU
+parity test (`crates/framer-app/tests/gpu_parity.rs`).
 
 ## Test
 

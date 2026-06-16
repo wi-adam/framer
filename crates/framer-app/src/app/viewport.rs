@@ -396,32 +396,59 @@ impl FramerApp {
             ..framer_render::RenderOptions::default()
         };
 
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            super::render_job::model_signature(&self.model).hash(&mut hasher);
-            ((self.view_3d.yaw * 2000.0) as i64).hash(&mut hasher);
-            ((self.view_3d.pitch * 2000.0) as i64).hash(&mut hasher);
-            ((self.view_3d.zoom * 1000.0) as i64).hash(&mut hasher);
-            width.hash(&mut hasher);
-            height.hash(&mut hasher);
-            hasher.finish()
-        };
+        // Prefer the real-time GPU compute path tracer; fall back to the
+        // background-thread CPU renderer when compute isn't available.
+        let (samples, target, accumulating) =
+            if let (true, Some(format)) = (self.gpu_compute_ok, self.gpu_target_format) {
+                let prepared = super::render::paint(
+                    &mut self.render_gpu,
+                    &painter,
+                    drawing,
+                    &self.model,
+                    &opts,
+                    width,
+                    height,
+                    format,
+                );
+                if !prepared {
+                    draw_view_empty(&painter, drawing, "Preparing render…");
+                }
+                (
+                    self.render_gpu.samples(),
+                    self.render_gpu.target_spp(),
+                    self.render_gpu.is_accumulating(),
+                )
+            } else {
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    super::render_job::model_signature(&self.model).hash(&mut hasher);
+                    ((self.view_3d.yaw * 2000.0) as i64).hash(&mut hasher);
+                    ((self.view_3d.pitch * 2000.0) as i64).hash(&mut hasher);
+                    ((self.view_3d.zoom * 1000.0) as i64).hash(&mut hasher);
+                    width.hash(&mut hasher);
+                    height.hash(&mut hasher);
+                    hasher.finish()
+                };
 
-        self.render_view
-            .update(&ctx, &self.model, opts, width, height, key);
+                self.render_view
+                    .update(&ctx, &self.model, opts, width, height, key);
 
-        if let Some(texture) = self.render_view.texture() {
-            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
-            painter.image(texture.id(), drawing, uv, Color32::WHITE);
-        } else {
-            draw_view_empty(&painter, drawing, "Preparing render…");
-        }
+                if let Some(texture) = self.render_view.texture() {
+                    let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+                    painter.image(texture.id(), drawing, uv, Color32::WHITE);
+                } else {
+                    draw_view_empty(&painter, drawing, "Preparing render…");
+                }
+                (
+                    self.render_view.samples(),
+                    self.render_view.target_spp(),
+                    self.render_view.is_accumulating(),
+                )
+            };
 
         // Progress / quality readout.
-        let samples = self.render_view.samples();
-        let target = self.render_view.target_spp();
-        let label = if self.render_view.is_accumulating() {
+        let label = if accumulating {
             format!("Rendering — {samples}/{target} spp")
         } else {
             format!("Render complete — {samples} spp")
@@ -436,7 +463,7 @@ impl FramerApp {
         draw_view_title(&painter, drawing, "Render");
 
         // Keep refining until converged (or while the user is interacting).
-        if self.render_view.is_accumulating() || response.dragged() {
+        if accumulating || response.dragged() {
             ctx.request_repaint();
         }
     }
@@ -824,10 +851,10 @@ fn draw_project_plan(
         return None;
     };
 
-    if let Some(hover) = response.hover_pos() {
-        if drawing.contains(hover) {
-            *cursor_out = Some(plan_inverse_point(hover, bounds, drawing));
-        }
+    if let Some(hover) = response.hover_pos()
+        && drawing.contains(hover)
+    {
+        *cursor_out = Some(plan_inverse_point(hover, bounds, drawing));
     }
 
     let pointer = response.interact_pointer_pos();

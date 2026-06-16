@@ -1240,6 +1240,7 @@ dependencies = [
  "framer-core",
  "framer-render",
  "framer-solver",
+ "pollster",
 ]
 
 [[package]]
@@ -1255,6 +1256,7 @@ dependencies = [
 name = "framer-render"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "framer-core",
  "image",
  "rayon",
