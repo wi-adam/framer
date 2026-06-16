@@ -480,12 +480,16 @@ fn radiance(primary: Ray, rng: ptr<function, Rng>) -> vec3<f32> {
     var throughput = vec3<f32>(1.0);
     var acc = vec3<f32>(0.0);
     var specular_path = true;
+    // Mirrors integrator.rs: once a path has had a diffuse bounce it can only
+    // reach the sun disk via an unsampleable caustic (the firefly speckles), so
+    // suppress the disk pickup for it. Direct glints keep this false.
+    var prior_nonspecular = false;
 
     for (var bounce = 0u; bounce < u.max_bounces; bounce = bounce + 1u) {
         let hit = intersect_scene(ray);
         if (!hit.valid) {
             var env = sky_radiance(ray.dir);
-            if (specular_path) {
+            if (specular_path && !prior_nonspecular) {
                 env = env + sun_disk_radiance(ray.dir);
             }
             acc = acc + throughput * env;
@@ -504,6 +508,9 @@ fn radiance(primary: Ray, rng: ptr<function, Rng>) -> vec3<f32> {
             break;
         }
         specular_path = sc.specular;
+        if (!sc.specular) {
+            prior_nonspecular = true;
+        }
         throughput = throughput * sc.throughput;
         if (max3(throughput) <= 0.0) {
             break;
