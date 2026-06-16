@@ -29,6 +29,15 @@ const MOTION_COOLDOWN_FRAMES: u32 = 6;
 /// Internal-resolution scale for the Render view while the camera is moving
 /// (0.5 ⇒ quarter the pixels, ~4× faster per frame).
 const MOTION_RESOLUTION_SCALE: f32 = 0.5;
+/// Smallest internal render dimension (device pixels) on either axis: floors the
+/// resolution for very small panes so the accumulator is never degenerate.
+const MIN_RENDER_DIM: u32 = 64;
+/// Largest internal render dimension (device pixels) on either axis. Caps GPU
+/// cost and accumulator memory (four f32×4 buffers ⇒ ~270 MB at the limit).
+/// Raised from the prior 1000 px so a settled frame on a hi-DPI display renders
+/// at (or near) native resolution instead of being nearest-upscaled by the blit
+/// — the upscale was the cause of jagged/soft edges on a stationary camera.
+const MAX_RENDER_DIM: u32 = 2048;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
@@ -404,13 +413,13 @@ impl FramerApp {
             return;
         }
 
-        // Internal render resolution: device pixels, capped, aspect-matched, and
-        // scaled down while the camera moves (fewer pixels → smoother orbit).
+        // Internal render resolution: device pixels, aspect-preserving and bounded
+        // (see `render_resolution`), scaled down while the camera moves so orbiting
+        // stays responsive; a settled frame returns to native resolution and
+        // converges crisp instead of being nearest-upscaled from a sub-native cap.
         let ppp = ui.ctx().pixels_per_point();
         let res_scale = if moving { MOTION_RESOLUTION_SCALE } else { 1.0 };
-        let aspect = (drawing.width() / drawing.height()).max(0.1);
-        let width = ((drawing.width() * ppp * res_scale).round() as u32).clamp(64, 1000);
-        let height = ((width as f32 / aspect).round() as u32).clamp(64, 1000);
+        let (width, height) = render_resolution(drawing.width(), drawing.height(), ppp, res_scale);
 
         let opts = framer_render::RenderOptions {
             yaw: self.view_3d.yaw,
@@ -664,6 +673,33 @@ fn viewport_drawing_rect(rect: Rect, margin: f32) -> Rect {
         rect.min + Vec2::splat(margin),
         rect.max - Vec2::new(margin, margin),
     )
+}
+
+/// Internal render resolution (device pixels) for a drawing rect of logical size
+/// `rect_w` × `rect_h`, at `pixels_per_point` `ppp` and motion scale `res_scale`
+/// (1.0 when the camera is still, `MOTION_RESOLUTION_SCALE` while orbiting).
+///
+/// Both axes are scaled by a single factor so the rect's aspect ratio is always
+/// preserved — a tall pane stays tall — instead of clamping each axis on its own
+/// (which squished portrait/landscape panes toward square). The factor floors the
+/// short axis at `MIN_RENDER_DIM` and caps the long axis at `MAX_RENDER_DIM`; the
+/// cap wins if the two bounds ever conflict on a degenerate sliver.
+fn render_resolution(rect_w: f32, rect_h: f32, ppp: f32, res_scale: f32) -> (u32, u32) {
+    // Target device-pixel size of the drawing rect.
+    let dw = (rect_w * ppp * res_scale).max(1.0);
+    let dh = (rect_h * ppp * res_scale).max(1.0);
+    let long = dw.max(dh);
+    let short = dw.min(dh);
+    // A single uniform factor keeps the aspect ratio intact: raise it to lift the
+    // short axis to MIN_RENDER_DIM, then cap it so the long axis never exceeds
+    // MAX_RENDER_DIM. `.min` is applied last, so the cost cap wins if the floor
+    // and cap conflict (extreme aspect ratios).
+    let scale = (MIN_RENDER_DIM as f32 / short)
+        .max(1.0)
+        .min(MAX_RENDER_DIM as f32 / long);
+    let w = (dw * scale).round().max(1.0) as u32;
+    let h = (dh * scale).round().max(1.0) as u32;
+    (w, h)
 }
 
 fn draw_view_title(painter: &egui::Painter, drawing: Rect, title: impl Into<String>) {
@@ -4561,6 +4597,57 @@ mod tests {
                 .iter()
                 .all(|pick| !matches!(&pick.click, ViewClick::Member { .. }))
         );
+    }
+
+    #[test]
+    fn render_resolution_uses_native_device_pixels_when_within_bounds() {
+        // A settled frame (res_scale = 1.0) on a hi-DPI pane must render at full
+        // device resolution. The old per-axis clamp capped width to 1000 px,
+        // which is what made stationary frames look soft and jagged.
+        let (w, h) = render_resolution(700.0, 500.0, 2.0, 1.0);
+        assert_eq!((w, h), (1400, 1000));
+    }
+
+    #[test]
+    fn render_resolution_preserves_aspect_on_tall_pane() {
+        // Regression: width/height used to be clamped independently to 1000,
+        // squishing a portrait pane toward square. Aspect must be preserved.
+        let (w, h) = render_resolution(600.0, 900.0, 2.0, 1.0);
+        assert!(h > w, "portrait pane must stay portrait, got {w}x{h}");
+        let ratio = w as f32 / h as f32;
+        assert!(
+            (ratio - 600.0 / 900.0).abs() < 0.01,
+            "aspect {ratio} should match 600/900"
+        );
+    }
+
+    #[test]
+    fn render_resolution_caps_long_axis_preserving_aspect() {
+        // Oversized pane: the long axis is capped to MAX_RENDER_DIM and the short
+        // axis scales by the same factor, rather than clamping each axis alone.
+        let (w, h) = render_resolution(1500.0, 1000.0, 2.0, 1.0);
+        assert_eq!(w.max(h), MAX_RENDER_DIM);
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 1.5).abs() < 0.01, "aspect {ratio} should match 1.5");
+    }
+
+    #[test]
+    fn render_resolution_floors_tiny_pane_to_min() {
+        let (w, h) = render_resolution(20.0, 15.0, 1.0, 1.0);
+        assert_eq!(w.min(h), MIN_RENDER_DIM);
+        let ratio = w as f32 / h as f32;
+        assert!(
+            (ratio - 20.0 / 15.0).abs() < 0.05,
+            "aspect {ratio} should match 20/15"
+        );
+    }
+
+    #[test]
+    fn render_resolution_motion_scale_shrinks_uniformly() {
+        let still = render_resolution(800.0, 600.0, 2.0, 1.0);
+        let moving = render_resolution(800.0, 600.0, 2.0, 0.5);
+        assert_eq!(still, (1600, 1200));
+        assert_eq!(moving, (800, 600));
     }
 
     fn assert_close(actual: f32, expected: f32) {
