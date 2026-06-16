@@ -168,9 +168,19 @@ mod tests {
         )];
         let materials = vec![Material::Diffuse { albedo: Vec3::ONE }];
         let camera = Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0);
-        let scene = Scene::new(tris, materials, DirectionalSun::DARK, test_sky(), camera, 1.0);
+        let scene = Scene::new(
+            tris,
+            materials,
+            DirectionalSun::DARK,
+            test_sky(),
+            camera,
+            1.0,
+        );
         let ray = Ray::new(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0));
         let hit = scene.intersect(&ray).expect("should hit triangle");
-        assert_eq!(scene.material(&hit), Material::Diffuse { albedo: Vec3::ONE });
+        assert_eq!(
+            scene.material(&hit),
+            Material::Diffuse { albedo: Vec3::ONE }
+        );
     }
 }

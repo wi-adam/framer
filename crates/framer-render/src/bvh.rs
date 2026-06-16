@@ -181,7 +181,9 @@ fn subdivide(
     indices[start..end].sort_by(|&a, &b| {
         let ca = axis_value(centroids[a as usize], axis);
         let cb = axis_value(centroids[b as usize], axis);
-        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b))
+        ca.partial_cmp(&cb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
     });
     let mid = start + count / 2;
 
@@ -276,7 +278,10 @@ mod tests {
             tested += 1;
         }
         assert_eq!(tested, 3000);
-        assert!(hits > 50, "test scene too sparse to be meaningful ({hits} hits)");
+        assert!(
+            hits > 50,
+            "test scene too sparse to be meaningful ({hits} hits)"
+        );
     }
 
     #[test]
@@ -315,7 +320,10 @@ mod tests {
             )
             .normalize();
             let ray = Ray::new(origin, dir);
-            assert_eq!(bvh.occluded(&tris, &ray), bvh.intersect(&tris, &ray).is_some());
+            assert_eq!(
+                bvh.occluded(&tris, &ray),
+                bvh.intersect(&tris, &ray).is_some()
+            );
         }
     }
 

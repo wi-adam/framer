@@ -53,7 +53,9 @@ pub fn render(scene: &Scene, width: u32, height: u32, spp: u32, seed: u64) -> Ve
             let mut rng = rng::pixel_rng(x, y, sample, seed);
             let jx = rng.next_f32();
             let jy = rng.next_f32();
-            let ray = scene.camera.ray(x as f32 + jx, y as f32 + jy, width, height);
+            let ray = scene
+                .camera
+                .ray(x as f32 + jx, y as f32 + jy, width, height);
             sum = sum + integrator::radiance(scene, ray, &mut rng, MAX_BOUNCES);
         }
         let avg = sum * (1.0 / spp as f32);
@@ -132,4 +134,3 @@ mod tests {
         assert!(buf.iter().any(|&b| b > 0));
     }
 }
-

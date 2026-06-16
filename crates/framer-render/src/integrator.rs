@@ -158,7 +158,10 @@ mod tests {
             1.0,
         );
         let avg = average_radiance(&scene, 20_000);
-        assert!((avg - l).length() < 0.01, "furnace failed: {avg:?} vs {l:?}");
+        assert!(
+            (avg - l).length() < 0.01,
+            "furnace failed: {avg:?} vs {l:?}"
+        );
     }
 
     #[test]

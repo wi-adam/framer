@@ -37,7 +37,8 @@ impl Camera {
         let depth_axis = Vec3::new(-yaw.sin(), yaw.cos(), 0.0);
         // Positive pitch looks down from above (the natural architectural vantage),
         // so the look direction tilts toward -Z.
-        let forward = Vec3::new(depth_axis.x * cos_p, depth_axis.y * cos_p, -pitch.sin()).normalize();
+        let forward =
+            Vec3::new(depth_axis.x * cos_p, depth_axis.y * cos_p, -pitch.sin()).normalize();
 
         let world_up = Vec3::new(0.0, 0.0, 1.0);
         let right = forward.cross(world_up).normalize();
@@ -68,8 +69,9 @@ impl Camera {
     pub fn ray(&self, sx: f32, sy: f32, width: u32, height: u32) -> Ray {
         let ndc_x = sx / width as f32 * 2.0 - 1.0;
         let ndc_y = 1.0 - sy / height as f32 * 2.0; // flip: row 0 is the top
-        let dir = (self.forward + self.right * (ndc_x * self.half_w) + self.up * (ndc_y * self.half_h))
-            .normalize();
+        let dir =
+            (self.forward + self.right * (ndc_x * self.half_w) + self.up * (ndc_y * self.half_h))
+                .normalize();
         Ray::new(self.eye, dir)
     }
 }
@@ -82,12 +84,12 @@ mod tests {
     fn cam() -> Camera {
         Camera::orbit(
             Vec3::new(10.0, 20.0, 5.0), // center
-            8.0,                         // radius
-            -0.785,                      // yaw
-            0.55,                        // pitch
-            1.0,                         // zoom
-            16.0 / 9.0,                  // aspect
-            40.0,                        // vfov degrees
+            8.0,                        // radius
+            -0.785,                     // yaw
+            0.55,                       // pitch
+            1.0,                        // zoom
+            16.0 / 9.0,                 // aspect
+            40.0,                       // vfov degrees
         )
     }
 
@@ -95,7 +97,10 @@ mod tests {
     fn eye_looks_toward_the_center() {
         let c = cam();
         let to_center = (c.center - c.eye).normalize();
-        assert!((to_center - c.forward).length() < 1e-4, "forward must point at center");
+        assert!(
+            (to_center - c.forward).length() < 1e-4,
+            "forward must point at center"
+        );
     }
 
     #[test]
@@ -109,7 +114,12 @@ mod tests {
     fn pitch_raises_the_eye() {
         let c = cam();
         // Positive pitch looks down from above, so the eye is above the center.
-        assert!(c.eye.z > c.center.z, "eye z={} center z={}", c.eye.z, c.center.z);
+        assert!(
+            c.eye.z > c.center.z,
+            "eye z={} center z={}",
+            c.eye.z,
+            c.center.z
+        );
     }
 
     #[test]

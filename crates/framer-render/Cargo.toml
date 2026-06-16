@@ -10,8 +10,8 @@ name = "framer_render"
 
 [features]
 default = []
-# Headless PNG export binary; pulls in the `image` codec.
-cli = ["dep:image"]
+# Headless PNG export binary; pulls in the `image` codec and parallel rendering.
+cli = ["dep:image", "parallel"]
 # Multi-threaded CPU rendering. Determinism is preserved (per-pixel seeding),
 # so `parallel` and single-threaded renders are byte-identical.
 parallel = ["dep:rayon"]
@@ -20,3 +20,8 @@ parallel = ["dep:rayon"]
 framer-core = { workspace = true }
 image = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
+
+[[bin]]
+name = "render"
+path = "src/bin/render.rs"
+required-features = ["cli"]

@@ -42,21 +42,22 @@ impl Default for RenderOptions {
         Self {
             // Matches the app's View3dState::default().
             yaw: -std::f32::consts::FRAC_PI_4,
-            pitch: 0.55,
+            pitch: 0.42,
             zoom: 1.0,
             aspect: 16.0 / 9.0,
-            vfov_deg: 38.0,
-            exposure: 1.1,
+            vfov_deg: 36.0,
+            exposure: 1.0,
             sun: DirectionalSun {
-                // Late-afternoon sun, high and to one side.
-                dir: Vec3::new(0.45, -0.35, 0.82).normalize(),
-                irradiance: Vec3::new(1.0, 0.96, 0.86) * 5.5,
-                angular_radius: 0.03,
+                // Low, warm late-afternoon sun for long, dramatic shadows.
+                dir: Vec3::new(0.55, -0.42, 0.58).normalize(),
+                irradiance: Vec3::new(1.0, 0.9, 0.74) * 4.4,
+                angular_radius: 0.025,
             },
             sky: Sky {
-                zenith: Vec3::new(0.18, 0.34, 0.78),
-                horizon: Vec3::new(0.75, 0.82, 0.92),
-                ground: Vec3::new(0.20, 0.18, 0.15),
+                // Deep blue zenith fading to a bright, slightly warm horizon.
+                zenith: Vec3::new(0.14, 0.30, 0.72),
+                horizon: Vec3::new(0.80, 0.84, 0.90),
+                ground: Vec3::new(0.22, 0.20, 0.16),
             },
         }
     }
@@ -66,7 +67,7 @@ impl Default for RenderOptions {
 pub fn palette() -> Vec<Material> {
     vec![
         Material::Diffuse {
-            albedo: Vec3::new(0.62, 0.60, 0.55), // cladding — warm light grey
+            albedo: Vec3::new(0.66, 0.62, 0.55), // cladding — warm light grey
         },
         Material::Diffuse {
             albedo: Vec3::new(0.86, 0.86, 0.83), // drywall — near white
@@ -101,7 +102,10 @@ pub fn scene_from_model(model: &BuildingModel, opts: &RenderOptions) -> Scene {
     let (center, radius) = if bounds == Aabb::EMPTY {
         (Vec3::ZERO, 120.0)
     } else {
-        (bounds.centroid(), (bounds.extent().length() * 0.5).max(12.0))
+        (
+            bounds.centroid(),
+            (bounds.extent().length() * 0.5).max(12.0),
+        )
     };
     let ground_z = if bounds == Aabb::EMPTY {
         0.0
@@ -212,24 +216,60 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
         let top = opening.top().inches() as f32;
 
         // Solid wall before the opening.
-        push_box(tris, &basis, cursor, left, half, base, base + height, wall_mat);
+        push_box(
+            tris,
+            &basis,
+            cursor,
+            left,
+            half,
+            base,
+            base + height,
+            wall_mat,
+        );
         // Wall below the sill (windows).
         if sill > 0.0 {
             push_box(tris, &basis, left, right, half, base, base + sill, wall_mat);
         }
         // Wall above the opening (header band).
         if top < height {
-            push_box(tris, &basis, left, right, half, base + top, base + height, wall_mat);
+            push_box(
+                tris,
+                &basis,
+                left,
+                right,
+                half,
+                base + top,
+                base + height,
+                wall_mat,
+            );
         }
         // The opening's fill panel (glass / door / garage), thin and centered.
         if let Some(panel) = opening_panel_material(opening.kind) {
             let panel_half = (depth * 0.2).min(0.75).max(0.25);
-            push_box(tris, &basis, left, right, panel_half, base + sill, base + top, panel);
+            push_box(
+                tris,
+                &basis,
+                left,
+                right,
+                panel_half,
+                base + sill,
+                base + top,
+                panel,
+            );
         }
         cursor = right;
     }
     // Remaining solid wall after the last opening.
-    push_box(tris, &basis, cursor, length, half, base, base + height, wall_mat);
+    push_box(
+        tris,
+        &basis,
+        cursor,
+        length,
+        half,
+        base,
+        base + height,
+        wall_mat,
+    );
 }
 
 /// Pushes an axis-aligned box (in wall-local coords) as 12 triangles. The box
@@ -282,8 +322,12 @@ fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
         Vec3::new(cx + r, cy + r, z),
         Vec3::new(cx - r, cy + r, z),
     ];
-    tris.push(Triangle::new(corners[0], corners[1], corners[2], MAT_GROUND));
-    tris.push(Triangle::new(corners[0], corners[2], corners[3], MAT_GROUND));
+    tris.push(Triangle::new(
+        corners[0], corners[1], corners[2], MAT_GROUND,
+    ));
+    tris.push(Triangle::new(
+        corners[0], corners[2], corners[3], MAT_GROUND,
+    ));
 }
 
 #[cfg(test)]
@@ -351,7 +395,10 @@ mod tests {
         let model = wall_model(WallExposure::Exterior, vec![window]);
         let scene = scene_from_model(&model, &RenderOptions::default());
         let hist = material_histogram(&scene);
-        assert!(hist.get(&MAT_GLASS).copied().unwrap_or(0) > 0, "no glass emitted");
+        assert!(
+            hist.get(&MAT_GLASS).copied().unwrap_or(0) > 0,
+            "no glass emitted"
+        );
         assert_eq!(hist.get(&MAT_DOOR).copied().unwrap_or(0), 0);
     }
 
@@ -367,7 +414,10 @@ mod tests {
         let model = wall_model(WallExposure::Exterior, vec![door]);
         let scene = scene_from_model(&model, &RenderOptions::default());
         let hist = material_histogram(&scene);
-        assert!(hist.get(&MAT_DOOR).copied().unwrap_or(0) > 0, "no door panel");
+        assert!(
+            hist.get(&MAT_DOOR).copied().unwrap_or(0) > 0,
+            "no door panel"
+        );
         assert_eq!(hist.get(&MAT_GLASS).copied().unwrap_or(0), 0);
     }
 
@@ -376,7 +426,11 @@ mod tests {
         let model = wall_model(WallExposure::Exterior, vec![]);
         let scene = scene_from_model(&model, &RenderOptions::default());
         // Wall runs 12ft along +x at y=0; center x should be ~6ft = 72in.
-        assert!((scene.camera.center.x - 72.0).abs() < 12.0, "center={:?}", scene.camera.center);
+        assert!(
+            (scene.camera.center.x - 72.0).abs() < 12.0,
+            "center={:?}",
+            scene.camera.center
+        );
     }
 
     #[test]

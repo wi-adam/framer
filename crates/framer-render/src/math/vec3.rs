@@ -224,14 +224,21 @@ mod tests {
         let incident = Vec3::new(0.4, 0.0, -1.0).normalize();
         let n = Vec3::new(0.0, 0.0, 1.0);
         let into = incident.refract(n, 1.0 / 1.5).expect("should refract in");
-        assert!((into.length() - 1.0).abs() < EPS, "refracted dir must be unit");
+        assert!(
+            (into.length() - 1.0).abs() < EPS,
+            "refracted dir must be unit"
+        );
         // It must transmit (continue downward, past the surface).
         assert!(into.z < 0.0);
         // Snell: sin(theta_in) / sin(theta_out) = n_glass / n_air = 1.5.
         let minus_n = -n;
         let sin_in = incident.cross(minus_n).length(); // |sin| of angle to -n
         let sin_out = into.cross(minus_n).length();
-        assert!((sin_in / sin_out - 1.5).abs() < 1e-3, "ratio={}", sin_in / sin_out);
+        assert!(
+            (sin_in / sin_out - 1.5).abs() < 1e-3,
+            "ratio={}",
+            sin_in / sin_out
+        );
     }
 
     #[test]

@@ -11,7 +11,10 @@ use std::f32::consts::PI;
 use crate::geom::Hit;
 use crate::math::{Onb, Vec3};
 use crate::rng::Pcg32;
-use crate::sampling::{cosine_sample_hemisphere, fresnel_dielectric, fresnel_schlick, sample_ggx_vndf, smith_g1, smith_g2};
+use crate::sampling::{
+    cosine_sample_hemisphere, fresnel_dielectric, fresnel_schlick, sample_ggx_vndf, smith_g1,
+    smith_g2,
+};
 
 /// A physically based material. Colors are linear reflectances / radiances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,7 +119,11 @@ impl Material {
                 let incident = -wo; // direction of travel into the surface
                 let cos_theta = wo.dot(hit.normal).clamp(0.0, 1.0);
                 // Signed cosine w.r.t. the outward geometric normal for Fresnel.
-                let signed_cos = if hit.front_face { cos_theta } else { -cos_theta };
+                let signed_cos = if hit.front_face {
+                    cos_theta
+                } else {
+                    -cos_theta
+                };
                 let reflectance = fresnel_dielectric(signed_cos, *ior);
                 let ratio = if hit.front_face { 1.0 / *ior } else { *ior };
 
@@ -186,7 +193,12 @@ mod tests {
             }
             .is_specular()
         );
-        assert!(!Material::Emissive { radiance: Vec3::ONE }.is_specular());
+        assert!(
+            !Material::Emissive {
+                radiance: Vec3::ONE
+            }
+            .is_specular()
+        );
     }
 
     #[test]
@@ -198,7 +210,9 @@ mod tests {
         let wo = Vec3::new(0.0, 0.0, 1.0);
         let mut rng = Pcg32::seed(1, 2);
         for _ in 0..5000 {
-            let s = mat.scatter(wo, &hit, &mut rng).expect("diffuse always scatters");
+            let s = mat
+                .scatter(wo, &hit, &mut rng)
+                .expect("diffuse always scatters");
             assert!(!s.specular);
             assert!(s.dir.dot(normal) > -1e-4, "below surface: {:?}", s.dir);
             assert!((s.dir.length() - 1.0).abs() < 1e-3);
@@ -230,7 +244,10 @@ mod tests {
             }
         }
         // Near-normal incidence transmits the large majority (~96%).
-        assert!(refracted > 4500, "expected mostly transmission, got {refracted}");
+        assert!(
+            refracted > 4500,
+            "expected mostly transmission, got {refracted}"
+        );
     }
 
     #[test]
