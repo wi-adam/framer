@@ -20,7 +20,7 @@ use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
-use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode};
+use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, theme};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
@@ -294,25 +294,26 @@ fn workspace_header(
     code_name: &str,
 ) {
     Frame::new()
-        .fill(Color32::from_rgb(31, 34, 35))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(55, 60, 62)))
-        .inner_margin(Margin::symmetric(10, 6))
+        .fill(theme::panel_header())
+        .stroke(theme::soft_stroke())
+        .corner_radius(3)
+        .inner_margin(Margin::symmetric(10, 7))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(workspace_mode_title(workspace_mode))
                         .strong()
                         .size(15.0)
-                        .color(Color32::from_rgb(232, 235, 234)),
+                        .color(theme::text_primary()),
                 );
                 ui.separator();
                 ui.label(
                     RichText::new(viewport_mode_title(workspace_mode, viewport_mode))
                         .strong()
-                        .color(Color32::from_rgb(117, 210, 238)),
+                        .color(theme::active_blue()),
                 );
                 ui.separator();
-                ui.label(RichText::new(code_name).color(Color32::from_rgb(164, 170, 170)));
+                ui.label(RichText::new(code_name).color(theme::text_muted()));
             });
         });
 }
@@ -373,7 +374,7 @@ fn draw_view_title(painter: &egui::Painter, drawing: Rect, title: impl Into<Stri
         Align2::LEFT_CENTER,
         title.into(),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 }
 
@@ -383,7 +384,7 @@ fn draw_view_empty(painter: &egui::Painter, rect: Rect, label: &str) {
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(14.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::text_muted(),
     );
 }
 
@@ -391,13 +392,165 @@ fn draw_view_border(painter: &egui::Painter, drawing: Rect) {
     painter.rect_stroke(
         drawing,
         0.0,
-        Stroke::new(1.0, Color32::from_rgb(190, 184, 172)),
+        Stroke::new(1.0, theme::sheet_grid_major()),
         StrokeKind::Outside,
     );
 }
 
 fn draw_view_background(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.rect_filled(rect, 0.0, color);
+}
+
+fn draw_drafting_grid(painter: &egui::Painter, drawing: Rect) {
+    let minor = 24.0;
+    let major_every = 5;
+    let mut index = 0;
+    let mut x = drawing.left();
+    while x <= drawing.right() {
+        let color = if index % major_every == 0 {
+            theme::sheet_grid_major()
+        } else {
+            theme::sheet_grid()
+        };
+        painter.line_segment(
+            [Pos2::new(x, drawing.top()), Pos2::new(x, drawing.bottom())],
+            Stroke::new(0.6, color),
+        );
+        x += minor;
+        index += 1;
+    }
+
+    index = 0;
+    let mut y = drawing.top();
+    while y <= drawing.bottom() {
+        let color = if index % major_every == 0 {
+            theme::sheet_grid_major()
+        } else {
+            theme::sheet_grid()
+        };
+        painter.line_segment(
+            [Pos2::new(drawing.left(), y), Pos2::new(drawing.right(), y)],
+            Stroke::new(0.6, color),
+        );
+        y += minor;
+        index += 1;
+    }
+}
+
+fn draw_drafting_rulers(painter: &egui::Painter, rect: Rect, drawing: Rect) {
+    let top_ruler = Rect::from_min_max(
+        Pos2::new(drawing.left(), rect.top()),
+        Pos2::new(drawing.right(), drawing.top()),
+    );
+    let left_ruler = Rect::from_min_max(
+        Pos2::new(rect.left(), drawing.top()),
+        Pos2::new(drawing.left(), drawing.bottom()),
+    );
+    painter.rect_filled(top_ruler, 0.0, theme::sheet_ruler());
+    painter.rect_filled(left_ruler, 0.0, theme::sheet_ruler());
+
+    let tick = theme::text_muted();
+    let minor = 24.0;
+    let mut index = 0;
+    let mut x = drawing.left();
+    while x <= drawing.right() {
+        let major = index % 5 == 0;
+        let y0 = if major {
+            top_ruler.bottom() - 12.0
+        } else {
+            top_ruler.bottom() - 6.0
+        };
+        painter.line_segment(
+            [Pos2::new(x, y0), Pos2::new(x, top_ruler.bottom())],
+            Stroke::new(0.75, tick),
+        );
+        if major {
+            painter.text(
+                Pos2::new(x + 3.0, top_ruler.bottom() - 18.0),
+                Align2::LEFT_CENTER,
+                format!("{}'", index * 2),
+                FontId::proportional(10.0),
+                tick,
+            );
+        }
+        x += minor;
+        index += 1;
+    }
+
+    index = 0;
+    let mut y = drawing.bottom();
+    while y >= drawing.top() {
+        let major = index % 5 == 0;
+        let x0 = if major {
+            left_ruler.right() - 12.0
+        } else {
+            left_ruler.right() - 6.0
+        };
+        painter.line_segment(
+            [Pos2::new(x0, y), Pos2::new(left_ruler.right(), y)],
+            Stroke::new(0.75, tick),
+        );
+        if major {
+            painter.text(
+                Pos2::new(left_ruler.right() - 16.0, y - 2.0),
+                Align2::RIGHT_CENTER,
+                format!("{}'", index * 2),
+                FontId::proportional(10.0),
+                tick,
+            );
+        }
+        y -= minor;
+        index += 1;
+    }
+}
+
+fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
+    let origin = rect.left_bottom() + Vec2::new(32.0, -30.0);
+    let x_end = origin + Vec2::new(36.0, 0.0);
+    let y_end = origin + Vec2::new(0.0, -36.0);
+    painter.line_segment(
+        [origin, x_end],
+        Stroke::new(1.5, Color32::from_rgb(204, 60, 48)),
+    );
+    painter.line_segment(
+        [origin, y_end],
+        Stroke::new(1.5, Color32::from_rgb(52, 158, 83)),
+    );
+    painter.circle_filled(origin, 4.0, theme::active_blue());
+    painter.text(
+        x_end + Vec2::new(7.0, 0.0),
+        Align2::LEFT_CENTER,
+        "X",
+        FontId::proportional(11.0),
+        theme::framing_line_dark(),
+    );
+    painter.text(
+        y_end + Vec2::new(0.0, -7.0),
+        Align2::CENTER_BOTTOM,
+        "Y",
+        FontId::proportional(11.0),
+        theme::framing_line_dark(),
+    );
+}
+
+fn draw_selection_handle(painter: &egui::Painter, point: Pos2) {
+    let handle = Rect::from_center_size(point, Vec2::splat(8.0));
+    painter.rect_filled(handle, 1.5, theme::active_blue());
+    painter.rect_stroke(
+        handle,
+        1.5,
+        Stroke::new(1.0, theme::sheet()),
+        StrokeKind::Outside,
+    );
+}
+
+fn draw_selected_wall_handles(painter: &egui::Painter, start: Pos2, end: Pos2) {
+    draw_selection_handle(painter, start);
+    draw_selection_handle(painter, end);
+    draw_selection_handle(
+        painter,
+        Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0),
+    );
 }
 
 fn draw_project_plan(
@@ -410,8 +563,10 @@ fn draw_project_plan(
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let painter = ui.painter_at(rect);
 
-    draw_view_background(&painter, rect, Color32::from_rgb(245, 244, 239));
-    let drawing = viewport_drawing_rect(rect, 52.0);
+    draw_view_background(&painter, rect, theme::sheet());
+    let drawing = viewport_drawing_rect(rect, 58.0);
+    draw_drafting_rulers(&painter, rect, drawing);
+    draw_drafting_grid(&painter, drawing);
     draw_view_border(&painter, drawing);
 
     let Some(bounds) = ModelBounds::from_model(model) else {
@@ -425,13 +580,13 @@ fn draw_project_plan(
 
     for join in &model.wall_joins {
         let point = plan_point(join.point, bounds, drawing);
-        painter.circle_filled(point, 4.5, Color32::from_rgb(47, 95, 127));
+        painter.circle_filled(point, 4.5, theme::active_blue());
         painter.text(
             point + Vec2::new(6.0, -7.0),
             Align2::LEFT_CENTER,
             join_kind_label(join.kind),
             FontId::proportional(10.0),
-            Color32::from_rgb(47, 95, 127),
+            theme::active_blue(),
         );
     }
 
@@ -442,13 +597,16 @@ fn draw_project_plan(
             pointer.is_some_and(|position| distance_to_segment(position, start, end) < 8.0);
         let selected = selected_wall == index && matches!(selection, Selection::Wall);
         let stroke = if selected {
-            Stroke::new(5.0, Color32::from_rgb(35, 94, 150))
+            Stroke::new(5.0, theme::active_blue())
         } else if hovered {
-            Stroke::new(4.5, Color32::from_rgb(88, 88, 78))
+            Stroke::new(4.5, theme::framing_line_dark())
         } else {
-            Stroke::new(3.5, Color32::from_rgb(111, 91, 63))
+            Stroke::new(3.5, theme::framing_line())
         };
         painter.line_segment([start, end], stroke);
+        if selected {
+            draw_selected_wall_handles(&painter, start, end);
+        }
         if hovered && response.clicked() {
             clicked_wall = Some(ViewClick::Wall(index));
         }
@@ -459,7 +617,7 @@ fn draw_project_plan(
             Align2::LEFT_CENTER,
             &wall.name,
             FontId::proportional(12.0),
-            Color32::from_rgb(60, 56, 48),
+            theme::framing_line_dark(),
         );
 
         for opening in &wall.openings {
@@ -469,10 +627,7 @@ fn draw_project_plan(
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
                 && selected_wall == index;
-            painter.line_segment(
-                [left, right],
-                Stroke::new(7.0, Color32::from_rgb(245, 244, 239)),
-            );
+            painter.line_segment([left, right], Stroke::new(7.0, theme::sheet()));
             painter.line_segment(
                 [left, right],
                 Stroke::new(
@@ -482,9 +637,9 @@ fn draw_project_plan(
                         2.0
                     },
                     if opening_selected {
-                        Color32::from_rgb(35, 94, 150)
+                        theme::active_blue()
                     } else {
-                        Color32::from_rgb(137, 102, 52)
+                        theme::framing_line()
                     },
                 ),
             );
@@ -498,6 +653,7 @@ fn draw_project_plan(
     }
 
     draw_view_title(&painter, drawing, "Whole-project plan");
+    draw_plan_axis_indicator(&painter, drawing);
 
     clicked_opening.or(clicked_wall)
 }
@@ -529,7 +685,7 @@ fn draw_project_axonometric(
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
-    draw_view_background(&painter, rect, Color32::from_rgb(239, 243, 241));
+    draw_view_background(&painter, rect, theme::sheet());
     let drawing = viewport_drawing_rect(rect, 42.0);
     draw_view_border(&painter, drawing);
     let cube_rect = view_cube_rect(drawing);
@@ -2373,7 +2529,9 @@ fn draw_wall_design_elevation(
     let wall_rect = layout.wall_rect;
     let scale = layout.scale;
 
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
+    painter.rect_filled(rect, 0.0, theme::sheet());
+    draw_drafting_rulers(&painter, rect, drawing);
+    draw_drafting_grid(&painter, drawing);
     draw_view_border(&painter, drawing);
     let pointer = response
         .interact_pointer_pos()
@@ -2543,7 +2701,7 @@ fn draw_wall_design_elevation(
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 
     output
@@ -2643,13 +2801,13 @@ fn draw_wall_dimension_annotations(
                 || label_rect.contains(position)
         });
         let color = if unsatisfied {
-            Color32::from_rgb(172, 54, 48)
+            theme::danger()
         } else if selected {
-            Color32::from_rgb(35, 94, 150)
+            theme::active_blue()
         } else if dimension.kind == DimensionKind::Reference {
-            Color32::from_rgb(93, 100, 103)
+            theme::text_muted()
         } else {
-            Color32::from_rgb(130, 83, 34)
+            theme::framing_line()
         };
         let stroke = Stroke::new(if selected || hovered { 2.0 } else { 1.25 }, color);
 
@@ -2829,7 +2987,7 @@ fn draw_pending_dimension_preview(
         preview.pointer,
         preview.fallback_axis,
     );
-    let color = Color32::from_rgb(35, 94, 150);
+    let color = theme::active_blue();
     let stroke = Stroke::new(1.75, color);
 
     let line_offset = dimension_line_offset_for_position(
@@ -2976,7 +3134,7 @@ fn draw_dimension_anchors(
         let on_axis = marker.anchor.coordinate(wall, selection.axis).is_some();
         let radius = if selected { 5.5 } else { marker.kind.radius() };
         let fill = if selected {
-            Color32::from_rgb(35, 94, 150)
+            theme::active_blue()
         } else if marker.kind == DimensionAnchorKind::Center {
             Color32::from_rgb(224, 240, 225)
         } else if marker.kind == DimensionAnchorKind::Vertex {
@@ -2985,9 +3143,9 @@ fn draw_dimension_anchors(
             Color32::from_rgb(247, 247, 242)
         };
         let stroke = if on_axis {
-            Color32::from_rgb(35, 94, 150)
+            theme::active_blue()
         } else {
-            Color32::from_rgb(93, 100, 103)
+            theme::text_muted()
         };
         painter.circle_filled(marker.position, radius, fill);
         painter.circle_stroke(
@@ -3153,7 +3311,9 @@ fn draw_wall_elevation(
     let wall_rect = layout.wall_rect;
     let scale = layout.scale;
 
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
+    painter.rect_filled(rect, 0.0, theme::sheet());
+    draw_drafting_rulers(&painter, rect, drawing);
+    draw_drafting_grid(&painter, drawing);
     draw_view_border(&painter, drawing);
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
@@ -3180,7 +3340,7 @@ fn draw_wall_elevation(
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 
     clicked
@@ -3342,14 +3502,14 @@ fn draw_opening_edit_handles(
         let hovered = hovered_handle == Some(handle);
         let size = if hovered { 7.5 } else { 6.0 };
         let fill = if selected {
-            Color32::from_rgb(35, 94, 150)
+            theme::active_blue()
         } else {
-            Color32::from_rgb(247, 247, 242)
+            theme::sheet()
         };
         let stroke = if hovered {
-            Stroke::new(2.0, Color32::from_rgb(35, 94, 150))
+            Stroke::new(2.0, theme::active_blue())
         } else {
-            Stroke::new(1.25, Color32::from_rgb(35, 94, 150))
+            Stroke::new(1.25, theme::active_blue())
         };
         painter.rect_filled(Rect::from_center_size(center, Vec2::splat(size)), 1.0, fill);
         painter.rect_stroke(
@@ -3411,11 +3571,11 @@ fn draw_opening_guide(
     hovered: bool,
 ) {
     let stroke = if selected {
-        Stroke::new(2.0, Color32::from_rgb(35, 94, 150))
+        Stroke::new(2.0, theme::active_blue())
     } else if hovered {
-        Stroke::new(1.5, Color32::from_rgb(88, 88, 78))
+        Stroke::new(1.5, theme::framing_line_dark())
     } else {
-        Stroke::new(1.0, Color32::from_rgb(137, 102, 52))
+        Stroke::new(1.0, theme::framing_line())
     };
     painter.rect_filled(
         rect,

@@ -17,28 +17,29 @@ use super::labels::{
 use super::model_edit::{
     opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
-use super::{FramerApp, Selection, ViewportMode, WorkspaceMode};
+use super::{FramerApp, Selection, ViewportMode, WorkspaceMode, theme};
 
 impl FramerApp {
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         command_bar_frame().show(ui, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
+            ui.spacing_mut().item_spacing = Vec2::new(10.0, 6.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("Framer")
                             .strong()
-                            .size(18.0)
-                            .color(Color32::from_rgb(238, 241, 240)),
+                            .size(18.5)
+                            .color(theme::text_primary()),
                     );
                     toolbar_divider(ui);
-                    ui.label(RichText::new("Project").small().color(toolbar_muted_text()));
+                    ui.label(RichText::new("Project").small().color(theme::text_muted()));
                     let path_width = (ui.available_width() * 0.48).clamp(300.0, 620.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.project_path)
                             .desired_width(path_width)
                             .font(egui::TextStyle::Monospace),
                     );
+                    status_chip(ui, "Ready", StatusTone::Success);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         status_chip(
                             ui,
@@ -50,19 +51,19 @@ impl FramerApp {
 
                 ui.horizontal_wrapped(|ui| {
                     toolbar_group(ui, "PROJECT", |ui| {
-                        if command_button(ui, "New", 48.0)
+                        if command_button(ui, "New", 54.0)
                             .on_hover_text("Start an empty wall project")
                             .clicked()
                         {
                             self.new_project();
                         }
-                        if command_button(ui, "Open", 50.0)
+                        if command_button(ui, "Open", 56.0)
                             .on_hover_text("Open the project path")
                             .clicked()
                         {
                             self.load_project_file();
                         }
-                        if command_button(ui, "Save", 50.0)
+                        if command_button(ui, "Save", 56.0)
                             .on_hover_text("Save the current model")
                             .clicked()
                         {
@@ -72,7 +73,7 @@ impl FramerApp {
                             ui,
                             self.workspace_mode.shows_generated_plan(),
                             "Export",
-                            58.0,
+                            62.0,
                         )
                         .on_hover_text("Export plan artifacts from Plan workspace")
                         .clicked()
@@ -83,13 +84,13 @@ impl FramerApp {
                     toolbar_divider(ui);
 
                     toolbar_group(ui, "SAMPLES", |ui| {
-                        if command_button(ui, "Shell", 54.0)
+                        if command_button(ui, "Shell", 58.0)
                             .on_hover_text("Load the multi-wall shell demo")
                             .clicked()
                         {
                             self.reset_demo();
                         }
-                        if command_button(ui, "Wall", 52.0)
+                        if command_button(ui, "Wall", 56.0)
                             .on_hover_text("Load the single-wall demo")
                             .clicked()
                         {
@@ -127,15 +128,33 @@ impl FramerApp {
                             wall_label,
                         );
                         view_segment(ui, &mut self.viewport_mode, ViewportMode::Axonometric, "3D");
-                        if self.workspace_mode.shows_generated_plan() {
-                            ui.checkbox(&mut self.show_section, "Section");
-                        }
                     });
 
                     if self.workspace_mode.allows_design_edits() {
                         toolbar_divider(ui);
-                        toolbar_group(ui, "TOOLS", |ui| {
-                            if segment_button(ui, self.dimension_tool.active, "Dimension", 84.0)
+                        toolbar_group(ui, "BUILD", |ui| {
+                            if command_button(ui, "Door", 54.0)
+                                .on_hover_text("Add a door to the selected wall")
+                                .clicked()
+                            {
+                                self.add_opening(OpeningKind::Door);
+                            }
+                            if command_button(ui, "Window", 70.0)
+                                .on_hover_text("Add a window to the selected wall")
+                                .clicked()
+                            {
+                                self.add_opening(OpeningKind::Window);
+                            }
+                            if command_button(ui, "Garage", 70.0)
+                                .on_hover_text("Add a garage door to the selected wall")
+                                .clicked()
+                            {
+                                self.add_opening(OpeningKind::GarageDoor);
+                            }
+                        });
+                        toolbar_divider(ui);
+                        toolbar_group(ui, "DIMENSION", |ui| {
+                            if segment_button(ui, self.dimension_tool.active, "Linear", 66.0)
                                 .on_hover_text("Place a wall dimension (D)")
                                 .clicked()
                             {
@@ -185,6 +204,11 @@ impl FramerApp {
                                     });
                             }
                         });
+                    } else {
+                        toolbar_divider(ui);
+                        toolbar_group(ui, "TOOLS", |ui| {
+                            ui.checkbox(&mut self.show_section, "Section");
+                        });
                     }
                 });
             });
@@ -195,7 +219,8 @@ impl FramerApp {
             || self.dimension_status.is_some()
         {
             Frame::new()
-                .fill(Color32::from_rgb(29, 32, 33))
+                .fill(theme::chrome_mid())
+                .stroke(theme::soft_stroke())
                 .inner_margin(Margin::symmetric(10, 4))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -215,7 +240,7 @@ impl FramerApp {
     }
 
     pub(super) fn model_tree(&mut self, ui: &mut Ui) {
-        panel_header(ui, "Model Tree", self.workspace_badge());
+        panel_header(ui, "Model Browser", self.workspace_badge());
 
         ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new("Authored")
@@ -785,7 +810,7 @@ impl FramerApp {
         } else if let Some(error) = self.error.as_deref() {
             ui.separator();
             panel_subheader(ui, "Validation");
-            ui.colored_label(Color32::from_rgb(214, 104, 96), error);
+            ui.colored_label(theme::danger(), error);
         }
     }
 
@@ -795,24 +820,104 @@ impl FramerApp {
             WorkspaceMode::Plan => "Plan",
         }
     }
+
+    pub(super) fn status_bar(&mut self, ui: &mut Ui) {
+        let (unsupported, warnings, info) = self.diagnostic_counts();
+        let error_count = usize::from(self.error.is_some());
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 2.0);
+            status_chip(ui, "Ready", StatusTone::Success);
+            toolbar_divider(ui);
+            ui.label(
+                RichText::new(self.workspace_badge())
+                    .strong()
+                    .color(theme::text_secondary()),
+            );
+            if let Some(wall) = self.model.walls.get(self.selected_wall) {
+                ui.label(RichText::new(&wall.name).color(theme::text_muted()));
+            }
+            toolbar_divider(ui);
+            ui.label(RichText::new(self.selection_status()).color(theme::text_secondary()));
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                status_chip(ui, "100%", StatusTone::Neutral);
+                status_chip(ui, "Ortho", StatusTone::Info);
+                status_chip(ui, "Grid", StatusTone::Info);
+                status_chip(ui, "Snap 1 in", StatusTone::Info);
+                status_chip(ui, &format!("{info} info"), StatusTone::Neutral);
+                status_chip(ui, &format!("{warnings} warnings"), StatusTone::Warning);
+                status_chip(
+                    ui,
+                    &format!("{unsupported} unsupported"),
+                    if unsupported == 0 {
+                        StatusTone::Neutral
+                    } else {
+                        StatusTone::Warning
+                    },
+                );
+                status_chip(
+                    ui,
+                    &format!("{error_count} errors"),
+                    if error_count == 0 {
+                        StatusTone::Neutral
+                    } else {
+                        StatusTone::Warning
+                    },
+                );
+            });
+        });
+    }
+
+    fn selection_status(&self) -> String {
+        match &self.selected {
+            Selection::Level(id) => format!("Level: {id}"),
+            Selection::Wall => "Wall segment".to_owned(),
+            Selection::Opening(id) => format!("Opening: {id}"),
+            Selection::Dimension(id) => format!("Dimension: {id}"),
+            Selection::Join(id) => format!("Join: {id}"),
+            Selection::Member { member_id, .. } => format!("Member: {member_id}"),
+        }
+    }
+
+    fn diagnostic_counts(&self) -> (usize, usize, usize) {
+        let Some(plan) = &self.project_plan else {
+            return (0, 0, 0);
+        };
+        plan.diagnostics
+            .iter()
+            .chain(
+                plan.wall_plans
+                    .iter()
+                    .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
+            )
+            .fold(
+                (0, 0, 0),
+                |(unsupported, warnings, info), diagnostic| match diagnostic.severity {
+                    DiagnosticSeverity::Unsupported => (unsupported + 1, warnings, info),
+                    DiagnosticSeverity::Warning => (unsupported, warnings + 1, info),
+                    DiagnosticSeverity::Info => (unsupported, warnings, info + 1),
+                },
+            )
+    }
 }
 
 fn command_bar_frame() -> Frame {
     Frame::new()
-        .fill(Color32::from_rgb(25, 27, 28))
-        .inner_margin(Margin::symmetric(10, 6))
+        .fill(theme::chrome_top())
+        .inner_margin(Margin::symmetric(12, 8))
 }
 
 fn toolbar_group(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.vertical(|ui| {
         ui.label(
             RichText::new(label)
-                .size(9.0)
+                .size(9.5)
                 .strong()
-                .color(toolbar_muted_text()),
+                .color(theme::text_muted()),
         );
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
+            ui.spacing_mut().item_spacing = Vec2::new(5.0, 2.0);
             add_contents(ui);
         });
     });
@@ -820,10 +925,10 @@ fn toolbar_group(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui)) {
 
 fn command_button(ui: &mut Ui, label: &str, min_width: f32) -> Response {
     ui.add_sized(
-        [min_width, 24.0],
-        egui::Button::new(label)
-            .fill(Color32::from_rgb(43, 46, 48))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 78, 82)))
+        [min_width, 28.0],
+        egui::Button::new(RichText::new(label).color(theme::text_secondary()))
+            .fill(theme::control_bg())
+            .stroke(theme::soft_stroke())
             .corner_radius(3),
     )
 }
@@ -831,10 +936,10 @@ fn command_button(ui: &mut Ui, label: &str, min_width: f32) -> Response {
 fn enabled_command_button(ui: &mut Ui, enabled: bool, label: &str, min_width: f32) -> Response {
     ui.add_enabled(
         enabled,
-        egui::Button::new(label)
-            .min_size(Vec2::new(min_width, 24.0))
-            .fill(Color32::from_rgb(43, 46, 48))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 78, 82)))
+        egui::Button::new(RichText::new(label).color(theme::text_secondary()))
+            .min_size(Vec2::new(min_width, 28.0))
+            .fill(theme::control_bg())
+            .stroke(theme::soft_stroke())
             .corner_radius(3),
     )
 }
@@ -853,25 +958,23 @@ fn view_segment(ui: &mut Ui, mode: &mut ViewportMode, value: ViewportMode, label
 
 fn segment_button(ui: &mut Ui, selected: bool, label: &str, min_width: f32) -> Response {
     let fill = if selected {
-        Color32::from_rgb(0, 114, 160)
+        theme::active_blue()
     } else {
-        Color32::from_rgb(37, 40, 42)
+        theme::field_bg()
     };
     let stroke = if selected {
-        Stroke::new(1.0, Color32::from_rgb(49, 176, 222))
+        Stroke::new(1.0, theme::active_blue())
     } else {
-        Stroke::new(1.0, Color32::from_rgb(66, 71, 75))
+        theme::soft_stroke()
     };
     let text = if selected {
-        RichText::new(label)
-            .strong()
-            .color(Color32::from_rgb(248, 251, 252))
+        RichText::new(label).strong().color(theme::text_primary())
     } else {
-        RichText::new(label).color(Color32::from_rgb(211, 216, 216))
+        RichText::new(label).color(theme::text_secondary())
     };
 
     ui.add_sized(
-        [min_width, 24.0],
+        [min_width, 28.0],
         egui::Button::new(text)
             .fill(fill)
             .stroke(stroke)
@@ -885,16 +988,17 @@ fn toolbar_divider(ui: &mut Ui) {
 
 fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
     Frame::new()
-        .fill(Color32::from_rgb(31, 34, 35))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(55, 60, 62)))
-        .inner_margin(Margin::symmetric(8, 6))
+        .fill(theme::panel_header())
+        .stroke(theme::soft_stroke())
+        .corner_radius(3)
+        .inner_margin(Margin::symmetric(9, 7))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(title)
                         .strong()
                         .size(15.0)
-                        .color(Color32::from_rgb(232, 235, 234)),
+                        .color(theme::text_primary()),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     status_chip(ui, badge, StatusTone::Neutral);
@@ -905,14 +1009,14 @@ fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
 }
 
 fn panel_subheader(ui: &mut Ui, title: &str) {
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     ui.label(
         RichText::new(title)
             .strong()
             .size(12.0)
-            .color(toolbar_muted_text()),
+            .color(theme::text_muted()),
     );
-    ui.add_space(2.0);
+    ui.add_space(3.0);
 }
 
 fn selection_badge(selection: &Selection) -> &'static str {
@@ -936,25 +1040,21 @@ enum StatusTone {
 
 fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
     let (fill, stroke, text_color) = match tone {
-        StatusTone::Neutral => (
-            Color32::from_rgb(43, 47, 49),
-            Color32::from_rgb(70, 76, 79),
-            Color32::from_rgb(206, 212, 212),
-        ),
+        StatusTone::Neutral => (theme::field_bg(), theme::divider(), theme::text_secondary()),
         StatusTone::Info => (
-            Color32::from_rgb(22, 61, 78),
-            Color32::from_rgb(38, 118, 150),
-            Color32::from_rgb(212, 238, 247),
+            theme::active_blue_soft(),
+            theme::active_blue(),
+            theme::text_primary(),
         ),
         StatusTone::Success => (
-            Color32::from_rgb(36, 70, 50),
-            Color32::from_rgb(75, 136, 96),
-            Color32::from_rgb(219, 242, 226),
+            Color32::from_rgb(28, 67, 45),
+            theme::success(),
+            Color32::from_rgb(217, 245, 225),
         ),
         StatusTone::Warning => (
-            Color32::from_rgb(82, 65, 30),
-            Color32::from_rgb(154, 119, 49),
-            Color32::from_rgb(248, 231, 190),
+            Color32::from_rgb(82, 63, 25),
+            theme::warning(),
+            Color32::from_rgb(250, 232, 188),
         ),
     };
 
@@ -966,10 +1066,6 @@ fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(11.0).color(text_color));
         });
-}
-
-fn toolbar_muted_text() -> Color32 {
-    Color32::from_rgb(150, 158, 158)
 }
 
 fn level_summary(ui: &mut Ui, level: &Level) {
@@ -1103,10 +1199,7 @@ fn dimension_inspector(
                 apply_driving = true;
             }
             if unsatisfied {
-                ui.colored_label(
-                    Color32::from_rgb(214, 104, 96),
-                    "Unsatisfied driving dimension",
-                );
+                ui.colored_label(theme::danger(), "Unsatisfied driving dimension");
             }
         }
 
@@ -1188,8 +1281,8 @@ fn join_summary(ui: &mut Ui, join: &WallJoin, wall_options: &[(String, String)])
 }
 
 fn summary_row(ui: &mut Ui, label: &str, value: impl ToString) {
-    ui.strong(label);
-    ui.label(value.to_string());
+    ui.label(RichText::new(label).strong().color(theme::text_secondary()));
+    ui.label(RichText::new(value.to_string()).color(theme::text_primary()));
     ui.end_row();
 }
 
@@ -1230,7 +1323,7 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
 fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFramePlan>) {
     panel_subheader(ui, "Diagnostics");
     if let Some(error) = error {
-        ui.colored_label(Color32::from_rgb(214, 104, 96), error);
+        ui.colored_label(theme::danger(), error);
     }
 
     if let Some(plan) = plan {
@@ -1288,9 +1381,9 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
 
 fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
     let color = match diagnostic.severity {
-        DiagnosticSeverity::Info => Color32::from_rgb(74, 92, 112),
-        DiagnosticSeverity::Warning => Color32::from_rgb(150, 95, 30),
-        DiagnosticSeverity::Unsupported => Color32::from_rgb(155, 60, 58),
+        DiagnosticSeverity::Info => theme::active_blue(),
+        DiagnosticSeverity::Warning => theme::warning(),
+        DiagnosticSeverity::Unsupported => theme::danger(),
     };
     ui.colored_label(
         color,
@@ -1333,13 +1426,25 @@ fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
     }
 }
 
-fn text_edit(ui: &mut Ui, label: &str, value: &mut String) -> bool {
-    let mut changed = false;
+const PROPERTY_LABEL_WIDTH: f32 = 92.0;
+
+fn property_row<R>(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     ui.horizontal(|ui| {
-        ui.label(label);
-        changed = ui.text_edit_singleline(value).changed();
-    });
-    changed
+        ui.add_sized(
+            [PROPERTY_LABEL_WIDTH, 22.0],
+            egui::Label::new(RichText::new(label).color(theme::text_secondary())),
+        );
+        add_contents(ui)
+    })
+    .inner
+}
+
+fn text_edit(ui: &mut Ui, label: &str, value: &mut String) -> bool {
+    property_row(ui, label, |ui| {
+        let width = ui.available_width().max(90.0);
+        ui.add_sized([width, 24.0], egui::TextEdit::singleline(value))
+    })
+    .changed()
 }
 
 fn level_display_name(options: &[(String, String)], id: &str) -> String {
@@ -1889,8 +1994,7 @@ fn readonly_length_field(
     };
     let hover_text = driver.hover_text();
 
-    ui.horizontal(|ui| {
-        ui.label(label);
+    property_row(ui, label, |ui| {
         let value_response = ui.add_enabled(
             false,
             egui::DragValue::new(&mut display_value)
@@ -1924,9 +2028,7 @@ fn driven_field_menu(
     };
 
     let menu = ui.menu_button(
-        RichText::new(label)
-            .size(11.0)
-            .color(Color32::from_rgb(248, 231, 190)),
+        RichText::new(label).size(11.0).color(theme::warning()),
         |ui| {
             ui.set_min_width(220.0);
             if driver.dimension_ids.is_empty() {
@@ -1974,8 +2076,7 @@ fn length_drag(
         value.inches()
     };
 
-    let response = ui.horizontal(|ui| {
-        ui.label(label);
+    let response = property_row(ui, label, |ui| {
         ui.add(
             egui::DragValue::new(&mut display_value)
                 .range(if display_unit == "ft" {
@@ -1988,7 +2089,7 @@ fn length_drag(
         )
     });
 
-    if response.inner.changed() {
+    if response.changed() {
         let next_inches = if display_unit == "ft" {
             display_value * 12.0
         } else {
@@ -2003,8 +2104,7 @@ fn length_drag(
 
 fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
     let mut display_value = value.feet();
-    let response = ui.horizontal(|ui| {
-        ui.label(label);
+    let response = property_row(ui, label, |ui| {
         ui.add(
             egui::DragValue::new(&mut display_value)
                 .range(-240.0..=240.0)
@@ -2013,7 +2113,7 @@ fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
         )
     });
 
-    if response.inner.changed() {
+    if response.changed() {
         *value = Length::from_feet(display_value.clamp(-240.0, 240.0));
         true
     } else {

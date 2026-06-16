@@ -2,13 +2,14 @@ mod labels;
 mod model_edit;
 mod panels;
 mod project_io;
+mod theme;
 mod viewport;
 
 use std::fs;
 use std::path::PathBuf;
 
 use eframe::egui::{
-    self, CentralPanel, Color32, CornerRadius, FontFamily, FontId, Panel, ScrollArea, Stroke,
+    self, CentralPanel, CornerRadius, FontFamily, FontId, Frame, Panel, ScrollArea, Stroke,
     TextStyle, Vec2,
 };
 use framer_core::{
@@ -721,31 +722,31 @@ fn configure_app_style(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
     style.text_styles.insert(
         TextStyle::Heading,
-        FontId::new(16.0, FontFamily::Proportional),
+        FontId::new(15.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Button,
-        FontId::new(12.5, FontFamily::Proportional),
+        FontId::new(12.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Small,
-        FontId::new(10.0, FontFamily::Proportional),
+        FontId::new(10.5, FontFamily::Proportional),
     );
-    style.spacing.item_spacing = Vec2::new(8.0, 4.0);
-    style.spacing.button_padding = Vec2::new(7.0, 3.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 5.0);
+    style.spacing.button_padding = Vec2::new(8.0, 4.0);
     style.spacing.interact_size = Vec2::new(40.0, 22.0);
     style.spacing.window_margin = egui::Margin::symmetric(8, 6);
-    style.visuals.panel_fill = Color32::from_rgb(24, 26, 27);
-    style.visuals.window_fill = Color32::from_rgb(29, 31, 32);
-    style.visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(61, 66, 68));
-    style.visuals.extreme_bg_color = Color32::from_rgb(11, 12, 12);
-    style.visuals.faint_bg_color = Color32::from_rgb(35, 38, 39);
-    style.visuals.text_edit_bg_color = Some(Color32::from_rgb(13, 14, 14));
-    style.visuals.selection.bg_fill = Color32::from_rgb(0, 114, 160);
-    style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(239, 250, 253));
-    style.visuals.hyperlink_color = Color32::from_rgb(82, 184, 222);
-    style.visuals.warn_fg_color = Color32::from_rgb(229, 169, 77);
-    style.visuals.error_fg_color = Color32::from_rgb(229, 96, 88);
+    style.visuals.panel_fill = theme::shell_bg();
+    style.visuals.window_fill = theme::panel_bg();
+    style.visuals.window_stroke = theme::divider_stroke();
+    style.visuals.extreme_bg_color = theme::workspace_bg();
+    style.visuals.faint_bg_color = theme::chrome_mid();
+    style.visuals.text_edit_bg_color = Some(theme::field_bg());
+    style.visuals.selection.bg_fill = theme::active_blue();
+    style.visuals.selection.stroke = Stroke::new(1.0, theme::text_primary());
+    style.visuals.hyperlink_color = theme::active_blue();
+    style.visuals.warn_fg_color = theme::warning();
+    style.visuals.error_fg_color = theme::danger();
     style.visuals.button_frame = true;
     style.visuals.collapsing_header_frame = false;
     style.visuals.indent_has_left_vline = true;
@@ -756,24 +757,22 @@ fn configure_app_style(ctx: &egui::Context) {
     style.visuals.widgets.hovered.corner_radius = radius;
     style.visuals.widgets.active.corner_radius = radius;
     style.visuals.widgets.open.corner_radius = radius;
-    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(32, 35, 36);
-    style.visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(34, 37, 38);
-    style.visuals.widgets.noninteractive.bg_stroke =
-        Stroke::new(1.0, Color32::from_rgb(56, 61, 63));
-    style.visuals.widgets.noninteractive.fg_stroke =
-        Stroke::new(1.0, Color32::from_rgb(216, 221, 220));
-    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(42, 45, 47);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(45, 48, 50);
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(72, 78, 82));
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(218, 223, 222));
-    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(54, 59, 61);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(58, 64, 66);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 98, 102));
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(244, 247, 247));
-    style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0, 91, 128);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(0, 114, 160);
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(74, 190, 229));
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(250, 253, 253));
+    style.visuals.widgets.noninteractive.bg_fill = theme::chrome_mid();
+    style.visuals.widgets.noninteractive.weak_bg_fill = theme::panel_header();
+    style.visuals.widgets.noninteractive.bg_stroke = theme::soft_stroke();
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, theme::text_secondary());
+    style.visuals.widgets.inactive.weak_bg_fill = theme::control_bg();
+    style.visuals.widgets.inactive.bg_fill = theme::control_bg();
+    style.visuals.widgets.inactive.bg_stroke = theme::divider_stroke();
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, theme::text_secondary());
+    style.visuals.widgets.hovered.weak_bg_fill = theme::control_bg_hover();
+    style.visuals.widgets.hovered.bg_fill = theme::control_bg_hover();
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, theme::active_blue_soft());
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, theme::text_primary());
+    style.visuals.widgets.active.weak_bg_fill = theme::active_blue_soft();
+    style.visuals.widgets.active.bg_fill = theme::active_blue();
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, theme::active_blue());
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, theme::text_primary());
     style.visuals.widgets.open = style.visuals.widgets.hovered;
 
     ctx.set_global_style(style);
@@ -785,22 +784,46 @@ impl eframe::App for FramerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        Panel::top("toolbar").show_inside(ui, |ui| self.toolbar(ui));
+        Panel::top("toolbar")
+            .frame(Frame::new().fill(theme::chrome_top()))
+            .show_inside(ui, |ui| self.toolbar(ui));
+        Panel::bottom("status-bar")
+            .frame(
+                Frame::new()
+                    .fill(theme::chrome_top())
+                    .stroke(theme::soft_stroke())
+                    .inner_margin(egui::Margin::symmetric(10, 5)),
+            )
+            .show_inside(ui, |ui| self.status_bar(ui));
         Panel::left("model-tree")
             .resizable(true)
             .default_size(280.0)
             .size_range(240.0..=380.0)
+            .frame(
+                Frame::new()
+                    .fill(theme::panel_bg())
+                    .stroke(theme::soft_stroke())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
             .show_inside(ui, |ui| self.model_tree(ui));
         Panel::right("inspector")
             .resizable(true)
             .default_size(360.0)
             .size_range(300.0..=520.0)
+            .frame(
+                Frame::new()
+                    .fill(theme::panel_bg())
+                    .stroke(theme::soft_stroke())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
             .show_inside(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.inspector(ui));
             });
-        CentralPanel::default().show_inside(ui, |ui| self.workspace(ui));
+        CentralPanel::default()
+            .frame(Frame::new().fill(theme::workspace_bg()))
+            .show_inside(ui, |ui| self.workspace(ui));
     }
 }
 
