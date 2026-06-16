@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
-    DimensionKind, Length, Opening, OpeningKind, Point2, Wall,
+    DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Wall,
     load_project as load_project_document, save_project as save_project_document,
 };
 use framer_solver::{
@@ -484,6 +484,53 @@ impl FramerApp {
         self.selected = Selection::Opening(opening.id.0.clone());
         wall.openings.push(opening);
         self.rebuild();
+    }
+
+    fn duplicate_selected_opening(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::Opening(id) = self.selected.clone() else {
+            return;
+        };
+        let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
+            return;
+        };
+        let Some(source) = wall
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == id)
+            .cloned()
+        else {
+            return;
+        };
+        let (new_id, _) = next_opening_id(wall, "opening-copy");
+        let mut clone = source.clone();
+        clone.id = ElementId::new(new_id.clone());
+        clone.name = format!("{} copy", source.name);
+        let half_width = source.width / 2;
+        clone.center = (source.center + source.width)
+            .min(wall.length - half_width)
+            .max(half_width);
+        wall.openings.push(clone);
+        self.selected = Selection::Opening(new_id);
+        self.rebuild();
+    }
+
+    fn delete_selected_opening(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::Opening(id) = self.selected.clone() else {
+            return;
+        };
+        let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
+            return;
+        };
+        if wall.remove_opening(&ElementId::new(id)) {
+            self.selected = Selection::Wall;
+            self.rebuild();
+        }
     }
 
     fn begin_opening_drag(

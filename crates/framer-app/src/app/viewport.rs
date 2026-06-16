@@ -163,7 +163,9 @@ impl FramerApp {
         );
         ui.add_space(8.0);
 
+        let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
         self.cursor_model = None;
+        let mut toolbar_anchor = None;
         let click = match self.viewport_mode {
             ViewportMode::Plan => draw_project_plan(
                 ui,
@@ -172,6 +174,7 @@ impl FramerApp {
                 &self.selected,
                 self.grid,
                 &mut self.cursor_model,
+                &mut toolbar_anchor,
             ),
             ViewportMode::Elevation => {
                 let Some(wall) = self.model.walls.get(self.selected_wall) else {
@@ -290,6 +293,146 @@ impl FramerApp {
         if let Some(click) = click {
             self.handle_view_click(click);
         }
+
+        if self.viewport_mode != ViewportMode::Axonometric {
+            self.canvas_view_controls(ui, canvas);
+        }
+        if let Some(anchor) = toolbar_anchor {
+            self.canvas_floating_toolbar(ui, anchor);
+        }
+    }
+
+    fn canvas_view_controls(&mut self, ui: &mut Ui, canvas: Rect) {
+        let t = design::active();
+
+        egui::Area::new(egui::Id::new("canvas-nav-cube"))
+            .fixed_pos(Pos2::new(canvas.right() - 64.0, canvas.bottom() - 118.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::click());
+                draw_nav_cube(ui.painter(), rect, t);
+                let response = response.on_hover_text("View from the top — click for 3D");
+                if response.clicked() {
+                    self.viewport_mode = ViewportMode::Axonometric;
+                }
+            });
+
+        egui::Area::new(egui::Id::new("canvas-view-mode"))
+            .fixed_pos(Pos2::new(canvas.right() - 78.0, canvas.bottom() - 46.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(t.overlay)
+                    .stroke(t.border_stroke())
+                    .corner_radius(design::radius::MD)
+                    .inner_margin(Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        let is_3d = self.viewport_mode == ViewportMode::Axonometric;
+                        egui::ComboBox::from_id_salt("view-2d-3d")
+                            .selected_text(if is_3d { "3D" } else { "2D" })
+                            .width(44.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(!is_3d, "2D").clicked() {
+                                    self.viewport_mode = ViewportMode::Plan;
+                                }
+                                if ui.selectable_label(is_3d, "3D").clicked() {
+                                    self.viewport_mode = ViewportMode::Axonometric;
+                                }
+                            });
+                    });
+            });
+    }
+
+    fn canvas_floating_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
+        let t = design::active();
+        egui::Area::new(egui::Id::new("canvas-floating-toolbar"))
+            .fixed_pos(Pos2::new(anchor.x - 40.0, anchor.y - 44.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(t.overlay)
+                    .stroke(t.border_stroke())
+                    .corner_radius(design::radius::MD)
+                    .inner_margin(Margin::symmetric(4, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if design::widgets::icon_button(
+                                ui,
+                                design::Icon::Duplicate,
+                                "Duplicate opening",
+                            )
+                            .clicked()
+                            {
+                                self.duplicate_selected_opening();
+                            }
+                            if design::widgets::icon_button(
+                                ui,
+                                design::Icon::Delete,
+                                "Delete opening",
+                            )
+                            .clicked()
+                            {
+                                self.delete_selected_opening();
+                            }
+                        });
+                    });
+            });
+    }
+}
+
+fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
+    painter.rect(
+        rect,
+        design::radius::MD,
+        theme.overlay,
+        theme.border_stroke(),
+        StrokeKind::Inside,
+    );
+    let face = rect.shrink(11.0);
+    painter.rect(
+        face,
+        2,
+        theme.control,
+        Stroke::new(1.0, theme.border),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        face.center(),
+        Align2::CENTER_CENTER,
+        "TOP",
+        FontId::proportional(9.0),
+        theme.text_secondary,
+    );
+    for (label, align, pos) in [
+        (
+            "N",
+            Align2::CENTER_TOP,
+            rect.center_top() + Vec2::new(0.0, 1.0),
+        ),
+        (
+            "S",
+            Align2::CENTER_BOTTOM,
+            rect.center_bottom() + Vec2::new(0.0, -1.0),
+        ),
+        (
+            "W",
+            Align2::LEFT_CENTER,
+            rect.left_center() + Vec2::new(1.0, 0.0),
+        ),
+        (
+            "E",
+            Align2::RIGHT_CENTER,
+            rect.right_center() + Vec2::new(-1.0, 0.0),
+        ),
+    ] {
+        painter.text(
+            pos,
+            align,
+            label,
+            FontId::proportional(7.5),
+            theme.text_muted,
+        );
     }
 }
 
@@ -563,6 +706,7 @@ fn draw_project_plan(
     selection: &Selection,
     show_grid: bool,
     cursor_out: &mut Option<Point2>,
+    toolbar_out: &mut Option<Pos2>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
@@ -640,6 +784,12 @@ fn draw_project_plan(
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
                 && selected_wall == index;
+            if opening_selected {
+                *toolbar_out = Some(Pos2::new(
+                    (left.x + right.x) / 2.0,
+                    (left.y + right.y) / 2.0,
+                ));
+            }
             painter.line_segment([left, right], Stroke::new(7.0, theme::sheet()));
             painter.line_segment(
                 [left, right],
@@ -665,10 +815,50 @@ fn draw_project_plan(
         }
     }
 
+    let scale = (drawing.width() / (bounds.max_x - bounds.min_x).max(1.0))
+        .min(drawing.height() / (bounds.max_y - bounds.min_y).max(1.0));
+    draw_scale_bar(&painter, drawing, scale);
     draw_view_title(&painter, drawing, "Whole-project plan");
     draw_plan_axis_indicator(&painter, drawing);
 
     clicked_opening.or(clicked_wall)
+}
+
+/// A drafting scale bar at the bottom-left of the plan, sized to a round number
+/// of feet given the current pixels-per-inch `scale`.
+fn draw_scale_bar(painter: &egui::Painter, drawing: Rect, scale: f32) {
+    let mut feet = 1.0_f32;
+    for candidate in [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
+        if candidate * 12.0 * scale <= 96.0 {
+            feet = candidate;
+        }
+    }
+    let bar = feet * 12.0 * scale;
+    let y = drawing.bottom() - 14.0;
+    let x0 = drawing.left() + 86.0;
+    let x1 = x0 + bar;
+    let ink = theme::framing_line_dark();
+    painter.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(2.0, ink));
+    for x in [x0, (x0 + x1) / 2.0, x1] {
+        painter.line_segment(
+            [Pos2::new(x, y - 4.0), Pos2::new(x, y + 4.0)],
+            Stroke::new(1.5, ink),
+        );
+    }
+    painter.text(
+        Pos2::new(x0, y + 6.0),
+        Align2::CENTER_TOP,
+        "0",
+        FontId::proportional(9.5),
+        theme::text_muted(),
+    );
+    painter.text(
+        Pos2::new(x1, y + 6.0),
+        Align2::CENTER_TOP,
+        format!("{feet:.0}'"),
+        FontId::proportional(9.5),
+        theme::text_muted(),
+    );
 }
 
 struct AxonometricView<'a> {
