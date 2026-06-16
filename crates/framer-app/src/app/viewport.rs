@@ -226,8 +226,12 @@ impl FramerApp {
                         DesignElevationClick::DimensionAnchor(anchor) => {
                             ViewClick::DimensionAnchor { wall_index, anchor }
                         }
-                        DesignElevationClick::DimensionPlacement { axis } => {
-                            ViewClick::DimensionPlacement { wall_index, axis }
+                        DesignElevationClick::DimensionPlacement { axis, line_offset } => {
+                            ViewClick::DimensionPlacement {
+                                wall_index,
+                                axis,
+                                line_offset,
+                            }
                         }
                     })
                 } else {
@@ -2283,7 +2287,16 @@ enum DesignElevationClick {
     Opening(String),
     Dimension(String),
     DimensionAnchor(DimensionAnchor),
-    DimensionPlacement { axis: DimensionAxis },
+    DimensionPlacement {
+        axis: DimensionAxis,
+        line_offset: Length,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct DimensionPlacement {
+    axis: DimensionAxis,
+    line_offset: Length,
 }
 
 #[derive(Default)]
@@ -2474,7 +2487,7 @@ fn draw_wall_design_elevation(
     }
 
     if dimension_tool_active {
-        let placement_axis = if let (Some(first_anchor), Some(second_anchor)) =
+        let placement = if let (Some(first_anchor), Some(second_anchor)) =
             (first_dimension_anchor, second_dimension_anchor)
         {
             draw_pending_dimension_preview(
@@ -2500,7 +2513,9 @@ fn draw_wall_design_elevation(
             scale,
             wall,
             DimensionAnchorSelection {
-                axis: placement_axis.unwrap_or(dimension_tool_axis),
+                axis: placement
+                    .map(|placement| placement.axis)
+                    .unwrap_or(dimension_tool_axis),
                 first_anchor: first_dimension_anchor,
                 second_anchor: second_dimension_anchor,
             },
@@ -2508,9 +2523,12 @@ fn draw_wall_design_elevation(
         let should_place_dimension =
             response.clicked() || response.drag_stopped_by(egui::PointerButton::Primary);
         if let Some(position) = pointer {
-            if let Some(axis) = placement_axis {
+            if let Some(placement) = placement {
                 if should_place_dimension {
-                    output.click = Some(DesignElevationClick::DimensionPlacement { axis });
+                    output.click = Some(DesignElevationClick::DimensionPlacement {
+                        axis: placement.axis,
+                        line_offset: placement.line_offset,
+                    });
                 }
             } else if response.clicked()
                 && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
@@ -2572,28 +2590,57 @@ fn draw_wall_dimension_annotations(
         let Some(end_coordinate) = dimension.end.coordinate(wall, dimension.axis) else {
             continue;
         };
+        let placed = dimension.line_offset.is_some();
         let (line_start, line_end) = match dimension.axis {
             DimensionAxis::Horizontal => {
                 let start = drawing.left() + start_coordinate.inches() as f32 * sx;
                 let end = drawing.left() + end_coordinate.inches() as f32 * sx;
-                let y = drawing.top() - 18.0 - horizontal_index.min(3) as f32 * 18.0;
-                horizontal_index += 1;
+                let y = dimension.line_offset.map_or_else(
+                    || {
+                        let y = drawing.top() - 18.0 - horizontal_index.min(3) as f32 * 18.0;
+                        horizontal_index += 1;
+                        y
+                    },
+                    |line_offset| {
+                        dimension_line_screen_position(
+                            drawing,
+                            sx,
+                            DimensionAxis::Horizontal,
+                            line_offset,
+                        )
+                    },
+                );
                 (Pos2::new(start, y), Pos2::new(end, y))
             }
             DimensionAxis::Vertical => {
                 let start = drawing.bottom() - start_coordinate.inches() as f32 * sx;
                 let end = drawing.bottom() - end_coordinate.inches() as f32 * sx;
-                let x = drawing.right() + 50.0 + vertical_index.min(3) as f32 * 18.0;
-                vertical_index += 1;
+                let x = dimension.line_offset.map_or_else(
+                    || {
+                        let x = drawing.right() + 50.0 + vertical_index.min(3) as f32 * 18.0;
+                        vertical_index += 1;
+                        x
+                    },
+                    |line_offset| {
+                        dimension_line_screen_position(
+                            drawing,
+                            sx,
+                            DimensionAxis::Vertical,
+                            line_offset,
+                        )
+                    },
+                );
                 (Pos2::new(x, start), Pos2::new(x, end))
             }
         };
         let selected = selected_dimension == Some(dimension.id.0.as_str());
         let unsatisfied = dimension.kind == DimensionKind::Driving
             && !wall.is_driving_dimension_satisfied(dimension);
+        let label = dimension_display_value(wall, dimension);
+        let label_rect = dimension_label_rect(line_start, line_end, dimension.axis, &label);
         let hovered = pointer.is_some_and(|position| {
             distance_to_segment(position, line_start, line_end) < 7.0
-                || dimension_label_rect(line_start, line_end, dimension.axis).contains(position)
+                || label_rect.contains(position)
         });
         let color = if unsatisfied {
             Color32::from_rgb(172, 54, 48)
@@ -2606,51 +2653,65 @@ fn draw_wall_dimension_annotations(
         };
         let stroke = Stroke::new(if selected || hovered { 2.0 } else { 1.25 }, color);
 
-        painter.line_segment([line_start, line_end], stroke);
-        match dimension.axis {
-            DimensionAxis::Horizontal => {
-                painter.line_segment(
-                    [
-                        Pos2::new(line_start.x, line_start.y),
-                        Pos2::new(line_start.x, drawing.top() + 4.0),
-                    ],
-                    Stroke::new(0.75, color),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(line_end.x, line_end.y),
-                        Pos2::new(line_end.x, drawing.top() + 4.0),
-                    ],
-                    Stroke::new(0.75, color),
-                );
+        draw_dimension_line_with_label_gap(
+            painter,
+            line_start,
+            line_end,
+            dimension.axis,
+            label_rect,
+            stroke,
+        );
+        if placed {
+            if let Some(start_position) =
+                dimension_anchor_position(drawing, sx, sx, wall, &dimension.start)
+            {
+                painter.line_segment([start_position, line_start], Stroke::new(0.75, color));
             }
-            DimensionAxis::Vertical => {
-                painter.line_segment(
-                    [
-                        Pos2::new(line_start.x, line_start.y),
-                        Pos2::new(drawing.right() - 4.0, line_start.y),
-                    ],
-                    Stroke::new(0.75, color),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(line_end.x, line_end.y),
-                        Pos2::new(drawing.right() - 4.0, line_end.y),
-                    ],
-                    Stroke::new(0.75, color),
-                );
+            if let Some(end_position) =
+                dimension_anchor_position(drawing, sx, sx, wall, &dimension.end)
+            {
+                painter.line_segment([end_position, line_end], Stroke::new(0.75, color));
+            }
+        } else {
+            match dimension.axis {
+                DimensionAxis::Horizontal => {
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_start.x, line_start.y),
+                            Pos2::new(line_start.x, drawing.top() + 4.0),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_end.x, line_end.y),
+                            Pos2::new(line_end.x, drawing.top() + 4.0),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                }
+                DimensionAxis::Vertical => {
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_start.x, line_start.y),
+                            Pos2::new(drawing.right() - 4.0, line_start.y),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_end.x, line_end.y),
+                            Pos2::new(drawing.right() - 4.0, line_end.y),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                }
             }
         }
         draw_dimension_tick(painter, line_start, dimension.axis, color);
         draw_dimension_tick(painter, line_end, dimension.axis, color);
 
-        let label = dimension_display_value(wall, dimension);
         let label_pos = dimension_label_position(line_start, line_end, dimension.axis);
-        painter.rect_filled(
-            dimension_label_rect(line_start, line_end, dimension.axis),
-            2.0,
-            Color32::from_rgb(246, 244, 239),
-        );
         painter.text(
             label_pos,
             Align2::CENTER_CENTER,
@@ -2682,9 +2743,48 @@ fn dimension_label_position(start: Pos2, end: Pos2, axis: DimensionAxis) -> Pos2
     }
 }
 
-fn dimension_label_rect(start: Pos2, end: Pos2, axis: DimensionAxis) -> Rect {
+fn dimension_label_rect(start: Pos2, end: Pos2, axis: DimensionAxis, label: &str) -> Rect {
     let center = dimension_label_position(start, end, axis);
-    Rect::from_center_size(center, Vec2::new(86.0, 18.0))
+    let width = (label.chars().count() as f32 * 6.5 + 12.0).clamp(34.0, 86.0);
+    Rect::from_center_size(center, Vec2::new(width, 18.0))
+}
+
+fn draw_dimension_line_with_label_gap(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    axis: DimensionAxis,
+    label_rect: Rect,
+    stroke: Stroke,
+) {
+    match axis {
+        DimensionAxis::Horizontal => {
+            let y = start.y;
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let gap_left = label_rect.left().clamp(left, right);
+            let gap_right = label_rect.right().clamp(left, right);
+            if gap_left > left {
+                painter.line_segment([Pos2::new(left, y), Pos2::new(gap_left, y)], stroke);
+            }
+            if gap_right < right {
+                painter.line_segment([Pos2::new(gap_right, y), Pos2::new(right, y)], stroke);
+            }
+        }
+        DimensionAxis::Vertical => {
+            let x = start.x;
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            let gap_top = label_rect.top().clamp(top, bottom);
+            let gap_bottom = label_rect.bottom().clamp(top, bottom);
+            if gap_top > top {
+                painter.line_segment([Pos2::new(x, top), Pos2::new(x, gap_top)], stroke);
+            }
+            if gap_bottom < bottom {
+                painter.line_segment([Pos2::new(x, gap_bottom), Pos2::new(x, bottom)], stroke);
+            }
+        }
+    }
 }
 
 fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstraint) -> String {
@@ -2720,7 +2820,7 @@ fn draw_pending_dimension_preview(
     sy: f32,
     wall: &Wall,
     preview: PendingDimensionPreview<'_>,
-) -> Option<DimensionAxis> {
+) -> Option<DimensionPlacement> {
     let first_position = dimension_anchor_position(drawing, sx, sy, wall, preview.first_anchor)?;
     let second_position = dimension_anchor_position(drawing, sx, sy, wall, preview.second_anchor)?;
     let axis = dimension_axis_for_placement_position(
@@ -2732,20 +2832,24 @@ fn draw_pending_dimension_preview(
     let color = Color32::from_rgb(35, 94, 150);
     let stroke = Stroke::new(1.75, color);
 
+    let line_offset = dimension_line_offset_for_position(
+        drawing,
+        sx,
+        axis,
+        preview
+            .pointer
+            .unwrap_or_else(|| pending_dimension_default_line_position(drawing, axis)),
+    );
     let (line_start, line_end) = match axis {
         DimensionAxis::Horizontal => {
-            let y = preview
-                .pointer
-                .map_or(drawing.top() - 24.0, |position| position.y);
+            let y = dimension_line_screen_position(drawing, sx, axis, line_offset);
             (
                 Pos2::new(first_position.x, y),
                 Pos2::new(second_position.x, y),
             )
         }
         DimensionAxis::Vertical => {
-            let x = preview
-                .pointer
-                .map_or(drawing.right() + 56.0, |position| position.x);
+            let x = dimension_line_screen_position(drawing, sx, axis, line_offset);
             (
                 Pos2::new(x, first_position.y),
                 Pos2::new(x, second_position.y),
@@ -2753,7 +2857,14 @@ fn draw_pending_dimension_preview(
         }
     };
 
-    painter.line_segment([line_start, line_end], stroke);
+    let label = preview
+        .first_anchor
+        .coordinate(wall, axis)
+        .zip(preview.second_anchor.coordinate(wall, axis))
+        .map(|(start, end)| (end - start).abs().to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let label_rect = dimension_label_rect(line_start, line_end, axis, &label);
+    draw_dimension_line_with_label_gap(painter, line_start, line_end, axis, label_rect, stroke);
     match axis {
         DimensionAxis::Horizontal => {
             painter.line_segment([first_position, line_start], Stroke::new(0.75, color));
@@ -2767,14 +2878,6 @@ fn draw_pending_dimension_preview(
     draw_dimension_tick(painter, line_start, axis, color);
     draw_dimension_tick(painter, line_end, axis, color);
 
-    let label = preview
-        .first_anchor
-        .coordinate(wall, axis)
-        .zip(preview.second_anchor.coordinate(wall, axis))
-        .map(|(start, end)| (end - start).abs().to_string())
-        .unwrap_or_else(|| "?".to_owned());
-    let label_rect = dimension_label_rect(line_start, line_end, axis);
-    painter.rect_filled(label_rect, 2.0, Color32::from_rgb(246, 244, 239));
     painter.text(
         dimension_label_position(line_start, line_end, axis),
         Align2::CENTER_CENTER,
@@ -2783,7 +2886,39 @@ fn draw_pending_dimension_preview(
         color,
     );
 
-    Some(axis)
+    Some(DimensionPlacement { axis, line_offset })
+}
+
+fn pending_dimension_default_line_position(drawing: Rect, axis: DimensionAxis) -> Pos2 {
+    match axis {
+        DimensionAxis::Horizontal => Pos2::new(drawing.center().x, drawing.top() - 24.0),
+        DimensionAxis::Vertical => Pos2::new(drawing.right() + 56.0, drawing.center().y),
+    }
+}
+
+fn dimension_line_offset_for_position(
+    drawing: Rect,
+    scale: f32,
+    axis: DimensionAxis,
+    position: Pos2,
+) -> Length {
+    let inches = match axis {
+        DimensionAxis::Horizontal => (drawing.bottom() - position.y) / scale,
+        DimensionAxis::Vertical => (position.x - drawing.left()) / scale,
+    };
+    Length::from_inches(inches as f64)
+}
+
+fn dimension_line_screen_position(
+    drawing: Rect,
+    scale: f32,
+    axis: DimensionAxis,
+    line_offset: Length,
+) -> f32 {
+    match axis {
+        DimensionAxis::Horizontal => drawing.bottom() - line_offset.inches() as f32 * scale,
+        DimensionAxis::Vertical => drawing.left() + line_offset.inches() as f32 * scale,
+    }
 }
 
 fn dimension_anchor_position(
@@ -3622,6 +3757,65 @@ mod tests {
                 horizontal: DimensionHorizontalReference::Left,
                 vertical: DimensionVerticalReference::Top,
             })
+        );
+    }
+
+    #[test]
+    fn dimension_line_offsets_map_between_screen_and_wall_coordinates() {
+        let drawing = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(240.0, 120.0));
+        let scale = 2.0;
+
+        let horizontal_position = Pos2::new(160.0, 140.0);
+        let horizontal_offset = dimension_line_offset_for_position(
+            drawing,
+            scale,
+            DimensionAxis::Horizontal,
+            horizontal_position,
+        );
+        assert_eq!(horizontal_offset, Length::from_inches(30.0));
+        assert_eq!(
+            dimension_line_screen_position(
+                drawing,
+                scale,
+                DimensionAxis::Horizontal,
+                horizontal_offset
+            ),
+            horizontal_position.y
+        );
+
+        let vertical_position = Pos2::new(250.0, 120.0);
+        let vertical_offset = dimension_line_offset_for_position(
+            drawing,
+            scale,
+            DimensionAxis::Vertical,
+            vertical_position,
+        );
+        assert_eq!(vertical_offset, Length::from_inches(75.0));
+        assert_eq!(
+            dimension_line_screen_position(
+                drawing,
+                scale,
+                DimensionAxis::Vertical,
+                vertical_offset
+            ),
+            vertical_position.x
+        );
+    }
+
+    #[test]
+    fn dimension_label_rect_sizes_to_text_instead_of_fixed_block() {
+        let start = Pos2::new(100.0, 120.0);
+        let end = Pos2::new(180.0, 120.0);
+
+        let short_label = dimension_label_rect(start, end, DimensionAxis::Horizontal, "1' 6\"");
+        let long_label =
+            dimension_label_rect(start, end, DimensionAxis::Horizontal, "28' 0\" x 8' 0\"");
+
+        assert!(short_label.width() < 50.0);
+        assert!(long_label.width() > short_label.width());
+        assert_eq!(
+            short_label.center(),
+            dimension_label_position(start, end, DimensionAxis::Horizontal)
         );
     }
 

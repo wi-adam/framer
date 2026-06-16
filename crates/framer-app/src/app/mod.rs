@@ -97,6 +97,7 @@ enum ViewClick {
     DimensionPlacement {
         wall_index: usize,
         axis: DimensionAxis,
+        line_offset: Length,
     },
     Member {
         wall_id: String,
@@ -560,11 +561,17 @@ impl FramerApp {
 
         self.dimension_tool.second_anchor = Some(pick);
         self.dimension_status = Some(
-            "Move the pointer to choose horizontal or vertical, then click to place".to_owned(),
+            "Move the pointer to choose the dimension axis and line position, then click to place"
+                .to_owned(),
         );
     }
 
-    fn handle_dimension_placement_click(&mut self, wall_index: usize, axis: DimensionAxis) {
+    fn handle_dimension_placement_click(
+        &mut self,
+        wall_index: usize,
+        axis: DimensionAxis,
+        line_offset: Length,
+    ) {
         if !self.workspace_mode.allows_design_edits() || !self.dimension_tool.active {
             return;
         }
@@ -621,7 +628,8 @@ impl FramerApp {
             direction,
             value,
         )
-        .with_axis(axis);
+        .with_axis(axis)
+        .with_line_offset(line_offset);
         if wall.would_overconstrain_driving_dimension(&dimension) {
             self.dimension_status =
                 Some("Driving dimension would overconstrain this wall".to_owned());
@@ -679,8 +687,12 @@ impl FramerApp {
             ViewClick::DimensionAnchor { wall_index, anchor } => {
                 self.handle_dimension_anchor_click(wall_index, anchor);
             }
-            ViewClick::DimensionPlacement { wall_index, axis } => {
-                self.handle_dimension_placement_click(wall_index, axis);
+            ViewClick::DimensionPlacement {
+                wall_index,
+                axis,
+                line_offset,
+            } => {
+                self.handle_dimension_placement_click(wall_index, axis, line_offset);
             }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {
@@ -804,7 +816,15 @@ mod tests {
         app.handle_view_click(ViewClick::DimensionPlacement {
             wall_index: 0,
             axis,
+            line_offset: dimension_line_offset(axis),
         });
+    }
+
+    fn dimension_line_offset(axis: DimensionAxis) -> Length {
+        match axis {
+            DimensionAxis::Horizontal => Length::from_inches(72.0),
+            DimensionAxis::Vertical => Length::from_inches(96.0),
+        }
     }
 
     #[test]
@@ -1004,6 +1024,10 @@ mod tests {
         assert_eq!(dimension.axis, DimensionAxis::Horizontal);
         assert_eq!(dimension.kind, DimensionKind::Driving);
         assert_eq!(dimension.value, Some(expected));
+        assert_eq!(
+            dimension.line_offset,
+            Some(dimension_line_offset(DimensionAxis::Horizontal))
+        );
         assert_eq!(app.dimension_tool.first_anchor, None);
         assert_eq!(app.dimension_tool.second_anchor, None);
         assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
@@ -1062,6 +1086,10 @@ mod tests {
         assert_eq!(dimension.axis, DimensionAxis::Vertical);
         assert_eq!(dimension.kind, DimensionKind::Driving);
         assert_eq!(dimension.value, Some(expected));
+        assert_eq!(
+            dimension.line_offset,
+            Some(dimension_line_offset(DimensionAxis::Vertical))
+        );
         assert_eq!(app.selected, Selection::Dimension(dimension.id.0.clone()));
     }
 

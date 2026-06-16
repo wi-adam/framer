@@ -99,6 +99,10 @@ Each dimension stores:
   vertices, and centers.
 - `direction`: `Forward` or `Backward`, preserving the click order used to place
   the dimension.
+- `line_offset`: optional wall-local annotation placement on the axis
+  perpendicular to the dimension. Horizontal dimensions use this as the line's
+  local Y position; vertical dimensions use it as the line's local X position.
+  Missing offsets use the legacy outside-of-wall stacked layout.
 - `value`: present only for `Driving` dimensions. Reference dimensions are
   measured from the current model and must not store a target value.
 
@@ -149,8 +153,9 @@ rough opening height:
 The current app applies wall-local driving dimensions for wall length and
 height, opening horizontal position and width, and opening vertical bottom and
 height. Reference dimensions are non-driving annotations that display the
-current measured distance. Cross-wall projections and alignment/offset
-constraints are future schema extensions, not implicit behavior in v4.
+current measured distance. Dimension `line_offset` values only place annotation
+graphics; cross-wall projections and alignment constraints are future schema
+extensions, not implicit behavior in v4.
 
 Driving dimensions must be simultaneously satisfied by the authored wall and
 opening geometry. If a new or edited driving dimension contradicts another

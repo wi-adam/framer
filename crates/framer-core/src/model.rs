@@ -985,6 +985,8 @@ pub struct DimensionConstraint {
     #[serde(default)]
     pub direction: DimensionDirection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_offset: Option<Length>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Length>,
 }
 
@@ -1006,12 +1008,18 @@ impl DimensionConstraint {
             start,
             end,
             direction,
+            line_offset: None,
             value,
         }
     }
 
     pub fn with_axis(mut self, axis: DimensionAxis) -> Self {
         self.axis = axis;
+        self
+    }
+
+    pub fn with_line_offset(mut self, line_offset: Length) -> Self {
+        self.line_offset = Some(line_offset);
         self
     }
 
