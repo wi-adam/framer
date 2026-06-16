@@ -377,23 +377,29 @@ fn wgsl_burst_matches_single_sample() {
     };
 
     let single = read_accum(1);
-    let burst = read_accum(8);
-    assert_eq!(single.len(), burst.len());
-    // Same samples, regrouped sum: agree to f32 rounding, exact sample counts.
-    let mut max_rel = 0f32;
-    for (i, (a, b)) in single.iter().zip(burst.iter()).enumerate() {
-        if i % 4 == 3 {
-            assert_eq!(*a, PARITY_SPP as f32, "1-spp pixel sample count");
-            assert_eq!(*b, PARITY_SPP as f32, "burst pixel sample count");
-            continue;
+    // Candidate per-dispatch bursts that must regroup to the same result as the
+    // 1-spp reference: 2 is the moving-camera cap (MOTION_SPP_CAP in render::mod —
+    // private, so mirrored here), 8 is the original convergence burst.
+    for spp_per_dispatch in [2u32, 8] {
+        let burst = read_accum(spp_per_dispatch);
+        assert_eq!(single.len(), burst.len());
+        // Same samples, regrouped sum: agree to f32 rounding, exact sample counts.
+        let mut max_rel = 0f32;
+        for (i, (a, b)) in single.iter().zip(burst.iter()).enumerate() {
+            if i % 4 == 3 {
+                assert_eq!(*a, PARITY_SPP as f32, "1-spp pixel sample count");
+                assert_eq!(*b, PARITY_SPP as f32, "burst pixel sample count");
+                continue;
+            }
+            max_rel = max_rel.max((a - b).abs() / a.abs().max(1.0));
         }
-        max_rel = max_rel.max((a - b).abs() / a.abs().max(1.0));
+        eprintln!("burst(spp={spp_per_dispatch}) vs 1-spp max relative error: {max_rel:.2e}");
+        assert!(
+            max_rel < 1e-3,
+            "burst(spp={spp_per_dispatch}) accumulation diverged from 1-spp by relative \
+             {max_rel} (wrong sample index?)"
+        );
     }
-    eprintln!("burst vs 1-spp max relative error: {max_rel:.2e}");
-    assert!(
-        max_rel < 1e-3,
-        "burst accumulation diverged from 1-spp by relative {max_rel} (wrong sample index?)"
-    );
 }
 
 /// End-to-end display-path test: accumulates on the GPU, then runs the *actual*

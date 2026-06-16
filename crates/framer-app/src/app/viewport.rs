@@ -432,6 +432,7 @@ impl FramerApp {
                     &opts,
                     width,
                     height,
+                    moving,
                     format,
                 );
                 if !prepared {
