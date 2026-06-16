@@ -61,6 +61,10 @@ struct Uniforms {
     max_bounces: u32,
     pad0: u32,
     spp: u32,
+    denoise: u32,
+    denoise_strength: f32,
+    pad_d0: u32,
+    pad_d1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> triangles: array<Triangle>;
@@ -69,6 +73,9 @@ struct Uniforms {
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
 @group(1) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(1) var<storage, read_write> accum: array<vec4<f32>>;
+// Denoiser guide buffer: first-hit world normal (.xyz) + linear view depth (.w).
+// Only referenced by `main` when u.denoise != 0; bound by the in-app renderer.
+@group(1) @binding(2) var<storage, read_write> gbuffer: array<vec4<f32>>;
 
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717959;
@@ -547,10 +554,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // parity test relies on (it drives spp = 1, frame = 0,1,2,...).
     let spp = max(u.spp, 1u);
     var rad = vec3<f32>(0.0);
+    var jx0 = 0.0;
+    var jy0 = 0.0;
     for (var s = 0u; s < spp; s = s + 1u) {
         var rng = pixel_rng(gid.x, gid.y, u.frame + s, vec2<u32>(u.seed_lo, u.seed_hi));
         let jx = pcg_next_f32(&rng);
         let jy = pcg_next_f32(&rng);
+        if (s == 0u) {
+            jx0 = jx;
+            jy0 = jy;
+        }
         let ray = camera_ray(f32(gid.x) + jx, f32(gid.y) + jy);
         rad = rad + radiance(ray, &rng);
     }
@@ -558,4 +571,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.y * u.width + gid.x;
     let prev = select(vec4<f32>(0.0), accum[idx], u.frame > 0u);
     accum[idx] = prev + vec4<f32>(rad, f32(spp));
+
+    // Denoiser guide buffer: first-hit world normal + linear view depth from the
+    // s==0 primary ray. Intersection consumes no RNG, so the pinned PCG stream is
+    // untouched (parity preserved). Sky/misses get a large depth sentinel so the
+    // depth edge-stop cleanly separates background from geometry.
+    if (u.denoise != 0u) {
+        let gray = camera_ray(f32(gid.x) + jx0, f32(gid.y) + jy0);
+        let ghit = intersect_scene(gray);
+        var gn = vec3<f32>(0.0);
+        var gz = 1.0e30;
+        if (ghit.valid) {
+            gn = ghit.normal;
+            gz = dot(ghit.point - u.cam_eye, u.cam_forward);
+        }
+        gbuffer[idx] = vec4<f32>(gn, gz);
+    }
 }

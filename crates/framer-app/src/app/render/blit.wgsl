@@ -35,10 +35,18 @@ struct Uniforms {
     max_bounces: u32,
     srgb_target: u32,
     spp: u32,
+    denoise: u32,
+    denoise_strength: f32,
+    pad_d0: u32,
+    pad_d1: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// Display buffer: either the À-Trous denoised color (stored averaged, .w = 1) or,
+// when the denoiser is off, the raw accumulator (bound to both 1 and 2).
 @group(0) @binding(1) var<storage, read> accum: array<vec4<f32>>;
+// Raw running-sum accumulator, for the denoise→raw cross-fade.
+@group(0) @binding(2) var<storage, read> raw_accum: array<vec4<f32>>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -74,8 +82,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let px = min(u32(in.uv.x * f32(u.width)), u.width - 1u);
     // Flip Y: accumulator row 0 is the top of the image; viewport uv.y=1 is top.
     let py = min(u32((1.0 - in.uv.y) * f32(u.height)), u.height - 1u);
-    let s = accum[py * u.width + px];
-    let hdr = s.xyz / max(s.w, 1.0) * u.exposure;
+    let di = py * u.width + px;
+    let disp = accum[di];
+    let display_lin = disp.xyz / max(disp.w, 1.0);
+    // Cross-fade the denoised display buffer toward the raw average; strength 0
+    // shows the unbiased path-traced result (the two bindings alias when off).
+    let raw = raw_accum[di];
+    let raw_lin = raw.xyz / max(raw.w, 1.0);
+    let lin = mix(raw_lin, display_lin, u.denoise_strength);
+    let hdr = lin * u.exposure;
     let mapped = aces(hdr);
     if (u.srgb_target != 0u) {
         return vec4<f32>(mapped, 1.0);

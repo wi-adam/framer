@@ -17,6 +17,7 @@ const RNG_WGSL: &str = include_str!("../src/app/render/rng.wgsl");
 const RNG_DEBUG_WGSL: &str = include_str!("../src/app/render/rng_debug.wgsl");
 const PATHTRACE_WGSL: &str = include_str!("../src/app/render/pathtrace.wgsl");
 const BLIT_WGSL: &str = include_str!("../src/app/render/blit.wgsl");
+const DENOISE_WGSL: &str = include_str!("../src/app/render/denoise.wgsl");
 
 /// Requests a headless device + queue, or `None` if no adapter is available.
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -187,6 +188,15 @@ fn accumulate_on_gpu(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    // The kernel declares a guide buffer (binding 2) for the in-app denoiser;
+    // with denoise = 0 (GpuUniforms default) it is never written, but the bind
+    // group must still provide it to match the pipeline layout.
+    let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gbuffer"),
+        size: (width as u64) * (height as u64) * 16,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
 
     let source = format!("{RNG_WGSL}\n{PATHTRACE_WGSL}");
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -234,6 +244,10 @@ fn accumulate_on_gpu(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: accum_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: gbuffer.as_entire_binding(),
             },
         ],
     });
@@ -465,6 +479,12 @@ fn wgsl_blit_matches_cpu_reference() {
                 binding: 1,
                 resource: accum_buf.as_entire_binding(),
             },
+            // Raw accumulator for the denoise cross-fade; with denoise_strength = 0
+            // the blit shows this buffer (display and raw alias to the same data).
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: accum_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -564,6 +584,198 @@ fn wgsl_blit_matches_cpu_reference() {
         "blit mean abs error {mae} too high (orientation/tonemap bug?)"
     );
     assert!(max < 48, "blit max pixel error {max} too high");
+}
+
+/// Runs the display-only À-Trous denoiser (resolve + 5 wavelet passes) over a
+/// `width`×`height` accumulator and normal/depth gbuffer, returning the final
+/// `color_b` buffer (vec4 per pixel). Mirrors the in-app pass sequence.
+fn run_denoise(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    accum: &[f32],
+    gbuffer_data: &[f32],
+) -> Vec<f32> {
+    let n = (width * height) as usize;
+    assert_eq!(accum.len(), n * 4);
+    assert_eq!(gbuffer_data.len(), n * 4);
+
+    let storage_init = |label, bytes: &[u8], extra: wgpu::BufferUsages| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytes,
+            usage: wgpu::BufferUsages::STORAGE | extra,
+        })
+    };
+    let accum_buf = storage_init("accum", bytemuck::cast_slice(accum), wgpu::BufferUsages::empty());
+    let gbuffer = storage_init(
+        "gbuffer",
+        bytemuck::cast_slice(gbuffer_data),
+        wgpu::BufferUsages::empty(),
+    );
+    let zeros = vec![0f32; n * 4];
+    let color_a = storage_init("color_a", bytemuck::cast_slice(&zeros), wgpu::BufferUsages::empty());
+    let color_b = storage_init(
+        "color_b",
+        bytemuck::cast_slice(&zeros),
+        wgpu::BufferUsages::COPY_SRC,
+    );
+    let du: Vec<wgpu::Buffer> = (0..5u32)
+        .map(|i| {
+            let data: [u32; 4] = [width, height, 1u32 << i, 0];
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("du"),
+                contents: bytemuck::cast_slice(&data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        })
+        .collect();
+
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("denoise"),
+        source: wgpu::ShaderSource::Wgsl(DENOISE_WGSL.into()),
+    });
+    let pipe = |entry: &str| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        })
+    };
+    let resolve = pipe("resolve");
+    let atrous = pipe("atrous");
+
+    let bg = |layout: wgpu::BindGroupLayout, entries: &[&wgpu::Buffer]| {
+        let e: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &e,
+        })
+    };
+    let resolve_bg = bg(resolve.get_bind_group_layout(0), &[&du[0], &accum_buf, &color_a]);
+    let atrous_bgs: Vec<_> = (0..5usize)
+        .map(|i| {
+            let (input, output) = if i % 2 == 0 {
+                (&color_a, &color_b)
+            } else {
+                (&color_b, &color_a)
+            };
+            bg(
+                atrous.get_bind_group_layout(0),
+                &[&du[i], input, &gbuffer, output],
+            )
+        })
+        .collect();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("denoise"),
+    });
+    {
+        let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        p.set_pipeline(&resolve);
+        p.set_bind_group(0, &resolve_bg, &[]);
+        p.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+    }
+    for atrous_bg in &atrous_bgs {
+        let mut p = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        p.set_pipeline(&atrous);
+        p.set_bind_group(0, atrous_bg, &[]);
+        p.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+    }
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("denoise_staging"),
+        size: (n * 16) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(&color_b, 0, &staging, 0, (n * 16) as u64);
+    queue.submit(Some(encoder.finish()));
+    bytemuck::cast_slice(&read_back(device, &staging)).to_vec()
+}
+
+#[test]
+fn denoise_preserves_flat_image_and_reduces_noise() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no GPU adapter available; skipping denoise_preserves_flat_image_and_reduces_noise");
+        return;
+    };
+    let (w, h) = (32u32, 32u32);
+    let n = (w * h) as usize;
+    // Flat gbuffer: every pixel is the same surface (normal +z, depth 5), so the
+    // edge-stops never fire and the À-Trous filter is a pure low-pass.
+    let mut gbuf = vec![0f32; n * 4];
+    for p in 0..n {
+        gbuf[p * 4 + 2] = 1.0; // normal.z
+        gbuf[p * 4 + 3] = 5.0; // depth
+    }
+
+    // (1) Constant input → constant output (edge-preserving filter is identity).
+    let color = [2.0f32, 3.0, 4.0];
+    let mut accum = vec![0f32; n * 4];
+    for p in 0..n {
+        // Running sum with w = 4 so resolve averages back to `color`.
+        accum[p * 4] = color[0] * 4.0;
+        accum[p * 4 + 1] = color[1] * 4.0;
+        accum[p * 4 + 2] = color[2] * 4.0;
+        accum[p * 4 + 3] = 4.0;
+    }
+    let out = run_denoise(&device, &queue, w, h, &accum, &gbuf);
+    let mut max_dev = 0f32;
+    for p in 0..n {
+        for c in 0..3 {
+            max_dev = max_dev.max((out[p * 4 + c] - color[c]).abs());
+        }
+    }
+    assert!(max_dev < 1e-4, "denoiser altered a flat image by {max_dev}");
+
+    // (2) Noisy input → variance reduced, mean preserved. A deterministic
+    // zero-mean checkerboard-ish perturbation around the same mean color.
+    let mut noisy = vec![0f32; n * 4];
+    let mut sum_in = [0f64; 3];
+    for p in 0..n {
+        let sign = if (p % 2) == 0 { 1.0 } else { -1.0 };
+        let amp = 0.6 * sign;
+        for c in 0..3 {
+            let v = (color[c] + amp).max(0.0);
+            noisy[p * 4 + c] = v; // w = 1, so resolve = this value
+            sum_in[c] += v as f64;
+        }
+        noisy[p * 4 + 3] = 1.0;
+    }
+    let den = run_denoise(&device, &queue, w, h, &noisy, &gbuf);
+    // Variance of the green channel before vs after.
+    let var = |buf: &[f32], c: usize| -> f64 {
+        let mean = (0..n).map(|p| buf[p * 4 + c] as f64).sum::<f64>() / n as f64;
+        (0..n)
+            .map(|p| {
+                let d = buf[p * 4 + c] as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64
+    };
+    let v_in = var(&noisy, 1);
+    let v_out = var(&den, 1);
+    let mean_out = (0..n).map(|p| den[p * 4 + 1] as f64).sum::<f64>() / n as f64;
+    eprintln!("denoise variance: in={v_in:.4} out={v_out:.4} mean_out={mean_out:.4}");
+    assert!(v_out < v_in * 0.5, "denoiser barely reduced variance ({v_in} -> {v_out})");
+    // Mean is preserved (low-pass on a flat surface conserves energy).
+    assert!(
+        (mean_out - sum_in[1] / n as f64).abs() < 0.05,
+        "denoiser shifted the mean"
+    );
 }
 
 /// Mean-absolute and max per-byte error between two equal-length RGBA buffers.
