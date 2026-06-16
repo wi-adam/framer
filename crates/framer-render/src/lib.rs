@@ -13,11 +13,4 @@
 //! WGSL's precision.
 #![forbid(unsafe_code)]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_links() {
-        // Sanity check that the crate compiles and links into the workspace.
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub mod math;
