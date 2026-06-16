@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aabb;
+pub mod build;
 pub mod bvh;
 pub mod camera;
 pub mod color;
@@ -25,6 +26,8 @@ pub mod ray;
 pub mod rng;
 pub mod sampling;
 pub mod scene;
+
+pub use build::{RenderOptions, scene_from_model};
 
 use math::Vec3;
 use scene::Scene;
