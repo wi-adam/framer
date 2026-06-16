@@ -1238,6 +1238,7 @@ dependencies = [
  "eframe",
  "env_logger",
  "framer-core",
+ "framer-render",
  "framer-solver",
 ]
 

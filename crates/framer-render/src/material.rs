@@ -294,7 +294,10 @@ mod tests {
         }
         // Near-normal incidence transmits the large majority; none should be
         // trapped flipping back inward incorrectly.
-        assert!(transmitted > 4000, "back-face refraction failed: {transmitted}/5000 exited");
+        assert!(
+            transmitted > 4000,
+            "back-face refraction failed: {transmitted}/5000 exited"
+        );
     }
 
     #[test]

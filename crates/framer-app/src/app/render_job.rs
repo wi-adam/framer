@@ -58,7 +58,7 @@ impl RenderJob {
                     return;
                 }
                 // Small batches first (instant feedback), growing for efficiency.
-                let batch = done.max(1).min(16).min(TARGET_SPP - done);
+                let batch = done.clamp(1, 16).min(TARGET_SPP - done);
                 accumulate(&scene, width, height, batch, done, SEED, &mut accum);
                 done += batch;
                 let rgba = tonemap_accum(&accum, done, opts.exposure);

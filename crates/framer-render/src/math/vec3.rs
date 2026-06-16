@@ -26,7 +26,9 @@ impl Vec3 {
     }
 
     /// Component-wise (Hadamard) product — used for tinting colors by albedo.
+    /// Named `mul` deliberately; this is not scalar `Mul` (that's `Mul<f32>`).
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, other: Self) -> Self {
         Self::new(self.x * other.x, self.y * other.y, self.z * other.z)
     }

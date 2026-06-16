@@ -43,8 +43,18 @@ fn cube(tris: &mut Vec<Triangle>, c: Vec3, h: f32, mat: u32) {
         [3, 0, 4, 7],
     ];
     for f in FACES {
-        tris.push(Triangle::new(corners[f[0]], corners[f[1]], corners[f[2]], mat));
-        tris.push(Triangle::new(corners[f[0]], corners[f[2]], corners[f[3]], mat));
+        tris.push(Triangle::new(
+            corners[f[0]],
+            corners[f[1]],
+            corners[f[2]],
+            mat,
+        ));
+        tris.push(Triangle::new(
+            corners[f[0]],
+            corners[f[2]],
+            corners[f[3]],
+            mat,
+        ));
     }
 }
 
@@ -109,8 +119,7 @@ fn reference_scene() -> Scene {
 }
 
 fn golden_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden/reference.rgba")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/reference.rgba")
 }
 
 #[test]
@@ -132,7 +141,11 @@ fn reference_render_matches_golden() {
             path.display()
         )
     });
-    assert_eq!(image.len(), golden.len(), "golden image has a different size");
+    assert_eq!(
+        image.len(),
+        golden.len(),
+        "golden image has a different size"
+    );
 
     // Mean absolute error tolerates cross-architecture f32 rounding; max error
     // catches a single blown-out pixel that a good average could hide.

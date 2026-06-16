@@ -84,11 +84,11 @@ impl Bvh {
             if node.count > 0 {
                 for k in 0..node.count {
                     let tri = &tris[self.indices[(node.left_first + k) as usize] as usize];
-                    if let Some(hit) = tri.intersect(ray) {
-                        if hit.t < closest {
-                            closest = hit.t;
-                            best = Some(hit);
-                        }
+                    if let Some(hit) = tri.intersect(ray)
+                        && hit.t < closest
+                    {
+                        closest = hit.t;
+                        best = Some(hit);
                     }
                 }
             } else {
@@ -232,10 +232,10 @@ mod tests {
     fn brute_force(tris: &[Triangle], ray: &Ray) -> Option<(f32, u32)> {
         let mut best: Option<(f32, u32)> = None;
         for tri in tris {
-            if let Some(hit) = tri.intersect(ray) {
-                if best.is_none_or(|(t, _)| hit.t < t) {
-                    best = Some((hit.t, hit.material));
-                }
+            if let Some(hit) = tri.intersect(ray)
+                && best.is_none_or(|(t, _)| hit.t < t)
+            {
+                best = Some((hit.t, hit.material));
             }
         }
         best

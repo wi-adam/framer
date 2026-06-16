@@ -275,7 +275,14 @@ mod tests {
         };
         let dim_sky = Sky::uniform(Vec3::splat(0.03));
         let lit = average_radiance(
-            &Scene::new(floor(0), metal.clone(), sun, dim_sky, top_down_camera(), 1.0),
+            &Scene::new(
+                floor(0),
+                metal.clone(),
+                sun,
+                dim_sky,
+                top_down_camera(),
+                1.0,
+            ),
             12_000,
         );
         let dark = average_radiance(
@@ -311,7 +318,14 @@ mod tests {
         };
         let dim_sky = Sky::uniform(Vec3::splat(0.03));
         let lit = average_radiance(
-            &Scene::new(floor(0), glass.clone(), sun, dim_sky, top_down_camera(), 1.0),
+            &Scene::new(
+                floor(0),
+                glass.clone(),
+                sun,
+                dim_sky,
+                top_down_camera(),
+                1.0,
+            ),
             12_000,
         );
         let dark = average_radiance(

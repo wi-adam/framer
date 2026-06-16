@@ -245,7 +245,7 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
         }
         // The opening's fill panel (glass / door / garage), thin and centered.
         if let Some(panel) = opening_panel_material(opening.kind) {
-            let panel_half = (depth * 0.2).min(0.75).max(0.25);
+            let panel_half = (depth * 0.2).clamp(0.25, 0.75);
             push_box(
                 tris,
                 &basis,
@@ -275,6 +275,7 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
 /// Pushes an axis-aligned box (in wall-local coords) as 12 triangles. The box
 /// spans `[x0, x1]` along the wall, `[-half, half]` across its thickness, and
 /// `[z0, z1]` vertically. Degenerate boxes are skipped.
+#[allow(clippy::too_many_arguments)]
 fn push_box(
     tris: &mut Vec<Triangle>,
     basis: &WallBasis,
