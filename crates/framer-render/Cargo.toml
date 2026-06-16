@@ -17,6 +17,7 @@ cli = ["dep:image", "parallel"]
 parallel = ["dep:rayon"]
 
 [dependencies]
+bytemuck = { workspace = true }
 framer-core = { workspace = true }
 image = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }

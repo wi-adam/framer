@@ -390,8 +390,9 @@ impl BoardProfile {
 
 /// Whether a wall faces the weather (drives sheathing intent and, later,
 /// generated sheathing zones).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WallExposure {
+    #[default]
     Exterior,
     Interior,
 }
@@ -405,17 +406,12 @@ impl WallExposure {
     }
 }
 
-impl Default for WallExposure {
-    fn default() -> Self {
-        Self::Exterior
-    }
-}
-
 /// Authored sheathing intent for a wall. Quantities are not yet generated; this
 /// records the design decision for the BOM and future sheathing zones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Sheathing {
     None,
+    #[default]
     Osb716,
     Plywood12,
     Plywood58,
@@ -429,12 +425,6 @@ impl Sheathing {
             Self::Plywood12 => "1/2\" Plywood",
             Self::Plywood58 => "5/8\" Plywood",
         }
-    }
-}
-
-impl Default for Sheathing {
-    fn default() -> Self {
-        Self::Osb716
     }
 }
 
