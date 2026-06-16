@@ -29,6 +29,13 @@ const SEED: u64 = 1;
 const TARGET_SPP: u32 = 256;
 /// Compute workgroup tile size (must match `@workgroup_size` in pathtrace.wgsl).
 const WORKGROUP: u32 = 8;
+/// Upper bound on samples × pixels traced in a single compute dispatch. Bursting
+/// many samples per egui frame removes the frame-rate ceiling on convergence, but
+/// one dispatch that runs too long can trip the GPU watchdog (TDR); this budget
+/// keeps each dispatch bounded regardless of window size.
+const SAMPLE_BUDGET_PER_DISPATCH: u64 = 8_000_000;
+/// Hard cap on the per-dispatch sample burst (also bounds small-window dispatches).
+const MAX_SPP_PER_DISPATCH: u32 = 32;
 
 const RNG_WGSL: &str = include_str!("rng.wgsl");
 const PATHTRACE_WGSL: &str = include_str!("pathtrace.wgsl");
@@ -92,13 +99,23 @@ impl GpuRenderState {
         let frame = self.frame;
         let dispatch = frame < TARGET_SPP;
 
+        // Progressive burst: trace several samples per dispatch so convergence is
+        // bounded by GPU throughput, not the egui frame cadence. Each dispatch
+        // traces sample indices `[frame, frame + spp)`, landing exactly on
+        // TARGET_SPP. The budget cap keeps a single dispatch from stalling the GPU.
+        let pixels = (width as u64 * height as u64).max(1);
+        let budget_cap =
+            (SAMPLE_BUDGET_PER_DISPATCH / pixels).clamp(1, MAX_SPP_PER_DISPATCH as u64) as u32;
+        let spp = TARGET_SPP.saturating_sub(frame).min(budget_cap).max(1);
+
         let mut uniforms = GpuUniforms::new(scene, width, height, frame, SEED, MAX_BOUNCES);
         // The blit reads this spare lane to decide whether to apply the sRGB
         // transfer function (skipped when the surface format already encodes it).
         uniforms._pad0 = u32::from(srgb_target);
+        uniforms.samples_per_dispatch = spp;
 
         if dispatch {
-            self.frame += 1;
+            self.frame += spp;
         }
 
         Some(PathTraceCallback {

@@ -34,7 +34,7 @@ struct Uniforms {
     seed_hi: u32,
     max_bounces: u32,
     srgb_target: u32,
-    pad1: u32,
+    spp: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

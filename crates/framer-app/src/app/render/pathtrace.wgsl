@@ -60,7 +60,7 @@ struct Uniforms {
     seed_hi: u32,
     max_bounces: u32,
     pad0: u32,
-    pad1: u32,
+    spp: u32,
 };
 
 @group(0) @binding(0) var<storage, read> triangles: array<Triangle>;
@@ -541,13 +541,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= u.width || gid.y >= u.height) {
         return;
     }
-    var rng = pixel_rng(gid.x, gid.y, u.frame, vec2<u32>(u.seed_lo, u.seed_hi));
-    let jx = pcg_next_f32(&rng);
-    let jy = pcg_next_f32(&rng);
-    let ray = camera_ray(f32(gid.x) + jx, f32(gid.y) + jy);
-    let rad = radiance(ray, &rng);
+    // Trace `spp` samples this dispatch (progressive burst). Each uses a distinct
+    // global sample index `u.frame + s`, so the stream matches one-sample-per-
+    // dispatch accumulation (frame index = sample) bit-for-bit — what the headless
+    // parity test relies on (it drives spp = 1, frame = 0,1,2,...).
+    let spp = max(u.spp, 1u);
+    var rad = vec3<f32>(0.0);
+    for (var s = 0u; s < spp; s = s + 1u) {
+        var rng = pixel_rng(gid.x, gid.y, u.frame + s, vec2<u32>(u.seed_lo, u.seed_hi));
+        let jx = pcg_next_f32(&rng);
+        let jy = pcg_next_f32(&rng);
+        let ray = camera_ray(f32(gid.x) + jx, f32(gid.y) + jy);
+        rad = rad + radiance(ray, &rng);
+    }
 
     let idx = gid.y * u.width + gid.x;
     let prev = select(vec4<f32>(0.0), accum[idx], u.frame > 0u);
-    accum[idx] = prev + vec4<f32>(rad, 1.0);
+    accum[idx] = prev + vec4<f32>(rad, f32(spp));
 }

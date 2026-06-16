@@ -157,6 +157,7 @@ fn accumulate_on_gpu(
     height: u32,
     spp: u32,
     seed: u64,
+    spp_per_dispatch: u32,
 ) -> wgpu::Buffer {
     use framer_render::MAX_BOUNCES;
     use framer_render::gpu::GpuUniforms;
@@ -237,9 +238,14 @@ fn accumulate_on_gpu(
         ],
     });
 
-    // Progressive accumulation: one dispatch per sample, frame index = sample.
-    for frame in 0..spp {
-        let uniforms = GpuUniforms::new(scene, width, height, frame, seed, MAX_BOUNCES);
+    // Progressive accumulation: `spp_per_dispatch` samples per dispatch, with the
+    // first sample index = `frame`, covering [0, spp). spp_per_dispatch == 1 is the
+    // in-app one-sample-per-frame cadence; larger values exercise the burst path.
+    let mut frame = 0;
+    while frame < spp {
+        let burst = spp_per_dispatch.min(spp - frame);
+        let mut uniforms = GpuUniforms::new(scene, width, height, frame, seed, MAX_BOUNCES);
+        uniforms.samples_per_dispatch = burst;
         queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pathtrace_encoder"),
@@ -252,6 +258,7 @@ fn accumulate_on_gpu(
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
         queue.submit(Some(encoder.finish()));
+        frame += burst;
     }
 
     accum_buf
@@ -272,7 +279,7 @@ fn wgsl_pathtracer_matches_cpu_reference() {
 
     let scene = reference_scene();
     let accum_bytes = (W * H) as u64 * 16;
-    let accum_buf = accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED);
+    let accum_buf = accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED, 1);
 
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("accum_staging"),
@@ -317,6 +324,64 @@ fn wgsl_pathtracer_matches_cpu_reference() {
     assert!(max < 48, "GPU↔CPU max pixel error {max} too high");
 }
 
+/// The progressive burst (many samples per dispatch) must accumulate the *same
+/// samples* as one-sample-per-dispatch — pinning the burst indexing the in-app
+/// renderer relies on (`pixel_rng(x, y, frame + s)`). The running sums match only
+/// to f32 rounding, not bit-for-bit: bursting folds each dispatch's inner sum
+/// before adding it to the buffer, regrouping the additions. A wrong sample index
+/// would diverge grossly, not by ULPs, so a tight relative tolerance is the gate.
+/// The integer .w sample counts (≤64) are exact in f32, so they match exactly.
+#[test]
+fn wgsl_burst_matches_single_sample() {
+    use framer_render::scenes::{
+        REFERENCE_HEIGHT as H, REFERENCE_SEED as SEED, REFERENCE_WIDTH as W, reference_scene,
+    };
+
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no GPU adapter available; skipping wgsl_burst_matches_single_sample");
+        return;
+    };
+
+    let scene = reference_scene();
+    let accum_bytes = (W * H) as u64 * 16;
+
+    let read_accum = |spp_per_dispatch: u32| -> Vec<f32> {
+        let accum_buf =
+            accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED, spp_per_dispatch);
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("burst_staging"),
+            size: accum_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("burst_copy"),
+        });
+        encoder.copy_buffer_to_buffer(&accum_buf, 0, &staging, 0, accum_bytes);
+        queue.submit(Some(encoder.finish()));
+        bytemuck::cast_slice(&read_back(&device, &staging)).to_vec()
+    };
+
+    let single = read_accum(1);
+    let burst = read_accum(8);
+    assert_eq!(single.len(), burst.len());
+    // Same samples, regrouped sum: agree to f32 rounding, exact sample counts.
+    let mut max_rel = 0f32;
+    for (i, (a, b)) in single.iter().zip(burst.iter()).enumerate() {
+        if i % 4 == 3 {
+            assert_eq!(*a, PARITY_SPP as f32, "1-spp pixel sample count");
+            assert_eq!(*b, PARITY_SPP as f32, "burst pixel sample count");
+            continue;
+        }
+        max_rel = max_rel.max((a - b).abs() / a.abs().max(1.0));
+    }
+    eprintln!("burst vs 1-spp max relative error: {max_rel:.2e}");
+    assert!(
+        max_rel < 1e-3,
+        "burst accumulation diverged from 1-spp by relative {max_rel} (wrong sample index?)"
+    );
+}
+
 /// End-to-end display-path test: accumulates on the GPU, then runs the *actual*
 /// blit shader (fullscreen triangle + ACES + sRGB) into an offscreen target and
 /// compares the rendered bytes to the CPU reference. This validates the parts the
@@ -338,7 +403,7 @@ fn wgsl_blit_matches_cpu_reference() {
     assert_eq!((W * 4) % 256, 0, "test width must give 256-aligned rows");
 
     let scene = reference_scene();
-    let accum_buf = accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED);
+    let accum_buf = accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED, 1);
 
     // Non-sRGB target + srgb_target=0 so the blit applies the sRGB OETF itself,
     // producing bytes directly comparable to the CPU render's encoded output.

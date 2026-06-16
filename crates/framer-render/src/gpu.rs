@@ -57,8 +57,10 @@ pub struct GpuMaterial {
 
 /// Per-frame uniforms: camera basis, sun (with precomputed `cos(angular_radius)`
 /// and solid angle so the GPU uses the *same* f32 values the CPU does), sky,
-/// exposure, image dimensions, the progressive frame index, and the split RNG
-/// seed. 176 bytes, a multiple of 16.
+/// exposure, image dimensions, the index of the first sample in this dispatch
+/// (`frame`; 0 ⇒ reset/discard previous accumulation), the number of samples to
+/// trace this dispatch (`samples_per_dispatch`), and the split RNG seed. 176
+/// bytes, a multiple of 16.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct GpuUniforms {
@@ -82,12 +84,16 @@ pub struct GpuUniforms {
     pub _pad_g: f32,
     pub width: u32,
     pub height: u32,
+    /// Index of the first sample traced in this dispatch (0 discards the previous
+    /// accumulator). With one sample per dispatch this is just the frame index.
     pub frame: u32,
     pub seed_lo: u32,
     pub seed_hi: u32,
     pub max_bounces: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
+    /// Samples per pixel to trace in this dispatch (progressive burst). The kernel
+    /// adds this to the accumulator's sample-count lane.
+    pub samples_per_dispatch: u32,
 }
 
 impl GpuUniforms {
@@ -132,7 +138,10 @@ impl GpuUniforms {
             seed_hi: (seed >> 32) as u32,
             max_bounces,
             _pad0: 0,
-            _pad1: 0,
+            // Default to a single sample so the headless parity test (which drives
+            // one sample per dispatch with frame = sample index) is unaffected; the
+            // in-app renderer overrides this to burst multiple samples per frame.
+            samples_per_dispatch: 1,
         }
     }
 }
