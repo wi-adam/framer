@@ -4,8 +4,22 @@
 
 use std::f32::consts::{PI, TAU};
 
-use crate::math::Vec3;
+use crate::math::{Onb, Vec3};
 use crate::rng::Pcg32;
+
+/// Uniformly samples a direction within a cone of half-angle `half_angle`
+/// (radians) around unit `axis`. Used for soft sun shadows.
+#[inline]
+pub fn sample_cone(axis: Vec3, half_angle: f32, rng: &mut Pcg32) -> Vec3 {
+    let cos_max = half_angle.cos();
+    let u1 = rng.next_f32();
+    let u2 = rng.next_f32();
+    let cos_t = 1.0 - u1 * (1.0 - cos_max);
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    let phi = TAU * u2;
+    let local = Vec3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+    Onb::from_normal(axis).to_world(local).normalize()
+}
 
 /// Cosine-weighted hemisphere sample (local +Z up). The matching pdf is
 /// `cos_theta / PI`.
@@ -183,6 +197,18 @@ mod tests {
             let g2 = smith_g2(nov, nov, 0.4);
             assert!((0.0..=1.0).contains(&g2));
             assert!(g2 <= g1 + 1e-4, "G2 should not exceed G1");
+        }
+    }
+
+    #[test]
+    fn cone_samples_stay_within_half_angle() {
+        let mut rng = Pcg32::seed(2, 2);
+        let axis = Vec3::new(0.3, 0.4, 0.866).normalize();
+        let half = 0.2_f32;
+        for _ in 0..50_000 {
+            let d = sample_cone(axis, half, &mut rng);
+            assert!((d.length() - 1.0).abs() < 1e-3);
+            assert!(d.dot(axis) >= half.cos() - 1e-3, "outside cone: {:?}", d);
         }
     }
 
