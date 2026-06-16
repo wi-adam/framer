@@ -5,10 +5,10 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v3 format stores only the canonical intent model. Generated framing plans,
+The v4 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
-v3 file.
+v4 file.
 
 This matches Framer's Design Mode / Plan Mode split. Design Mode writes the
 authored model saved here. Plan Mode regenerates framing layouts, diagnostics,
@@ -21,12 +21,12 @@ corner joins, doors, windows, and a garage-door-style opening. The Phase 1
 single-wall example remains checked in at
 [../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
 
-## V3 Shape
+## V5 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 3,
+  "schema_version": 5,
   "authored": {
     "code": {},
     "levels": [],
@@ -37,14 +37,22 @@ single-wall example remains checked in at
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `3` when saving from the current app.
+- `schema_version` must be `5` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected. Do not add `generated`, `cache`,
-  `exports`, or presentation data to v3 project files.
+  `exports`, or presentation data to project files.
 - Schema v1 single-wall files are accepted on load and migrated to the current
   placed-wall shape with a default `level-1` level and a straight wall segment.
-- Schema v2 shell files are accepted on load; missing wall dimensions default to
-  an empty list.
+- Schema v2 and v3 shell files are accepted on load; missing wall dimensions
+  default to an empty list and missing dimension axes default to horizontal.
+- Schema v4 files are accepted on load; each wall gains a default `assembly`
+  (`Exterior`, `TwoByFour` studs, `Osb716` sheathing) and an empty `tags` list.
+
+Each wall carries an `assembly` describing its construction: `exposure`
+(`Exterior`/`Interior`), `stud` (a board profile that also sizes the plates),
+and `sheathing`. The generated framing uses the wall's `stud` profile, so
+changing it re-sizes that wall's studs, plates, and corner posts in the plan and
+BOM. Optional `tags` are a free-form string list, omitted when empty.
 
 Lengths are exact integer ticks:
 
@@ -66,7 +74,7 @@ Example:
 
 ## Authored Model
 
-The current v3 authored model supports the completed Phase 1 single-wall
+The current v4 authored model supports the completed Phase 1 single-wall
 workflow and the first beyond-Phase-1 multi-wall shell workflow:
 
 - `code`: starter framing defaults used by the current solver.
@@ -84,15 +92,25 @@ Each wall stores both a local framing length and a project placement:
 - `length`: the wall's local framing length; it must match the axis-aligned
   distance between `start` and `end`.
 - `dimensions`: optional driving or reference dimensions between wall-local
-  anchors.
+  anchors on either the horizontal or vertical wall-elevation axis.
 
 Each dimension stores:
 
 - `kind`: `Driving` or `Reference`.
-- `start` and `end`: wall-local anchors such as `wall_start`, `wall_end`,
-  `opening_left`, `opening_center`, or `opening_right`.
+- `axis`: `Horizontal` or `Vertical`. Missing `axis` defaults to `Horizontal`
+  for projects created before schema v4.
+- `start` and `end`: wall-local anchors. Legacy horizontal anchors such as
+  `wall_start`, `wall_end`, `opening_left`, `opening_center`, and
+  `opening_right` remain valid. New point anchors use `wall_point` or
+  `opening_point` with horizontal `Left`/`Center`/`Right` and vertical
+  `Bottom`/`Center`/`Top` references, allowing dimensions to snap to edges,
+  vertices, and centers.
 - `direction`: `Forward` or `Backward`, preserving the click order used to place
   the dimension.
+- `line_offset`: optional wall-local annotation placement on the axis
+  perpendicular to the dimension. Horizontal dimensions use this as the line's
+  local Y position; vertical dimensions use it as the line's local X position.
+  Missing offsets use the legacy outside-of-wall stacked layout.
 - `value`: present only for `Driving` dimensions. Reference dimensions are
   measured from the current model and must not store a target value.
 
@@ -103,6 +121,7 @@ Opening anchors include the stable opening ID:
   "id": "dimension-1",
   "name": "Dimension 1",
   "kind": "Driving",
+  "axis": "Horizontal",
   "start": { "kind": "wall_start" },
   "end": {
     "kind": "opening_center",
@@ -113,11 +132,44 @@ Opening anchors include the stable opening ID:
 }
 ```
 
-The current app applies simple wall-local driving dimensions for wall length,
-opening position, and opening width. Reference dimensions are non-driving
-annotations that display the current measured distance. Cross-wall projections
-and alignment/offset constraints are future schema extensions, not implicit
-behavior in v3.
+Vertical dimensions use the same shape. For example, this constrains a window's
+rough opening height:
+
+```json
+{
+  "id": "dimension-2",
+  "name": "Dimension 2",
+  "kind": "Driving",
+  "axis": "Vertical",
+  "start": {
+    "kind": "opening_point",
+    "opening": "opening-front-window",
+    "horizontal": "Center",
+    "vertical": "Bottom"
+  },
+  "end": {
+    "kind": "opening_point",
+    "opening": "opening-front-window",
+    "horizontal": "Center",
+    "vertical": "Top"
+  },
+  "direction": "Forward",
+  "value": { "ticks": 768 }
+}
+```
+
+The current app applies wall-local driving dimensions for wall length and
+height, opening horizontal position and width, and opening vertical bottom and
+height. Reference dimensions are non-driving annotations that display the
+current measured distance. Dimension `line_offset` values only place annotation
+graphics; cross-wall projections and alignment constraints are future schema
+extensions, not implicit behavior in v4.
+
+Driving dimensions must be simultaneously satisfied by the authored wall and
+opening geometry. If a new or edited driving dimension contradicts another
+driving dimension on the same wall, the app rejects it during creation or
+validation reports the dimension set as overconstrained instead of silently
+choosing one target over another.
 
 Each wall join stores:
 
@@ -162,7 +214,7 @@ Framer canonicalizes project files before saving:
 - Dimensions within each wall are sorted by `id`.
 - Wall joins are sorted by `id`.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing is deterministic output and is not saved in v3 files.
+- Generated framing is deterministic output and is not saved in v4 files.
 
 This keeps `.framer` files stable for Git diffs, code review, and agent edits.
 

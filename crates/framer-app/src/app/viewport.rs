@@ -7,18 +7,20 @@ use std::{
 
 use bytemuck::{Pod, Zeroable};
 use eframe::egui::{
-    self, Align2, Color32, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
-    epaint::Vertex,
+    self, Align2, Color32, CursorIcon, FontId, Frame, Margin, Mesh, Pos2, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, Ui, Vec2, epaint::Vertex,
 };
 use eframe::{egui_wgpu, wgpu};
 use framer_core::{
-    BuildingModel, DimensionAnchor, DimensionKind, Length, Opening, OpeningKind, Point2, Wall,
+    BuildingModel, DimensionAnchor, DimensionAxis, DimensionHorizontalReference, DimensionKind,
+    DimensionVerticalReference, Length, Opening, OpeningKind, Point2, Wall,
 };
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
 use super::labels::{join_kind_label, kind_label};
-use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode};
+use super::model_edit::{OpeningDragState, OpeningEditHandle};
+use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
@@ -153,25 +155,27 @@ impl View3dState {
 
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(match self.workspace_mode {
-                WorkspaceMode::Design => "Design Workspace",
-                WorkspaceMode::Plan => "Plan Workspace",
-            });
-            ui.separator();
-            ui.label(self.model.code.display_name.as_str());
-        });
+        workspace_header(
+            ui,
+            self.workspace_mode,
+            self.viewport_mode,
+            self.model.code.display_name.as_str(),
+        );
         ui.add_space(8.0);
 
-        let Some(plan) = &self.project_plan else {
-            ui.label("No valid framing plan");
-            return;
-        };
-
+        let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
+        self.cursor_model = None;
+        let mut toolbar_anchor = None;
         let click = match self.viewport_mode {
-            ViewportMode::Plan => {
-                draw_project_plan(ui, &self.model, self.selected_wall, &self.selected)
-            }
+            ViewportMode::Plan => draw_project_plan(
+                ui,
+                &self.model,
+                self.selected_wall,
+                &self.selected,
+                self.grid,
+                &mut self.cursor_model,
+                &mut toolbar_anchor,
+            ),
             ViewportMode::Elevation => {
                 let Some(wall) = self.model.walls.get(self.selected_wall) else {
                     ui.label("No wall selected");
@@ -192,31 +196,58 @@ impl FramerApp {
                         .as_ref()
                         .filter(|pick| pick.wall_index == self.selected_wall)
                         .map(|pick| &pick.anchor);
-                    draw_wall_design_elevation(
+                    let second_anchor = self
+                        .dimension_tool
+                        .second_anchor
+                        .as_ref()
+                        .filter(|pick| pick.wall_index == self.selected_wall)
+                        .map(|pick| &pick.anchor);
+                    let active_opening_drag = self
+                        .opening_drag
+                        .as_ref()
+                        .filter(|drag| drag.wall_index == self.selected_wall);
+                    let wall_index = self.selected_wall;
+                    let elevation_response = draw_wall_design_elevation(
                         ui,
                         wall,
-                        selected_opening,
-                        selected_dimension,
-                        self.dimension_tool.active,
-                        first_anchor,
-                    )
-                    .map(|click| match click {
+                        DesignElevationView {
+                            selected_opening,
+                            selected_dimension,
+                            dimension_tool_active: self.dimension_tool.active,
+                            dimension_tool_axis: self.dimension_tool.axis,
+                            first_dimension_anchor: first_anchor,
+                            second_dimension_anchor: second_anchor,
+                            active_opening_drag,
+                        },
+                    );
+                    if let Some(event) = elevation_response.opening_drag {
+                        self.handle_opening_drag_event(wall_index, event);
+                    }
+                    elevation_response.click.map(|click| match click {
                         DesignElevationClick::Opening(opening_id) => ViewClick::Opening {
-                            wall_index: self.selected_wall,
+                            wall_index,
                             opening_id,
                         },
                         DesignElevationClick::Dimension(dimension_id) => ViewClick::Dimension {
-                            wall_index: self.selected_wall,
+                            wall_index,
                             dimension_id,
                         },
                         DesignElevationClick::DimensionAnchor(anchor) => {
-                            ViewClick::DimensionAnchor {
-                                wall_index: self.selected_wall,
-                                anchor,
+                            ViewClick::DimensionAnchor { wall_index, anchor }
+                        }
+                        DesignElevationClick::DimensionPlacement { axis, line_offset } => {
+                            ViewClick::DimensionPlacement {
+                                wall_index,
+                                axis,
+                                line_offset,
                             }
                         }
                     })
                 } else {
+                    let Some(plan) = &self.project_plan else {
+                        ui.label("No valid framing plan");
+                        return;
+                    };
                     let Some(wall_plan) = plan.wall_plan(&wall.id) else {
                         ui.label("No generated framing for selected wall");
                         return;
@@ -239,34 +270,241 @@ impl FramerApp {
                         })
                 }
             }
-            ViewportMode::Axonometric => draw_project_axonometric(
-                ui,
-                AxonometricView {
-                    model: &self.model,
-                    plan,
-                    selected_wall: self.selected_wall,
-                    selection: &self.selected,
-                    workspace_mode: self.workspace_mode,
-                    gpu_target_format: self.gpu_target_format,
-                },
-                &mut self.view_3d,
-            ),
+            ViewportMode::Axonometric => {
+                let Some(plan) = &self.project_plan else {
+                    ui.label("No valid framing plan");
+                    return;
+                };
+                draw_project_axonometric(
+                    ui,
+                    AxonometricView {
+                        model: &self.model,
+                        plan,
+                        selected_wall: self.selected_wall,
+                        selection: &self.selected,
+                        workspace_mode: self.workspace_mode,
+                        gpu_target_format: self.gpu_target_format,
+                    },
+                    &mut self.view_3d,
+                )
+            }
         };
 
         if let Some(click) = click {
             self.handle_view_click(click);
         }
+
+        if self.viewport_mode != ViewportMode::Axonometric {
+            self.canvas_view_controls(ui, canvas);
+        }
+        if let Some(anchor) = toolbar_anchor {
+            self.canvas_floating_toolbar(ui, anchor);
+        }
+    }
+
+    fn canvas_view_controls(&mut self, ui: &mut Ui, canvas: Rect) {
+        let t = design::active();
+
+        egui::Area::new(egui::Id::new("canvas-nav-cube"))
+            .fixed_pos(Pos2::new(canvas.right() - 64.0, canvas.bottom() - 118.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::click());
+                draw_nav_cube(ui.painter(), rect, t);
+                let response = response.on_hover_text("View from the top — click for 3D");
+                if response.clicked() {
+                    self.viewport_mode = ViewportMode::Axonometric;
+                }
+            });
+
+        egui::Area::new(egui::Id::new("canvas-view-mode"))
+            .fixed_pos(Pos2::new(canvas.right() - 78.0, canvas.bottom() - 46.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(t.overlay)
+                    .stroke(t.border_stroke())
+                    .corner_radius(design::radius::MD)
+                    .inner_margin(Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        let is_3d = self.viewport_mode == ViewportMode::Axonometric;
+                        egui::ComboBox::from_id_salt("view-2d-3d")
+                            .selected_text(if is_3d { "3D" } else { "2D" })
+                            .width(44.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(!is_3d, "2D").clicked() {
+                                    self.viewport_mode = ViewportMode::Plan;
+                                }
+                                if ui.selectable_label(is_3d, "3D").clicked() {
+                                    self.viewport_mode = ViewportMode::Axonometric;
+                                }
+                            });
+                    });
+            });
+    }
+
+    fn canvas_floating_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
+        let t = design::active();
+        egui::Area::new(egui::Id::new("canvas-floating-toolbar"))
+            .fixed_pos(Pos2::new(anchor.x - 40.0, anchor.y - 44.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(t.overlay)
+                    .stroke(t.border_stroke())
+                    .corner_radius(design::radius::MD)
+                    .inner_margin(Margin::symmetric(4, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if design::widgets::icon_button(
+                                ui,
+                                design::Icon::Duplicate,
+                                "Duplicate opening",
+                            )
+                            .clicked()
+                            {
+                                self.duplicate_selected_opening();
+                            }
+                            if design::widgets::icon_button(
+                                ui,
+                                design::Icon::Delete,
+                                "Delete opening",
+                            )
+                            .clicked()
+                            {
+                                self.delete_selected_opening();
+                            }
+                        });
+                    });
+            });
+    }
+}
+
+fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
+    painter.rect(
+        rect,
+        design::radius::MD,
+        theme.overlay,
+        theme.border_stroke(),
+        StrokeKind::Inside,
+    );
+    let face = rect.shrink(11.0);
+    painter.rect(
+        face,
+        2,
+        theme.control,
+        Stroke::new(1.0, theme.border),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        face.center(),
+        Align2::CENTER_CENTER,
+        "TOP",
+        FontId::proportional(9.0),
+        theme.text_secondary,
+    );
+    for (label, align, pos) in [
+        (
+            "N",
+            Align2::CENTER_TOP,
+            rect.center_top() + Vec2::new(0.0, 1.0),
+        ),
+        (
+            "S",
+            Align2::CENTER_BOTTOM,
+            rect.center_bottom() + Vec2::new(0.0, -1.0),
+        ),
+        (
+            "W",
+            Align2::LEFT_CENTER,
+            rect.left_center() + Vec2::new(1.0, 0.0),
+        ),
+        (
+            "E",
+            Align2::RIGHT_CENTER,
+            rect.right_center() + Vec2::new(-1.0, 0.0),
+        ),
+    ] {
+        painter.text(
+            pos,
+            align,
+            label,
+            FontId::proportional(7.5),
+            theme.text_muted,
+        );
+    }
+}
+
+fn workspace_header(
+    ui: &mut Ui,
+    workspace_mode: WorkspaceMode,
+    viewport_mode: ViewportMode,
+    code_name: &str,
+) {
+    let t = design::active();
+    Frame::new()
+        .fill(t.panel)
+        .inner_margin(Margin::symmetric(6, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = design::space::LG;
+                ui.label(
+                    RichText::new(workspace_mode_title(workspace_mode))
+                        .strong()
+                        .size(design::text_size::HEADING)
+                        .color(t.text),
+                );
+                design::widgets::tab(ui, viewport_mode_title(workspace_mode, viewport_mode), true);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(code_name)
+                            .size(design::text_size::LABEL)
+                            .color(t.text_muted),
+                    );
+                });
+            });
+        });
+}
+
+fn workspace_mode_title(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::Design => "Design Workspace",
+        WorkspaceMode::Plan => "Plan Workspace",
+    }
+}
+
+fn viewport_mode_title(workspace_mode: WorkspaceMode, viewport_mode: ViewportMode) -> &'static str {
+    match (workspace_mode, viewport_mode) {
+        (WorkspaceMode::Design, ViewportMode::Plan) => "Shell",
+        (WorkspaceMode::Design, ViewportMode::Elevation) => "Wall",
+        (_, ViewportMode::Plan) => "Plan",
+        (_, ViewportMode::Elevation) => "Elevation",
+        (_, ViewportMode::Axonometric) => "3D",
+    }
+}
+
+impl FramerApp {
+    fn handle_opening_drag_event(&mut self, wall_index: usize, event: OpeningDragEvent) {
+        match event {
+            OpeningDragEvent::Started { opening_id, handle } => {
+                self.begin_opening_drag(wall_index, opening_id, handle);
+            }
+            OpeningDragEvent::Updated { delta_x, delta_y } => {
+                self.update_opening_drag(delta_x, delta_y);
+            }
+            OpeningDragEvent::Stopped => {
+                self.finish_opening_drag();
+            }
+        }
     }
 }
 
 fn viewport_size(ui: &Ui) -> Vec2 {
+    // Fill the central panel so the drawing surface reaches the panel edges; the
+    // plan/3D projectors letterbox their content within this rect.
     let available = ui.available_size();
-    let width = available.x.max(420.0);
-    let target_height = (width * 0.72).clamp(420.0, 640.0);
-    let min_height = available.y.min(360.0);
-    let height = available.y.min(target_height).max(min_height);
-
-    Vec2::new(width, height)
+    Vec2::new(available.x.max(420.0), available.y.max(360.0))
 }
 
 fn viewport_drawing_rect(rect: Rect, margin: f32) -> Rect {
@@ -282,7 +520,7 @@ fn draw_view_title(painter: &egui::Painter, drawing: Rect, title: impl Into<Stri
         Align2::LEFT_CENTER,
         title.into(),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 }
 
@@ -292,7 +530,7 @@ fn draw_view_empty(painter: &egui::Painter, rect: Rect, label: &str) {
         Align2::CENTER_CENTER,
         label,
         FontId::proportional(14.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::text_muted(),
     );
 }
 
@@ -300,7 +538,7 @@ fn draw_view_border(painter: &egui::Painter, drawing: Rect) {
     painter.rect_stroke(
         drawing,
         0.0,
-        Stroke::new(1.0, Color32::from_rgb(190, 184, 172)),
+        Stroke::new(1.0, theme::sheet_grid_major()),
         StrokeKind::Outside,
     );
 }
@@ -309,18 +547,177 @@ fn draw_view_background(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.rect_filled(rect, 0.0, color);
 }
 
+fn draw_drafting_grid(painter: &egui::Painter, drawing: Rect) {
+    let minor = 24.0;
+    let major_every = 5;
+    let mut index = 0;
+    let mut x = drawing.left();
+    while x <= drawing.right() {
+        let color = if index % major_every == 0 {
+            theme::sheet_grid_major()
+        } else {
+            theme::sheet_grid()
+        };
+        painter.line_segment(
+            [Pos2::new(x, drawing.top()), Pos2::new(x, drawing.bottom())],
+            Stroke::new(0.6, color),
+        );
+        x += minor;
+        index += 1;
+    }
+
+    index = 0;
+    let mut y = drawing.top();
+    while y <= drawing.bottom() {
+        let color = if index % major_every == 0 {
+            theme::sheet_grid_major()
+        } else {
+            theme::sheet_grid()
+        };
+        painter.line_segment(
+            [Pos2::new(drawing.left(), y), Pos2::new(drawing.right(), y)],
+            Stroke::new(0.6, color),
+        );
+        y += minor;
+        index += 1;
+    }
+}
+
+fn draw_drafting_rulers(painter: &egui::Painter, rect: Rect, drawing: Rect) {
+    let top_ruler = Rect::from_min_max(
+        Pos2::new(drawing.left(), rect.top()),
+        Pos2::new(drawing.right(), drawing.top()),
+    );
+    let left_ruler = Rect::from_min_max(
+        Pos2::new(rect.left(), drawing.top()),
+        Pos2::new(drawing.left(), drawing.bottom()),
+    );
+    painter.rect_filled(top_ruler, 0.0, theme::sheet_ruler());
+    painter.rect_filled(left_ruler, 0.0, theme::sheet_ruler());
+
+    let tick = theme::text_muted();
+    let minor = 24.0;
+    let mut index = 0;
+    let mut x = drawing.left();
+    while x <= drawing.right() {
+        let major = index % 5 == 0;
+        let y0 = if major {
+            top_ruler.bottom() - 12.0
+        } else {
+            top_ruler.bottom() - 6.0
+        };
+        painter.line_segment(
+            [Pos2::new(x, y0), Pos2::new(x, top_ruler.bottom())],
+            Stroke::new(0.75, tick),
+        );
+        if major {
+            painter.text(
+                Pos2::new(x + 3.0, top_ruler.bottom() - 18.0),
+                Align2::LEFT_CENTER,
+                format!("{}'", index * 2),
+                FontId::proportional(10.0),
+                tick,
+            );
+        }
+        x += minor;
+        index += 1;
+    }
+
+    index = 0;
+    let mut y = drawing.bottom();
+    while y >= drawing.top() {
+        let major = index % 5 == 0;
+        let x0 = if major {
+            left_ruler.right() - 12.0
+        } else {
+            left_ruler.right() - 6.0
+        };
+        painter.line_segment(
+            [Pos2::new(x0, y), Pos2::new(left_ruler.right(), y)],
+            Stroke::new(0.75, tick),
+        );
+        if major {
+            painter.text(
+                Pos2::new(left_ruler.right() - 16.0, y - 2.0),
+                Align2::RIGHT_CENTER,
+                format!("{}'", index * 2),
+                FontId::proportional(10.0),
+                tick,
+            );
+        }
+        y -= minor;
+        index += 1;
+    }
+}
+
+fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
+    let origin = rect.left_bottom() + Vec2::new(32.0, -30.0);
+    let x_end = origin + Vec2::new(36.0, 0.0);
+    let y_end = origin + Vec2::new(0.0, -36.0);
+    painter.line_segment(
+        [origin, x_end],
+        Stroke::new(1.5, Color32::from_rgb(204, 60, 48)),
+    );
+    painter.line_segment(
+        [origin, y_end],
+        Stroke::new(1.5, Color32::from_rgb(52, 158, 83)),
+    );
+    painter.circle_filled(origin, 4.0, theme::active_blue());
+    painter.text(
+        x_end + Vec2::new(7.0, 0.0),
+        Align2::LEFT_CENTER,
+        "X",
+        FontId::proportional(11.0),
+        theme::framing_line_dark(),
+    );
+    painter.text(
+        y_end + Vec2::new(0.0, -7.0),
+        Align2::CENTER_BOTTOM,
+        "Y",
+        FontId::proportional(11.0),
+        theme::framing_line_dark(),
+    );
+}
+
+fn draw_selection_handle(painter: &egui::Painter, point: Pos2) {
+    let handle = Rect::from_center_size(point, Vec2::splat(8.0));
+    painter.rect_filled(handle, 1.5, theme::active_blue());
+    painter.rect_stroke(
+        handle,
+        1.5,
+        Stroke::new(1.0, theme::sheet()),
+        StrokeKind::Outside,
+    );
+}
+
+fn draw_selected_wall_handles(painter: &egui::Painter, start: Pos2, end: Pos2) {
+    draw_selection_handle(painter, start);
+    draw_selection_handle(painter, end);
+    draw_selection_handle(
+        painter,
+        Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0),
+    );
+}
+
 fn draw_project_plan(
     ui: &mut Ui,
     model: &BuildingModel,
     selected_wall: usize,
     selection: &Selection,
+    show_grid: bool,
+    cursor_out: &mut Option<Point2>,
+    toolbar_out: &mut Option<Pos2>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let painter = ui.painter_at(rect);
 
-    draw_view_background(&painter, rect, Color32::from_rgb(245, 244, 239));
-    let drawing = viewport_drawing_rect(rect, 52.0);
+    draw_view_background(&painter, rect, theme::sheet());
+    let drawing = viewport_drawing_rect(rect, 58.0);
+    draw_drafting_rulers(&painter, rect, drawing);
+    if show_grid {
+        draw_drafting_grid(&painter, drawing);
+    }
     draw_view_border(&painter, drawing);
 
     let Some(bounds) = ModelBounds::from_model(model) else {
@@ -328,19 +725,25 @@ fn draw_project_plan(
         return None;
     };
 
+    if let Some(hover) = response.hover_pos() {
+        if drawing.contains(hover) {
+            *cursor_out = Some(plan_inverse_point(hover, bounds, drawing));
+        }
+    }
+
     let pointer = response.interact_pointer_pos();
     let mut clicked_wall = None;
     let mut clicked_opening = None;
 
     for join in &model.wall_joins {
         let point = plan_point(join.point, bounds, drawing);
-        painter.circle_filled(point, 4.5, Color32::from_rgb(47, 95, 127));
+        painter.circle_filled(point, 4.5, theme::active_blue());
         painter.text(
             point + Vec2::new(6.0, -7.0),
             Align2::LEFT_CENTER,
             join_kind_label(join.kind),
             FontId::proportional(10.0),
-            Color32::from_rgb(47, 95, 127),
+            theme::active_blue(),
         );
     }
 
@@ -351,13 +754,16 @@ fn draw_project_plan(
             pointer.is_some_and(|position| distance_to_segment(position, start, end) < 8.0);
         let selected = selected_wall == index && matches!(selection, Selection::Wall);
         let stroke = if selected {
-            Stroke::new(5.0, Color32::from_rgb(35, 94, 150))
+            Stroke::new(5.0, theme::active_blue())
         } else if hovered {
-            Stroke::new(4.5, Color32::from_rgb(88, 88, 78))
+            Stroke::new(4.5, theme::framing_line_dark())
         } else {
-            Stroke::new(3.5, Color32::from_rgb(111, 91, 63))
+            Stroke::new(3.5, theme::framing_line())
         };
         painter.line_segment([start, end], stroke);
+        if selected {
+            draw_selected_wall_handles(&painter, start, end);
+        }
         if hovered && response.clicked() {
             clicked_wall = Some(ViewClick::Wall(index));
         }
@@ -368,7 +774,7 @@ fn draw_project_plan(
             Align2::LEFT_CENTER,
             &wall.name,
             FontId::proportional(12.0),
-            Color32::from_rgb(60, 56, 48),
+            theme::framing_line_dark(),
         );
 
         for opening in &wall.openings {
@@ -378,10 +784,13 @@ fn draw_project_plan(
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
                 && selected_wall == index;
-            painter.line_segment(
-                [left, right],
-                Stroke::new(7.0, Color32::from_rgb(245, 244, 239)),
-            );
+            if opening_selected {
+                *toolbar_out = Some(Pos2::new(
+                    (left.x + right.x) / 2.0,
+                    (left.y + right.y) / 2.0,
+                ));
+            }
+            painter.line_segment([left, right], Stroke::new(7.0, theme::sheet()));
             painter.line_segment(
                 [left, right],
                 Stroke::new(
@@ -391,9 +800,9 @@ fn draw_project_plan(
                         2.0
                     },
                     if opening_selected {
-                        Color32::from_rgb(35, 94, 150)
+                        theme::active_blue()
                     } else {
-                        Color32::from_rgb(137, 102, 52)
+                        theme::framing_line()
                     },
                 ),
             );
@@ -406,9 +815,50 @@ fn draw_project_plan(
         }
     }
 
+    let scale = (drawing.width() / (bounds.max_x - bounds.min_x).max(1.0))
+        .min(drawing.height() / (bounds.max_y - bounds.min_y).max(1.0));
+    draw_scale_bar(&painter, drawing, scale);
     draw_view_title(&painter, drawing, "Whole-project plan");
+    draw_plan_axis_indicator(&painter, drawing);
 
     clicked_opening.or(clicked_wall)
+}
+
+/// A drafting scale bar at the bottom-left of the plan, sized to a round number
+/// of feet given the current pixels-per-inch `scale`.
+fn draw_scale_bar(painter: &egui::Painter, drawing: Rect, scale: f32) {
+    let mut feet = 1.0_f32;
+    for candidate in [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
+        if candidate * 12.0 * scale <= 96.0 {
+            feet = candidate;
+        }
+    }
+    let bar = feet * 12.0 * scale;
+    let y = drawing.bottom() - 14.0;
+    let x0 = drawing.left() + 86.0;
+    let x1 = x0 + bar;
+    let ink = theme::framing_line_dark();
+    painter.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(2.0, ink));
+    for x in [x0, (x0 + x1) / 2.0, x1] {
+        painter.line_segment(
+            [Pos2::new(x, y - 4.0), Pos2::new(x, y + 4.0)],
+            Stroke::new(1.5, ink),
+        );
+    }
+    painter.text(
+        Pos2::new(x0, y + 6.0),
+        Align2::CENTER_TOP,
+        "0",
+        FontId::proportional(9.5),
+        theme::text_muted(),
+    );
+    painter.text(
+        Pos2::new(x1, y + 6.0),
+        Align2::CENTER_TOP,
+        format!("{feet:.0}'"),
+        FontId::proportional(9.5),
+        theme::text_muted(),
+    );
 }
 
 struct AxonometricView<'a> {
@@ -438,7 +888,7 @@ fn draw_project_axonometric(
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
-    draw_view_background(&painter, rect, Color32::from_rgb(239, 243, 241));
+    draw_view_background(&painter, rect, theme::sheet());
     let drawing = viewport_drawing_rect(rect, 42.0);
     draw_view_border(&painter, drawing);
     let cube_rect = view_cube_rect(drawing);
@@ -1364,6 +1814,20 @@ fn plan_point(point: Point2, bounds: ModelBounds, drawing: Rect) -> Pos2 {
     )
 }
 
+/// Inverse of [`plan_point`]: map a screen position back to model coordinates.
+fn plan_inverse_point(screen: Pos2, bounds: ModelBounds, drawing: Rect) -> Point2 {
+    let width = (bounds.max_x - bounds.min_x).max(1.0);
+    let depth = (bounds.max_y - bounds.min_y).max(1.0);
+    let scale = (drawing.width() / width).min(drawing.height() / depth);
+    let used_width = width * scale;
+    let used_height = depth * scale;
+    let x =
+        bounds.min_x + (screen.x - drawing.left() - (drawing.width() - used_width) / 2.0) / scale;
+    let y = bounds.min_y
+        + (drawing.bottom() - (drawing.height() - used_height) / 2.0 - screen.y) / scale;
+    Point2::new(Length::from_inches(x as f64), Length::from_inches(y as f64))
+}
+
 #[derive(Clone, Copy)]
 struct Point3 {
     x: f32,
@@ -2196,35 +2660,113 @@ enum DesignElevationClick {
     Opening(String),
     Dimension(String),
     DimensionAnchor(DimensionAnchor),
+    DimensionPlacement {
+        axis: DimensionAxis,
+        line_offset: Length,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct DimensionPlacement {
+    axis: DimensionAxis,
+    line_offset: Length,
+}
+
+#[derive(Default)]
+struct DesignElevationResponse {
+    click: Option<DesignElevationClick>,
+    opening_drag: Option<OpeningDragEvent>,
+}
+
+enum OpeningDragEvent {
+    Started {
+        opening_id: String,
+        handle: OpeningEditHandle,
+    },
+    Updated {
+        delta_x: Length,
+        delta_y: Length,
+    },
+    Stopped,
+}
+
+#[derive(Clone)]
+struct OpeningHandleHit {
+    opening_id: String,
+    handle: OpeningEditHandle,
+}
+
+struct DesignElevationView<'a> {
+    selected_opening: Option<&'a str>,
+    selected_dimension: Option<&'a str>,
+    dimension_tool_active: bool,
+    dimension_tool_axis: DimensionAxis,
+    first_dimension_anchor: Option<&'a DimensionAnchor>,
+    second_dimension_anchor: Option<&'a DimensionAnchor>,
+    active_opening_drag: Option<&'a OpeningDragState>,
 }
 
 fn draw_wall_design_elevation(
     ui: &mut Ui,
     wall: &Wall,
-    selected_opening: Option<&str>,
-    selected_dimension: Option<&str>,
-    dimension_tool_active: bool,
-    first_dimension_anchor: Option<&DimensionAnchor>,
-) -> Option<DesignElevationClick> {
+    view: DesignElevationView<'_>,
+) -> DesignElevationResponse {
+    let DesignElevationView {
+        selected_opening,
+        selected_dimension,
+        dimension_tool_active,
+        dimension_tool_axis,
+        first_dimension_anchor,
+        second_dimension_anchor,
+        active_opening_drag,
+    } = view;
     let available = ui.available_size();
     let desired = Vec2::new(available.x.max(420.0), (available.y - 16.0).max(420.0));
-    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
     let side_margin = 52.0;
-    let top_margin = (64.0 + wall.dimensions.len().min(4) as f32 * 18.0).min(136.0);
+    let horizontal_dimension_count = wall
+        .dimensions
+        .iter()
+        .filter(|dimension| dimension.axis == DimensionAxis::Horizontal)
+        .count();
+    let vertical_dimension_count = wall
+        .dimensions
+        .iter()
+        .filter(|dimension| dimension.axis == DimensionAxis::Vertical)
+        .count();
+    let top_margin = (64.0 + horizontal_dimension_count.min(4) as f32 * 18.0).min(136.0);
+    let right_margin = (96.0 + vertical_dimension_count.min(4) as f32 * 18.0).min(168.0);
     let drawing = Rect::from_min_max(
         rect.min + Vec2::new(side_margin, top_margin),
-        rect.max - Vec2::new(side_margin, side_margin),
+        rect.max - Vec2::new(right_margin, side_margin),
     );
     let layout = WallElevationLayout::new(drawing, wall);
     let wall_rect = layout.wall_rect;
     let scale = layout.scale;
 
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
+    painter.rect_filled(rect, 0.0, theme::sheet());
+    draw_drafting_rulers(&painter, rect, drawing);
+    draw_drafting_grid(&painter, drawing);
     draw_view_border(&painter, drawing);
-    let pointer = response.interact_pointer_pos();
-    let mut clicked = None;
+    let pointer = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos());
+    let press_origin = ui.input(|input| input.pointer.press_origin());
+    let mut output = DesignElevationResponse::default();
+    let pending_dimension_active = dimension_tool_active
+        && first_dimension_anchor.is_some()
+        && second_dimension_anchor.is_some();
+    let mut hovered_handle = None;
+    let mut hovered_dimension_move = None;
+    if let Some(position) = pointer {
+        if !dimension_tool_active {
+            hovered_handle = hit_opening_edit_target(wall_rect, scale, wall, position);
+        } else if !pending_dimension_active {
+            hovered_dimension_move = hit_opening_move_target(wall_rect, scale, wall, position);
+        }
+    }
 
     painter.rect_filled(
         wall_rect,
@@ -2235,11 +2777,75 @@ fn draw_wall_design_elevation(
     for opening in &wall.openings {
         let opening_rect = opening_rect(wall_rect, scale, scale, opening);
         let hovered = pointer.is_some_and(|position| opening_rect.contains(position));
+        let handle_hovered = hovered_handle
+            .as_ref()
+            .is_some_and(|hit| hit.opening_id == opening.id.0)
+            || hovered_dimension_move
+                .as_ref()
+                .is_some_and(|hit| hit.opening_id == opening.id.0);
+        let active = active_opening_drag
+            .as_ref()
+            .is_some_and(|drag| drag.opening_id == opening.id.0);
         let selected = selected_opening == Some(opening.id.0.as_str());
-        draw_opening_guide(&painter, opening_rect, opening.kind, selected, hovered);
-        if hovered && response.clicked() && !dimension_tool_active {
-            clicked = Some(DesignElevationClick::Opening(opening.id.0.clone()));
+        draw_opening_guide(
+            &painter,
+            opening_rect,
+            opening.kind,
+            selected || active,
+            hovered || handle_hovered,
+        );
+        if !dimension_tool_active && (selected || hovered || active || handle_hovered) {
+            draw_opening_edit_handles(
+                &painter,
+                opening_rect,
+                selected || active,
+                hovered_handle
+                    .as_ref()
+                    .filter(|hit| hit.opening_id == opening.id.0)
+                    .map(|hit| hit.handle),
+            );
         }
+        if hovered && response.clicked() && !dimension_tool_active {
+            output.click = Some(DesignElevationClick::Opening(opening.id.0.clone()));
+        }
+    }
+
+    if let Some(active) = active_opening_drag {
+        if response.drag_stopped() {
+            output.opening_drag = Some(OpeningDragEvent::Stopped);
+        } else if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(delta) = response.total_drag_delta()
+        {
+            let (delta_x, delta_y) = opening_drag_delta(delta, scale);
+            output.opening_drag = Some(OpeningDragEvent::Updated { delta_x, delta_y });
+            ui.ctx()
+                .set_cursor_icon(cursor_for_opening_handle(active.handle, true));
+        }
+    } else if response.drag_started_by(egui::PointerButton::Primary) {
+        let hit = press_origin.and_then(|position| {
+            if pending_dimension_active {
+                None
+            } else if dimension_tool_active {
+                hit_opening_move_target(wall_rect, scale, wall, position)
+            } else {
+                hit_opening_edit_target(wall_rect, scale, wall, position)
+            }
+        });
+        if let Some(hit) = hit {
+            output.click = None;
+            output.opening_drag = Some(OpeningDragEvent::Started {
+                opening_id: hit.opening_id,
+                handle: hit.handle,
+            });
+            ui.ctx()
+                .set_cursor_icon(cursor_for_opening_handle(hit.handle, true));
+        }
+    } else if let Some(hit) = hovered_handle {
+        ui.ctx()
+            .set_cursor_icon(cursor_for_opening_handle(hit.handle, false));
+    } else if let Some(hit) = hovered_dimension_move {
+        ui.ctx()
+            .set_cursor_icon(cursor_for_opening_handle(hit.handle, false));
     }
 
     let dimension_click = draw_wall_dimension_annotations(
@@ -2252,23 +2858,58 @@ fn draw_wall_design_elevation(
         response.clicked() && !dimension_tool_active,
     );
     if let Some(dimension_id) = dimension_click {
-        clicked = Some(DesignElevationClick::Dimension(dimension_id));
+        output.click = Some(DesignElevationClick::Dimension(dimension_id));
     }
 
     if dimension_tool_active {
+        let placement = if let (Some(first_anchor), Some(second_anchor)) =
+            (first_dimension_anchor, second_dimension_anchor)
+        {
+            draw_pending_dimension_preview(
+                &painter,
+                wall_rect,
+                scale,
+                scale,
+                wall,
+                PendingDimensionPreview {
+                    first_anchor,
+                    second_anchor,
+                    pointer,
+                    fallback_axis: dimension_tool_axis,
+                },
+            )
+        } else {
+            None
+        };
         draw_dimension_anchors(
             &painter,
             wall_rect,
             scale,
             scale,
             wall,
-            first_dimension_anchor,
+            DimensionAnchorSelection {
+                axis: placement
+                    .map(|placement| placement.axis)
+                    .unwrap_or(dimension_tool_axis),
+                first_anchor: first_dimension_anchor,
+                second_anchor: second_dimension_anchor,
+            },
         );
-        if let Some(position) = pointer
-            && response.clicked()
-            && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
-        {
-            clicked = Some(DesignElevationClick::DimensionAnchor(anchor));
+        let should_place_dimension =
+            response.clicked() || response.drag_stopped_by(egui::PointerButton::Primary);
+        if let Some(position) = pointer {
+            if let Some(placement) = placement {
+                if should_place_dimension {
+                    output.click = Some(DesignElevationClick::DimensionPlacement {
+                        axis: placement.axis,
+                        line_offset: placement.line_offset,
+                    });
+                }
+            } else if response.clicked()
+                && let Some(anchor) = hit_dimension_anchor(position, wall_rect, scale, scale, wall)
+            {
+                output.click = Some(DesignElevationClick::DimensionAnchor(anchor));
+            }
         }
     }
 
@@ -2277,10 +2918,10 @@ fn draw_wall_design_elevation(
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 
-    clicked
+    output
 }
 
 #[derive(Clone, Copy)]
@@ -2314,52 +2955,138 @@ fn draw_wall_dimension_annotations(
     click_enabled: bool,
 ) -> Option<String> {
     let mut clicked = None;
+    let mut horizontal_index = 0usize;
+    let mut vertical_index = 0usize;
 
-    for (index, dimension) in wall.dimensions.iter().enumerate() {
-        let Some(start_x) = dimension.start.local_x(wall) else {
+    for dimension in &wall.dimensions {
+        let Some(start_coordinate) = dimension.start.coordinate(wall, dimension.axis) else {
             continue;
         };
-        let Some(end_x) = dimension.end.local_x(wall) else {
+        let Some(end_coordinate) = dimension.end.coordinate(wall, dimension.axis) else {
             continue;
         };
-        let start = drawing.left() + start_x.inches() as f32 * sx;
-        let end = drawing.left() + end_x.inches() as f32 * sx;
-        let y = drawing.top() - 18.0 - index.min(3) as f32 * 18.0;
-        let line_start = Pos2::new(start, y);
-        let line_end = Pos2::new(end, y);
+        let placed = dimension.line_offset.is_some();
+        let (line_start, line_end) = match dimension.axis {
+            DimensionAxis::Horizontal => {
+                let start = drawing.left() + start_coordinate.inches() as f32 * sx;
+                let end = drawing.left() + end_coordinate.inches() as f32 * sx;
+                let y = dimension.line_offset.map_or_else(
+                    || {
+                        let y = drawing.top() - 18.0 - horizontal_index.min(3) as f32 * 18.0;
+                        horizontal_index += 1;
+                        y
+                    },
+                    |line_offset| {
+                        dimension_line_screen_position(
+                            drawing,
+                            sx,
+                            DimensionAxis::Horizontal,
+                            line_offset,
+                        )
+                    },
+                );
+                (Pos2::new(start, y), Pos2::new(end, y))
+            }
+            DimensionAxis::Vertical => {
+                let start = drawing.bottom() - start_coordinate.inches() as f32 * sx;
+                let end = drawing.bottom() - end_coordinate.inches() as f32 * sx;
+                let x = dimension.line_offset.map_or_else(
+                    || {
+                        let x = drawing.right() + 50.0 + vertical_index.min(3) as f32 * 18.0;
+                        vertical_index += 1;
+                        x
+                    },
+                    |line_offset| {
+                        dimension_line_screen_position(
+                            drawing,
+                            sx,
+                            DimensionAxis::Vertical,
+                            line_offset,
+                        )
+                    },
+                );
+                (Pos2::new(x, start), Pos2::new(x, end))
+            }
+        };
         let selected = selected_dimension == Some(dimension.id.0.as_str());
+        let unsatisfied = dimension.kind == DimensionKind::Driving
+            && !wall.is_driving_dimension_satisfied(dimension);
+        let label = dimension_display_value(wall, dimension);
+        let label_rect = dimension_label_rect(line_start, line_end, dimension.axis, &label);
         let hovered = pointer.is_some_and(|position| {
             distance_to_segment(position, line_start, line_end) < 7.0
-                || dimension_label_rect(line_start, line_end).contains(position)
+                || label_rect.contains(position)
         });
-        let color = if selected {
-            Color32::from_rgb(35, 94, 150)
+        let color = if unsatisfied {
+            theme::danger()
+        } else if selected {
+            theme::active_blue()
         } else if dimension.kind == DimensionKind::Reference {
-            Color32::from_rgb(93, 100, 103)
+            theme::text_muted()
         } else {
-            Color32::from_rgb(130, 83, 34)
+            theme::framing_line()
         };
         let stroke = Stroke::new(if selected || hovered { 2.0 } else { 1.25 }, color);
 
-        painter.line_segment([line_start, line_end], stroke);
-        painter.line_segment(
-            [Pos2::new(start, y), Pos2::new(start, drawing.top() + 4.0)],
-            Stroke::new(0.75, color),
+        draw_dimension_line_with_label_gap(
+            painter,
+            line_start,
+            line_end,
+            dimension.axis,
+            label_rect,
+            stroke,
         );
-        painter.line_segment(
-            [Pos2::new(end, y), Pos2::new(end, drawing.top() + 4.0)],
-            Stroke::new(0.75, color),
-        );
-        draw_dimension_tick(painter, line_start, color);
-        draw_dimension_tick(painter, line_end, color);
+        if placed {
+            if let Some(start_position) =
+                dimension_anchor_position(drawing, sx, sx, wall, &dimension.start)
+            {
+                painter.line_segment([start_position, line_start], Stroke::new(0.75, color));
+            }
+            if let Some(end_position) =
+                dimension_anchor_position(drawing, sx, sx, wall, &dimension.end)
+            {
+                painter.line_segment([end_position, line_end], Stroke::new(0.75, color));
+            }
+        } else {
+            match dimension.axis {
+                DimensionAxis::Horizontal => {
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_start.x, line_start.y),
+                            Pos2::new(line_start.x, drawing.top() + 4.0),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_end.x, line_end.y),
+                            Pos2::new(line_end.x, drawing.top() + 4.0),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                }
+                DimensionAxis::Vertical => {
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_start.x, line_start.y),
+                            Pos2::new(drawing.right() - 4.0, line_start.y),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                    painter.line_segment(
+                        [
+                            Pos2::new(line_end.x, line_end.y),
+                            Pos2::new(drawing.right() - 4.0, line_end.y),
+                        ],
+                        Stroke::new(0.75, color),
+                    );
+                }
+            }
+        }
+        draw_dimension_tick(painter, line_start, dimension.axis, color);
+        draw_dimension_tick(painter, line_end, dimension.axis, color);
 
-        let label = dimension_display_value(wall, dimension);
-        let label_pos = Pos2::new((start + end) / 2.0, y - 2.0);
-        painter.rect_filled(
-            dimension_label_rect(line_start, line_end),
-            2.0,
-            Color32::from_rgb(246, 244, 239),
-        );
+        let label_pos = dimension_label_position(line_start, line_end, dimension.axis);
         painter.text(
             label_pos,
             Align2::CENTER_CENTER,
@@ -2376,30 +3103,238 @@ fn draw_wall_dimension_annotations(
     clicked
 }
 
-fn draw_dimension_tick(painter: &egui::Painter, point: Pos2, color: Color32) {
-    painter.line_segment(
-        [point + Vec2::new(-4.0, 4.0), point + Vec2::new(4.0, -4.0)],
-        Stroke::new(1.0, color),
-    );
+fn draw_dimension_tick(painter: &egui::Painter, point: Pos2, axis: DimensionAxis, color: Color32) {
+    let tick = match axis {
+        DimensionAxis::Horizontal => [point + Vec2::new(-4.0, 4.0), point + Vec2::new(4.0, -4.0)],
+        DimensionAxis::Vertical => [point + Vec2::new(-4.0, -4.0), point + Vec2::new(4.0, 4.0)],
+    };
+    painter.line_segment(tick, Stroke::new(1.0, color));
 }
 
-fn dimension_label_rect(start: Pos2, end: Pos2) -> Rect {
-    let center = Pos2::new((start.x + end.x) / 2.0, start.y - 2.0);
-    Rect::from_center_size(center, Vec2::new(86.0, 18.0))
+fn dimension_label_position(start: Pos2, end: Pos2, axis: DimensionAxis) -> Pos2 {
+    match axis {
+        DimensionAxis::Horizontal => Pos2::new((start.x + end.x) / 2.0, start.y - 2.0),
+        DimensionAxis::Vertical => Pos2::new(start.x, (start.y + end.y) / 2.0),
+    }
+}
+
+fn dimension_label_rect(start: Pos2, end: Pos2, axis: DimensionAxis, label: &str) -> Rect {
+    let center = dimension_label_position(start, end, axis);
+    let width = (label.chars().count() as f32 * 6.5 + 12.0).clamp(34.0, 86.0);
+    Rect::from_center_size(center, Vec2::new(width, 18.0))
+}
+
+fn draw_dimension_line_with_label_gap(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    axis: DimensionAxis,
+    label_rect: Rect,
+    stroke: Stroke,
+) {
+    match axis {
+        DimensionAxis::Horizontal => {
+            let y = start.y;
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let gap_left = label_rect.left().clamp(left, right);
+            let gap_right = label_rect.right().clamp(left, right);
+            if gap_left > left {
+                painter.line_segment([Pos2::new(left, y), Pos2::new(gap_left, y)], stroke);
+            }
+            if gap_right < right {
+                painter.line_segment([Pos2::new(gap_right, y), Pos2::new(right, y)], stroke);
+            }
+        }
+        DimensionAxis::Vertical => {
+            let x = start.x;
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            let gap_top = label_rect.top().clamp(top, bottom);
+            let gap_bottom = label_rect.bottom().clamp(top, bottom);
+            if gap_top > top {
+                painter.line_segment([Pos2::new(x, top), Pos2::new(x, gap_top)], stroke);
+            }
+            if gap_bottom < bottom {
+                painter.line_segment([Pos2::new(x, gap_bottom), Pos2::new(x, bottom)], stroke);
+            }
+        }
+    }
 }
 
 fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstraint) -> String {
     let measured = wall.dimension_measurement(dimension);
     match dimension.kind {
-        DimensionKind::Driving => dimension
-            .value
-            .or(measured)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "?".to_owned()),
+        DimensionKind::Driving => dimension.value.or(measured).map_or_else(
+            || "?".to_owned(),
+            |value| {
+                if wall.is_driving_dimension_satisfied(dimension) {
+                    value.to_string()
+                } else {
+                    format!("! {value}")
+                }
+            },
+        ),
         DimensionKind::Reference => measured
             .map(|value| format!("({value})"))
             .unwrap_or_else(|| "(?)".to_owned()),
     }
+}
+
+struct PendingDimensionPreview<'a> {
+    first_anchor: &'a DimensionAnchor,
+    second_anchor: &'a DimensionAnchor,
+    pointer: Option<Pos2>,
+    fallback_axis: DimensionAxis,
+}
+
+fn draw_pending_dimension_preview(
+    painter: &egui::Painter,
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+    preview: PendingDimensionPreview<'_>,
+) -> Option<DimensionPlacement> {
+    let first_position = dimension_anchor_position(drawing, sx, sy, wall, preview.first_anchor)?;
+    let second_position = dimension_anchor_position(drawing, sx, sy, wall, preview.second_anchor)?;
+    let axis = dimension_axis_for_placement_position(
+        first_position,
+        second_position,
+        preview.pointer,
+        preview.fallback_axis,
+    );
+    let color = theme::active_blue();
+    let stroke = Stroke::new(1.75, color);
+
+    let line_offset = dimension_line_offset_for_position(
+        drawing,
+        sx,
+        axis,
+        preview
+            .pointer
+            .unwrap_or_else(|| pending_dimension_default_line_position(drawing, axis)),
+    );
+    let (line_start, line_end) = match axis {
+        DimensionAxis::Horizontal => {
+            let y = dimension_line_screen_position(drawing, sx, axis, line_offset);
+            (
+                Pos2::new(first_position.x, y),
+                Pos2::new(second_position.x, y),
+            )
+        }
+        DimensionAxis::Vertical => {
+            let x = dimension_line_screen_position(drawing, sx, axis, line_offset);
+            (
+                Pos2::new(x, first_position.y),
+                Pos2::new(x, second_position.y),
+            )
+        }
+    };
+
+    let label = preview
+        .first_anchor
+        .coordinate(wall, axis)
+        .zip(preview.second_anchor.coordinate(wall, axis))
+        .map(|(start, end)| (end - start).abs().to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let label_rect = dimension_label_rect(line_start, line_end, axis, &label);
+    draw_dimension_line_with_label_gap(painter, line_start, line_end, axis, label_rect, stroke);
+    match axis {
+        DimensionAxis::Horizontal => {
+            painter.line_segment([first_position, line_start], Stroke::new(0.75, color));
+            painter.line_segment([second_position, line_end], Stroke::new(0.75, color));
+        }
+        DimensionAxis::Vertical => {
+            painter.line_segment([first_position, line_start], Stroke::new(0.75, color));
+            painter.line_segment([second_position, line_end], Stroke::new(0.75, color));
+        }
+    }
+    draw_dimension_tick(painter, line_start, axis, color);
+    draw_dimension_tick(painter, line_end, axis, color);
+
+    painter.text(
+        dimension_label_position(line_start, line_end, axis),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(11.0),
+        color,
+    );
+
+    Some(DimensionPlacement { axis, line_offset })
+}
+
+fn pending_dimension_default_line_position(drawing: Rect, axis: DimensionAxis) -> Pos2 {
+    match axis {
+        DimensionAxis::Horizontal => Pos2::new(drawing.center().x, drawing.top() - 24.0),
+        DimensionAxis::Vertical => Pos2::new(drawing.right() + 56.0, drawing.center().y),
+    }
+}
+
+fn dimension_line_offset_for_position(
+    drawing: Rect,
+    scale: f32,
+    axis: DimensionAxis,
+    position: Pos2,
+) -> Length {
+    let inches = match axis {
+        DimensionAxis::Horizontal => (drawing.bottom() - position.y) / scale,
+        DimensionAxis::Vertical => (position.x - drawing.left()) / scale,
+    };
+    Length::from_inches(inches as f64)
+}
+
+fn dimension_line_screen_position(
+    drawing: Rect,
+    scale: f32,
+    axis: DimensionAxis,
+    line_offset: Length,
+) -> f32 {
+    match axis {
+        DimensionAxis::Horizontal => drawing.bottom() - line_offset.inches() as f32 * scale,
+        DimensionAxis::Vertical => drawing.left() + line_offset.inches() as f32 * scale,
+    }
+}
+
+fn dimension_anchor_position(
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+    anchor: &DimensionAnchor,
+) -> Option<Pos2> {
+    let (x, y) = anchor.point(wall)?;
+    Some(Pos2::new(
+        drawing.left() + x.inches() as f32 * sx,
+        drawing.bottom() - y.inches() as f32 * sy,
+    ))
+}
+
+fn dimension_axis_for_placement_position(
+    first_position: Pos2,
+    second_position: Pos2,
+    pointer: Option<Pos2>,
+    fallback_axis: DimensionAxis,
+) -> DimensionAxis {
+    let Some(pointer) = pointer else {
+        return fallback_axis;
+    };
+    let midpoint = first_position + (second_position - first_position) * 0.5;
+    let offset = pointer - midpoint;
+    if offset.x.abs() <= 4.0 && offset.y.abs() <= 4.0 {
+        return fallback_axis;
+    }
+    if offset.x.abs() > offset.y.abs() {
+        DimensionAxis::Vertical
+    } else {
+        DimensionAxis::Horizontal
+    }
+}
+
+struct DimensionAnchorSelection<'a> {
+    axis: DimensionAxis,
+    first_anchor: Option<&'a DimensionAnchor>,
+    second_anchor: Option<&'a DimensionAnchor>,
 }
 
 fn draw_dimension_anchors(
@@ -2408,27 +3343,32 @@ fn draw_dimension_anchors(
     sx: f32,
     sy: f32,
     wall: &Wall,
-    first_anchor: Option<&DimensionAnchor>,
+    selection: DimensionAnchorSelection<'_>,
 ) {
-    for (anchor, position) in dimension_anchor_positions(drawing, sx, sy, wall) {
-        let selected = first_anchor == Some(&anchor);
-        let radius = if selected { 5.5 } else { 4.0 };
-        painter.circle_filled(
-            position,
-            radius,
-            if selected {
-                Color32::from_rgb(35, 94, 150)
-            } else {
-                Color32::from_rgb(247, 247, 242)
-            },
-        );
+    for marker in dimension_anchor_markers(drawing, sx, sy, wall) {
+        let selected = selection.first_anchor == Some(&marker.anchor)
+            || selection.second_anchor == Some(&marker.anchor);
+        let on_axis = marker.anchor.coordinate(wall, selection.axis).is_some();
+        let radius = if selected { 5.5 } else { marker.kind.radius() };
+        let fill = if selected {
+            theme::active_blue()
+        } else if marker.kind == DimensionAnchorKind::Center {
+            Color32::from_rgb(224, 240, 225)
+        } else if marker.kind == DimensionAnchorKind::Vertex {
+            Color32::from_rgb(235, 241, 247)
+        } else {
+            Color32::from_rgb(247, 247, 242)
+        };
+        let stroke = if on_axis {
+            theme::active_blue()
+        } else {
+            theme::text_muted()
+        };
+        painter.circle_filled(marker.position, radius, fill);
         painter.circle_stroke(
-            position,
+            marker.position,
             radius,
-            Stroke::new(
-                if selected { 2.0 } else { 1.25 },
-                Color32::from_rgb(35, 94, 150),
-            ),
+            Stroke::new(if selected { 2.0 } else { 1.25 }, stroke),
         );
     }
 }
@@ -2440,56 +3380,131 @@ fn hit_dimension_anchor(
     sy: f32,
     wall: &Wall,
 ) -> Option<DimensionAnchor> {
-    dimension_anchor_positions(drawing, sx, sy, wall)
+    dimension_anchor_markers(drawing, sx, sy, wall)
         .into_iter()
-        .filter_map(|(anchor, anchor_position)| {
-            let distance = position.distance(anchor_position);
-            (distance <= 11.0).then_some((anchor, distance))
+        .filter_map(|marker| {
+            let distance = position.distance(marker.position);
+            (distance <= marker.kind.hit_radius()).then_some((marker, distance))
         })
-        .min_by(|(_, left), (_, right)| left.total_cmp(right))
-        .map(|(anchor, _)| anchor)
+        .max_by(|(left, left_distance), (right, right_distance)| {
+            left.kind
+                .priority()
+                .cmp(&right.kind.priority())
+                .then_with(|| right_distance.total_cmp(left_distance))
+        })
+        .map(|(marker, _)| marker.anchor)
 }
 
-fn dimension_anchor_positions(
+#[derive(Clone)]
+struct DimensionAnchorMarker {
+    anchor: DimensionAnchor,
+    position: Pos2,
+    kind: DimensionAnchorKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DimensionAnchorKind {
+    Edge,
+    Center,
+    Vertex,
+}
+
+impl DimensionAnchorKind {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Vertex => 3,
+            Self::Center => 2,
+            Self::Edge => 1,
+        }
+    }
+
+    fn radius(self) -> f32 {
+        match self {
+            Self::Vertex => 3.8,
+            Self::Center => 4.5,
+            Self::Edge => 3.5,
+        }
+    }
+
+    fn hit_radius(self) -> f32 {
+        match self {
+            Self::Vertex => 11.0,
+            Self::Center => 10.0,
+            Self::Edge => 9.0,
+        }
+    }
+}
+
+fn dimension_anchor_markers(
     drawing: Rect,
     sx: f32,
     sy: f32,
     wall: &Wall,
-) -> Vec<(DimensionAnchor, Pos2)> {
-    let mut anchors = vec![
-        (
-            DimensionAnchor::WallStart,
-            Pos2::new(drawing.left(), drawing.bottom()),
-        ),
-        (
-            DimensionAnchor::WallEnd,
-            Pos2::new(drawing.right(), drawing.bottom()),
-        ),
-    ];
+) -> Vec<DimensionAnchorMarker> {
+    let mut anchors = Vec::new();
+    push_wall_anchor_markers(&mut anchors, drawing);
 
     for opening in &wall.openings {
         let rect = opening_rect(drawing, sx, sy, opening);
-        anchors.push((
-            DimensionAnchor::OpeningLeft {
-                opening: opening.id.clone(),
-            },
-            Pos2::new(rect.left(), rect.center().y),
-        ));
-        anchors.push((
-            DimensionAnchor::OpeningCenter {
-                opening: opening.id.clone(),
-            },
-            rect.center(),
-        ));
-        anchors.push((
-            DimensionAnchor::OpeningRight {
-                opening: opening.id.clone(),
-            },
-            Pos2::new(rect.right(), rect.center().y),
-        ));
+        push_opening_anchor_markers(&mut anchors, rect, opening);
     }
 
     anchors
+}
+
+fn push_wall_anchor_markers(markers: &mut Vec<DimensionAnchorMarker>, rect: Rect) {
+    push_point_anchor_markers(markers, rect, |horizontal, vertical| {
+        DimensionAnchor::WallPoint {
+            horizontal,
+            vertical,
+        }
+    });
+}
+
+fn push_opening_anchor_markers(
+    markers: &mut Vec<DimensionAnchorMarker>,
+    rect: Rect,
+    opening: &Opening,
+) {
+    push_point_anchor_markers(markers, rect, |horizontal, vertical| {
+        DimensionAnchor::OpeningPoint {
+            opening: opening.id.clone(),
+            horizontal,
+            vertical,
+        }
+    });
+}
+
+fn push_point_anchor_markers(
+    markers: &mut Vec<DimensionAnchorMarker>,
+    rect: Rect,
+    mut anchor: impl FnMut(DimensionHorizontalReference, DimensionVerticalReference) -> DimensionAnchor,
+) {
+    for (horizontal, x) in [
+        (DimensionHorizontalReference::Left, rect.left()),
+        (DimensionHorizontalReference::Center, rect.center().x),
+        (DimensionHorizontalReference::Right, rect.right()),
+    ] {
+        for (vertical, y) in [
+            (DimensionVerticalReference::Bottom, rect.bottom()),
+            (DimensionVerticalReference::Center, rect.center().y),
+            (DimensionVerticalReference::Top, rect.top()),
+        ] {
+            let kind = match (horizontal, vertical) {
+                (DimensionHorizontalReference::Center, DimensionVerticalReference::Center) => {
+                    DimensionAnchorKind::Center
+                }
+                (DimensionHorizontalReference::Center, _)
+                | (_, DimensionVerticalReference::Center) => DimensionAnchorKind::Edge,
+                _ => DimensionAnchorKind::Vertex,
+            };
+            markers.push(DimensionAnchorMarker {
+                anchor: anchor(horizontal, vertical),
+                position: Pos2::new(x, y),
+                kind,
+            });
+        }
+    }
 }
 
 fn draw_wall_elevation(
@@ -2513,7 +3528,9 @@ fn draw_wall_elevation(
     let wall_rect = layout.wall_rect;
     let scale = layout.scale;
 
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(246, 244, 239));
+    painter.rect_filled(rect, 0.0, theme::sheet());
+    draw_drafting_rulers(&painter, rect, drawing);
+    draw_drafting_grid(&painter, drawing);
     draw_view_border(&painter, drawing);
     let pointer = response.interact_pointer_pos();
     let mut clicked = None;
@@ -2540,7 +3557,7 @@ fn draw_wall_elevation(
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
         FontId::proportional(13.0),
-        Color32::from_rgb(70, 67, 61),
+        theme::framing_line_dark(),
     );
 
     clicked
@@ -2590,6 +3607,179 @@ fn opening_rect(drawing: Rect, sx: f32, sy: f32, opening: &Opening) -> Rect {
     Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
 }
 
+fn hit_opening_edit_target(
+    drawing: Rect,
+    scale: f32,
+    wall: &Wall,
+    position: Pos2,
+) -> Option<OpeningHandleHit> {
+    wall.openings.iter().rev().find_map(|opening| {
+        let rect = opening_rect(drawing, scale, scale, opening);
+        hit_opening_edit_handle(rect, position).map(|handle| OpeningHandleHit {
+            opening_id: opening.id.0.clone(),
+            handle,
+        })
+    })
+}
+
+fn hit_opening_move_target(
+    drawing: Rect,
+    scale: f32,
+    wall: &Wall,
+    position: Pos2,
+) -> Option<OpeningHandleHit> {
+    wall.openings.iter().rev().find_map(|opening| {
+        let rect = opening_rect(drawing, scale, scale, opening);
+        hit_opening_move_handle(rect, position).then(|| OpeningHandleHit {
+            opening_id: opening.id.0.clone(),
+            handle: OpeningEditHandle::Move,
+        })
+    })
+}
+
+fn hit_opening_move_handle(rect: Rect, position: Pos2) -> bool {
+    rect.expand(11.0).contains(position)
+}
+
+fn hit_opening_edit_handle(rect: Rect, position: Pos2) -> Option<OpeningEditHandle> {
+    const HANDLE_HIT_RADIUS: f32 = 10.0;
+    const EDGE_HIT_RADIUS: f32 = 7.0;
+
+    let corner_hits = [
+        (OpeningEditHandle::TopLeft, rect.left_top()),
+        (OpeningEditHandle::TopRight, rect.right_top()),
+        (OpeningEditHandle::BottomLeft, rect.left_bottom()),
+        (OpeningEditHandle::BottomRight, rect.right_bottom()),
+    ]
+    .into_iter()
+    .filter_map(|(handle, point)| {
+        let distance = position.distance(point);
+        (distance <= HANDLE_HIT_RADIUS).then_some((handle, distance))
+    })
+    .min_by(|(_, left), (_, right)| left.total_cmp(right))
+    .map(|(handle, _)| handle);
+    if corner_hits.is_some() {
+        return corner_hits;
+    }
+
+    let within_y =
+        position.y >= rect.top() - EDGE_HIT_RADIUS && position.y <= rect.bottom() + EDGE_HIT_RADIUS;
+    let within_x =
+        position.x >= rect.left() - EDGE_HIT_RADIUS && position.x <= rect.right() + EDGE_HIT_RADIUS;
+    let edge_hits = [
+        (
+            OpeningEditHandle::Left,
+            (position.x - rect.left()).abs(),
+            within_y,
+        ),
+        (
+            OpeningEditHandle::Right,
+            (position.x - rect.right()).abs(),
+            within_y,
+        ),
+        (
+            OpeningEditHandle::Top,
+            (position.y - rect.top()).abs(),
+            within_x,
+        ),
+        (
+            OpeningEditHandle::Bottom,
+            (position.y - rect.bottom()).abs(),
+            within_x,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, distance, in_range)| *in_range && *distance <= EDGE_HIT_RADIUS)
+    .min_by(|(_, left, _), (_, right, _)| left.total_cmp(right))
+    .map(|(handle, _, _)| handle);
+    if edge_hits.is_some() {
+        return edge_hits;
+    }
+
+    rect.contains(position).then_some(OpeningEditHandle::Move)
+}
+
+fn draw_opening_edit_handles(
+    painter: &egui::Painter,
+    rect: Rect,
+    selected: bool,
+    hovered_handle: Option<OpeningEditHandle>,
+) {
+    for handle in [
+        OpeningEditHandle::TopLeft,
+        OpeningEditHandle::Top,
+        OpeningEditHandle::TopRight,
+        OpeningEditHandle::Right,
+        OpeningEditHandle::BottomRight,
+        OpeningEditHandle::Bottom,
+        OpeningEditHandle::BottomLeft,
+        OpeningEditHandle::Left,
+    ] {
+        let center = opening_handle_position(rect, handle);
+        let hovered = hovered_handle == Some(handle);
+        let size = if hovered { 7.5 } else { 6.0 };
+        let fill = if selected {
+            theme::active_blue()
+        } else {
+            theme::sheet()
+        };
+        let stroke = if hovered {
+            Stroke::new(2.0, theme::active_blue())
+        } else {
+            Stroke::new(1.25, theme::active_blue())
+        };
+        painter.rect_filled(Rect::from_center_size(center, Vec2::splat(size)), 1.0, fill);
+        painter.rect_stroke(
+            Rect::from_center_size(center, Vec2::splat(size)),
+            1.0,
+            stroke,
+            StrokeKind::Outside,
+        );
+    }
+}
+
+fn opening_handle_position(rect: Rect, handle: OpeningEditHandle) -> Pos2 {
+    match handle {
+        OpeningEditHandle::Move => rect.center(),
+        OpeningEditHandle::Left => Pos2::new(rect.left(), rect.center().y),
+        OpeningEditHandle::Right => Pos2::new(rect.right(), rect.center().y),
+        OpeningEditHandle::Top => Pos2::new(rect.center().x, rect.top()),
+        OpeningEditHandle::Bottom => Pos2::new(rect.center().x, rect.bottom()),
+        OpeningEditHandle::TopLeft => rect.left_top(),
+        OpeningEditHandle::TopRight => rect.right_top(),
+        OpeningEditHandle::BottomLeft => rect.left_bottom(),
+        OpeningEditHandle::BottomRight => rect.right_bottom(),
+    }
+}
+
+fn opening_drag_delta(delta: Vec2, scale: f32) -> (Length, Length) {
+    let scale = scale.max(0.001) as f64;
+    (
+        Length::from_inches(delta.x as f64 / scale),
+        Length::from_inches(-(delta.y as f64) / scale),
+    )
+}
+
+fn cursor_for_opening_handle(handle: OpeningEditHandle, active: bool) -> CursorIcon {
+    match handle {
+        OpeningEditHandle::Move => {
+            if active {
+                CursorIcon::Grabbing
+            } else {
+                CursorIcon::Grab
+            }
+        }
+        OpeningEditHandle::Left => CursorIcon::ResizeWest,
+        OpeningEditHandle::Right => CursorIcon::ResizeEast,
+        OpeningEditHandle::Top => CursorIcon::ResizeNorth,
+        OpeningEditHandle::Bottom => CursorIcon::ResizeSouth,
+        OpeningEditHandle::TopLeft => CursorIcon::ResizeNorthWest,
+        OpeningEditHandle::TopRight => CursorIcon::ResizeNorthEast,
+        OpeningEditHandle::BottomLeft => CursorIcon::ResizeSouthWest,
+        OpeningEditHandle::BottomRight => CursorIcon::ResizeSouthEast,
+    }
+}
+
 fn draw_opening_guide(
     painter: &egui::Painter,
     rect: Rect,
@@ -2598,11 +3788,11 @@ fn draw_opening_guide(
     hovered: bool,
 ) {
     let stroke = if selected {
-        Stroke::new(2.0, Color32::from_rgb(35, 94, 150))
+        Stroke::new(2.0, theme::active_blue())
     } else if hovered {
-        Stroke::new(1.5, Color32::from_rgb(88, 88, 78))
+        Stroke::new(1.5, theme::framing_line_dark())
     } else {
-        Stroke::new(1.0, Color32::from_rgb(137, 102, 52))
+        Stroke::new(1.0, theme::framing_line())
     };
     painter.rect_filled(
         rect,
@@ -2802,6 +3992,208 @@ mod tests {
         );
         assert_close(layout.wall_rect.center().x, available.center().x);
         assert_close(layout.wall_rect.center().y, available.center().y);
+    }
+
+    #[test]
+    fn dimension_placement_pointer_chooses_closest_axis() {
+        let first = Pos2::new(100.0, 180.0);
+        let second = Pos2::new(240.0, 120.0);
+        let midpoint = first + (second - first) * 0.5;
+
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint + Vec2::new(160.0, 20.0)),
+                DimensionAxis::Horizontal,
+            ),
+            DimensionAxis::Vertical
+        );
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint + Vec2::new(20.0, -160.0)),
+                DimensionAxis::Vertical,
+            ),
+            DimensionAxis::Horizontal
+        );
+        assert_eq!(
+            dimension_axis_for_placement_position(
+                first,
+                second,
+                Some(midpoint),
+                DimensionAxis::Vertical,
+            ),
+            DimensionAxis::Vertical
+        );
+    }
+
+    #[test]
+    fn opening_edit_hit_testing_prioritizes_resize_handles() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(120.0, 72.0));
+
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.right_top()),
+            Some(OpeningEditHandle::TopRight)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.right(), rect.center().y)),
+            Some(OpeningEditHandle::Right)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.center()),
+            Some(OpeningEditHandle::Move)
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, rect.right_bottom() + Vec2::splat(16.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn opening_move_hit_testing_includes_dimension_anchor_rim() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(120.0, 72.0));
+
+        assert!(hit_opening_move_handle(
+            rect,
+            Pos2::new(rect.left() - 8.0, rect.center().y)
+        ));
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.left() - 8.0, rect.center().y)),
+            None
+        );
+        assert_eq!(
+            hit_opening_edit_handle(rect, Pos2::new(rect.left(), rect.center().y)),
+            Some(OpeningEditHandle::Left)
+        );
+    }
+
+    #[test]
+    fn opening_drag_delta_maps_screen_motion_to_wall_axes() {
+        let (delta_x, delta_y) = opening_drag_delta(Vec2::new(20.0, -12.0), 2.0);
+
+        assert_eq!(delta_x, Length::from_inches(10.0));
+        assert_eq!(delta_y, Length::from_inches(6.0));
+    }
+
+    #[test]
+    fn dimension_anchor_markers_include_edges_vertices_and_centers() {
+        let model = BuildingModel::demo_wall();
+        let wall = &model.walls[0];
+        let drawing = Rect::from_min_size(
+            Pos2::new(100.0, 80.0),
+            Vec2::new(wall.length.inches() as f32, wall.height.inches() as f32),
+        );
+
+        let markers = dimension_anchor_markers(drawing, 1.0, 1.0, wall);
+        let opening = wall.openings[0].id.clone();
+
+        assert!(markers.iter().any(|marker| {
+            marker.anchor
+                == DimensionAnchor::WallPoint {
+                    horizontal: DimensionHorizontalReference::Left,
+                    vertical: DimensionVerticalReference::Top,
+                }
+                && marker.kind == DimensionAnchorKind::Vertex
+        }));
+        assert!(markers.iter().any(|marker| {
+            marker.anchor
+                == DimensionAnchor::WallPoint {
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Center,
+                }
+                && marker.kind == DimensionAnchorKind::Center
+        }));
+        assert!(markers.iter().any(|marker| {
+            marker.anchor
+                == DimensionAnchor::OpeningPoint {
+                    opening: opening.clone(),
+                    horizontal: DimensionHorizontalReference::Center,
+                    vertical: DimensionVerticalReference::Top,
+                }
+                && marker.kind == DimensionAnchorKind::Edge
+        }));
+    }
+
+    #[test]
+    fn dimension_anchor_hit_testing_prioritizes_vertices() {
+        let model = BuildingModel::demo_wall();
+        let wall = &model.walls[0];
+        let opening = &wall.openings[0];
+        let drawing = Rect::from_min_size(
+            Pos2::new(100.0, 80.0),
+            Vec2::new(wall.length.inches() as f32, wall.height.inches() as f32),
+        );
+        let opening_rect = opening_rect(drawing, 1.0, 1.0, opening);
+
+        assert_eq!(
+            hit_dimension_anchor(opening_rect.left_top(), drawing, 1.0, 1.0, wall),
+            Some(DimensionAnchor::OpeningPoint {
+                opening: opening.id.clone(),
+                horizontal: DimensionHorizontalReference::Left,
+                vertical: DimensionVerticalReference::Top,
+            })
+        );
+    }
+
+    #[test]
+    fn dimension_line_offsets_map_between_screen_and_wall_coordinates() {
+        let drawing = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(240.0, 120.0));
+        let scale = 2.0;
+
+        let horizontal_position = Pos2::new(160.0, 140.0);
+        let horizontal_offset = dimension_line_offset_for_position(
+            drawing,
+            scale,
+            DimensionAxis::Horizontal,
+            horizontal_position,
+        );
+        assert_eq!(horizontal_offset, Length::from_inches(30.0));
+        assert_eq!(
+            dimension_line_screen_position(
+                drawing,
+                scale,
+                DimensionAxis::Horizontal,
+                horizontal_offset
+            ),
+            horizontal_position.y
+        );
+
+        let vertical_position = Pos2::new(250.0, 120.0);
+        let vertical_offset = dimension_line_offset_for_position(
+            drawing,
+            scale,
+            DimensionAxis::Vertical,
+            vertical_position,
+        );
+        assert_eq!(vertical_offset, Length::from_inches(75.0));
+        assert_eq!(
+            dimension_line_screen_position(
+                drawing,
+                scale,
+                DimensionAxis::Vertical,
+                vertical_offset
+            ),
+            vertical_position.x
+        );
+    }
+
+    #[test]
+    fn dimension_label_rect_sizes_to_text_instead_of_fixed_block() {
+        let start = Pos2::new(100.0, 120.0);
+        let end = Pos2::new(180.0, 120.0);
+
+        let short_label = dimension_label_rect(start, end, DimensionAxis::Horizontal, "1' 6\"");
+        let long_label =
+            dimension_label_rect(start, end, DimensionAxis::Horizontal, "28' 0\" x 8' 0\"");
+
+        assert!(short_label.width() < 50.0);
+        assert!(long_label.width() > short_label.width());
+        assert_eq!(
+            short_label.center(),
+            dimension_label_position(start, end, DimensionAxis::Horizontal)
+        );
     }
 
     #[test]

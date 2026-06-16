@@ -178,8 +178,10 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
 
     let mut members = Vec::new();
     let mut diagnostics = starter_profile_diagnostics(wall, code);
-    let plate_thickness = code.plate_profile.thickness();
-    let stud_thickness = code.stud_profile.thickness();
+    let wall_stud = wall.assembly.stud_profile();
+    let wall_plate = wall.assembly.plate_profile();
+    let plate_thickness = wall_plate.thickness();
+    let stud_thickness = wall_stud.thickness();
     let top_plate_count = if code.double_top_plate { 2 } else { 1 };
     let stud_top = wall.height - plate_thickness * top_plate_count as i64;
     let stud_length = stud_top - plate_thickness;
@@ -211,13 +213,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
         "bottom-plate-1",
         &wall.id,
         MemberKind::BottomPlate,
-        code.plate_profile,
+        wall_plate,
         FrameMemberPlacement::new(
             MemberOrientation::Horizontal,
             Length::ZERO,
             Length::ZERO,
             wall.length,
-            code.plate_profile.thickness(),
+            plate_thickness,
         ),
         RuleProvenance::new(
             "wall.plate.continuous",
@@ -230,13 +232,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
             format!("top-plate-{}", index + 1),
             &wall.id,
             MemberKind::TopPlate,
-            code.plate_profile,
+            wall_plate,
             FrameMemberPlacement::new(
                 MemberOrientation::Horizontal,
                 Length::ZERO,
                 wall.height - plate_thickness * (index as i64 + 1),
                 wall.length,
-                code.plate_profile.thickness(),
+                plate_thickness,
             ),
             RuleProvenance::new(
                 "wall.plate.double-top",
@@ -256,13 +258,13 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
                 format!("stud-{}", x.ticks()),
                 &wall.id,
                 MemberKind::CommonStud,
-                code.stud_profile,
+                wall_stud,
                 FrameMemberPlacement::new(
                     MemberOrientation::Vertical,
                     x,
                     stud_base,
                     stud_length,
-                    code.stud_profile.thickness(),
+                    stud_thickness,
                 ),
                 RuleProvenance::new(
                     "wall.studs.on-center",
@@ -364,8 +366,8 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                     wall: wall.id.clone(),
                 }
             })?;
-            let post_x =
-                face_aligned_center(join_x, wall.length, model.code.stud_profile.thickness());
+            let wall_stud = wall.assembly.stud_profile();
+            let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
             let stud_top = wall.height - plate_thickness * top_plate_count as i64;
             let stud_length = stud_top - stud_base;
 
@@ -384,13 +386,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 format!("{}-{}-corner-post", join.id.0, wall.id.0),
                 &join.id,
                 MemberKind::CornerPost,
-                model.code.stud_profile,
+                wall_stud,
                 FrameMemberPlacement::new(
                     MemberOrientation::Vertical,
                     post_x,
                     stud_base,
                     stud_length,
-                    model.code.stud_profile.thickness(),
+                    wall_stud.thickness(),
                 ),
                 RuleProvenance::new(
                     "wall.join.corner-posts",
@@ -433,7 +435,8 @@ fn add_opening_members(
     let header_top = header_bottom + header_depth;
     let left = opening.left();
     let right = opening.right();
-    let stud_thickness = code.stud_profile.thickness();
+    let wall_stud = wall.assembly.stud_profile();
+    let stud_thickness = wall_stud.thickness();
     let side_positions = OpeningSidePositions::new(left, right, stud_thickness);
 
     if header_depth < code.default_header_depth {
@@ -460,13 +463,13 @@ fn add_opening_members(
             format!("{}-king-{}", opening.id.0, side),
             &opening.id,
             MemberKind::KingStud,
-            code.stud_profile,
+            wall_stud,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
                 king_x,
                 stud_base,
                 stud_top - stud_base,
-                code.stud_profile.thickness(),
+                stud_thickness,
             ),
             RuleProvenance::new(
                 "opening.king-studs.each-side",
@@ -481,13 +484,13 @@ fn add_opening_members(
             format!("{}-jack-{}", opening.id.0, side),
             &opening.id,
             MemberKind::JackStud,
-            code.stud_profile,
+            wall_stud,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
                 jack_x,
                 stud_base,
                 header_bottom - stud_base,
-                code.stud_profile.thickness(),
+                stud_thickness,
             ),
             RuleProvenance::new(
                 "opening.jack-studs.header-bearing",
@@ -525,13 +528,13 @@ fn add_opening_members(
             format!("{}-sill", opening.id.0),
             &opening.id,
             MemberKind::RoughSill,
-            code.stud_profile,
+            wall_stud,
             FrameMemberPlacement::new(
                 MemberOrientation::Horizontal,
                 left,
                 opening.sill_height,
                 opening.width,
-                code.stud_profile.thickness(),
+                stud_thickness,
             ),
             RuleProvenance::new(
                 "opening.window.rough-sill",
@@ -545,6 +548,7 @@ fn add_opening_members(
         add_cripples(
             members,
             code,
+            wall_stud,
             opening,
             "lower",
             plate_thickness,
@@ -552,7 +556,9 @@ fn add_opening_members(
         );
     }
 
-    add_cripples(members, code, opening, "upper", header_top, stud_top);
+    add_cripples(
+        members, code, wall_stud, opening, "upper", header_top, stud_top,
+    );
 }
 
 struct OpeningSidePositions {
@@ -579,6 +585,7 @@ impl OpeningSidePositions {
 fn add_cripples(
     members: &mut Vec<FrameMember>,
     code: &CodeProfile,
+    stud_profile: BoardProfile,
     opening: &Opening,
     label: &str,
     bottom: Length,
@@ -594,13 +601,13 @@ fn add_cripples(
             format!("{}-cripple-{}-{}", opening.id.0, label, x.ticks()),
             &opening.id,
             MemberKind::CrippleStud,
-            code.stud_profile,
+            stud_profile,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
                 x,
                 bottom,
                 cut_length,
-                code.stud_profile.thickness(),
+                stud_profile.thickness(),
             ),
             RuleProvenance::new(
                 "opening.cripples.on-center",
@@ -1268,6 +1275,45 @@ mod tests {
                 && item.cut_length == Length::from_feet(8.0)
                 && item.quantity == 2
         }));
+    }
+
+    #[test]
+    fn wall_assembly_stud_profile_sizes_studs_and_plates() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.assembly.stud = BoardProfile::TwoBySix;
+        wall.openings.push(Opening::door(
+            "opening-door",
+            "Door",
+            Length::from_inches(72.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+
+        let plan = generate_wall_plan(&wall, &code).unwrap();
+
+        for kind in [
+            MemberKind::CommonStud,
+            MemberKind::BottomPlate,
+            MemberKind::TopPlate,
+            MemberKind::KingStud,
+            MemberKind::JackStud,
+        ] {
+            let member = plan
+                .members
+                .iter()
+                .find(|member| member.kind == kind)
+                .unwrap_or_else(|| panic!("expected a {kind:?} member"));
+            assert_eq!(member.profile, BoardProfile::TwoBySix, "{kind:?}");
+        }
+
+        // The header still follows the code profile until span lookups exist.
+        let header = plan
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Header)
+            .unwrap();
+        assert_eq!(header.profile, code.header_profile);
     }
 
     #[test]

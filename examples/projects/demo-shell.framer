@@ -1,6 +1,6 @@
 {
   "format": "framer.project",
-  "schema_version": 3,
+  "schema_version": 5,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -57,6 +57,11 @@
         },
         "stud_spacing": {
           "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
         },
         "openings": [
           {
@@ -124,6 +129,11 @@
         "stud_spacing": {
           "ticks": 256
         },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
         "openings": [
           {
             "id": "opening-front-door",
@@ -190,6 +200,11 @@
         "stud_spacing": {
           "ticks": 256
         },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
         "openings": [
           {
             "id": "opening-left-service-door",
@@ -238,6 +253,11 @@
         },
         "stud_spacing": {
           "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
         },
         "openings": [
           {

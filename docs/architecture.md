@@ -64,6 +64,13 @@ printing model. If Framer later allows manual plan adjustments, they should be
 stored as explicit intent constraints or override records that the solver can
 validate and explain.
 
+Authored driving dimensions are checked through a generic linear constraint
+layer in `framer-core`. Walls currently adapt their local length and opening
+edge anchors into that layer, but the rank check itself is independent of wall
+geometry. Future height, roof, floor, rafter, pitch, and offset constraints
+should add variables and anchor expressions for their own authored objects
+rather than adding one-off overconstraint checks.
+
 ## Code Profiles
 
 Code profiles should be versioned data plus executable rules. A profile such as
@@ -148,7 +155,7 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v3 `.framer` format is documented in
+The current v4 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only;
 derived framing plans, cached view state, and exports remain disposable outputs
 that are regenerated from the project.
