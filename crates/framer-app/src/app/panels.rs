@@ -984,6 +984,8 @@ impl FramerApp {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::MD, 2.0);
             status_metric(ui, Icon::Ready, "Ready", t.success);
             toolbar_divider(ui);
+            self.status_level_dropdown(ui);
+            toolbar_divider(ui);
             ui.label(
                 RichText::new(self.workspace_badge())
                     .strong()
@@ -1003,6 +1005,19 @@ impl FramerApp {
                     .size(design::text_size::LABEL)
                     .color(t.text_secondary),
             );
+            if let Some(cursor) = self.cursor_model {
+                toolbar_divider(ui);
+                ui.label(
+                    RichText::new(format!(
+                        "X {:.3} ft   Y {:.3} ft   Z 0.000 ft",
+                        cursor.x.inches() / 12.0,
+                        cursor.y.inches() / 12.0
+                    ))
+                    .monospace()
+                    .size(design::text_size::LABEL)
+                    .color(t.text_muted),
+                );
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = design::space::MD;
@@ -1014,7 +1029,36 @@ impl FramerApp {
                 toolbar_divider(ui);
                 widgets::toggle_switch(ui, &mut self.ortho, "Ortho");
                 widgets::toggle_switch(ui, &mut self.grid, "Grid");
-                status_metric(ui, Icon::Snap, "Snap 1 in", t.text_secondary);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(design::icon_text(Icon::Snap, 13.0).color(t.text_secondary));
+                    ComboBox::from_id_salt("snap-step")
+                        .selected_text(snap_label(self.snap_step))
+                        .width(58.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.snap_step, None, "Off");
+                            ui.selectable_value(
+                                &mut self.snap_step,
+                                Some(Length::from_inches(0.5)),
+                                "1/2 in",
+                            );
+                            ui.selectable_value(
+                                &mut self.snap_step,
+                                Some(Length::from_whole_inches(1)),
+                                "1 in",
+                            );
+                            ui.selectable_value(
+                                &mut self.snap_step,
+                                Some(Length::from_whole_inches(2)),
+                                "2 in",
+                            );
+                            ui.selectable_value(
+                                &mut self.snap_step,
+                                Some(Length::from_whole_inches(6)),
+                                "6 in",
+                            );
+                        });
+                });
                 toolbar_divider(ui);
                 let muted = t.text_muted;
                 status_metric(ui, Icon::Saved, &format!("{info} info"), muted);
@@ -1038,6 +1082,48 @@ impl FramerApp {
                 );
             });
         });
+    }
+
+    fn status_level_dropdown(&mut self, ui: &mut Ui) {
+        let levels: Vec<(String, String)> = self
+            .model
+            .levels
+            .iter()
+            .map(|level| (level.id.0.clone(), level.name.clone()))
+            .collect();
+        if levels.is_empty() {
+            return;
+        }
+        let current = self
+            .model
+            .walls
+            .get(self.selected_wall)
+            .map(|wall| wall.level.0.clone())
+            .filter(|id| levels.iter().any(|(level_id, _)| level_id == id))
+            .unwrap_or_else(|| levels[0].0.clone());
+        let current_name = levels
+            .iter()
+            .find(|(id, _)| id == &current)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| current.clone());
+
+        let t = design::active();
+        let mut chosen = current.clone();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(design::icon_text(Icon::LayoutGrid, 13.0).color(t.text_secondary));
+            ComboBox::from_id_salt("status-level")
+                .selected_text(current_name)
+                .width(78.0)
+                .show_ui(ui, |ui| {
+                    for (id, name) in &levels {
+                        ui.selectable_value(&mut chosen, id.clone(), name);
+                    }
+                });
+        });
+        if chosen != current {
+            self.selected = Selection::Level(chosen);
+        }
     }
 
     fn selection_status(&self) -> String {
@@ -1363,6 +1449,14 @@ fn status_metric(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
                 .color(design::active().text_secondary),
         );
     });
+}
+
+fn snap_label(step: Option<Length>) -> String {
+    match step {
+        None => "Off".to_owned(),
+        Some(step) if step == Length::from_inches(0.5) => "1/2 in".to_owned(),
+        Some(step) => format!("{} in", step.inches()),
+    }
 }
 
 fn level_summary(ui: &mut Ui, level: &Level) {

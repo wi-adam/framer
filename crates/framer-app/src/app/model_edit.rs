@@ -92,6 +92,8 @@ impl OpeningDragState {
 pub(super) struct OpeningDragConstraints {
     edge_clearance: Length,
     top_clearance: Length,
+    snap_step: Option<Length>,
+    ortho: bool,
 }
 
 impl OpeningDragConstraints {
@@ -99,7 +101,28 @@ impl OpeningDragConstraints {
         Self {
             edge_clearance: code.stud_profile.thickness() * 2,
             top_clearance: opening_top_clearance(code),
+            snap_step: None,
+            ortho: false,
         }
+    }
+
+    /// Apply the active drafting modifiers (snap increment and ortho axis-lock).
+    pub(super) fn with_modifiers(mut self, snap_step: Option<Length>, ortho: bool) -> Self {
+        self.snap_step = snap_step;
+        self.ortho = ortho;
+        self
+    }
+}
+
+/// Round a length to the nearest multiple of `step` when snapping is enabled.
+fn maybe_snap(value: Length, step: Option<Length>) -> Length {
+    match step {
+        Some(step) if step > Length::ZERO => {
+            let step_ticks = step.ticks();
+            let rounded = ((value.ticks() as f64 / step_ticks as f64).round() as i64) * step_ticks;
+            Length::from_ticks(rounded)
+        }
+        _ => value,
     }
 }
 
@@ -146,33 +169,58 @@ pub(super) fn apply_opening_drag(
     let mut top = start.top().min(max_top);
 
     if matches!(handle, OpeningEditHandle::Move) {
+        let (delta_x, delta_y) = if constraints.ortho {
+            if delta_x.abs() >= delta_y.abs() {
+                (delta_x, Length::ZERO)
+            } else {
+                (Length::ZERO, delta_y)
+            }
+        } else {
+            (delta_x, delta_y)
+        };
         let half_width = start.width.min(usable_width) / 2;
         let center = clamp_length(
-            start.center + delta_x,
+            maybe_snap(start.center + delta_x, constraints.snap_step),
             min_x + half_width,
             max_x - half_width,
         );
         let max_bottom = (max_top - start.height).max(Length::ZERO);
-        bottom = clamp_length(start.sill_height + delta_y, Length::ZERO, max_bottom);
+        bottom = clamp_length(
+            maybe_snap(start.sill_height + delta_y, constraints.snap_step),
+            Length::ZERO,
+            max_bottom,
+        );
         left = center - start.width / 2;
         right = center + start.width / 2;
         top = bottom + start.height;
     } else {
         if handle.resizes_left() {
-            left = clamp_length(start.left() + delta_x, min_x, start.right() - min_width);
+            left = clamp_length(
+                maybe_snap(start.left() + delta_x, constraints.snap_step),
+                min_x,
+                start.right() - min_width,
+            );
         }
         if handle.resizes_right() {
-            right = clamp_length(start.right() + delta_x, left + min_width, max_x);
+            right = clamp_length(
+                maybe_snap(start.right() + delta_x, constraints.snap_step),
+                left + min_width,
+                max_x,
+            );
         }
         if handle.resizes_bottom() {
             bottom = clamp_length(
-                start.sill_height + delta_y,
+                maybe_snap(start.sill_height + delta_y, constraints.snap_step),
                 Length::ZERO,
                 start.top() - min_height,
             );
         }
         if handle.resizes_top() {
-            top = clamp_length(start.top() + delta_y, bottom + min_height, max_top);
+            top = clamp_length(
+                maybe_snap(start.top() + delta_y, constraints.snap_step),
+                bottom + min_height,
+                max_top,
+            );
         }
     }
 
@@ -424,5 +472,63 @@ mod tests {
         ));
 
         assert_eq!(wall.openings[0].right(), wall.openings[1].left());
+    }
+
+    #[test]
+    fn snap_rounds_move_to_step() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_inches(72.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+        let start = OpeningGeometry::from_opening(&wall.openings[0]);
+        let constraints = OpeningDragConstraints::from_code(&code)
+            .with_modifiers(Some(Length::from_whole_inches(1)), false);
+
+        assert!(apply_opening_drag(
+            &mut wall,
+            "door",
+            OpeningEditHandle::Move,
+            start,
+            Length::from_inches(17.3),
+            Length::ZERO,
+            constraints,
+        ));
+
+        // 72 + 17.3125 = 89.3125 in, snapped to the nearest inch.
+        assert_eq!(wall.openings[0].center, Length::from_whole_inches(89));
+    }
+
+    #[test]
+    fn ortho_locks_move_to_dominant_axis() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_inches(72.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+        let start = OpeningGeometry::from_opening(&wall.openings[0]);
+        let constraints = OpeningDragConstraints::from_code(&code).with_modifiers(None, true);
+
+        assert!(apply_opening_drag(
+            &mut wall,
+            "door",
+            OpeningEditHandle::Move,
+            start,
+            Length::from_inches(18.0),
+            Length::from_inches(8.0),
+            constraints,
+        ));
+
+        // X dominates, so the vertical delta is dropped.
+        assert_eq!(wall.openings[0].center, Length::from_inches(90.0));
+        assert_eq!(wall.openings[0].sill_height, start.sill_height);
     }
 }

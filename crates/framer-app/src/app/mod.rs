@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
-    DimensionKind, Length, Opening, OpeningKind, Wall, load_project as load_project_document,
-    save_project as save_project_document,
+    DimensionKind, Length, Opening, OpeningKind, Point2, Wall,
+    load_project as load_project_document, save_project as save_project_document,
 };
 use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
@@ -45,6 +45,8 @@ pub(crate) struct FramerApp {
     show_section: bool,
     grid: bool,
     ortho: bool,
+    snap_step: Option<Length>,
+    cursor_model: Option<Point2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +177,8 @@ impl Default for FramerApp {
             show_section: true,
             grid: true,
             ortho: true,
+            snap_step: Some(Length::from_whole_inches(1)),
+            cursor_model: None,
         };
         app.rebuild();
         app
@@ -510,7 +514,8 @@ impl FramerApp {
         let Some(drag) = self.opening_drag.clone() else {
             return;
         };
-        let constraints = OpeningDragConstraints::from_code(&self.model.code);
+        let constraints = OpeningDragConstraints::from_code(&self.model.code)
+            .with_modifiers(self.snap_step, self.ortho);
         let Some(wall) = self.model.walls.get_mut(drag.wall_index) else {
             self.opening_drag = None;
             return;

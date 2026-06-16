@@ -163,10 +163,16 @@ impl FramerApp {
         );
         ui.add_space(8.0);
 
+        self.cursor_model = None;
         let click = match self.viewport_mode {
-            ViewportMode::Plan => {
-                draw_project_plan(ui, &self.model, self.selected_wall, &self.selected)
-            }
+            ViewportMode::Plan => draw_project_plan(
+                ui,
+                &self.model,
+                self.selected_wall,
+                &self.selected,
+                self.grid,
+                &mut self.cursor_model,
+            ),
             ViewportMode::Elevation => {
                 let Some(wall) = self.model.walls.get(self.selected_wall) else {
                     ui.label("No wall selected");
@@ -352,13 +358,10 @@ impl FramerApp {
 }
 
 fn viewport_size(ui: &Ui) -> Vec2 {
+    // Fill the central panel so the drawing surface reaches the panel edges; the
+    // plan/3D projectors letterbox their content within this rect.
     let available = ui.available_size();
-    let width = available.x.max(420.0);
-    let target_height = (width * 0.72).clamp(420.0, 640.0);
-    let min_height = available.y.min(360.0);
-    let height = available.y.min(target_height).max(min_height);
-
-    Vec2::new(width, height)
+    Vec2::new(available.x.max(420.0), available.y.max(360.0))
 }
 
 fn viewport_drawing_rect(rect: Rect, margin: f32) -> Rect {
@@ -558,6 +561,8 @@ fn draw_project_plan(
     model: &BuildingModel,
     selected_wall: usize,
     selection: &Selection,
+    show_grid: bool,
+    cursor_out: &mut Option<Point2>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
@@ -566,13 +571,21 @@ fn draw_project_plan(
     draw_view_background(&painter, rect, theme::sheet());
     let drawing = viewport_drawing_rect(rect, 58.0);
     draw_drafting_rulers(&painter, rect, drawing);
-    draw_drafting_grid(&painter, drawing);
+    if show_grid {
+        draw_drafting_grid(&painter, drawing);
+    }
     draw_view_border(&painter, drawing);
 
     let Some(bounds) = ModelBounds::from_model(model) else {
         draw_view_empty(&painter, rect, "No wall segments");
         return None;
     };
+
+    if let Some(hover) = response.hover_pos() {
+        if drawing.contains(hover) {
+            *cursor_out = Some(plan_inverse_point(hover, bounds, drawing));
+        }
+    }
 
     let pointer = response.interact_pointer_pos();
     let mut clicked_wall = None;
@@ -1609,6 +1622,20 @@ fn plan_point(point: Point2, bounds: ModelBounds, drawing: Rect) -> Pos2 {
             - (drawing.height() - used_height) / 2.0
             - (point.y.inches() as f32 - bounds.min_y) * scale,
     )
+}
+
+/// Inverse of [`plan_point`]: map a screen position back to model coordinates.
+fn plan_inverse_point(screen: Pos2, bounds: ModelBounds, drawing: Rect) -> Point2 {
+    let width = (bounds.max_x - bounds.min_x).max(1.0);
+    let depth = (bounds.max_y - bounds.min_y).max(1.0);
+    let scale = (drawing.width() / width).min(drawing.height() / depth);
+    let used_width = width * scale;
+    let used_height = depth * scale;
+    let x =
+        bounds.min_x + (screen.x - drawing.left() - (drawing.width() - used_width) / 2.0) / scale;
+    let y = bounds.min_y
+        + (drawing.bottom() - (drawing.height() - used_height) / 2.0 - screen.y) / scale;
+    Point2::new(Length::from_inches(x as f64), Length::from_inches(y as f64))
 }
 
 #[derive(Clone, Copy)]
