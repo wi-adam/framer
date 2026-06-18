@@ -251,6 +251,11 @@ impl BuildingModel {
                 });
             };
 
+            // This requires the join point to be an endpoint of BOTH walls,
+            // which is correct for Corner/EndToEnd joins. Tee/Cross joins (where
+            // the point lies mid-span of the through wall) need per-kind branching
+            // here; that lands with interior-wall framing. See
+            // docs/plans/2026-06-18-walls-and-rooms-design.md (Section 2).
             if !first.has_endpoint(join.point) || !second.has_endpoint(join.point) {
                 return Err(ModelError::JoinPointDoesNotConnectWalls {
                     join: join.id.clone(),
@@ -297,6 +302,21 @@ impl BuildingModel {
             changed |= wall.apply_driving_dimensions();
         }
         changed
+    }
+
+    /// Remove a wall and every join that references it. The wall's nested
+    /// openings and dimensions are removed along with it. Returns whether a
+    /// wall was actually removed.
+    pub fn remove_wall(&mut self, wall: &ElementId) -> bool {
+        let before = self.walls.len();
+        self.walls.retain(|candidate| candidate.id != *wall);
+        if self.walls.len() == before {
+            return false;
+        }
+
+        self.wall_joins
+            .retain(|join| join.first_wall != *wall && join.second_wall != *wall);
+        true
     }
 }
 
@@ -1844,6 +1864,42 @@ mod tests {
             vec!["other-offset", "wall-length"]
         );
         wall.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_wall_cascades_joins_that_reference_it() {
+        let mut model = BuildingModel::demo_shell();
+
+        assert!(model.remove_wall(&ElementId::new("wall-front")));
+
+        // The wall and every join touching it are gone; unrelated walls/joins stay.
+        assert!(model.walls.iter().all(|wall| wall.id.0 != "wall-front"));
+        assert_eq!(model.walls.len(), 3);
+        assert!(model.wall_joins.iter().all(|join| {
+            join.first_wall.0 != "wall-front" && join.second_wall.0 != "wall-front"
+        }));
+        assert_eq!(
+            model
+                .wall_joins
+                .iter()
+                .map(|join| join.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["join-back-left", "join-right-back"]
+        );
+        // The remaining shell is still a valid model.
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_unknown_wall_is_a_no_op() {
+        let mut model = BuildingModel::demo_shell();
+        let walls_before = model.walls.len();
+        let joins_before = model.wall_joins.len();
+
+        assert!(!model.remove_wall(&ElementId::new("does-not-exist")));
+
+        assert_eq!(model.walls.len(), walls_before);
+        assert_eq!(model.wall_joins.len(), joins_before);
     }
 
     #[test]

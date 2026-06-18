@@ -18,7 +18,7 @@ use super::labels::{
 use super::model_edit::{
     opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
-use super::{FramerApp, Selection, ViewportMode, WorkspaceMode, design, theme};
+use super::{DrawWallToolState, FramerApp, Selection, ViewportMode, WorkspaceMode, design, theme};
 
 impl FramerApp {
     pub(super) fn app_header(&mut self, ui: &mut Ui) {
@@ -221,6 +221,26 @@ impl FramerApp {
             if self.workspace_mode.allows_design_edits() {
                 widgets::tool_divider(ui);
                 widgets::tool_group(ui, "BUILD", |ui| {
+                    if widgets::tool_button(
+                        ui,
+                        Icon::Wall,
+                        "Wall",
+                        self.draw_wall_tool.active,
+                        true,
+                    )
+                    .on_hover_text("Draw walls in the plan view (W)")
+                    .clicked()
+                    {
+                        self.toggle_draw_wall_tool();
+                    }
+                    let can_delete =
+                        matches!(self.selected, Selection::Wall | Selection::Opening(_));
+                    if widgets::tool_button(ui, Icon::Delete, "Delete", false, can_delete)
+                        .on_hover_text("Delete the selected wall or opening (Del)")
+                        .clicked()
+                    {
+                        self.delete_selected();
+                    }
                     if widgets::tool_button(ui, Icon::Door, "Door", false, true)
                         .on_hover_text("Add a door to the selected wall")
                         .clicked()
@@ -332,6 +352,9 @@ impl FramerApp {
     fn toggle_dimension_tool(&mut self) {
         self.dimension_tool.active = !self.dimension_tool.active;
         self.dimension_tool.clear_picks();
+        if self.dimension_tool.active {
+            self.draw_wall_tool = DrawWallToolState::default();
+        }
         self.opening_drag = None;
         self.dimension_status = if self.dimension_tool.active {
             Some("Pick two anchors, then move the pointer to place the dimension".to_owned())

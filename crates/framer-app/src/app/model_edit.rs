@@ -1,4 +1,4 @@
-use framer_core::{CodeProfile, Length, Opening, Point2, Wall};
+use framer_core::{BuildingModel, CodeProfile, Length, Opening, Point2, Wall};
 
 const OPENING_MIN_SIZE: Length = Length::from_whole_inches(12);
 
@@ -115,7 +115,7 @@ impl OpeningDragConstraints {
 }
 
 /// Round a length to the nearest multiple of `step` when snapping is enabled.
-fn maybe_snap(value: Length, step: Option<Length>) -> Length {
+pub(super) fn maybe_snap(value: Length, step: Option<Length>) -> Length {
     match step {
         Some(step) if step > Length::ZERO => {
             let step_ticks = step.ticks();
@@ -280,6 +280,20 @@ fn opening_drag_horizontal_limits(
     }
 
     (min_x, max_x)
+}
+
+/// Generate the next free `wall-N` id, unique across every wall in the model.
+/// Wall ids must be globally unique (unlike per-wall `next_opening_id`), so this
+/// scopes its uniqueness check to the whole `BuildingModel`.
+pub(super) fn next_wall_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.walls.len() + 1;
+    loop {
+        let id = format!("wall-{index}");
+        if model.walls.iter().all(|wall| wall.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
 }
 
 pub(super) fn next_opening_id(wall: &Wall, prefix: &str) -> (String, usize) {
@@ -501,6 +515,23 @@ mod tests {
 
         // 72 + 17.3125 = 89.3125 in, snapped to the nearest inch.
         assert_eq!(wall.openings[0].center, Length::from_whole_inches(89));
+    }
+
+    #[test]
+    fn next_wall_id_is_globally_unique() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(Wall::new("wall-1", "One", Length::from_feet(8.0), &code));
+        model
+            .walls
+            .push(Wall::new("wall-3", "Three", Length::from_feet(8.0), &code));
+
+        let (id, index) = next_wall_id(&model);
+
+        assert!(model.walls.iter().all(|wall| wall.id.0 != id));
+        assert_eq!(id, format!("wall-{index}"));
     }
 
     #[test]

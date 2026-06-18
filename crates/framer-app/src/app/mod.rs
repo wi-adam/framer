@@ -1,4 +1,5 @@
 mod design;
+mod draw_wall;
 mod history;
 #[cfg(test)]
 mod history_integration_tests;
@@ -25,10 +26,11 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
+use draw_wall::corner_joins_for_new_wall;
 use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
-    next_dimension_id, next_opening_id,
+    next_dimension_id, next_opening_id, next_wall_id,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState};
@@ -59,6 +61,7 @@ pub(crate) struct FramerApp {
     /// while interacting so orbiting stays smooth. 0 = settled / full resolution.
     render_motion_cooldown: u32,
     dimension_tool: DimensionToolState,
+    draw_wall_tool: DrawWallToolState,
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     /// Whether the active adapter supports compute shaders (GPU path tracer);
@@ -145,6 +148,14 @@ enum ViewClick {
         axis: DimensionAxis,
         line_offset: Length,
     },
+    /// A draw-wall tool click committing the next polyline point (already
+    /// resolved through ortho/grid/endpoint snapping in the plan view).
+    DrawWallPoint {
+        point: Point2,
+    },
+    /// Cancel the in-progress draw-wall run (e.g. right-click) without leaving
+    /// the tool.
+    DrawWallCancel,
     Member {
         wall_id: String,
         member_id: String,
@@ -185,6 +196,15 @@ impl DimensionToolState {
     }
 }
 
+/// State for the interactive draw-wall tool. `start` holds the first committed
+/// endpoint while a wall (or polyline run) is being drawn; `None` means the next
+/// click begins a new segment.
+#[derive(Debug, Clone, Default)]
+struct DrawWallToolState {
+    active: bool,
+    start: Option<Point2>,
+}
+
 fn dimension_kind_name(kind: DimensionKind) -> &'static str {
     match kind {
         DimensionKind::Driving => "driving",
@@ -220,6 +240,7 @@ impl Default for FramerApp {
             render_gpu: render::GpuRenderState::default(),
             render_motion_cooldown: 0,
             dimension_tool: DimensionToolState::default(),
+            draw_wall_tool: DrawWallToolState::default(),
             opening_drag: None,
             gpu_target_format: None,
             gpu_compute_ok: false,
@@ -268,9 +289,14 @@ impl FramerApp {
         // ids). new/load clear it wholesale via `reset_2d_cameras`; this covers
         // any future single-wall deletion without it having to remember to prune.
         if !self.elevation_views.is_empty() {
-            let live: std::collections::HashSet<&str> =
-                self.model.walls.iter().map(|wall| wall.id.0.as_str()).collect();
-            self.elevation_views.retain(|id, _| live.contains(id.as_str()));
+            let live: std::collections::HashSet<&str> = self
+                .model
+                .walls
+                .iter()
+                .map(|wall| wall.id.0.as_str())
+                .collect();
+            self.elevation_views
+                .retain(|id, _| live.contains(id.as_str()));
         }
 
         self.model.apply_driving_dimensions();
@@ -370,6 +396,15 @@ impl FramerApp {
         self.elevation_views.clear();
     }
 
+    /// Clears all transient interaction tools. Called whenever the document is
+    /// replaced wholesale (new/open/reset), so no in-progress draw, dimension, or
+    /// drag gesture carries into a different document.
+    fn reset_tools(&mut self) {
+        self.dimension_tool = DimensionToolState::default();
+        self.draw_wall_tool = DrawWallToolState::default();
+        self.opening_drag = None;
+    }
+
     fn new_project(&mut self) {
         let code = framer_core::CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
@@ -386,8 +421,7 @@ impl FramerApp {
         self.file_status = Some("Created new project".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
-        self.dimension_tool = DimensionToolState::default();
-        self.opening_drag = None;
+        self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
         self.reset_2d_cameras();
@@ -402,8 +436,7 @@ impl FramerApp {
         self.file_status = Some("Reset to multi-wall demo shell".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
-        self.dimension_tool = DimensionToolState::default();
-        self.opening_drag = None;
+        self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
         self.reset_2d_cameras();
@@ -418,8 +451,7 @@ impl FramerApp {
         self.file_status = Some("Reset to Phase 1 demo wall".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
-        self.dimension_tool = DimensionToolState::default();
-        self.opening_drag = None;
+        self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
         self.reset_2d_cameras();
@@ -466,8 +498,7 @@ impl FramerApp {
                 self.file_status = Some(format!("Opened {}", path.display()));
                 self.artifact_status = None;
                 self.dimension_status = None;
-                self.dimension_tool = DimensionToolState::default();
-                self.opening_drag = None;
+                self.reset_tools();
             }
             Err(error) => {
                 self.file_status = Some(format!("Open failed: {error}"));
@@ -515,22 +546,31 @@ impl FramerApp {
             return;
         }
 
-        let (escape_pressed, dimension_pressed, redo_pressed, undo_pressed) =
-            ctx.input_mut(|input| {
-                let escape = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-                let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
-                // Redo MUST be consumed before undo: egui's consume_key matches
-                // modifiers *logically* (a pattern without Shift still matches a
-                // Shift-held event), so Cmd+Z would otherwise swallow Cmd+Shift+Z.
-                // Redo: Cmd/Ctrl+Shift+Z, or Ctrl+Y.
-                let redo = input.consume_key(
-                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                    egui::Key::Z,
-                ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
-                // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
-                let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-                (escape, dimension, redo, undo)
-            });
+        let (
+            escape_pressed,
+            dimension_pressed,
+            draw_wall_pressed,
+            delete_pressed,
+            redo_pressed,
+            undo_pressed,
+        ) = ctx.input_mut(|input| {
+            let escape = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
+            let draw_wall = input.consume_key(egui::Modifiers::NONE, egui::Key::W);
+            let delete = input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
+            // Redo MUST be consumed before undo: egui's consume_key matches
+            // modifiers *logically* (a pattern without Shift still matches a
+            // Shift-held event), so Cmd+Z would otherwise swallow Cmd+Shift+Z.
+            // Redo: Cmd/Ctrl+Shift+Z, or Ctrl+Y.
+            let redo = input.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Z,
+            ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
+            // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
+            let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+            (escape, dimension, draw_wall, delete, redo, undo)
+        });
 
         if undo_pressed {
             self.undo();
@@ -538,8 +578,21 @@ impl FramerApp {
             self.redo();
         } else if escape_pressed {
             self.exit_current_context();
+        } else if delete_pressed {
+            self.delete_selected();
         } else if dimension_pressed {
             self.activate_dimension_tool();
+        } else if draw_wall_pressed {
+            self.toggle_draw_wall_tool();
+        }
+    }
+
+    /// Delete whatever authored element is selected (wall or opening).
+    fn delete_selected(&mut self) {
+        match &self.selected {
+            Selection::Opening(_) => self.delete_selected_opening(),
+            Selection::Wall => self.delete_selected_wall(),
+            _ => {}
         }
     }
 
@@ -550,13 +603,64 @@ impl FramerApp {
 
         self.dimension_tool.active = true;
         self.dimension_tool.clear_picks();
+        self.draw_wall_tool = DrawWallToolState::default();
         self.opening_drag = None;
         self.dimension_status =
             Some("Pick two anchors, then move the pointer to place the dimension".to_owned());
         self.viewport_mode = ViewportMode::Elevation;
     }
 
+    /// Toggle the draw-wall tool. Activating it switches to the Plan view (where
+    /// walls are authored), enters Design mode, and disables the dimension tool.
+    fn toggle_draw_wall_tool(&mut self) {
+        let activate = !self.draw_wall_tool.active;
+        self.draw_wall_tool = DrawWallToolState {
+            active: activate,
+            start: None,
+        };
+        if activate {
+            if !self.workspace_mode.allows_design_edits() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            self.dimension_tool.active = false;
+            self.dimension_tool.clear_picks();
+            self.opening_drag = None;
+            self.viewport_mode = ViewportMode::Plan;
+            self.dimension_status =
+                Some("Click to place wall endpoints; right-click or Esc ends the run".to_owned());
+        } else {
+            self.dimension_status = None;
+        }
+    }
+
+    /// Commit one draw-wall click. The first click sets the run's start point;
+    /// each subsequent click draws a wall from the previous point and continues
+    /// the polyline from the new point.
+    fn handle_draw_wall_point(&mut self, point: Point2) {
+        if !self.draw_wall_tool.active {
+            return;
+        }
+        match self.draw_wall_tool.start {
+            None => self.draw_wall_tool.start = Some(point),
+            Some(start) => {
+                if start != point {
+                    self.add_wall(start, point);
+                }
+                self.draw_wall_tool.start = Some(point);
+            }
+        }
+    }
+
     fn exit_current_context(&mut self) {
+        if self.draw_wall_tool.active {
+            // Esc cancels the current polyline run first, then leaves the tool.
+            if self.draw_wall_tool.start.take().is_none() {
+                self.draw_wall_tool.active = false;
+                self.dimension_status = None;
+            }
+            return;
+        }
+
         if self.opening_drag.is_some() {
             self.opening_drag = None;
             return;
@@ -608,6 +712,69 @@ impl FramerApp {
             }
             self.selected = Selection::Wall;
         }
+    }
+
+    /// Add a wall between two authored endpoints as one undo step, auto-creating
+    /// corner joins to any existing walls that share an endpoint. Endpoints are
+    /// expected to be ortho-snapped by the draw tool; a zero-length segment is a
+    /// no-op.
+    fn add_wall(&mut self, start: Point2, end: Point2) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        if start == end {
+            return;
+        }
+        // Walls must be axis-aligned (Slice 1). Reject a diagonal segment up front
+        // so an invalid model never enters the document or undo history.
+        if start.x != end.x && start.y != end.y {
+            return;
+        }
+        self.edit("Draw wall", |app| {
+            let (id, index) = next_wall_id(&app.model);
+            let level = app
+                .model
+                .levels
+                .first()
+                .map(|level| level.id.0.clone())
+                .unwrap_or_else(|| "level-1".to_owned());
+            let wall = Wall::new(
+                id,
+                format!("Wall {index}"),
+                Length::from_feet(1.0),
+                &app.model.code,
+            )
+            .with_placement(level, start, end);
+            let joins = corner_joins_for_new_wall(&app.model, &wall);
+            app.model.walls.push(wall);
+            app.model.wall_joins.extend(joins);
+            app.selected_wall = app.model.walls.len() - 1;
+            app.selected = Selection::Wall;
+        });
+    }
+
+    /// Delete the selected wall and every join referencing it as one undo step.
+    fn delete_selected_wall(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        if !matches!(self.selected, Selection::Wall) {
+            return;
+        }
+        let Some(wall_id) = self
+            .model
+            .walls
+            .get(self.selected_wall)
+            .map(|wall| wall.id.clone())
+        else {
+            return;
+        };
+        self.edit("Delete wall", |app| {
+            if app.model.remove_wall(&wall_id) {
+                app.selected_wall = 0;
+                app.selected = Selection::Wall;
+            }
+        });
     }
 
     fn add_opening(&mut self, kind: OpeningKind) {
@@ -936,6 +1103,12 @@ impl FramerApp {
                 line_offset,
             } => {
                 self.handle_dimension_placement_click(wall_index, axis, line_offset);
+            }
+            ViewClick::DrawWallPoint { point } => {
+                self.handle_draw_wall_point(point);
+            }
+            ViewClick::DrawWallCancel => {
+                self.draw_wall_tool.start = None;
             }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {
