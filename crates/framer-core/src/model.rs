@@ -35,6 +35,8 @@ pub struct BuildingModel {
     pub walls: Vec<Wall>,
     #[serde(default)]
     pub wall_joins: Vec<WallJoin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rooms: Vec<Room>,
 }
 
 impl BuildingModel {
@@ -44,6 +46,7 @@ impl BuildingModel {
             levels: default_levels(),
             walls: Vec::new(),
             wall_joins: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 
@@ -81,6 +84,7 @@ impl BuildingModel {
             levels: default_levels(),
             walls: vec![wall],
             wall_joins: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 
@@ -198,6 +202,7 @@ impl BuildingModel {
                     Point2::new(Length::ZERO, Length::ZERO),
                 ),
             ],
+            rooms: Vec::new(),
         }
         .into_deterministic()
     }
@@ -262,6 +267,17 @@ impl BuildingModel {
                 });
             }
         }
+
+        for room in &self.rooms {
+            validate_element_id(&room.id)?;
+            insert_unique_id(&mut ids, &room.id)?;
+            if !level_ids.contains(&room.level) {
+                return Err(ModelError::RoomReferencesUnknownLevel {
+                    room: room.id.clone(),
+                    level: room.level.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -273,6 +289,7 @@ impl BuildingModel {
         }
         self.wall_joins
             .sort_by(|left, right| left.id.cmp(&right.id));
+        self.rooms.sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -1406,6 +1423,95 @@ pub enum WallJoinKind {
     Cross,
 }
 
+/// How a room is used. Drives labelling now and, later, room-type code rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoomUsage {
+    #[default]
+    Unspecified,
+    Living,
+    Bedroom,
+    Bathroom,
+    Kitchen,
+    Dining,
+    Office,
+    Hallway,
+    Closet,
+    Utility,
+    Garage,
+    Other,
+}
+
+impl RoomUsage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::Living => "Living",
+            Self::Bedroom => "Bedroom",
+            Self::Bathroom => "Bathroom",
+            Self::Kitchen => "Kitchen",
+            Self::Dining => "Dining",
+            Self::Office => "Office",
+            Self::Hallway => "Hallway",
+            Self::Closet => "Closet",
+            Self::Utility => "Utility",
+            Self::Garage => "Garage",
+            Self::Other => "Other",
+        }
+    }
+
+    pub const ALL: [Self; 12] = [
+        Self::Unspecified,
+        Self::Living,
+        Self::Bedroom,
+        Self::Bathroom,
+        Self::Kitchen,
+        Self::Dining,
+        Self::Office,
+        Self::Hallway,
+        Self::Closet,
+        Self::Utility,
+        Self::Garage,
+        Self::Other,
+    ];
+}
+
+/// An authored room. Its identity (id, name, usage) and a `seed` point inside it
+/// persist; the boundary, area, and perimeter are derived from the surrounding
+/// walls at solve time and are never stored. See
+/// `docs/plans/2026-06-18-walls-and-rooms-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Room {
+    pub id: ElementId,
+    pub name: String,
+    #[serde(default)]
+    pub usage: RoomUsage,
+    pub level: ElementId,
+    /// A point inside the room, used to locate its bounding wall loop.
+    pub seed: Point2,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl Room {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        usage: RoomUsage,
+        level: impl Into<String>,
+        seed: Point2,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            usage,
+            level: ElementId::new(level),
+            seed,
+            tags: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Opening {
@@ -1549,6 +1655,8 @@ pub enum ModelError {
     JoinReferencesSameWall { join: ElementId },
     #[error("wall join {join:?} point does not connect the referenced wall endpoints")]
     JoinPointDoesNotConnectWalls { join: ElementId },
+    #[error("room {room:?} references unknown level {level:?}")]
+    RoomReferencesUnknownLevel { room: ElementId, level: ElementId },
 }
 
 fn default_levels() -> Vec<Level> {
@@ -1864,6 +1972,24 @@ mod tests {
             vec!["other-offset", "wall-length"]
         );
         wall.validate().unwrap();
+    }
+
+    #[test]
+    fn room_validation_rejects_unknown_level() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code);
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "no-such-level",
+            Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoomReferencesUnknownLevel { .. })
+        ));
     }
 
     #[test]
