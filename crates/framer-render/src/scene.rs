@@ -191,7 +191,7 @@ mod tests {
             0,
         )];
         let materials = vec![Material::Diffuse { albedo: Vec3::ONE }];
-        let camera = Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0);
+        let camera = Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0, 1.0);
         let scene = Scene::new(
             tris,
             materials,

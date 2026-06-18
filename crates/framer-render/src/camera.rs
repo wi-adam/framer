@@ -20,7 +20,10 @@ pub struct Camera {
 impl Camera {
     /// Builds a camera orbiting `center` at `radius`, matching the app's orbit
     /// projector: `yaw` rotates in the XY plane, `pitch` tilts up, and world +Z
-    /// is up. `zoom > 1` moves closer. `vfov_deg` is the vertical field of view.
+    /// is up. `zoom > 1` is telephoto (narrows the FOV, magnifying uniformly).
+    /// `dolly` scales the eye's distance from `center` along the view axis: `< 1`
+    /// moves the eye toward (and eventually inside) the model, `> 1` pulls it back.
+    /// `vfov_deg` is the vertical field of view.
     #[allow(clippy::too_many_arguments)]
     pub fn orbit(
         center: Vec3,
@@ -30,6 +33,7 @@ impl Camera {
         zoom: f32,
         aspect: f32,
         vfov_deg: f32,
+        dolly: f32,
     ) -> Self {
         // Reproduce the OrbitProjector's screen basis exactly so the path tracer
         // frames the model from the same vantage as the interactive 3D view (the
@@ -64,8 +68,10 @@ impl Camera {
         let half_w = half_h * aspect;
 
         // Distance that frames the bounding sphere at zoom 1, with a small margin.
-        // Independent of zoom, so the camera never enters the model.
-        let dist = radius / (vfov * 0.5).sin() * 1.05;
+        // Independent of zoom, so a telephoto zoom never enters the model. `dolly`
+        // then scales this distance along the view axis: the one control that *does*
+        // move the eye (toward the model at `dolly < 1`, away at `> 1`).
+        let dist = radius / (vfov * 0.5).sin() * 1.05 * dolly;
         let eye = center - forward * dist;
 
         Self {
@@ -106,6 +112,7 @@ mod tests {
             1.0,                        // zoom
             16.0 / 9.0,                 // aspect
             40.0,                       // vfov degrees
+            1.0,                        // dolly
         )
     }
 
@@ -164,12 +171,46 @@ mod tests {
     }
 
     #[test]
+    fn dolly_scales_eye_distance_without_moving_center_or_fov() {
+        // Dolly moves the eye along the view axis toward/away from the pivot,
+        // leaving the pivot and the field of view untouched. A 0.5× dolly halves
+        // the eye→center distance; 2× doubles it. (Contrast telephoto zoom, which
+        // moves the eye not at all — see `zoom_narrows_the_fov...`.)
+        let base = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 1.0);
+        let close = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 0.5);
+        let far = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 2.0);
+
+        // Pivot and FOV are invariant under dolly.
+        assert_eq!(base.center, close.center);
+        assert_eq!(base.center, far.center);
+        assert!((base.half_h - close.half_h).abs() < 1e-6);
+        assert!((base.half_w - close.half_w).abs() < 1e-6);
+
+        let dist = |c: &Camera| (c.center - c.eye).length();
+        let d_base = dist(&base);
+        assert!(
+            (dist(&close) - d_base * 0.5).abs() < 1e-3,
+            "0.5× dolly should halve eye distance: base={d_base}, close={}",
+            dist(&close)
+        );
+        assert!(
+            (dist(&far) - d_base * 2.0).abs() < 1e-3,
+            "2× dolly should double eye distance: base={d_base}, far={}",
+            dist(&far)
+        );
+
+        // The eye still looks straight at the pivot at every dolly.
+        let to_center = (close.center - close.eye).normalize();
+        assert!((to_center - close.forward).length() < 1e-4);
+    }
+
+    #[test]
     fn zoom_narrows_the_fov_without_moving_the_camera() {
         // Telephoto zoom: the eye stays put (so the camera never dives into the
         // model) while the field of view narrows, magnifying the image uniformly
         // like the orthographic 3D view it must stay in sync with.
-        let base = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 1.0, 1.0, 40.0);
-        let zoomed = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 2.0, 1.0, 40.0);
+        let base = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 1.0, 1.0, 40.0, 1.0);
+        let zoomed = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 2.0, 1.0, 40.0, 1.0);
         assert!(
             (zoomed.eye - base.eye).length() < 1e-5,
             "zoom must not move the eye: base={:?} zoomed={:?}",

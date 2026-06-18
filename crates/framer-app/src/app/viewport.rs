@@ -15,6 +15,7 @@ use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionHorizontalReference, DimensionKind,
     DimensionVerticalReference, Length, Opening, OpeningKind, Point2, Wall,
 };
+use framer_render::math::Vec3;
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
@@ -39,11 +40,29 @@ const MIN_RENDER_DIM: u32 = 64;
 /// — the upscale was the cause of jagged/soft edges on a stationary camera.
 const MAX_RENDER_DIM: u32 = 2048;
 
+/// World-height (in framing radii) visible across a full-viewport span at zoom 1.
+/// Sets the pan rate so a full-viewport drag slides the view by ~one model height
+/// and the point under the cursor tracks the cursor closely. Derived from the
+/// render camera's framing (`2 · 1.05 / cos(vfov/2)` ≈ 2.2 at the default 36° FOV).
+const PAN_RADII_PER_VIEWPORT: f32 = 2.1;
+/// Clamp on the pan offset's length (radius units), so the pivot can't drift so
+/// far the model is lost off-screen. The view-cube "Home" recenters.
+const PAN_MAX_RADII: f32 = 20.0;
+/// Dolly bounds. The minimum lets the eye move well inside the building (the path
+/// tracer renders fine from inside geometry); the maximum pulls comfortably back.
+const DOLLY_MIN: f32 = 0.05;
+const DOLLY_MAX: f32 = 6.0;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct View3dState {
     yaw: f32,
     pitch: f32,
     zoom: f32,
+    /// Orbit-pivot offset in radius-relative world units (see [`RenderOptions::pan`]).
+    pan: Vec3,
+    /// Eye-distance multiplier for the perspective Render view (the orthographic
+    /// 3D workspace ignores it — it has no eye distance to change).
+    dolly: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +154,8 @@ impl Default for View3dState {
             yaw: -FRAC_PI_4,
             pitch: 0.55,
             zoom: 1.0,
+            pan: Vec3::ZERO,
+            dolly: 1.0,
         }
     }
 }
@@ -148,6 +169,45 @@ impl View3dState {
     fn zoom_by(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
             self.zoom = (self.zoom * factor).clamp(0.35, 3.0);
+        }
+    }
+
+    /// The camera's world-space screen basis (`right`, `up`) for the current yaw
+    /// and pitch — the exact vectors `framer_render::camera::Camera::orbit` uses,
+    /// so panning slides the pivot along the same axes the Render view shows.
+    fn screen_basis(&self) -> (Vec3, Vec3) {
+        let (sin_y, cos_y) = (self.yaw.sin(), self.yaw.cos());
+        let (sin_p, cos_p) = (self.pitch.sin(), self.pitch.cos());
+        let right = Vec3::new(cos_y, sin_y, 0.0);
+        let up = Vec3::new(sin_y * sin_p, -cos_y * sin_p, cos_p);
+        (right, up)
+    }
+
+    /// Slides the orbit pivot in the camera's screen plane by a pointer `delta`
+    /// (egui points; y grows downward), over a viewport of `viewport_span` points.
+    /// "Grab-the-scene": the world point under the cursor tracks the cursor, so the
+    /// pivot moves opposite the drag horizontally and with it vertically. The rate
+    /// is radius-relative and scales inversely with telephoto zoom, so a drag pans
+    /// the same fraction of the framed model at any model scale or zoom.
+    fn pan(&mut self, delta: Vec2, viewport_span: f32) {
+        if viewport_span <= f32::EPSILON || (delta.x == 0.0 && delta.y == 0.0) {
+            return;
+        }
+        let (right, up) = self.screen_basis();
+        let per_px = PAN_RADII_PER_VIEWPORT / self.zoom.max(1.0e-3) / viewport_span;
+        self.pan = self.pan - right * (delta.x * per_px) + up * (delta.y * per_px);
+        let len = self.pan.length();
+        if len > PAN_MAX_RADII {
+            self.pan = self.pan * (PAN_MAX_RADII / len);
+        }
+    }
+
+    /// Dollies the eye toward (`factor < 1`) or away from (`> 1`) the pivot,
+    /// multiplicatively, clamped to `[DOLLY_MIN, DOLLY_MAX]`. Non-finite or
+    /// non-positive factors are ignored.
+    fn dolly_by(&mut self, factor: f32) {
+        if factor.is_finite() && factor > 0.0 {
+            self.dolly = (self.dolly * factor).clamp(DOLLY_MIN, DOLLY_MAX);
         }
     }
 
@@ -165,6 +225,10 @@ impl View3dState {
                 } else {
                     self.yaw = 0.0;
                 }
+                // Re-frame the model: a face snap clears any accumulated pan/dolly
+                // so the snapped view is centered and at the framing distance.
+                self.pan = Vec3::ZERO;
+                self.dolly = 1.0;
             }
         }
     }
@@ -380,20 +444,43 @@ impl FramerApp {
         let drawing = viewport_drawing_rect(rect, 42.0);
         draw_view_border(&painter, drawing);
 
-        // Orbit + zoom, mirroring the 3D workspace controls.
-        let orbiting = response.dragged_by(egui::PointerButton::Primary);
+        // Orbit / pan / dolly / telephoto zoom, mirroring the 3D workspace controls.
+        // Left-drag orbits; middle-drag or Shift+left-drag pans; the wheel dollies
+        // the eye in and out; Cmd+wheel (or a trackpad pinch) is telephoto zoom.
+        let shift = ui.input(|input| input.modifiers.shift);
+        let primary_drag = response.dragged_by(egui::PointerButton::Primary);
+        let middle_drag = response.dragged_by(egui::PointerButton::Middle);
+        let orbiting = primary_drag && !shift;
+        let panning = middle_drag || (primary_drag && shift);
         if orbiting {
             self.view_3d.orbit(response.drag_delta());
         }
+        if panning {
+            self.view_3d.pan(response.drag_delta(), drawing.height());
+        }
         let mut zooming = false;
+        let mut dollying = false;
         if response.hovered() {
-            let zoom_factor = ui.input(|input| {
-                let wheel = (input.smooth_scroll_delta.y * 0.002).exp();
-                wheel * input.zoom_delta()
+            let (scroll_y, pinch, cmd) = ui.input(|input| {
+                (
+                    input.smooth_scroll_delta.y,
+                    input.zoom_delta(),
+                    input.modifiers.command,
+                )
             });
-            if (zoom_factor - 1.0).abs() > f32::EPSILON {
-                self.view_3d.zoom_by(zoom_factor);
-                zooming = true;
+            // Plain wheel/two-finger scroll dollies the eye; a pinch gesture or
+            // Cmd+wheel is telephoto (lens) zoom, kept off the plain wheel.
+            let telephoto = (pinch - 1.0).abs() > f32::EPSILON || cmd;
+            if telephoto {
+                let zoom_factor = pinch * (scroll_y * 0.002).exp();
+                if (zoom_factor - 1.0).abs() > f32::EPSILON {
+                    self.view_3d.zoom_by(zoom_factor);
+                    zooming = true;
+                }
+            } else if scroll_y.abs() > f32::EPSILON {
+                // Scroll up (positive) moves the eye closer, so dolly < 1.
+                self.view_3d.dolly_by((-scroll_y * 0.0015).exp());
+                dollying = true;
             }
         }
         // Camera-motion hysteresis: while interacting (plus a short cooldown so a
@@ -401,7 +488,7 @@ impl FramerApp {
         // internal resolution to keep orbiting responsive; the denoiser keeps the
         // resulting low-sample preview clean, and the still frame returns to full
         // resolution and converges to the unbiased result.
-        if orbiting || zooming {
+        if orbiting || panning || zooming || dollying {
             self.render_motion_cooldown = MOTION_COOLDOWN_FRAMES;
         } else {
             self.render_motion_cooldown = self.render_motion_cooldown.saturating_sub(1);
@@ -425,6 +512,8 @@ impl FramerApp {
             yaw: self.view_3d.yaw,
             pitch: self.view_3d.pitch,
             zoom: self.view_3d.zoom,
+            pan: self.view_3d.pan,
+            dolly: self.view_3d.dolly,
             aspect: width as f32 / height as f32,
             ..framer_render::RenderOptions::default()
         };
@@ -453,17 +542,14 @@ impl FramerApp {
                     self.render_gpu.is_accumulating(),
                 )
             } else {
-                let key = {
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    super::render_job::model_signature(&self.model).hash(&mut hasher);
-                    ((self.view_3d.yaw * 2000.0) as i64).hash(&mut hasher);
-                    ((self.view_3d.pitch * 2000.0) as i64).hash(&mut hasher);
-                    ((self.view_3d.zoom * 1000.0) as i64).hash(&mut hasher);
-                    width.hash(&mut hasher);
-                    height.hash(&mut hasher);
-                    hasher.finish()
-                };
+                // Reuse the GPU path's accumulation key so the CPU fallback resets
+                // on exactly the same camera/geometry/size changes (incl. pan/dolly).
+                let key = super::render::accumulation_key(
+                    super::render_job::model_signature(&self.model),
+                    &opts,
+                    width,
+                    height,
+                );
 
                 self.render_view
                     .update(&ctx, &self.model, opts, width, height, key);
@@ -1085,10 +1171,18 @@ fn draw_project_axonometric(
         .input(|input| input.pointer.hover_pos())
         .filter(|position| cube_rect.contains(*position));
     let press_origin = ui.input(|input| input.pointer.press_origin());
+    let shift = ui.input(|input| input.modifiers.shift);
     let dragging_primary = response.dragged_by(egui::PointerButton::Primary);
-    let dragging_from_cube = dragging_primary && pointer_started_in_rect(press_origin, cube_rect);
+    let dragging_middle = response.dragged_by(egui::PointerButton::Middle);
+    // Middle-drag or Shift+left-drag pans; plain left-drag orbits. The shared pan
+    // state keeps the Render view and this view on the same vantage.
+    let panning = dragging_middle || (dragging_primary && shift);
+    let orbiting = dragging_primary && !shift;
+    let dragging_from_cube = orbiting && pointer_started_in_rect(press_origin, cube_rect);
 
-    if dragging_primary {
+    if panning {
+        view.pan(response.drag_delta(), drawing.width().min(drawing.height()));
+    } else if orbiting {
         view.orbit(response.drag_delta());
     }
 
@@ -2056,8 +2150,16 @@ impl OrbitProjector {
         let pitch = view.pitch.clamp(-FRAC_PI_2, FRAC_PI_2);
         let right = Vec2::angled(yaw);
         let depth_axis = Vec2::new(-right.y, right.x);
-        let center = model_3d_center(points);
-        let radius = model_3d_radius(points, center).max(1.0);
+        let auto_center = model_3d_center(points);
+        let radius = model_3d_radius(points, auto_center).max(1.0);
+        // Pan slides the pivot by `pan * radius` (radius-relative world units),
+        // matching the Render camera so the shared vantage stays in sync. Dolly is
+        // perspective-only and has no meaning for this orthographic projection.
+        let center = Point3::vector(
+            auto_center.x + view.pan.x * radius,
+            auto_center.y + view.pan.y * radius,
+            auto_center.z + view.pan.z * radius,
+        );
         let diameter = radius * 2.0;
         let scale = drawing.width().min(drawing.height()) / diameter * 0.92 * view.zoom;
 
@@ -4159,6 +4261,142 @@ mod tests {
         assert_close(zoomed.scale / base.scale, 1.25);
     }
 
+    #[test]
+    fn orbit_projector_pans_rigidly_by_pan_offset() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene =
+            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        let base =
+            OrbitProjector::from_points(&scene.points, drawing, View3dState::default()).unwrap();
+        let mut panned_view = View3dState::default();
+        panned_view.pan = Vec3::new(0.3, -0.15, 0.05);
+        let panned = OrbitProjector::from_points(&scene.points, drawing, panned_view).unwrap();
+
+        // Pan is a uniform world translation of the pivot, so in the orthographic
+        // view every point shifts on screen by the SAME vector (a rigid pan), by a
+        // non-trivial amount.
+        let pa = scene.points[0];
+        let pb = scene.points[scene.points.len() / 2];
+        let shift_a = panned.project_point(pa).pos - base.project_point(pa).pos;
+        let shift_b = panned.project_point(pb).pos - base.project_point(pb).pos;
+        assert!(
+            shift_a.length() > 1.0,
+            "pan must move the projection: {shift_a:?}"
+        );
+        assert!(
+            (shift_a - shift_b).length() < 1e-2,
+            "pan must be rigid across all points: {shift_a:?} vs {shift_b:?}"
+        );
+    }
+
+    #[test]
+    fn pan_drag_is_zero_for_zero_delta() {
+        let mut v = View3dState::default();
+        v.pan(Vec2::ZERO, 600.0);
+        assert_eq!(v.pan, Vec3::ZERO);
+    }
+
+    #[test]
+    fn horizontal_pan_moves_along_world_right_opposite_the_drag() {
+        let (right, up) = View3dState::default().screen_basis();
+        let mut v = View3dState::default();
+        v.pan(Vec2::new(40.0, 0.0), 600.0);
+        // Grab-the-scene: dragging right slides the pivot along −right (so the
+        // content under the cursor tracks it), with no vertical component.
+        assert!(
+            v.pan.dot(up).abs() < 1e-6,
+            "horizontal drag must not pan vertically: {:?}",
+            v.pan
+        );
+        assert!(
+            v.pan.dot(right) < 0.0,
+            "drag right → pivot moves −right (grab scene): {:?}",
+            v.pan
+        );
+    }
+
+    #[test]
+    fn vertical_pan_moves_along_world_up_with_the_drag() {
+        let (right, up) = View3dState::default().screen_basis();
+        let mut v = View3dState::default();
+        v.pan(Vec2::new(0.0, 40.0), 600.0); // egui y grows downward
+        assert!(
+            v.pan.dot(right).abs() < 1e-6,
+            "vertical drag must not pan horizontally: {:?}",
+            v.pan
+        );
+        assert!(
+            v.pan.dot(up) > 0.0,
+            "drag down → pivot moves +up (grab scene): {:?}",
+            v.pan
+        );
+    }
+
+    #[test]
+    fn telephoto_zoom_reduces_the_pan_rate() {
+        let mut wide = View3dState::default();
+        wide.pan(Vec2::new(0.0, 30.0), 600.0);
+        let mut tele = View3dState::default();
+        tele.zoom = 2.0;
+        tele.pan(Vec2::new(0.0, 30.0), 600.0);
+        assert!(wide.pan.length() > 0.0);
+        assert!(
+            (tele.pan.length() - wide.pan.length() * 0.5).abs() < 1e-4 * wide.pan.length(),
+            "2× telephoto zoom should halve the pan rate: wide={}, tele={}",
+            wide.pan.length(),
+            tele.pan.length()
+        );
+    }
+
+    #[test]
+    fn pan_is_clamped_to_a_maximum_radius() {
+        let mut v = View3dState::default();
+        for _ in 0..2000 {
+            v.pan(Vec2::new(0.0, 100.0), 600.0);
+        }
+        assert!(
+            v.pan.length() <= PAN_MAX_RADII + 1e-3,
+            "pan length must be bounded: {}",
+            v.pan.length()
+        );
+    }
+
+    #[test]
+    fn dolly_by_multiplies_and_clamps() {
+        let mut v = View3dState::default();
+        v.dolly_by(0.5);
+        assert!((v.dolly - 0.5).abs() < 1e-6, "dolly is multiplicative");
+
+        let mut close = View3dState::default();
+        close.dolly_by(0.0001);
+        assert!((close.dolly - DOLLY_MIN).abs() < 1e-6, "dolly clamps to DOLLY_MIN");
+
+        let mut far = View3dState::default();
+        far.dolly_by(1000.0);
+        assert!((far.dolly - DOLLY_MAX).abs() < 1e-6, "dolly clamps to DOLLY_MAX");
+
+        let mut keep = View3dState::default();
+        keep.dolly_by(-1.0);
+        keep.dolly_by(f32::NAN);
+        assert!((keep.dolly - 1.0).abs() < 1e-6, "invalid factors are ignored");
+    }
+
+    #[test]
+    fn snapping_to_a_face_reframes_by_clearing_pan_and_dolly() {
+        // Clicking a view-cube face re-frames the model, so any accumulated pan or
+        // dolly is cleared — otherwise the snapped view could stay panned off the
+        // model or dollied inside it.
+        let mut v = View3dState::default();
+        v.pan = Vec3::new(2.0, -1.0, 0.5);
+        v.dolly = 0.4;
+        v.snap_to(ViewCubeAction::FRONT);
+        assert_eq!(v.pan, Vec3::ZERO, "face snap must recenter the pan");
+        assert!((v.dolly - 1.0).abs() < 1e-6, "face snap must reset the dolly");
+    }
+
     /// The Render view and the interactive 3D view share one `View3dState`, so a
     /// given (yaw, pitch, zoom) must frame the model from the *same* vantage in
     /// both. The path tracer's [`framer_render::camera::Camera`] is built to match
@@ -4166,7 +4404,6 @@ mod tests {
     /// switching back to 3D can never flip or mirror the camera.
     #[test]
     fn render_camera_matches_orbit_projector_orientation() {
-        use framer_render::math::Vec3;
 
         // Project a world point through the path tracer's camera into normalized
         // device coordinates (origin centered, +x right, +y up), plus its
@@ -4199,6 +4436,7 @@ mod tests {
                 yaw: 0.7,
                 pitch: 0.3,
                 zoom: 1.0,
+                ..View3dState::default()
             },
         ];
 
@@ -4228,6 +4466,7 @@ mod tests {
                 view.zoom,
                 aspect,
                 36.0,
+                1.0,
             );
             for (ox, oy, oz) in offsets {
                 let point = Point3::vector(center.x + ox, center.y + oy, center.z + oz);
@@ -4273,7 +4512,6 @@ mod tests {
     /// scale.
     #[test]
     fn render_zoom_magnifies_uniformly_like_the_orbit_projector() {
-        use framer_render::math::Vec3;
 
         fn render_ndc(camera: &framer_render::camera::Camera, point: Point3) -> (f32, f32) {
             let to_point = Vec3::new(point.x, point.y, point.z) - camera.eye;
@@ -4304,6 +4542,7 @@ mod tests {
                 zoom,
                 aspect,
                 36.0,
+                1.0,
             )
         };
 
@@ -4311,6 +4550,7 @@ mod tests {
             yaw: -FRAC_PI_4,
             pitch: 0.5,
             zoom: 1.0,
+            ..View3dState::default()
         };
         let base_proj = OrbitProjector::from_points(&points, drawing, base_view).unwrap();
         let base_cam = make_camera(1.0);

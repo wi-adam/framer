@@ -286,7 +286,7 @@ mod tests {
         let materials = vec![Material::Diffuse {
             albedo: Vec3::new(0.1, 0.2, 0.3),
         }];
-        let camera = Camera::orbit(Vec3::ZERO, 2.0, -0.6, 0.4, 1.0, 1.5, 36.0);
+        let camera = Camera::orbit(Vec3::ZERO, 2.0, -0.6, 0.4, 1.0, 1.5, 36.0, 1.0);
         let sun = DirectionalSun {
             dir: Vec3::new(0.3, 0.2, 1.0).normalize(),
             irradiance: Vec3::splat(4.0),

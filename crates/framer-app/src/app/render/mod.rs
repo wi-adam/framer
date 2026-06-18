@@ -196,13 +196,20 @@ fn dispatch_spp(frame: u32, pixels: u64, moving: bool) -> u32 {
     if moving { spp.min(MOTION_SPP_CAP) } else { spp }
 }
 
-fn accumulation_key(geom_key: u64, opts: &RenderOptions, width: u32, height: u32) -> u64 {
+/// Hashes everything that, if changed, invalidates progressive accumulation:
+/// geometry, the full camera (orbit + pan + dolly + zoom), and the render size.
+/// Shared by the GPU path and the CPU fallback so they reset identically.
+pub(crate) fn accumulation_key(geom_key: u64, opts: &RenderOptions, width: u32, height: u32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     geom_key.hash(&mut hasher);
     ((opts.yaw * 2000.0) as i64).hash(&mut hasher);
     ((opts.pitch * 2000.0) as i64).hash(&mut hasher);
     ((opts.zoom * 1000.0) as i64).hash(&mut hasher);
+    ((opts.pan.x * 2000.0) as i64).hash(&mut hasher);
+    ((opts.pan.y * 2000.0) as i64).hash(&mut hasher);
+    ((opts.pan.z * 2000.0) as i64).hash(&mut hasher);
+    ((opts.dolly * 1000.0) as i64).hash(&mut hasher);
     width.hash(&mut hasher);
     height.hash(&mut hasher);
     hasher.finish()
@@ -807,6 +814,28 @@ fn make_atrous_bind_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulation_key_reacts_to_pan_and_dolly() {
+        use framer_render::math::Vec3;
+        // A pan or dolly is a camera move and must restart progressive
+        // accumulation, exactly like yaw/pitch/zoom already do.
+        let base = RenderOptions::default();
+        let key = |opts: &RenderOptions| accumulation_key(42, opts, 800, 600);
+        let base_key = key(&base);
+
+        let panned = RenderOptions {
+            pan: Vec3::new(0.1, -0.2, 0.05),
+            ..base
+        };
+        let dollied = RenderOptions {
+            dolly: 0.5,
+            ..base
+        };
+
+        assert_ne!(base_key, key(&panned), "pan must invalidate the accumulator");
+        assert_ne!(base_key, key(&dollied), "dolly must invalidate the accumulator");
+    }
 
     /// The original budget-bounded burst, kept here as the reference the still
     /// path must continue to match exactly.
