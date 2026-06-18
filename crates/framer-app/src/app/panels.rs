@@ -102,6 +102,30 @@ impl FramerApp {
             });
             widgets::tool_divider(ui);
 
+            widgets::tool_group(ui, "EDIT", |ui| {
+                let undo_tip = match self.history.undo_label() {
+                    Some(label) => format!("Undo {label}  (⌘Z / Ctrl+Z)"),
+                    None => "Nothing to undo  (⌘Z / Ctrl+Z)".to_owned(),
+                };
+                if widgets::tool_button(ui, Icon::Undo, "Undo", false, self.history.can_undo())
+                    .on_hover_text(undo_tip)
+                    .clicked()
+                {
+                    self.undo();
+                }
+                let redo_tip = match self.history.redo_label() {
+                    Some(label) => format!("Redo {label}  (⌘⇧Z / Ctrl+Y)"),
+                    None => "Nothing to redo  (⌘⇧Z / Ctrl+Y)".to_owned(),
+                };
+                if widgets::tool_button(ui, Icon::Redo, "Redo", false, self.history.can_redo())
+                    .on_hover_text(redo_tip)
+                    .clicked()
+                {
+                    self.redo();
+                }
+            });
+            widgets::tool_divider(ui);
+
             widgets::tool_group(ui, "SAMPLES", |ui| {
                 if widgets::tool_button(ui, Icon::Shell, "Shell", false, true)
                     .on_hover_text("Load the multi-wall shell demo")
@@ -556,6 +580,16 @@ impl FramerApp {
 
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let mut changed = false;
+        // Capture a pre-edit baseline for the undo transaction, but only while
+        // an interaction could open one (pointer down or a text field focused)
+        // and none is already in flight — so idle frames never clone the model.
+        let edit_base = if !self.history.is_pending()
+            && (ui.ctx().input(|input| input.pointer.any_down()) || ui.ctx().text_edit_focused())
+        {
+            Some(self.snapshot())
+        } else {
+            None
+        };
         let selection = self.selected.clone();
         let can_edit = self.workspace_mode.allows_design_edits();
         let level_options = self
@@ -964,6 +998,14 @@ impl FramerApp {
         }
 
         if changed {
+            // Open one coalesced undo step for this inspector edit run. begin()
+            // is a no-op once a transaction is already in flight, so a drag
+            // across many frames collapses to a single step; settle_history()
+            // (end of frame) commits it when the interaction ends.
+            if let Some(base) = edit_base {
+                let label = inspector_edit_label(&self.selected);
+                self.begin_inspector_edit(base, label);
+            }
             self.rebuild();
         }
 
@@ -1248,6 +1290,20 @@ fn short_status(status: &str) -> String {
         .next()
         .unwrap_or("Ready")
         .to_owned()
+}
+
+/// A coarse, selection-derived label for an inspector edit, shown on the Undo
+/// button (e.g. "Undo Edit wall"). Inspector edits are coalesced per selection,
+/// so a single label per selected-object kind is the right granularity.
+fn inspector_edit_label(selection: &Selection) -> &'static str {
+    match selection {
+        Selection::Level(_) => "Edit level",
+        Selection::Wall => "Edit wall",
+        Selection::Opening(_) => "Edit opening",
+        Selection::Dimension(_) => "Edit dimension",
+        Selection::Join(_) => "Edit join",
+        Selection::Member { .. } => "Edit",
+    }
 }
 
 fn toolbar_divider(ui: &mut Ui) {
