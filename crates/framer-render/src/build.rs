@@ -30,6 +30,13 @@ pub struct RenderOptions {
     pub yaw: f32,
     pub pitch: f32,
     pub zoom: f32,
+    /// Orbit-pivot offset in *radius-relative* world units: the effective pivot is
+    /// `framing.center + pan * framing.radius`. Lets the interactive view slide the
+    /// framing without knowing the model's absolute scale.
+    pub pan: Vec3,
+    /// Eye-distance multiplier along the view axis (`1.0` frames the model; `< 1`
+    /// dives in, `> 1` pulls back). See [`Camera::orbit`].
+    pub dolly: f32,
     pub aspect: f32,
     pub vfov_deg: f32,
     pub exposure: f32,
@@ -44,6 +51,8 @@ impl Default for RenderOptions {
             yaw: -std::f32::consts::FRAC_PI_4,
             pitch: 0.42,
             zoom: 1.0,
+            pan: Vec3::ZERO,
+            dolly: 1.0,
             aspect: 16.0 / 9.0,
             vfov_deg: 36.0,
             exposure: 1.0,
@@ -99,16 +108,19 @@ pub struct SceneFraming {
 }
 
 impl SceneFraming {
-    /// The orbit camera for this framing under the given view options.
+    /// The orbit camera for this framing under the given view options. `opts.pan`
+    /// slides the pivot by `pan * radius` (radius-relative world units) before the
+    /// orbit is constructed, so panning then orbiting rotates around the new pivot.
     pub fn camera(&self, opts: &RenderOptions) -> Camera {
         Camera::orbit(
-            self.center,
+            self.center + opts.pan * self.radius,
             self.radius,
             opts.yaw,
             opts.pitch,
             opts.zoom,
             opts.aspect,
             opts.vfov_deg,
+            opts.dolly,
         )
     }
 }
@@ -386,6 +398,41 @@ mod tests {
         wall.openings = openings;
         model.walls.push(wall);
         model
+    }
+
+    #[test]
+    fn pan_translates_the_camera_rigidly_by_pan_times_radius() {
+        // Pan offsets the orbit pivot by `pan * radius` (radius-relative world
+        // units). The whole rig translates rigidly: the pivot and the eye shift by
+        // the same vector, and the view basis is unchanged (pan does not rotate).
+        let framing = SceneFraming {
+            center: Vec3::new(10.0, -4.0, 2.0),
+            radius: 8.0,
+        };
+        let base = framing.camera(&RenderOptions {
+            pan: Vec3::ZERO,
+            ..RenderOptions::default()
+        });
+        let pan = Vec3::new(0.25, -0.5, 0.1);
+        let panned = framing.camera(&RenderOptions {
+            pan,
+            ..RenderOptions::default()
+        });
+
+        let expected = pan * framing.radius;
+        assert!(
+            (panned.center - (base.center + expected)).length() < 1e-4,
+            "pivot must shift by pan*radius: base={:?}, panned={:?}",
+            base.center,
+            panned.center
+        );
+        assert!(
+            (panned.eye - (base.eye + expected)).length() < 1e-4,
+            "eye must shift by the same offset (rigid translation)"
+        );
+        assert_eq!(base.forward, panned.forward, "pan must not rotate the view");
+        assert_eq!(base.right, panned.right);
+        assert_eq!(base.up, panned.up);
     }
 
     #[test]

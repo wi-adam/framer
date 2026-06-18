@@ -134,7 +134,7 @@ mod tests {
 
     /// A camera high above the origin looking straight down at the z=0 plane.
     fn top_down_camera() -> Camera {
-        let mut c = Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.0, 1.0, 1.0, 40.0);
+        let mut c = Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.0, 1.0, 1.0, 40.0, 1.0);
         c.eye = Vec3::new(0.0, 0.0, 10.0);
         c.center = Vec3::ZERO;
         c.forward = Vec3::new(0.0, 0.0, -1.0);

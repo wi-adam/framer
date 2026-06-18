@@ -99,6 +99,7 @@ pub fn reference_scene() -> Scene {
         1.0,
         REFERENCE_WIDTH as f32 / REFERENCE_HEIGHT as f32,
         42.0,
+        1.0,
     );
     let sun = DirectionalSun {
         dir: Vec3::new(0.4, -0.3, 0.85).normalize(),
