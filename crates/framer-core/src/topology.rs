@@ -7,6 +7,8 @@
 //! Slice 2 only connects walls that share endpoints (corner-formed loops);
 //! mid-span (Tee) intersections arrive with interior-wall framing.
 
+use std::collections::HashSet;
+
 use crate::{BuildingModel, Length, Point2};
 
 /// The derived geometry of a room: its boundary loop (counterclockwise), its
@@ -38,6 +40,24 @@ pub fn room_boundary(model: &BuildingModel, seed: Point2) -> Option<RoomBoundary
         .map(RoomBoundary::from_vertices)
 }
 
+/// Resolve many room seeds against the wall graph at once: the bounded faces are
+/// computed a single time and each seed (in order) is matched to its enclosing
+/// face. Returns `None` for any seed not inside a closed loop. Prefer this over
+/// calling [`room_boundary`] in a loop.
+pub fn room_boundaries(model: &BuildingModel, seeds: &[Point2]) -> Vec<Option<RoomBoundary>> {
+    let faces = bounded_faces(model);
+    seeds
+        .iter()
+        .map(|seed| {
+            faces
+                .iter()
+                .find(|vertices| point_in_polygon(*seed, vertices))
+                .cloned()
+                .map(RoomBoundary::from_vertices)
+        })
+        .collect()
+}
+
 impl RoomBoundary {
     fn from_vertices(vertices: Vec<Point2>) -> Self {
         let perimeter = polygon_perimeter(&vertices);
@@ -54,7 +74,7 @@ impl RoomBoundary {
 fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
     // Nodes: unique wall endpoints.
     let mut nodes: Vec<Point2> = Vec::new();
-    let mut node_index = |point: Point2, nodes: &mut Vec<Point2>| -> usize {
+    let node_index = |point: Point2, nodes: &mut Vec<Point2>| -> usize {
         match nodes.iter().position(|candidate| *candidate == point) {
             Some(index) => index,
             None => {
@@ -64,9 +84,11 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
         }
     };
 
-    // Directed half-edges, pushed in twin pairs so twin(i) == i ^ 1.
+    // Directed half-edges. CRITICAL INVARIANT: each wall pushes its two
+    // directions consecutively, so the twin of edge `i` is always `i ^ 1`. The
+    // face traversal below relies on this; do not reorder these pushes.
     let mut half_edges: Vec<(usize, usize)> = Vec::new();
-    let mut seen_edges: Vec<(usize, usize)> = Vec::new();
+    let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for wall in &model.walls {
         if wall.start == wall.end {
             continue;
@@ -75,10 +97,9 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
         let to = node_index(wall.end, &mut nodes);
         // Skip a duplicate (overlapping) wall so the graph has no parallel edges.
         let undirected = (from.min(to), from.max(to));
-        if seen_edges.contains(&undirected) {
+        if !seen_edges.insert(undirected) {
             continue;
         }
-        seen_edges.push(undirected);
         half_edges.push((from, to));
         half_edges.push((to, from));
     }
@@ -267,6 +288,40 @@ mod tests {
         assert!((right.area_square_feet() - 48.0).abs() < 1e-6);
         assert_eq!(left.vertices.len(), 4);
         assert_eq!(right.vertices.len(), 4);
+    }
+
+    #[test]
+    fn l_shaped_room_resolves_with_correct_area() {
+        // A concave L-shaped loop (a 12×12 square with a 6×6 bite out of the
+        // top-right): 12*12 - 6*6 = 108 sq ft. Six walls, all corner-joined.
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let (a, b) = (72.0, 144.0); // 6ft, 12ft in inches
+        let pts = [p(0.0, 0.0), p(b, 0.0), p(b, a), p(a, a), p(a, b), p(0.0, b)];
+        for index in 0..pts.len() {
+            let next = (index + 1) % pts.len();
+            model
+                .walls
+                .push(wall(&format!("w-{index}"), pts[index], pts[next]));
+        }
+
+        let boundary = room_boundary(&model, p(36.0, 36.0)).expect("seed inside the L");
+
+        assert_eq!(boundary.vertices.len(), 6);
+        assert!((boundary.area_square_feet() - 108.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn room_boundaries_batch_matches_seeds_in_order() {
+        let model = rect_model(12.0, 8.0);
+        let results = room_boundaries(&model, &[p(72.0, 48.0), p(10_000.0, 10_000.0)]);
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0]
+                .as_ref()
+                .is_some_and(|b| (b.area_square_feet() - 96.0).abs() < 1e-6)
+        );
+        assert!(results[1].is_none());
     }
 
     #[test]

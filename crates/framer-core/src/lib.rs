@@ -15,5 +15,5 @@ pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,
     save_project,
 };
-pub use topology::{RoomBoundary, room_boundary};
+pub use topology::{RoomBoundary, room_boundaries, room_boundary};
 pub use units::{Length, Point2};

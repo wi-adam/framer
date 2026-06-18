@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
-    DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Wall,
+    DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room, RoomUsage, Wall,
     load_project as load_project_document, save_project as save_project_document,
 };
 use framer_solver::{
@@ -30,7 +30,7 @@ use draw_wall::corner_joins_for_new_wall;
 use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
-    next_dimension_id, next_opening_id, next_wall_id,
+    next_dimension_id, next_opening_id, next_room_id, next_wall_id,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState};
@@ -62,6 +62,7 @@ pub(crate) struct FramerApp {
     render_motion_cooldown: u32,
     dimension_tool: DimensionToolState,
     draw_wall_tool: DrawWallToolState,
+    room_tool_active: bool,
     opening_drag: Option<OpeningDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     /// Whether the active adapter supports compute shaders (GPU path tracer);
@@ -101,6 +102,7 @@ enum Selection {
     Opening(String),
     Dimension(String),
     Join(String),
+    Room(String),
     Member { wall_id: String, member_id: String },
 }
 
@@ -156,6 +158,14 @@ enum ViewClick {
     /// Cancel the in-progress draw-wall run (e.g. right-click) without leaving
     /// the tool.
     DrawWallCancel,
+    /// A room-tool click placing a room at a model point inside a closed loop.
+    PlaceRoom {
+        point: Point2,
+    },
+    /// Select an existing room (e.g. clicking its fill in the plan).
+    Room {
+        room_id: String,
+    },
     Member {
         wall_id: String,
         member_id: String,
@@ -241,6 +251,7 @@ impl Default for FramerApp {
             render_motion_cooldown: 0,
             dimension_tool: DimensionToolState::default(),
             draw_wall_tool: DrawWallToolState::default(),
+            room_tool_active: false,
             opening_drag: None,
             gpu_target_format: None,
             gpu_compute_ok: false,
@@ -402,6 +413,7 @@ impl FramerApp {
     fn reset_tools(&mut self) {
         self.dimension_tool = DimensionToolState::default();
         self.draw_wall_tool = DrawWallToolState::default();
+        self.room_tool_active = false;
         self.opening_drag = None;
     }
 
@@ -550,6 +562,7 @@ impl FramerApp {
             escape_pressed,
             dimension_pressed,
             draw_wall_pressed,
+            room_pressed,
             delete_pressed,
             redo_pressed,
             undo_pressed,
@@ -557,6 +570,7 @@ impl FramerApp {
             let escape = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
             let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
             let draw_wall = input.consume_key(egui::Modifiers::NONE, egui::Key::W);
+            let room = input.consume_key(egui::Modifiers::NONE, egui::Key::R);
             let delete = input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
             // Redo MUST be consumed before undo: egui's consume_key matches
@@ -569,7 +583,7 @@ impl FramerApp {
             ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
             // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
             let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            (escape, dimension, draw_wall, delete, redo, undo)
+            (escape, dimension, draw_wall, room, delete, redo, undo)
         });
 
         if undo_pressed {
@@ -584,14 +598,17 @@ impl FramerApp {
             self.activate_dimension_tool();
         } else if draw_wall_pressed {
             self.toggle_draw_wall_tool();
+        } else if room_pressed {
+            self.toggle_room_tool();
         }
     }
 
-    /// Delete whatever authored element is selected (wall or opening).
+    /// Delete whatever authored element is selected (wall, opening, or room).
     fn delete_selected(&mut self) {
         match &self.selected {
             Selection::Opening(_) => self.delete_selected_opening(),
             Selection::Wall => self.delete_selected_wall(),
+            Selection::Room(_) => self.delete_selected_room(),
             _ => {}
         }
     }
@@ -604,6 +621,7 @@ impl FramerApp {
         self.dimension_tool.active = true;
         self.dimension_tool.clear_picks();
         self.draw_wall_tool = DrawWallToolState::default();
+        self.room_tool_active = false;
         self.opening_drag = None;
         self.dimension_status =
             Some("Pick two anchors, then move the pointer to place the dimension".to_owned());
@@ -624,6 +642,7 @@ impl FramerApp {
             }
             self.dimension_tool.active = false;
             self.dimension_tool.clear_picks();
+            self.room_tool_active = false;
             self.opening_drag = None;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
@@ -661,6 +680,12 @@ impl FramerApp {
             return;
         }
 
+        if self.room_tool_active {
+            self.room_tool_active = false;
+            self.dimension_status = None;
+            return;
+        }
+
         if self.opening_drag.is_some() {
             self.opening_drag = None;
             return;
@@ -693,7 +718,10 @@ impl FramerApp {
                 }
                 self.selected = Selection::Wall;
             }
-            Selection::Level(_) | Selection::Opening(_) | Selection::Join(_) => {
+            Selection::Level(_)
+            | Selection::Opening(_)
+            | Selection::Join(_)
+            | Selection::Room(_) => {
                 self.selected = Selection::Wall;
             }
             Selection::Dimension(_) => unreachable!("dimension selections exit above"),
@@ -775,6 +803,83 @@ impl FramerApp {
                 app.selected = Selection::Wall;
             }
         });
+    }
+
+    /// Add a room with the given seed point as one undo step. The seed locates the
+    /// bounding wall loop; enclosure is checked by the caller (the room tool).
+    fn add_room(&mut self, seed: Point2) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add room", |app| {
+            let (id, index) = next_room_id(&app.model);
+            let level = app
+                .model
+                .levels
+                .first()
+                .map(|level| level.id.0.clone())
+                .unwrap_or_else(|| "level-1".to_owned());
+            let room = Room::new(
+                id.clone(),
+                format!("Room {index}"),
+                RoomUsage::Unspecified,
+                level,
+                seed,
+            );
+            app.model.rooms.push(room);
+            app.selected = Selection::Room(id);
+        });
+    }
+
+    /// Delete the selected room as one undo step.
+    fn delete_selected_room(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::Room(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete room", |app| {
+            let before = app.model.rooms.len();
+            app.model.rooms.retain(|room| room.id.0 != id);
+            if app.model.rooms.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    /// Toggle the room tool. Activating it switches to the Plan view, enters
+    /// Design mode, and disables the other tools.
+    fn toggle_room_tool(&mut self) {
+        self.room_tool_active = !self.room_tool_active;
+        if self.room_tool_active {
+            if !self.workspace_mode.allows_design_edits() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            self.dimension_tool.active = false;
+            self.dimension_tool.clear_picks();
+            self.draw_wall_tool = DrawWallToolState::default();
+            self.opening_drag = None;
+            self.viewport_mode = ViewportMode::Plan;
+            self.dimension_status =
+                Some("Click inside an enclosed area to place a room".to_owned());
+        } else {
+            self.dimension_status = None;
+        }
+    }
+
+    /// Place a room from a room-tool click, but only when the point is inside a
+    /// closed wall loop.
+    fn handle_place_room(&mut self, point: Point2) {
+        if !self.room_tool_active {
+            return;
+        }
+        if framer_core::room_boundary(&self.model, point).is_some() {
+            self.add_room(point);
+        } else {
+            self.dimension_status =
+                Some("No enclosed area here — close a wall loop first".to_owned());
+        }
     }
 
     fn add_opening(&mut self, kind: OpeningKind) {
@@ -1109,6 +1214,12 @@ impl FramerApp {
             }
             ViewClick::DrawWallCancel => {
                 self.draw_wall_tool.start = None;
+            }
+            ViewClick::PlaceRoom { point } => {
+                self.handle_place_room(point);
+            }
+            ViewClick::Room { room_id } => {
+                self.selected = Selection::Room(room_id);
             }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {

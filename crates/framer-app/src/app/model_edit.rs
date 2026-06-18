@@ -296,6 +296,18 @@ pub(super) fn next_wall_id(model: &BuildingModel) -> (String, usize) {
     }
 }
 
+/// Generate the next free `room-N` id, unique across every room in the model.
+pub(super) fn next_room_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.rooms.len() + 1;
+    loop {
+        let id = format!("room-{index}");
+        if model.rooms.iter().all(|room| room.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
 pub(super) fn next_opening_id(wall: &Wall, prefix: &str) -> (String, usize) {
     let mut index = wall.openings.len() + 1;
     loop {
@@ -515,6 +527,25 @@ mod tests {
 
         // 72 + 17.3125 = 89.3125 in, snapped to the nearest inch.
         assert_eq!(wall.openings[0].center, Length::from_whole_inches(89));
+    }
+
+    #[test]
+    fn next_room_id_is_globally_unique() {
+        use framer_core::{Point2, Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code);
+        model.rooms.push(Room::new(
+            "room-1",
+            "One",
+            RoomUsage::Unspecified,
+            "level-1",
+            Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
+        ));
+
+        let (id, index) = next_room_id(&model);
+
+        assert!(model.rooms.iter().all(|room| room.id.0 != id));
+        assert_eq!(id, format!("room-{index}"));
     }
 
     #[test]

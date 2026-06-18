@@ -233,8 +233,16 @@ impl FramerApp {
                     {
                         self.toggle_draw_wall_tool();
                     }
-                    let can_delete =
-                        matches!(self.selected, Selection::Wall | Selection::Opening(_));
+                    if widgets::tool_button(ui, Icon::Shell, "Room", self.room_tool_active, true)
+                        .on_hover_text("Place a room inside an enclosed area (R)")
+                        .clicked()
+                    {
+                        self.toggle_room_tool();
+                    }
+                    let can_delete = matches!(
+                        self.selected,
+                        Selection::Wall | Selection::Opening(_) | Selection::Room(_)
+                    );
                     if widgets::tool_button(ui, Icon::Delete, "Delete", false, can_delete)
                         .on_hover_text("Delete the selected wall or opening (Del)")
                         .clicked()
@@ -354,6 +362,7 @@ impl FramerApp {
         self.dimension_tool.clear_picks();
         if self.dimension_tool.active {
             self.draw_wall_tool = DrawWallToolState::default();
+            self.room_tool_active = false;
         }
         self.opening_drag = None;
         self.dimension_status = if self.dimension_tool.active {
@@ -414,6 +423,12 @@ impl FramerApp {
                         .wall_joins
                         .iter()
                         .map(|join| (join.id.0.clone(), join.name.clone(), join.kind))
+                        .collect();
+                    let rooms: Vec<_> = self
+                        .model
+                        .rooms
+                        .iter()
+                        .map(|room| (room.id.0.clone(), room.name.clone(), room.level.0.clone()))
                         .collect();
 
                     for (level_id, level_name) in levels {
@@ -494,6 +509,22 @@ impl FramerApp {
                                         }
                                     }
                                 });
+                            }
+
+                            for (room_id, room_name, room_level) in &rooms {
+                                if room_level != &level_id {
+                                    continue;
+                                }
+                                let selected = matches!(
+                                    &self.selected,
+                                    Selection::Room(id) if id == room_id
+                                );
+                                if ui
+                                    .selectable_label(selected, format!("Room: {room_name}"))
+                                    .clicked()
+                                {
+                                    self.selected = Selection::Room(room_id.clone());
+                                }
                             }
                         });
                     }
@@ -648,6 +679,43 @@ impl FramerApp {
                     }
                 } else {
                     ui.label("Level no longer exists");
+                }
+            }
+            Selection::Room(id) => {
+                let boundary = self
+                    .model
+                    .rooms
+                    .iter()
+                    .find(|room| room.id.0 == id)
+                    .and_then(|room| framer_core::room_boundary(&self.model, room.seed));
+                if let Some(room) = self.model.rooms.iter_mut().find(|room| room.id.0 == id) {
+                    ui.label(&room.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut room.name);
+                        ComboBox::from_id_salt("room-usage")
+                            .selected_text(room.usage.label())
+                            .show_ui(ui, |ui| {
+                                for usage in framer_core::RoomUsage::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut room.usage, usage, usage.label())
+                                        .changed();
+                                }
+                            });
+                    } else {
+                        ui.label(&room.name);
+                        ui.label(format!("Usage: {}", room.usage.label()));
+                    }
+                    match &boundary {
+                        Some(boundary) => {
+                            ui.label(format!("Area: {:.0} sq ft", boundary.area_square_feet()));
+                            ui.label(format!("Perimeter: {}", boundary.perimeter));
+                        }
+                        None => {
+                            ui.label("Boundary: open (not enclosed)");
+                        }
+                    }
+                } else {
+                    ui.label("Room no longer exists");
                 }
             }
             Selection::Wall => {
@@ -1237,6 +1305,7 @@ impl FramerApp {
             Selection::Opening(id) => format!("Opening: {id}"),
             Selection::Dimension(id) => format!("Dimension: {id}"),
             Selection::Join(id) => format!("Join: {id}"),
+            Selection::Room(id) => format!("Room: {id}"),
             Selection::Member { member_id, .. } => format!("Member: {member_id}"),
         }
     }
@@ -1353,6 +1422,7 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Opening(_) => "Edit opening",
         Selection::Dimension(_) => "Edit dimension",
         Selection::Join(_) => "Edit join",
+        Selection::Room(_) => "Edit room",
         Selection::Member { .. } => "Edit",
     }
 }
@@ -1540,6 +1610,7 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Opening(_) => "Opening",
         Selection::Dimension(_) => "Dimension",
         Selection::Join(_) => "Join",
+        Selection::Room(_) => "Room",
         Selection::Member { .. } => "Member",
     }
 }

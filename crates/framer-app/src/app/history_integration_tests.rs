@@ -204,6 +204,44 @@ fn add_wall_rejects_non_ortho_segment() {
 }
 
 #[test]
+fn add_room_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.rooms.len();
+
+    // Seed inside the demo shell (28ft × 20ft).
+    app.add_room(Point2::new(
+        Length::from_feet(14.0),
+        Length::from_feet(10.0),
+    ));
+
+    assert_eq!(app.model.rooms.len(), before + 1);
+    assert_eq!(app.history.undo_label(), Some("Add room"));
+
+    app.undo();
+    assert_eq!(app.model.rooms.len(), before, "undo removes the added room");
+}
+
+#[test]
+fn delete_room_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    app.add_room(Point2::new(
+        Length::from_feet(14.0),
+        Length::from_feet(10.0),
+    ));
+    let id = match &app.selected {
+        Selection::Room(id) => id.clone(),
+        other => panic!("expected the new room selected, got {other:?}"),
+    };
+
+    app.delete_selected_room();
+    assert!(app.model.rooms.iter().all(|room| room.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete room"));
+
+    app.undo();
+    assert_eq!(app.model.rooms.len(), 1, "undo restores the deleted room");
+}
+
+#[test]
 fn delete_last_wall_leaves_consistent_state() {
     let mut app = FramerApp::default();
     // Delete every wall; this must not panic and must leave an empty model.

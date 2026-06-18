@@ -558,6 +558,7 @@ impl FramerApp {
                     &mut toolbar_anchor,
                     &mut self.plan_view,
                     &draw_tool,
+                    self.room_tool_active,
                 )
             }
             ViewportMode::Elevation => {
@@ -1298,6 +1299,7 @@ fn draw_project_plan(
     toolbar_out: &mut Option<Pos2>,
     camera: &mut View2dState,
     draw_tool: &DrawWallPlanInput,
+    room_tool_active: bool,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
@@ -1340,7 +1342,53 @@ fn draw_project_plan(
     let pointer = response.interact_pointer_pos();
     let mut clicked_wall = None;
     let mut clicked_opening = None;
+    let mut clicked_room = None;
     let mut over_element = false;
+
+    // Room fills + labels, drawn under the walls. Boundaries are derived from the
+    // wall loop each frame (never stored); resolve them all in one graph pass.
+    let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
+    let room_boundaries = framer_core::room_boundaries(model, &room_seeds);
+    for (room, boundary) in model.rooms.iter().zip(&room_boundaries) {
+        let Some(boundary) = boundary else {
+            continue;
+        };
+        let screen: Vec<Pos2> = boundary
+            .vertices
+            .iter()
+            .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
+            .collect();
+        let selected = matches!(selection, Selection::Room(id) if id == &room.id.0);
+        let fill = if selected {
+            theme::active_blue().gamma_multiply(0.22)
+        } else {
+            theme::framing_line().gamma_multiply(0.10)
+        };
+        painter.add(egui::Shape::convex_polygon(
+            screen.clone(),
+            fill,
+            Stroke::NONE,
+        ));
+        let label = plan_point(room.seed, bounds, drawing, camera);
+        painter.text(
+            label,
+            Align2::CENTER_CENTER,
+            format!("{}\n{:.0} sq ft", room.name, boundary.area_square_feet()),
+            FontId::proportional(11.0),
+            theme::framing_line_dark(),
+        );
+        // Selecting a room by click is the lowest-priority hit (walls/openings win),
+        // and only when no tool is active.
+        if !draw_tool.active
+            && !room_tool_active
+            && response.clicked()
+            && pointer.is_some_and(|position| point_in_screen_polygon(position, &screen))
+        {
+            clicked_room = Some(ViewClick::Room {
+                room_id: room.id.0.clone(),
+            });
+        }
+    }
 
     for join in &model.wall_joins {
         let point = plan_point(join.point, bounds, drawing, camera);
@@ -1372,7 +1420,7 @@ fn draw_project_plan(
         if selected {
             draw_selected_wall_handles(&painter, start, end);
         }
-        if hovered && response.clicked() && !draw_tool.active {
+        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
             clicked_wall = Some(ViewClick::Wall(index));
         }
 
@@ -1425,7 +1473,7 @@ fn draw_project_plan(
                     },
                 ),
             );
-            if opening_hovered && response.clicked() && !draw_tool.active {
+            if opening_hovered && response.clicked() && !draw_tool.active && !room_tool_active {
                 clicked_opening = Some(ViewClick::Opening {
                     wall_index: index,
                     opening_id: opening.id.0.clone(),
@@ -1441,9 +1489,9 @@ fn draw_project_plan(
     draw_view_title(&painter, drawing, "Whole-project plan");
     draw_plan_axis_indicator(&painter, drawing);
 
-    // Skip double-click-to-refit while drawing, so a quick second click that
-    // places a polyline point doesn't also reset the camera.
-    if !draw_tool.active {
+    // Skip double-click-to-refit while a placement tool is active, so a quick
+    // second click that places a point/room doesn't also reset the camera.
+    if !draw_tool.active && !room_tool_active {
         reset_view_on_empty_double_click(&response, camera, over_element);
     }
 
@@ -1455,7 +1503,37 @@ fn draw_project_plan(
         }
     }
 
-    clicked_opening.or(clicked_wall)
+    if room_tool_active && response.clicked() {
+        if let Some(cursor) = response
+            .interact_pointer_pos()
+            .filter(|c| drawing.contains(*c))
+        {
+            return Some(ViewClick::PlaceRoom {
+                point: plan_inverse_point(cursor, bounds, drawing, camera),
+            });
+        }
+    }
+
+    clicked_opening.or(clicked_wall).or(clicked_room)
+}
+
+/// Even-odd point-in-polygon test in screen space, for picking a room by click.
+fn point_in_screen_polygon(point: Pos2, vertices: &[Pos2]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (xi, yi) = (vertices[i].x, vertices[i].y);
+        let (xj, yj) = (vertices[j].x, vertices[j].y);
+        if (yi > point.y) != (yj > point.y) && point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Render the draw-wall tool's live preview (snap marker, rubber band, length
@@ -4635,9 +4713,11 @@ fn section_position(wall: &Wall, selection: &Selection) -> Option<Length> {
                 let end = dimension.end.local_x(wall)?;
                 Some((start + end) / 2)
             }),
-        Selection::Member { .. } | Selection::Join(_) | Selection::Level(_) | Selection::Wall => {
-            Some(wall.length / 2)
-        }
+        Selection::Member { .. }
+        | Selection::Join(_)
+        | Selection::Level(_)
+        | Selection::Room(_)
+        | Selection::Wall => Some(wall.length / 2),
     }
 }
 
