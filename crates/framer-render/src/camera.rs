@@ -31,25 +31,41 @@ impl Camera {
         aspect: f32,
         vfov_deg: f32,
     ) -> Self {
-        // Match OrbitProjector: right = (cos yaw, sin yaw), depth axis is its
-        // +90° rotation, and the look direction tilts by pitch toward +Z.
-        let cos_p = pitch.cos();
-        let depth_axis = Vec3::new(-yaw.sin(), yaw.cos(), 0.0);
-        // Positive pitch looks down from above (the natural architectural vantage),
-        // so the look direction tilts toward -Z.
-        let forward =
-            Vec3::new(depth_axis.x * cos_p, depth_axis.y * cos_p, -pitch.sin()).normalize();
-
-        let world_up = Vec3::new(0.0, 0.0, 1.0);
-        let right = forward.cross(world_up).normalize();
-        let up = right.cross(forward).normalize();
+        // Reproduce the OrbitProjector's screen basis exactly so the path tracer
+        // frames the model from the same vantage as the interactive 3D view (the
+        // two share one orbit state). The projector defines, in world space:
+        //   screen-right = (cos yaw, sin yaw, 0)
+        //   screen-up    = (sin yaw sin pitch, -cos yaw sin pitch, cos pitch)
+        //   eye offset   = (-sin yaw cos pitch, cos yaw cos pitch, sin pitch)  (toward the eye)
+        // so `forward` (eye → scene) is the negation of that eye offset. These are
+        // already orthonormal; `normalize` only guards against f32 drift.
+        //
+        // Deriving `right`/`up` from `forward × world_up` (the textbook approach)
+        // does NOT reproduce this basis — it yields a vertically mirrored view —
+        // because the projector's handedness is `forward = right × up`, not the
+        // usual `up = right × forward`. Construct all three explicitly instead.
+        let (sin_y, cos_y) = (yaw.sin(), yaw.cos());
+        let (sin_p, cos_p) = (pitch.sin(), pitch.cos());
+        // Positive pitch looks down from above (the natural architectural vantage):
+        // forward tilts toward -Z, placing the eye above the center.
+        let forward = Vec3::new(sin_y * cos_p, -cos_y * cos_p, -sin_p).normalize();
+        let right = Vec3::new(cos_y, sin_y, 0.0).normalize();
+        let up = Vec3::new(sin_y * sin_p, -cos_y * sin_p, cos_p).normalize();
 
         let vfov = vfov_deg.to_radians();
-        let half_h = (vfov * 0.5).tan();
+        // Zoom is telephoto, not dolly: narrow the field of view at a fixed framing
+        // distance instead of moving the eye toward the model. The interactive 3D
+        // view is an orthographic projection whose zoom magnifies the image
+        // uniformly; a dolly would instead dive into the room and exaggerate
+        // perspective as you zoom in, drifting out of sync with it. Narrowing the
+        // FOV scales the whole image uniformly about the center (matching the ortho
+        // zoom) and keeps the eye outside the model at any zoom.
+        let half_h = (vfov * 0.5).tan() / zoom.max(1.0e-3);
         let half_w = half_h * aspect;
 
-        // Distance that frames the bounding sphere, with a small margin.
-        let dist = radius / (vfov * 0.5).sin() * 1.05 / zoom.max(1.0e-3);
+        // Distance that frames the bounding sphere at zoom 1, with a small margin.
+        // Independent of zoom, so the camera never enters the model.
+        let dist = radius / (vfov * 0.5).sin() * 1.05;
         let eye = center - forward * dist;
 
         Self {
@@ -148,9 +164,20 @@ mod tests {
     }
 
     #[test]
-    fn zoom_moves_camera_closer() {
-        let near = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 2.0, 1.0, 40.0);
-        let far = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 1.0, 1.0, 40.0);
-        assert!(near.eye.length() < far.eye.length());
+    fn zoom_narrows_the_fov_without_moving_the_camera() {
+        // Telephoto zoom: the eye stays put (so the camera never dives into the
+        // model) while the field of view narrows, magnifying the image uniformly
+        // like the orthographic 3D view it must stay in sync with.
+        let base = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 1.0, 1.0, 40.0);
+        let zoomed = Camera::orbit(Vec3::ZERO, 5.0, 0.0, 0.4, 2.0, 1.0, 40.0);
+        assert!(
+            (zoomed.eye - base.eye).length() < 1e-5,
+            "zoom must not move the eye: base={:?} zoomed={:?}",
+            base.eye,
+            zoomed.eye
+        );
+        // 2× zoom halves the image-plane half-extents, so objects appear 2× larger.
+        assert!((base.half_h / zoomed.half_h - 2.0).abs() < 1e-4);
+        assert!((base.half_w / zoomed.half_w - 2.0).abs() < 1e-4);
     }
 }

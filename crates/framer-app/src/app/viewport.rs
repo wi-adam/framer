@@ -4159,6 +4159,205 @@ mod tests {
         assert_close(zoomed.scale / base.scale, 1.25);
     }
 
+    /// The Render view and the interactive 3D view share one `View3dState`, so a
+    /// given (yaw, pitch, zoom) must frame the model from the *same* vantage in
+    /// both. The path tracer's [`framer_render::camera::Camera`] is built to match
+    /// the [`OrbitProjector`]; this pins that agreement so orbiting in Render and
+    /// switching back to 3D can never flip or mirror the camera.
+    #[test]
+    fn render_camera_matches_orbit_projector_orientation() {
+        use framer_render::math::Vec3;
+
+        // Project a world point through the path tracer's camera into normalized
+        // device coordinates (origin centered, +x right, +y up), plus its
+        // view-space depth so we can require the probe sits in front of the eye.
+        fn render_ndc(camera: &framer_render::camera::Camera, point: Point3) -> (f32, f32, f32) {
+            let to_point = Vec3::new(point.x, point.y, point.z) - camera.eye;
+            let depth = to_point.dot(camera.forward);
+            let ndc_x = to_point.dot(camera.right) / depth / camera.half_w;
+            let ndc_y = to_point.dot(camera.up) / depth / camera.half_h;
+            (ndc_x, ndc_y, depth)
+        }
+
+        let points = model_3d_points(&BuildingModel::demo_shell()).unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let center = model_3d_center(&points);
+        let radius = model_3d_radius(&points, center).max(1.0);
+        let aspect = drawing.width() / drawing.height();
+
+        // A representative spread of orbit states: the default vantage, an
+        // orbit-dragged view, a snapped side, and an arbitrary positive-yaw angle.
+        let mut dragged = View3dState::default();
+        dragged.orbit(Vec2::new(60.0, -25.0));
+        let mut side = View3dState::default();
+        side.snap_to(ViewCubeAction::RIGHT);
+        let views = [
+            View3dState::default(),
+            dragged,
+            side,
+            View3dState {
+                yaw: 0.7,
+                pitch: 0.3,
+                zoom: 1.0,
+            },
+        ];
+
+        // Probe points offset from the model center along each world axis (and a
+        // couple of diagonals). The offset is a fraction of the radius so every
+        // probe stays comfortably inside the frustum, where perspective cannot
+        // flip a sign relative to the orthographic OrbitProjector.
+        let d = radius * 0.3;
+        let offsets = [
+            (d, 0.0, 0.0),
+            (-d, 0.0, 0.0),
+            (0.0, d, 0.0),
+            (0.0, -d, 0.0),
+            (0.0, 0.0, d),
+            (0.0, 0.0, -d),
+            (d, d, 0.0),
+            (-d, d, d),
+        ];
+
+        for view in views {
+            let projector = OrbitProjector::from_points(&points, drawing, view).unwrap();
+            let camera = framer_render::camera::Camera::orbit(
+                Vec3::new(center.x, center.y, center.z),
+                radius,
+                view.yaw,
+                view.pitch,
+                view.zoom,
+                aspect,
+                36.0,
+            );
+            for (ox, oy, oz) in offsets {
+                let point = Point3::vector(center.x + ox, center.y + oy, center.z + oz);
+                let screen = projector.project_point(point).pos;
+                let (ndc_x, ndc_y, depth) = render_ndc(&camera, point);
+                assert!(
+                    depth > 0.0,
+                    "probe must sit in front of the render camera (yaw={}, pitch={})",
+                    view.yaw,
+                    view.pitch
+                );
+
+                // egui screen-space is y-down; render NDC is y-up. A correct
+                // camera never disagrees in sign on either axis. Compare via the
+                // product so axes a probe lands exactly on (≈0 in both) are not
+                // tripped by floating-point dust.
+                let screen_dx = screen.x - projector.origin.x;
+                let screen_dy = screen.y - projector.origin.y;
+                assert!(
+                    screen_dx * ndc_x >= -1.0e-3,
+                    "horizontal mismatch: yaw={}, pitch={}, offset=({ox}, {oy}, {oz}): \
+                     screen_dx={screen_dx}, ndc_x={ndc_x}",
+                    view.yaw,
+                    view.pitch,
+                );
+                assert!(
+                    -screen_dy * ndc_y >= -1.0e-3,
+                    "vertical mismatch: yaw={}, pitch={}, offset=({ox}, {oy}, {oz}): \
+                     screen_dy={screen_dy}, ndc_y={ndc_y}",
+                    view.yaw,
+                    view.pitch,
+                );
+            }
+        }
+    }
+
+    /// Zoom must magnify the Render view uniformly — exactly like the orthographic
+    /// 3D view, where a zoom of `z` scales every on-screen offset by `z` about the
+    /// center. The path tracer achieves this with a telephoto zoom (narrowing the
+    /// field of view at a fixed distance); a dolly would instead magnify by a
+    /// depth-dependent amount and drift out of sync. Probes span a range of depths
+    /// so a dolly's perspective exaggeration would be caught, not just focal-plane
+    /// scale.
+    #[test]
+    fn render_zoom_magnifies_uniformly_like_the_orbit_projector() {
+        use framer_render::math::Vec3;
+
+        fn render_ndc(camera: &framer_render::camera::Camera, point: Point3) -> (f32, f32) {
+            let to_point = Vec3::new(point.x, point.y, point.z) - camera.eye;
+            let depth = to_point.dot(camera.forward);
+            (
+                to_point.dot(camera.right) / depth / camera.half_w,
+                to_point.dot(camera.up) / depth / camera.half_h,
+            )
+        }
+
+        // Relative closeness — robust at pixel scale, yet far tighter than a
+        // dolly's double-digit-percent magnification error off the focal plane.
+        fn close(actual: f32, expected: f32) -> bool {
+            (actual - expected).abs() <= 1.0e-3 * expected.abs().max(1.0)
+        }
+
+        let points = model_3d_points(&BuildingModel::demo_shell()).unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let center = model_3d_center(&points);
+        let radius = model_3d_radius(&points, center).max(1.0);
+        let aspect = drawing.width() / drawing.height();
+        let make_camera = |zoom: f32| {
+            framer_render::camera::Camera::orbit(
+                Vec3::new(center.x, center.y, center.z),
+                radius,
+                -FRAC_PI_4,
+                0.5,
+                zoom,
+                aspect,
+                36.0,
+            )
+        };
+
+        let base_view = View3dState {
+            yaw: -FRAC_PI_4,
+            pitch: 0.5,
+            zoom: 1.0,
+        };
+        let base_proj = OrbitProjector::from_points(&points, drawing, base_view).unwrap();
+        let base_cam = make_camera(1.0);
+
+        // Offsets toward and away from the eye, not just across the focal plane.
+        let d = radius * 0.35;
+        let offsets = [
+            (d, 0.0, 0.0),
+            (0.0, d, 0.0),
+            (0.0, 0.0, d),
+            (-d, -d, d),
+            (d, -d, -d),
+        ];
+
+        for zoom in [0.5_f32, 1.5, 2.5] {
+            let zoom_proj = OrbitProjector::from_points(
+                &points,
+                drawing,
+                View3dState { zoom, ..base_view },
+            )
+            .unwrap();
+            let zoom_cam = make_camera(zoom);
+            for (ox, oy, oz) in offsets {
+                let point = Point3::vector(center.x + ox, center.y + oy, center.z + oz);
+
+                // Orthographic 3D view: the offset from center scales by exactly zoom.
+                let base_screen = base_proj.project_point(point).pos - base_proj.origin;
+                let zoom_screen = zoom_proj.project_point(point).pos - zoom_proj.origin;
+                assert!(
+                    close(zoom_screen.x, base_screen.x * zoom)
+                        && close(zoom_screen.y, base_screen.y * zoom),
+                    "orbit projector zoom not uniform at zoom={zoom}, offset=({ox}, {oy}, {oz})"
+                );
+
+                // Render view: NDC must scale by the same zoom factor, regardless of
+                // the probe's depth (telephoto, not dolly).
+                let (bx, by) = render_ndc(&base_cam, point);
+                let (zx, zy) = render_ndc(&zoom_cam, point);
+                assert!(
+                    close(zx, bx * zoom) && close(zy, by * zoom),
+                    "render zoom not uniform at zoom={zoom}, offset=({ox}, {oy}, {oz}): \
+                     base=({bx}, {by}) zoomed=({zx}, {zy})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn wall_elevation_layout_preserves_wall_aspect_ratio() {
         let model = BuildingModel::demo_wall();
