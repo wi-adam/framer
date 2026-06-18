@@ -357,25 +357,19 @@ fn apply_view_2d_input(
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
     }
 
-    // Wheel / trackpad: a pinch or Cmd+scroll is cursor-anchored zoom; a plain
-    // two-finger scroll pans. Guarded on hover so it never hijacks global scroll
-    // (mirrors the Render view's hover guard).
+    // Wheel / trackpad zoom + pan. egui (zoom_modifier = COMMAND) already folds a
+    // trackpad pinch *and* a Cmd+scroll into `zoom_delta()`, zeroing
+    // `smooth_scroll_delta` for that input — so routing purely off those two
+    // keeps a zoom's scroll out of the pan path entirely (no smoothed-tail
+    // drift): a zoom factor != 1 zooms at the cursor, otherwise a non-zero scroll
+    // pans. Hover-guarded so it never hijacks global scroll.
     if response.hovered() && !panning {
-        let (scroll, pinch, cmd) = ui.input(|input| {
-            (
-                input.smooth_scroll_delta,
-                input.zoom_delta(),
-                input.modifiers.command,
-            )
-        });
-        if (pinch - 1.0).abs() > f32::EPSILON || cmd {
-            let factor = pinch * (scroll.y * 0.002).exp();
-            if (factor - 1.0).abs() > f32::EPSILON {
-                let cursor = response.hover_pos().unwrap_or_else(|| drawing.center());
-                camera.zoom_at(cursor, drawing, factor);
-            }
+        let (scroll, zoom) = ui.input(|input| (input.smooth_scroll_delta, input.zoom_delta()));
+        if (zoom - 1.0).abs() > f32::EPSILON {
+            let cursor = response.hover_pos().unwrap_or_else(|| drawing.center());
+            camera.zoom_at(cursor, drawing, zoom);
         } else if scroll != Vec2::ZERO {
-            // Two-finger scroll pans; the drawing tracks the fingers.
+            // Plain two-finger scroll pans; the drawing tracks the fingers.
             camera.pan_by(scroll, drawing);
         }
     }
