@@ -3,9 +3,10 @@
 //! Walls form a planar graph whose nodes are wall endpoints and whose edges are
 //! the walls. The bounded faces of that graph are the enclosed rooms. Given a
 //! `seed` point we find the bounded face containing it and report its boundary
-//! polygon, area, and perimeter. The math is general over straight segments, but
-//! Slice 2 only connects walls that share endpoints (corner-formed loops);
-//! mid-span (Tee) intersections arrive with interior-wall framing.
+//! polygon, area, and perimeter. Walls connect at shared endpoints (corners) and
+//! at mid-span junctions (a Tee partition meeting a through wall), which are
+//! split into sub-edges so interior walls carve rooms. The math is general over
+//! straight segments.
 
 use std::collections::HashSet;
 
@@ -72,36 +73,61 @@ impl RoomBoundary {
 
 /// All bounded faces of the wall graph, each as a counterclockwise vertex loop.
 fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
-    // Nodes: unique wall endpoints.
+    // Pass 1: nodes are the unique wall endpoints (these are also the mid-span
+    // junction points, since a Tee partition's endpoint lands on a through wall).
     let mut nodes: Vec<Point2> = Vec::new();
-    let node_index = |point: Point2, nodes: &mut Vec<Point2>| -> usize {
-        match nodes.iter().position(|candidate| *candidate == point) {
-            Some(index) => index,
-            None => {
-                nodes.push(point);
-                nodes.len() - 1
+    for wall in &model.walls {
+        if wall.start == wall.end {
+            continue;
+        }
+        for endpoint in [wall.start, wall.end] {
+            if !nodes.contains(&endpoint) {
+                nodes.push(endpoint);
             }
         }
+    }
+    let find = |point: Point2| {
+        nodes
+            .iter()
+            .position(|candidate| *candidate == point)
+            .unwrap()
     };
 
-    // Directed half-edges. CRITICAL INVARIANT: each wall pushes its two
-    // directions consecutively, so the twin of edge `i` is always `i ^ 1`. The
-    // face traversal below relies on this; do not reorder these pushes.
+    // Pass 2: split each wall at any node lying on its interior (a Tee/Cross
+    // junction), then emit a half-edge pair per sub-edge. CRITICAL INVARIANT:
+    // each sub-edge pushes its two directions consecutively, so the twin of edge
+    // `i` is always `i ^ 1`. The face traversal below relies on this.
     let mut half_edges: Vec<(usize, usize)> = Vec::new();
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for wall in &model.walls {
         if wall.start == wall.end {
             continue;
         }
-        let from = node_index(wall.start, &mut nodes);
-        let to = node_index(wall.end, &mut nodes);
-        // Skip a duplicate (overlapping) wall so the graph has no parallel edges.
-        let undirected = (from.min(to), from.max(to));
-        if !seen_edges.insert(undirected) {
-            continue;
+        let mut chain: Vec<Point2> = vec![wall.start, wall.end];
+        for &node in &nodes {
+            if wall.point_on_interior(node) {
+                chain.push(node);
+            }
         }
-        half_edges.push((from, to));
-        half_edges.push((to, from));
+        // Order the points along the wall by distance from its start.
+        chain.sort_by_key(|point| {
+            let dx = (point.x - wall.start.x).ticks();
+            let dy = (point.y - wall.start.y).ticks();
+            dx * dx + dy * dy
+        });
+        chain.dedup();
+
+        for pair in chain.windows(2) {
+            let from = find(pair[0]);
+            let to = find(pair[1]);
+            // Skip a duplicate (overlapping) sub-edge so the graph has no parallel edges.
+            let undirected = (from.min(to), from.max(to));
+            if !seen_edges.insert(undirected) {
+                continue;
+            }
+            half_edges.push((from, to));
+            half_edges.push((to, from));
+        }
     }
 
     if half_edges.is_empty() {
@@ -280,6 +306,25 @@ mod tests {
             .walls
             .push(wall("r", p(twelve, 0.0), p(twelve, eight)));
         model.walls.push(wall("d", p(six, 0.0), p(six, eight)));
+
+        let left = room_boundary(&model, p(36.0, 48.0)).expect("left room");
+        let right = room_boundary(&model, p(108.0, 48.0)).expect("right room");
+
+        assert!((left.area_square_feet() - 48.0).abs() < 1e-6);
+        assert!((right.area_square_feet() - 48.0).abs() < 1e-6);
+        assert_eq!(left.vertices.len(), 4);
+        assert_eq!(right.vertices.len(), 4);
+    }
+
+    #[test]
+    fn interior_wall_at_midspan_splits_into_two_rooms() {
+        // A 12ft × 8ft rectangle plus one interior wall whose endpoints land on
+        // the bottom and top walls' MID-SPANS (a Tee at each end). The through
+        // walls must be split at those junctions for the room to divide in two.
+        let mut model = rect_model(12.0, 8.0);
+        model
+            .walls
+            .push(wall("interior", p(72.0, 0.0), p(72.0, 96.0)));
 
         let left = room_boundary(&model, p(36.0, 48.0)).expect("left room");
         let right = room_boundary(&model, p(108.0, 48.0)).expect("right room");

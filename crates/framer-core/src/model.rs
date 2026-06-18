@@ -256,12 +256,24 @@ impl BuildingModel {
                 });
             };
 
-            // This requires the join point to be an endpoint of BOTH walls,
-            // which is correct for Corner/EndToEnd joins. Tee/Cross joins (where
-            // the point lies mid-span of the through wall) need per-kind branching
-            // here; that lands with interior-wall framing. See
-            // docs/plans/2026-06-18-walls-and-rooms-design.md (Section 2).
-            if !first.has_endpoint(join.point) || !second.has_endpoint(join.point) {
+            // The join point must connect the two walls per the join kind:
+            // - Corner/EndToEnd: an endpoint of both walls.
+            // - Tee: an endpoint of one (the partition) on the interior of the
+            //   other (the through wall).
+            // - Cross: interior to both walls.
+            let connects = match join.kind {
+                WallJoinKind::Corner | WallJoinKind::EndToEnd => {
+                    first.has_endpoint(join.point) && second.has_endpoint(join.point)
+                }
+                WallJoinKind::Tee => {
+                    (first.has_endpoint(join.point) && second.point_on_interior(join.point))
+                        || (second.has_endpoint(join.point) && first.point_on_interior(join.point))
+                }
+                WallJoinKind::Cross => {
+                    first.point_on_interior(join.point) && second.point_on_interior(join.point)
+                }
+            };
+            if !connects {
                 return Err(ModelError::JoinPointDoesNotConnectWalls {
                     join: join.id.clone(),
                 });
@@ -714,6 +726,26 @@ impl Wall {
 
     pub fn has_endpoint(&self, point: Point2) -> bool {
         self.start == point || self.end == point
+    }
+
+    /// Whether `point` lies on this wall's segment (endpoints included). General
+    /// over straight segments via collinearity plus projection bounds.
+    pub fn point_on_segment(&self, point: Point2) -> bool {
+        let edge_x = (self.end.x - self.start.x).ticks();
+        let edge_y = (self.end.y - self.start.y).ticks();
+        let offset_x = (point.x - self.start.x).ticks();
+        let offset_y = (point.y - self.start.y).ticks();
+        if edge_x * offset_y - edge_y * offset_x != 0 {
+            return false;
+        }
+        let projection = offset_x * edge_x + offset_y * edge_y;
+        projection >= 0 && projection <= edge_x * edge_x + edge_y * edge_y
+    }
+
+    /// Whether `point` lies on the wall's interior (on the segment, not an
+    /// endpoint) — the mid-span condition for a Tee/Cross through wall.
+    pub fn point_on_interior(&self, point: Point2) -> bool {
+        self.point_on_segment(point) && !self.has_endpoint(point)
     }
 
     pub fn dimension_measurement(&self, dimension: &DimensionConstraint) -> Option<Length> {
@@ -1385,9 +1417,10 @@ pub struct WallJoin {
 }
 
 impl WallJoin {
-    pub fn corner(
+    pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
+        kind: WallJoinKind,
         first_wall: impl Into<String>,
         second_wall: impl Into<String>,
         point: Point2,
@@ -1395,11 +1428,28 @@ impl WallJoin {
         Self {
             id: ElementId::new(id),
             name: name.into(),
-            kind: WallJoinKind::Corner,
+            kind,
             first_wall: ElementId::new(first_wall),
             second_wall: ElementId::new(second_wall),
             point,
         }
+    }
+
+    pub fn corner(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        first_wall: impl Into<String>,
+        second_wall: impl Into<String>,
+        point: Point2,
+    ) -> Self {
+        Self::new(
+            id,
+            name,
+            WallJoinKind::Corner,
+            first_wall,
+            second_wall,
+            point,
+        )
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -1989,6 +2039,98 @@ mod tests {
         assert!(matches!(
             model.validate(),
             Err(ModelError::RoomReferencesUnknownLevel { .. })
+        ));
+    }
+
+    fn placed_wall(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", start, end)
+    }
+
+    #[test]
+    fn tee_join_validates_when_partition_meets_through_wall_midspan() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed_wall(
+            "through",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-tee",
+            "Tee",
+            WallJoinKind::Tee,
+            "through",
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn cross_join_validates_when_point_interior_to_both() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed_wall(
+            "horizontal",
+            Point2::new(Length::ZERO, Length::from_feet(4.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(4.0)),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-cross",
+            "Cross",
+            WallJoinKind::Cross,
+            "horizontal",
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(4.0)),
+        ));
+
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn tee_join_rejected_when_point_is_a_shared_endpoint() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // Two walls meeting at a shared endpoint (a corner) but mislabelled Tee.
+        model.walls.push(placed_wall(
+            "a",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join",
+            "Bad tee",
+            WallJoinKind::Tee,
+            "a",
+            "b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::JoinPointDoesNotConnectWalls { .. })
         ));
     }
 
