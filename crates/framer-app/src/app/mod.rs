@@ -484,19 +484,21 @@ impl FramerApp {
             return;
         }
 
-        let (escape_pressed, dimension_pressed, undo_pressed, redo_pressed) =
+        let (escape_pressed, dimension_pressed, redo_pressed, undo_pressed) =
             ctx.input_mut(|input| {
-                (
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::D),
-                    // Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
-                    input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
-                    // Redo: Cmd/Ctrl+Shift+Z, or Ctrl+Y.
-                    input.consume_key(
-                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                        egui::Key::Z,
-                    ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y),
-                )
+                let escape = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
+                // Redo MUST be consumed before undo: egui's consume_key matches
+                // modifiers *logically* (a pattern without Shift still matches a
+                // Shift-held event), so Cmd+Z would otherwise swallow Cmd+Shift+Z.
+                // Redo: Cmd/Ctrl+Shift+Z, or Ctrl+Y.
+                let redo = input.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
+                // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
+                let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                (escape, dimension, redo, undo)
             });
 
         if undo_pressed {
@@ -697,11 +699,12 @@ impl FramerApp {
         // Build the drag state (copies the opening's geometry) so the borrow of
         // the model ends before we snapshot it for the undo transaction.
         let drag = OpeningDragState::new(wall_index, opening_id.clone(), handle, opening);
-        // Open one coalesced undo step for the whole drag; update_opening_drag
-        // mutates within it and finish_opening_drag settles it.
-        self.history.begin(self.snapshot(), "Move opening");
         self.selected_wall = wall_index;
         self.selected = Selection::Opening(opening_id);
+        // Open one coalesced undo step for the whole drag, capturing the base
+        // *after* selecting the dragged opening so undo restores it as selected.
+        // update_opening_drag mutates within it; finish_opening_drag settles it.
+        self.history.begin(self.snapshot(), "Move opening");
         self.opening_drag = Some(drag);
     }
 

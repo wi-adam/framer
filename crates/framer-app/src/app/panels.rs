@@ -580,12 +580,18 @@ impl FramerApp {
 
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let mut changed = false;
+        // A Remove click sets this; executed through edit() after the model
+        // borrow below ends, so deletions are one labelled, undoable step.
+        let mut deferred_remove: Option<DeferredRemove> = None;
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
-        let edit_base = if !self.history.is_pending()
-            && (ui.ctx().input(|input| input.pointer.any_down()) || ui.ctx().text_edit_focused())
-        {
+        let edit_base = if should_capture_edit_base(
+            self.history.is_pending(),
+            ui.ctx().input(|input| input.pointer.any_down()),
+            ui.ctx().input(|input| input.pointer.any_click()),
+            ui.ctx().text_edit_focused(),
+        ) {
             Some(self.snapshot())
         } else {
             None
@@ -879,11 +885,7 @@ impl FramerApp {
                     }
 
                     if remove {
-                        let opening_id = ElementId::new(id.as_str());
-                        if wall.remove_opening(&opening_id) {
-                            self.selected = Selection::Wall;
-                            changed = true;
-                        }
+                        deferred_remove = Some(DeferredRemove::Opening(id.clone()));
                     }
                 }
 
@@ -909,9 +911,7 @@ impl FramerApp {
                     }
 
                     if remove {
-                        wall.dimensions.retain(|dimension| dimension.id.0 != id);
-                        self.selected = Selection::Wall;
-                        changed = true;
+                        deferred_remove = Some(DeferredRemove::Dimension(id.clone()));
                     }
                 }
             }
@@ -995,6 +995,34 @@ impl FramerApp {
                     ui.label("Generated member no longer exists");
                 }
             }
+        }
+
+        // Replay a deferred Remove as one discrete, labelled undo step now that
+        // the model borrow above has ended. These paths leave `changed` false,
+        // so they do not also flow through the coalesced inspector transaction.
+        match deferred_remove {
+            Some(DeferredRemove::Opening(opening_id)) => {
+                self.edit("Remove opening", |app| {
+                    if let Some(wall) = app.model.walls.get_mut(app.selected_wall) {
+                        if wall.remove_opening(&ElementId::new(opening_id)) {
+                            app.selected = Selection::Wall;
+                        }
+                    }
+                });
+            }
+            Some(DeferredRemove::Dimension(dimension_id)) => {
+                self.edit("Remove dimension", |app| {
+                    if let Some(wall) = app.model.walls.get_mut(app.selected_wall) {
+                        let before = wall.dimensions.len();
+                        wall.dimensions
+                            .retain(|dimension| dimension.id.0 != dimension_id);
+                        if wall.dimensions.len() != before {
+                            app.selected = Selection::Wall;
+                        }
+                    }
+                });
+            }
+            None => {}
         }
 
         if changed {
@@ -1304,6 +1332,30 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Join(_) => "Edit join",
         Selection::Member { .. } => "Edit",
     }
+}
+
+/// A deletion requested from the inspector this frame, deferred until the
+/// inspector's `&mut` borrow of the model ends so it can be replayed through
+/// `FramerApp::edit` as one correctly-labelled undo step.
+enum DeferredRemove {
+    Opening(String),
+    Dimension(String),
+}
+
+/// Whether to snapshot a pre-edit baseline this frame for the inspector's undo
+/// transaction. We must capture on any frame where an inspector edit could
+/// *commit*: while dragging a value (`pointer_down`), on the click-release that
+/// commits a ComboBox selection or button (`any_click` — egui fires the click
+/// on release, when `pointer_down` is already false), or while a text field is
+/// focused. Only when no transaction is already in flight, so idle frames never
+/// clone the model.
+fn should_capture_edit_base(
+    is_pending: bool,
+    pointer_down: bool,
+    any_click: bool,
+    text_focused: bool,
+) -> bool {
+    !is_pending && (pointer_down || any_click || text_focused)
 }
 
 fn toolbar_divider(ui: &mut Ui) {
@@ -2586,6 +2638,35 @@ mod tests {
         CodeProfile, DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference,
     };
+
+    #[test]
+    fn captures_edit_base_on_click_release_frame() {
+        // A ComboBox selection or button commits on the pointer-release frame:
+        // pointer is already up, but a click occurred. Without this, the whole
+        // class of dropdown/button inspector edits records no undo step.
+        assert!(should_capture_edit_base(false, false, true, false));
+    }
+
+    #[test]
+    fn captures_edit_base_while_dragging_or_focused() {
+        assert!(should_capture_edit_base(false, true, false, false), "drag");
+        assert!(
+            should_capture_edit_base(false, false, false, true),
+            "focused text field"
+        );
+    }
+
+    #[test]
+    fn skips_edit_base_when_idle_or_pending() {
+        assert!(
+            !should_capture_edit_base(false, false, false, false),
+            "idle frame: no clone"
+        );
+        assert!(
+            !should_capture_edit_base(true, true, true, true),
+            "transaction already open: keep the original base"
+        );
+    }
 
     #[derive(Debug, Clone, Copy)]
     enum WindowAnchor {

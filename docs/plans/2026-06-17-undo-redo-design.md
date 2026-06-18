@@ -169,8 +169,17 @@ funnel through one `if changed { self.rebuild() }` (`panels.rs:966`). Pattern:
   the interaction ends — detected via egui pointer-up + no text-field focus. This
   coalesces a whole `DragValue` drag into one undo step.
 
-The base snapshot for (c) is captured lazily — only while a transaction could
-open — so there is no per-frame clone during idle.
+The base snapshot for (c) is captured lazily — only on frames where an inspector
+edit could begin or commit (pointer down, a click this frame, or a focused text
+field) and no transaction is already open. A truly idle inspector clones
+nothing. (A focused-but-idle text field still triggers egui's ~2 Hz cursor-blink
+repaints, each cloning the KB-scale model once and dropping it — a negligible
+cost, not a per-frame hot path.)
+
+> Implementation note: the commit gate must include egui's `pointer.any_click()`,
+> not just `pointer.any_down()` — ComboBox selections and buttons commit on the
+> pointer-*release* frame, when `any_down()` is already false. See
+> `should_capture_edit_base` in `panels.rs`.
 
 ### Performing undo / redo
 
