@@ -21,23 +21,24 @@ corner joins, doors, windows, and a garage-door-style opening. The Phase 1
 single-wall example remains checked in at
 [../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
 
-## V5 Shape
+## V6 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 5,
+  "schema_version": 6,
   "authored": {
     "code": {},
     "levels": [],
     "walls": [],
-    "wall_joins": []
+    "wall_joins": [],
+    "rooms": []
   }
 }
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `5` when saving from the current app.
+- `schema_version` must be `6` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected. Do not add `generated`, `cache`,
   `exports`, or presentation data to project files.
@@ -47,6 +48,9 @@ single-wall example remains checked in at
   default to an empty list and missing dimension axes default to horizontal.
 - Schema v4 files are accepted on load; each wall gains a default `assembly`
   (`Exterior`, `TwoByFour` studs, `Osb716` sheathing) and an empty `tags` list.
+- Schema v5 files are accepted on load; `rooms` defaults to an empty list. The
+  `rooms` key is omitted when empty, so room-free v6 files are byte-identical to
+  the equivalent v5 file apart from the version number.
 
 Each wall carries an `assembly` describing its construction: `exposure`
 (`Exterior`/`Interior`), `stud` (a board profile that also sizes the plates),
@@ -173,13 +177,55 @@ choosing one target over another.
 
 Each wall join stores:
 
-- `kind`: currently `Corner`, `EndToEnd`, `Tee`, or `Cross`.
+- `kind`: `Corner`, `EndToEnd`, `Tee`, or `Cross`.
 - `first_wall` and `second_wall`: the connected wall segment IDs.
 - `point`: the project coordinate where the walls meet.
 
-The solver currently generates corner-post members for `Corner` and `EndToEnd`
-joins. `Tee` and `Cross` joins are stored as authored intent but reported as
-unsupported for framing generation.
+The join point connects the walls according to the kind:
+
+- `Corner`/`EndToEnd`: the point is an endpoint of both walls.
+- `Tee`: the point is an endpoint of one wall (the partition) and lies on the
+  interior (mid-span) of the other (the through wall).
+- `Cross`: the point lies in the interior of both walls.
+
+The solver generates corner-post members for `Corner` and `EndToEnd` joins; for
+`Tee` joins it generates a partition end stud plus a backing stud in the through
+wall (no corner post); for `Cross` joins it generates backing studs in both walls
+and notes that interrupting one wall for a true cross is not yet modelled.
+
+## Rooms
+
+`rooms` is a deterministic list of authored rooms (spaces). A room persists only
+its identity and a seed point; its boundary, area, and perimeter are *derived*
+from the surrounding wall loop each time the plan is regenerated and are never
+stored. A room whose seed is no longer enclosed by a closed wall loop is reported
+with a `room.boundary.open` warning rather than failing validation.
+
+Each room stores:
+
+- `id`: a stable semantic identifier.
+- `name`: a human-readable name (e.g. `Bedroom 1`).
+- `usage`: one of `Unspecified` (default), `Living`, `Bedroom`, `Bathroom`,
+  `Kitchen`, `Dining`, `Office`, `Hallway`, `Closet`, `Utility`, `Garage`, or
+  `Other`. Omitted/`Unspecified` when not set.
+- `level`: the level that owns the room.
+- `seed`: a project coordinate inside the room, used to locate its bounding loop.
+- `tags`: optional free-form string list, omitted when empty.
+
+```json
+{
+  "id": "room-bed-1",
+  "name": "Bedroom 1",
+  "usage": "Bedroom",
+  "level": "level-1",
+  "seed": { "x": { "ticks": 1152 }, "y": { "ticks": 768 } }
+}
+```
+
+See
+[../examples/projects/demo-two-bedroom.framer](../examples/projects/demo-two-bedroom.framer)
+for a checked-in example with interior partitions (tee joins) dividing a shell
+into two bedrooms and a living area.
 
 Level, wall, join, opening, and dimension IDs are stable semantic identifiers.
 They must be non-empty and contain only lowercase letters, digits, or hyphens.
@@ -213,6 +259,7 @@ Framer canonicalizes project files before saving:
 - Openings within each wall are sorted by `id`.
 - Dimensions within each wall are sorted by `id`.
 - Wall joins are sorted by `id`.
+- Rooms are sorted by `id`.
 - JSON is pretty-printed with a trailing newline.
 - Generated framing is deterministic output and is not saved in v4 files.
 

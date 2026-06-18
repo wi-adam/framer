@@ -132,6 +132,9 @@ documented data.
 - Wood framed structures and framed objects.
 - Walls, wall openings, floors, floor openings, ceilings, roofs, skylights,
   stairs, decks, posts, beams, blocking, and sheathing zones.
+- Rooms/spaces: lightweight authored objects (identity, name, usage) whose
+  boundary and area are derived from the enclosing wall loop for takeoffs and,
+  later, room-type code rules.
 - Parametric editing of dimensions, spacing, code assumptions, and member
   families.
 - 3D modeling, sectioning, object placement, and parametric object editing for

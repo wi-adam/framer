@@ -207,6 +207,161 @@ impl BuildingModel {
         .into_deterministic()
     }
 
+    /// A 24ft × 16ft shell partitioned into two bedrooms and a living area by
+    /// interior walls that meet the exterior (and each other) at tee joins. Used
+    /// as the rooms/interior-walls example project.
+    pub fn demo_two_bedroom() -> Self {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let ft = Length::from_feet;
+        let wall = |id: &str, name: &str, start: Point2, end: Point2| {
+            Wall::new(id, name, ft(1.0), &code).with_placement("level-1", start, end)
+        };
+
+        let mut front = wall(
+            "wall-front",
+            "Front wall",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(24.0), Length::ZERO),
+        );
+        front.openings.push(Opening::door(
+            "opening-front-door",
+            "Front door",
+            ft(6.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+
+        let walls = vec![
+            front,
+            wall(
+                "wall-right",
+                "Right wall",
+                Point2::new(ft(24.0), Length::ZERO),
+                Point2::new(ft(24.0), ft(16.0)),
+            ),
+            wall(
+                "wall-back",
+                "Back wall",
+                Point2::new(ft(24.0), ft(16.0)),
+                Point2::new(Length::ZERO, ft(16.0)),
+            ),
+            wall(
+                "wall-left",
+                "Left wall",
+                Point2::new(Length::ZERO, ft(16.0)),
+                Point2::new(Length::ZERO, Length::ZERO),
+            ),
+            wall(
+                "wall-mid",
+                "Center partition",
+                Point2::new(ft(12.0), Length::ZERO),
+                Point2::new(ft(12.0), ft(16.0)),
+            ),
+            wall(
+                "wall-bed",
+                "Bedroom partition",
+                Point2::new(Length::ZERO, ft(8.0)),
+                Point2::new(ft(12.0), ft(8.0)),
+            ),
+        ];
+
+        let wall_joins = vec![
+            WallJoin::corner(
+                "join-front-right",
+                "Front right corner",
+                "wall-front",
+                "wall-right",
+                Point2::new(ft(24.0), Length::ZERO),
+            ),
+            WallJoin::corner(
+                "join-right-back",
+                "Right back corner",
+                "wall-right",
+                "wall-back",
+                Point2::new(ft(24.0), ft(16.0)),
+            ),
+            WallJoin::corner(
+                "join-back-left",
+                "Back left corner",
+                "wall-back",
+                "wall-left",
+                Point2::new(Length::ZERO, ft(16.0)),
+            ),
+            WallJoin::corner(
+                "join-left-front",
+                "Left front corner",
+                "wall-left",
+                "wall-front",
+                Point2::new(Length::ZERO, Length::ZERO),
+            ),
+            WallJoin::new(
+                "join-mid-front",
+                "Center partition at front",
+                WallJoinKind::Tee,
+                "wall-front",
+                "wall-mid",
+                Point2::new(ft(12.0), Length::ZERO),
+            ),
+            WallJoin::new(
+                "join-mid-back",
+                "Center partition at back",
+                WallJoinKind::Tee,
+                "wall-back",
+                "wall-mid",
+                Point2::new(ft(12.0), ft(16.0)),
+            ),
+            WallJoin::new(
+                "join-bed-left",
+                "Bedroom partition at left",
+                WallJoinKind::Tee,
+                "wall-left",
+                "wall-bed",
+                Point2::new(Length::ZERO, ft(8.0)),
+            ),
+            WallJoin::new(
+                "join-bed-mid",
+                "Bedroom partition at center",
+                WallJoinKind::Tee,
+                "wall-mid",
+                "wall-bed",
+                Point2::new(ft(12.0), ft(8.0)),
+            ),
+        ];
+
+        let rooms = vec![
+            Room::new(
+                "room-bed-1",
+                "Bedroom 1",
+                RoomUsage::Bedroom,
+                "level-1",
+                Point2::new(ft(6.0), ft(4.0)),
+            ),
+            Room::new(
+                "room-bed-2",
+                "Bedroom 2",
+                RoomUsage::Bedroom,
+                "level-1",
+                Point2::new(ft(6.0), ft(12.0)),
+            ),
+            Room::new(
+                "room-living",
+                "Living",
+                RoomUsage::Living,
+                "level-1",
+                Point2::new(ft(18.0), ft(8.0)),
+            ),
+        ];
+
+        Self {
+            code,
+            levels: default_levels(),
+            walls,
+            wall_joins,
+            rooms,
+        }
+        .into_deterministic()
+    }
+
     pub fn validate(&self) -> Result<(), ModelError> {
         let mut ids = BTreeSet::new();
         let mut level_ids = BTreeSet::new();

@@ -1133,6 +1133,14 @@ impl FramerApp {
             diagnostics_panel(ui, self.error.as_deref(), self.project_plan.as_ref());
             ui.separator();
             bom_panel(ui, self.project_plan.as_ref());
+            if self
+                .project_plan
+                .as_ref()
+                .is_some_and(|plan| !plan.rooms.is_empty())
+            {
+                ui.separator();
+                room_schedule_panel(ui, self.project_plan.as_ref());
+            }
         } else if let Some(error) = self.error.as_deref() {
             ui.separator();
             panel_subheader(ui, "Validation");
@@ -2024,6 +2032,36 @@ fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
                     ui.label(item.cut_length.to_string());
                     ui.label(item.total_length.to_string());
                     ui.label(item.kind.label());
+                    ui.end_row();
+                }
+            });
+    }
+}
+
+fn room_schedule_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
+    panel_subheader(ui, "Room schedule");
+    if let Some(plan) = plan {
+        egui::Grid::new("room-schedule-grid")
+            .num_columns(4)
+            .spacing([12.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Room");
+                ui.strong("Usage");
+                ui.strong("Area");
+                ui.strong("Perimeter");
+                ui.end_row();
+
+                for room in &plan.rooms {
+                    ui.label(&room.name);
+                    ui.label(&room.usage);
+                    if room.closed {
+                        ui.label(format!("{:.0} sq ft", room.area_square_feet()));
+                        ui.label(room.perimeter.to_string());
+                    } else {
+                        ui.colored_label(theme::text_secondary(), "open");
+                        ui.label("—");
+                    }
                     ui.end_row();
                 }
             });

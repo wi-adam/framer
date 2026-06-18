@@ -207,6 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn demo_two_bedroom_example_is_canonical() {
+        let example = include_str!("../../../examples/projects/demo-two-bedroom.framer");
+
+        let model = load_project(example).unwrap();
+
+        assert_eq!(model.walls.len(), 6);
+        assert_eq!(model.rooms.len(), 3);
+        assert_eq!(
+            model
+                .wall_joins
+                .iter()
+                .filter(|join| join.kind == crate::WallJoinKind::Tee)
+                .count(),
+            4
+        );
+        assert_eq!(save_project(&model).unwrap(), example);
+    }
+
+    #[test]
     fn demo_wall_example_is_canonical() {
         let example = include_str!("../../../examples/projects/demo-wall.framer");
 

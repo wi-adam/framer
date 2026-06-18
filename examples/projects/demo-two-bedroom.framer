@@ -1,0 +1,434 @@
+{
+  "format": "framer.project",
+  "schema_version": 6,
+  "authored": {
+    "code": {
+      "code": "Irc2021",
+      "display_name": "IRC 2021 prescriptive starter profile",
+      "default_wall_height": {
+        "ticks": 1536
+      },
+      "default_stud_spacing": {
+        "ticks": 256
+      },
+      "double_top_plate": true,
+      "default_header_depth": {
+        "ticks": 144
+      },
+      "stud_profile": "TwoByFour",
+      "plate_profile": "TwoByFour",
+      "header_profile": "TwoByTen"
+    },
+    "levels": [
+      {
+        "id": "level-1",
+        "name": "Level 1",
+        "elevation": {
+          "ticks": 0
+        }
+      }
+    ],
+    "walls": [
+      {
+        "id": "wall-back",
+        "name": "Back wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "length": {
+          "ticks": 4608
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
+      },
+      {
+        "id": "wall-bed",
+        "name": "Bedroom partition",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 1536
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 1536
+          }
+        },
+        "length": {
+          "ticks": 2304
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
+      },
+      {
+        "id": "wall-front",
+        "name": "Front wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "length": {
+          "ticks": 4608
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": [
+          {
+            "id": "opening-front-door",
+            "name": "Front door",
+            "kind": "Door",
+            "center": {
+              "ticks": 1152
+            },
+            "width": {
+              "ticks": 576
+            },
+            "height": {
+              "ticks": 1280
+            },
+            "sill_height": {
+              "ticks": 0
+            }
+          }
+        ]
+      },
+      {
+        "id": "wall-left",
+        "name": "Left wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "length": {
+          "ticks": 3072
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
+      },
+      {
+        "id": "wall-mid",
+        "name": "Center partition",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "length": {
+          "ticks": 3072
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
+      },
+      {
+        "id": "wall-right",
+        "name": "Right wall",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 0
+          }
+        },
+        "end": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "length": {
+          "ticks": 3072
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
+      }
+    ],
+    "wall_joins": [
+      {
+        "id": "join-back-left",
+        "name": "Back left corner",
+        "kind": "Corner",
+        "first_wall": "wall-back",
+        "second_wall": "wall-left",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 3072
+          }
+        }
+      },
+      {
+        "id": "join-bed-left",
+        "name": "Bedroom partition at left",
+        "kind": "Tee",
+        "first_wall": "wall-left",
+        "second_wall": "wall-bed",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 1536
+          }
+        }
+      },
+      {
+        "id": "join-bed-mid",
+        "name": "Bedroom partition at center",
+        "kind": "Tee",
+        "first_wall": "wall-mid",
+        "second_wall": "wall-bed",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 1536
+          }
+        }
+      },
+      {
+        "id": "join-front-right",
+        "name": "Front right corner",
+        "kind": "Corner",
+        "first_wall": "wall-front",
+        "second_wall": "wall-right",
+        "point": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
+        "id": "join-left-front",
+        "name": "Left front corner",
+        "kind": "Corner",
+        "first_wall": "wall-left",
+        "second_wall": "wall-front",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
+        "id": "join-mid-back",
+        "name": "Center partition at back",
+        "kind": "Tee",
+        "first_wall": "wall-back",
+        "second_wall": "wall-mid",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 3072
+          }
+        }
+      },
+      {
+        "id": "join-mid-front",
+        "name": "Center partition at front",
+        "kind": "Tee",
+        "first_wall": "wall-front",
+        "second_wall": "wall-mid",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
+        "id": "join-right-back",
+        "name": "Right back corner",
+        "kind": "Corner",
+        "first_wall": "wall-right",
+        "second_wall": "wall-back",
+        "point": {
+          "x": {
+            "ticks": 4608
+          },
+          "y": {
+            "ticks": 3072
+          }
+        }
+      }
+    ],
+    "rooms": [
+      {
+        "id": "room-bed-1",
+        "name": "Bedroom 1",
+        "usage": "Bedroom",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 1152
+          },
+          "y": {
+            "ticks": 768
+          }
+        }
+      },
+      {
+        "id": "room-bed-2",
+        "name": "Bedroom 2",
+        "usage": "Bedroom",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 1152
+          },
+          "y": {
+            "ticks": 2304
+          }
+        }
+      },
+      {
+        "id": "room-living",
+        "name": "Living",
+        "usage": "Living",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 3456
+          },
+          "y": {
+            "ticks": 1536
+          }
+        }
+      }
+    ]
+  }
+}

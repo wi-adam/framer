@@ -1438,6 +1438,35 @@ mod tests {
     }
 
     #[test]
+    fn two_bedroom_example_frames_three_rooms_via_tee_joins() {
+        let plan = generate_project_plan(&BuildingModel::demo_two_bedroom()).unwrap();
+
+        // Three enclosed rooms with the expected areas (96 + 96 + 192 sq ft).
+        assert_eq!(plan.rooms.len(), 3);
+        assert!(plan.rooms.iter().all(|room| room.closed));
+        let mut areas: Vec<i64> = plan
+            .rooms
+            .iter()
+            .map(|room| room.area_square_feet().round() as i64)
+            .collect();
+        areas.sort_unstable();
+        assert_eq!(areas, vec![96, 96, 192]);
+
+        // Interior partitions are framed, not diagnosed as unsupported.
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
+        assert!(plan.wall_plans.iter().any(|wall_plan| {
+            wall_plan
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::PartitionStud)
+        }));
+    }
+
+    #[test]
     fn tee_join_frames_partition_end_stud_and_backing_no_corner_post() {
         use framer_core::{WallJoin, WallJoinKind};
         let code = CodeProfile::irc_2021_prescriptive();
