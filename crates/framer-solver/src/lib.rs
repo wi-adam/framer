@@ -443,7 +443,10 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
             }
             WallJoinKind::Tee => {
                 // The partition meets the through wall at the partition's endpoint;
-                // the through wall owns the join on its interior.
+                // the through wall owns the join on its interior. This derives the
+                // roles from geometry, so it is correct regardless of which wall the
+                // author stored as first/second (validation guarantees exactly one
+                // endpoint owner).
                 let (partition, through) = if first.has_endpoint(join.point) {
                     (first, second)
                 } else {

@@ -35,9 +35,12 @@ pub(super) fn snap_to_grid(point: Point2, step: Option<Length>) -> Point2 {
     Point2::new(maybe_snap(point.x, step), maybe_snap(point.y, step))
 }
 
-/// The nearest existing wall endpoint within `tolerance` of `point`, if any.
+/// The nearest existing wall endpoint within `tolerance` of `point` that keeps
+/// the wall axis-aligned relative to `start`. Candidates that would make a
+/// diagonal wall are skipped so a farther ortho-compatible endpoint can win.
 pub(super) fn snap_to_endpoint(
     model: &BuildingModel,
+    start: Option<Point2>,
     point: Point2,
     tolerance: Length,
 ) -> Option<Point2> {
@@ -45,6 +48,9 @@ pub(super) fn snap_to_endpoint(
     let mut best: Option<(i64, Point2)> = None;
     for wall in &model.walls {
         for endpoint in [wall.start, wall.end] {
+            if !keeps_ortho(start, endpoint) {
+                continue;
+            }
             let distance_sq = point_distance_sq(point, endpoint);
             if distance_sq <= tolerance_sq && best.is_none_or(|(best_sq, _)| distance_sq < best_sq)
             {
@@ -68,22 +74,18 @@ pub(super) fn resolve_draw_point(
     tolerance: Length,
 ) -> ResolvedPoint {
     // 1. Snap to an existing endpoint (forms a Corner join).
-    if let Some(endpoint) = snap_to_endpoint(model, raw, tolerance) {
-        if keeps_ortho(start, endpoint) {
-            return ResolvedPoint {
-                point: endpoint,
-                on_existing: true,
-            };
-        }
+    if let Some(endpoint) = snap_to_endpoint(model, start, raw, tolerance) {
+        return ResolvedPoint {
+            point: endpoint,
+            on_existing: true,
+        };
     }
     // 2. Snap onto an existing wall's mid-span (forms a Tee join).
-    if let Some(projected) = snap_to_wall_line(model, raw, tolerance) {
-        if keeps_ortho(start, projected) {
-            return ResolvedPoint {
-                point: projected,
-                on_existing: true,
-            };
-        }
+    if let Some(projected) = snap_to_wall_line(model, start, raw, tolerance) {
+        return ResolvedPoint {
+            point: projected,
+            on_existing: true,
+        };
     }
 
     let locked = match start {
@@ -110,6 +112,7 @@ fn keeps_ortho(start: Option<Point2>, candidate: Point2) -> bool {
 /// [`snap_to_endpoint`]). This is what lets a wall snap mid-span to form a Tee.
 pub(super) fn snap_to_wall_line(
     model: &BuildingModel,
+    start: Option<Point2>,
     point: Point2,
     tolerance: Length,
 ) -> Option<Point2> {
@@ -120,7 +123,7 @@ pub(super) fn snap_to_wall_line(
             continue;
         }
         let projected = project_onto_segment(point, wall.start, wall.end);
-        if !wall.point_on_interior(projected) {
+        if !wall.point_on_interior(projected) || !keeps_ortho(start, projected) {
             continue;
         }
         let distance_sq = point_distance_sq(point, projected);
@@ -282,7 +285,7 @@ mod tests {
             .walls
             .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
 
-        let got = snap_to_endpoint(&model, p(118.0, 0.0), Length::from_inches(6.0));
+        let got = snap_to_endpoint(&model, None, p(118.0, 0.0), Length::from_inches(6.0));
 
         assert_eq!(got, Some(p(120.0, 0.0)));
     }
@@ -295,7 +298,7 @@ mod tests {
             .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
 
         assert_eq!(
-            snap_to_endpoint(&model, p(60.0, 60.0), Length::from_inches(6.0)),
+            snap_to_endpoint(&model, None, p(60.0, 60.0), Length::from_inches(6.0)),
             None
         );
     }
@@ -436,7 +439,7 @@ mod tests {
             .push(wall_from("wall-1", p(0.0, 0.0), p(0.0, 120.0)));
 
         // A cursor 3in off the vertical wall at y=60 snaps onto the wall line.
-        let got = snap_to_wall_line(&model, p(3.0, 60.0), Length::from_inches(6.0));
+        let got = snap_to_wall_line(&model, None, p(3.0, 60.0), Length::from_inches(6.0));
         assert_eq!(got, Some(p(0.0, 60.0)));
     }
 
@@ -449,12 +452,12 @@ mod tests {
 
         // Projects to the wall's endpoint (0,120) -> excluded (interior only).
         assert_eq!(
-            snap_to_wall_line(&model, p(3.0, 130.0), Length::from_inches(6.0)),
+            snap_to_wall_line(&model, None, p(3.0, 130.0), Length::from_inches(6.0)),
             None
         );
         // Too far from the wall line.
         assert_eq!(
-            snap_to_wall_line(&model, p(60.0, 60.0), Length::from_inches(6.0)),
+            snap_to_wall_line(&model, None, p(60.0, 60.0), Length::from_inches(6.0)),
             None
         );
     }
@@ -473,6 +476,53 @@ mod tests {
         assert_eq!(joins.len(), 1);
         assert_eq!(joins[0].kind, WallJoinKind::Tee);
         assert_eq!(joins[0].point, p(120.0, 0.0));
+        // first = through wall, second = new partition (the solver relies on this).
+        assert_eq!(joins[0].first_wall, ElementId::new("through"));
+        assert_eq!(joins[0].second_wall, ElementId::new("partition"));
+    }
+
+    #[test]
+    fn resolve_second_point_snaps_onto_wall_interior_as_tee() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("through", p(0.0, 0.0), p(240.0, 0.0)));
+
+        // Drawing up from (120,96) toward the through wall; the cursor just shy of
+        // it snaps onto the wall's interior at (120,0), keeping the wall vertical.
+        let resolved = resolve_draw_point(
+            &model,
+            Some(p(120.0, 96.0)),
+            p(120.0, 3.0),
+            Some(Length::from_whole_inches(6)),
+            Length::from_inches(6.0),
+        );
+
+        assert_eq!(resolved.point, p(120.0, 0.0));
+        assert!(resolved.on_existing, "a mid-span snap flags a join site");
+    }
+
+    #[test]
+    fn resolve_prefers_farther_ortho_wall_over_nearer_diagonal_one() {
+        // A parallel wall whose nearest interior projection would be diagonal to
+        // the start must not block snapping to a perpendicular wall that is ortho.
+        let mut model = empty_model();
+        // Perpendicular through wall the partition should Tee into.
+        model
+            .walls
+            .push(wall_from("perp", p(120.0, 0.0), p(120.0, 240.0)));
+
+        // Start at (0,60) drawing right; cursor near the perpendicular wall.
+        let resolved = resolve_draw_point(
+            &model,
+            Some(p(0.0, 60.0)),
+            p(118.0, 60.0),
+            Some(Length::from_whole_inches(6)),
+            Length::from_inches(6.0),
+        );
+
+        assert_eq!(resolved.point, p(120.0, 60.0));
+        assert!(resolved.on_existing);
     }
 
     #[test]
