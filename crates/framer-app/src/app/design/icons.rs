@@ -56,6 +56,8 @@ pub(crate) enum Icon {
     Edit,
     Duplicate,
     Delete,
+    Undo,
+    Redo,
     // Browser / tree.
     Search,
     Filter,
@@ -111,6 +113,8 @@ impl Icon {
             Icon::Edit => '\u{e1f9}',          // pencil
             Icon::Duplicate => '\u{e09e}',     // copy
             Icon::Delete => '\u{e18e}',        // trash-2
+            Icon::Undo => '\u{e2a1}',          // undo-2
+            Icon::Redo => '\u{e2a0}',          // redo-2
             Icon::Search => '\u{e151}',        // search
             Icon::Filter => '\u{e460}',        // list-filter
             Icon::Menu => '\u{e184}',          // align-justify

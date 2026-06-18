@@ -1,4 +1,7 @@
 mod design;
+mod history;
+#[cfg(test)]
+mod history_integration_tests;
 mod labels;
 mod model_edit;
 mod panels;
@@ -21,6 +24,7 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
+use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
     next_dimension_id, next_opening_id,
@@ -61,6 +65,23 @@ pub(crate) struct FramerApp {
     ortho: bool,
     snap_step: Option<Length>,
     cursor_model: Option<Point2>,
+    /// Undo/redo history of authored-model edits. Ephemeral presentation state:
+    /// never serialized, cleared on load/new/reset. See
+    /// `docs/plans/2026-06-17-undo-redo-design.md`.
+    history: History<Snapshot>,
+}
+
+/// Maximum number of undo steps retained; oldest evicted past this. Snapshots
+/// are KB-scale clones, so a deep history is cheap.
+const HISTORY_LIMIT: usize = 200;
+
+/// One restorable point: the authored document plus the transient selection we
+/// restore alongside it. Not serialized.
+#[derive(Clone)]
+struct Snapshot {
+    model: BuildingModel,
+    selected: Selection,
+    selected_wall: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +220,7 @@ impl Default for FramerApp {
             ortho: true,
             snap_step: Some(Length::from_whole_inches(1)),
             cursor_model: None,
+            history: History::new(HISTORY_LIMIT),
         };
         app.rebuild();
         app
@@ -246,6 +268,81 @@ impl FramerApp {
         }
     }
 
+    /// Capture the current restorable state (authored model + selection).
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            model: self.model.clone(),
+            selected: self.selected.clone(),
+            selected_wall: self.selected_wall,
+        }
+    }
+
+    /// Restore a snapshot's model and selection. Does not re-solve; callers
+    /// follow with `rebuild()`.
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.model = snapshot.model;
+        self.selected = snapshot.selected;
+        self.selected_wall = snapshot.selected_wall;
+    }
+
+    /// Run a discrete document edit, recording one undo step labelled `label`
+    /// iff the authored model actually changed. Always re-solves afterwards,
+    /// matching the previous unconditional `rebuild()` on every mutation.
+    fn edit(&mut self, label: &str, f: impl FnOnce(&mut Self)) {
+        let before = self.snapshot();
+        f(self);
+        self.rebuild();
+        if self.model != before.model {
+            self.history.record(before, label);
+        }
+    }
+
+    /// Open or refresh the edit transaction for an in-progress immediate-mode
+    /// edit (inspector field run). `base` is the pre-edit state captured at the
+    /// start of the interaction; `label` describes the edit. Coalesces a whole
+    /// gesture into one undo step — the first call opens it, the rest are
+    /// absorbed.
+    fn begin_inspector_edit(&mut self, base: Snapshot, label: &str) {
+        self.history.begin(base, label);
+    }
+
+    /// Finalize any open edit transaction. `interaction_active` is true while
+    /// the user is still mid-gesture (pointer down or a widget focused); the
+    /// transaction is only settled once the gesture ends. A settled gesture
+    /// that left the model unchanged is dropped rather than recorded.
+    fn settle_history(&mut self, interaction_active: bool) {
+        if interaction_active {
+            return;
+        }
+        let changed = match self.history.pending_base() {
+            None => return,
+            Some(base) => self.model != base.model,
+        };
+        if changed {
+            self.history.commit();
+        } else {
+            self.history.cancel_pending();
+        }
+    }
+
+    fn undo(&mut self) {
+        self.settle_history(false);
+        let current = self.snapshot();
+        if let Some(previous) = self.history.undo(current) {
+            self.restore(previous);
+            self.rebuild();
+        }
+    }
+
+    fn redo(&mut self) {
+        self.settle_history(false);
+        let current = self.snapshot();
+        if let Some(next) = self.history.redo(current) {
+            self.restore(next);
+            self.rebuild();
+        }
+    }
+
     fn new_project(&mut self) {
         let code = framer_core::CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
@@ -265,6 +362,7 @@ impl FramerApp {
         self.dimension_tool = DimensionToolState::default();
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
+        self.history.clear();
         self.rebuild();
     }
 
@@ -279,6 +377,7 @@ impl FramerApp {
         self.dimension_tool = DimensionToolState::default();
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
+        self.history.clear();
         self.rebuild();
     }
 
@@ -293,6 +392,7 @@ impl FramerApp {
         self.dimension_tool = DimensionToolState::default();
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
+        self.history.clear();
         self.rebuild();
     }
 
@@ -330,6 +430,7 @@ impl FramerApp {
                 self.selected_wall = 0;
                 self.selected = Selection::Wall;
                 self.workspace_mode = WorkspaceMode::Design;
+                self.history.clear();
                 self.rebuild();
                 self.file_status = Some(format!("Opened {}", path.display()));
                 self.artifact_status = None;
@@ -383,14 +484,28 @@ impl FramerApp {
             return;
         }
 
-        let (escape_pressed, dimension_pressed) = ctx.input_mut(|input| {
-            (
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::D),
-            )
-        });
+        let (escape_pressed, dimension_pressed, redo_pressed, undo_pressed) =
+            ctx.input_mut(|input| {
+                let escape = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
+                // Redo MUST be consumed before undo: egui's consume_key matches
+                // modifiers *logically* (a pattern without Shift still matches a
+                // Shift-held event), so Cmd+Z would otherwise swallow Cmd+Shift+Z.
+                // Redo: Cmd/Ctrl+Shift+Z, or Ctrl+Y.
+                let redo = input.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Z,
+                ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
+                // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
+                let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                (escape, dimension, redo, undo)
+            });
 
-        if escape_pressed {
+        if undo_pressed {
+            self.undo();
+        } else if redo_pressed {
+            self.redo();
+        } else if escape_pressed {
             self.exit_current_context();
         } else if dimension_pressed {
             self.activate_dimension_tool();
@@ -469,49 +584,50 @@ impl FramerApp {
             return;
         }
 
-        let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
-            return;
-        };
+        self.edit("Add opening", |app| {
+            let Some(wall) = app.model.walls.get_mut(app.selected_wall) else {
+                return;
+            };
 
-        let center = (wall.length / 2).max(Length::from_inches(24.0));
-        let opening = match kind {
-            OpeningKind::Door => {
-                let (id, index) = next_opening_id(wall, "opening-door");
-                Opening::door(
-                    id,
-                    format!("Door {index}"),
-                    center,
-                    Length::from_inches(36.0),
-                    Length::from_inches(80.0),
-                )
-            }
-            OpeningKind::GarageDoor => {
-                let (id, index) = next_opening_id(wall, "opening-garage");
-                Opening::door(
-                    id,
-                    format!("Garage Door {index}"),
-                    center,
-                    Length::from_feet(8.0),
-                    Length::from_inches(84.0),
-                )
-                .with_kind(OpeningKind::GarageDoor)
-            }
-            OpeningKind::Window | OpeningKind::Skylight | OpeningKind::Stair => {
-                let (id, index) = next_opening_id(wall, "opening-window");
-                Opening::window(
-                    id,
-                    format!("Window {index}"),
-                    center,
-                    Length::from_inches(36.0),
-                    Length::from_inches(42.0),
-                    Length::from_inches(36.0),
-                )
-            }
-        };
+            let center = (wall.length / 2).max(Length::from_inches(24.0));
+            let opening = match kind {
+                OpeningKind::Door => {
+                    let (id, index) = next_opening_id(wall, "opening-door");
+                    Opening::door(
+                        id,
+                        format!("Door {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(80.0),
+                    )
+                }
+                OpeningKind::GarageDoor => {
+                    let (id, index) = next_opening_id(wall, "opening-garage");
+                    Opening::door(
+                        id,
+                        format!("Garage Door {index}"),
+                        center,
+                        Length::from_feet(8.0),
+                        Length::from_inches(84.0),
+                    )
+                    .with_kind(OpeningKind::GarageDoor)
+                }
+                OpeningKind::Window | OpeningKind::Skylight | OpeningKind::Stair => {
+                    let (id, index) = next_opening_id(wall, "opening-window");
+                    Opening::window(
+                        id,
+                        format!("Window {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(42.0),
+                        Length::from_inches(36.0),
+                    )
+                }
+            };
 
-        self.selected = Selection::Opening(opening.id.0.clone());
-        wall.openings.push(opening);
-        self.rebuild();
+            app.selected = Selection::Opening(opening.id.0.clone());
+            wall.openings.push(opening);
+        });
     }
 
     fn duplicate_selected_opening(&mut self) {
@@ -521,28 +637,29 @@ impl FramerApp {
         let Selection::Opening(id) = self.selected.clone() else {
             return;
         };
-        let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
-            return;
-        };
-        let Some(source) = wall
-            .openings
-            .iter()
-            .find(|opening| opening.id.0 == id)
-            .cloned()
-        else {
-            return;
-        };
-        let (new_id, _) = next_opening_id(wall, "opening-copy");
-        let mut clone = source.clone();
-        clone.id = ElementId::new(new_id.clone());
-        clone.name = format!("{} copy", source.name);
-        let half_width = source.width / 2;
-        clone.center = (source.center + source.width)
-            .min(wall.length - half_width)
-            .max(half_width);
-        wall.openings.push(clone);
-        self.selected = Selection::Opening(new_id);
-        self.rebuild();
+        self.edit("Duplicate opening", |app| {
+            let Some(wall) = app.model.walls.get_mut(app.selected_wall) else {
+                return;
+            };
+            let Some(source) = wall
+                .openings
+                .iter()
+                .find(|opening| opening.id.0 == id)
+                .cloned()
+            else {
+                return;
+            };
+            let (new_id, _) = next_opening_id(wall, "opening-copy");
+            let mut clone = source.clone();
+            clone.id = ElementId::new(new_id.clone());
+            clone.name = format!("{} copy", source.name);
+            let half_width = source.width / 2;
+            clone.center = (source.center + source.width)
+                .min(wall.length - half_width)
+                .max(half_width);
+            wall.openings.push(clone);
+            app.selected = Selection::Opening(new_id);
+        });
     }
 
     fn delete_selected_opening(&mut self) {
@@ -552,13 +669,14 @@ impl FramerApp {
         let Selection::Opening(id) = self.selected.clone() else {
             return;
         };
-        let Some(wall) = self.model.walls.get_mut(self.selected_wall) else {
-            return;
-        };
-        if wall.remove_opening(&ElementId::new(id)) {
-            self.selected = Selection::Wall;
-            self.rebuild();
-        }
+        self.edit("Delete opening", |app| {
+            let Some(wall) = app.model.walls.get_mut(app.selected_wall) else {
+                return;
+            };
+            if wall.remove_opening(&ElementId::new(id)) {
+                app.selected = Selection::Wall;
+            }
+        });
     }
 
     fn begin_opening_drag(
@@ -578,11 +696,16 @@ impl FramerApp {
             return;
         };
 
+        // Build the drag state (copies the opening's geometry) so the borrow of
+        // the model ends before we snapshot it for the undo transaction.
+        let drag = OpeningDragState::new(wall_index, opening_id.clone(), handle, opening);
         self.selected_wall = wall_index;
-        self.selected = Selection::Opening(opening_id.clone());
-        self.opening_drag = Some(OpeningDragState::new(
-            wall_index, opening_id, handle, opening,
-        ));
+        self.selected = Selection::Opening(opening_id);
+        // Open one coalesced undo step for the whole drag, capturing the base
+        // *after* selecting the dragged opening so undo restores it as selected.
+        // update_opening_drag mutates within it; finish_opening_drag settles it.
+        self.history.begin(self.snapshot(), "Move opening");
+        self.opening_drag = Some(drag);
     }
 
     fn update_opening_drag(&mut self, delta_x: Length, delta_y: Length) {
@@ -613,6 +736,9 @@ impl FramerApp {
 
     fn finish_opening_drag(&mut self) {
         self.opening_drag = None;
+        // Settle the drag's transaction: commit it as one undo step if the
+        // opening actually moved, otherwise discard it.
+        self.settle_history(false);
     }
 
     fn handle_dimension_anchor_click(&mut self, wall_index: usize, anchor: DimensionAnchor) {
@@ -659,77 +785,80 @@ impl FramerApp {
             return;
         }
 
-        let Some(first) = self.dimension_tool.first_anchor.clone() else {
-            return;
-        };
-        let Some(second) = self.dimension_tool.second_anchor.clone() else {
-            return;
-        };
-        if first.wall_index != wall_index || second.wall_index != wall_index {
-            self.dimension_status =
-                Some("Dimension anchors must be on the same wall for now".to_owned());
-            self.dimension_tool.clear_picks();
-            return;
-        }
+        self.edit("Add dimension", |app| {
+            let Some(first) = app.dimension_tool.first_anchor.clone() else {
+                return;
+            };
+            let Some(second) = app.dimension_tool.second_anchor.clone() else {
+                return;
+            };
+            if first.wall_index != wall_index || second.wall_index != wall_index {
+                app.dimension_status =
+                    Some("Dimension anchors must be on the same wall for now".to_owned());
+                app.dimension_tool.clear_picks();
+                return;
+            }
 
-        let Some(wall) = self.model.walls.get_mut(wall_index) else {
-            return;
-        };
-        let Some(start_coordinate) = first.anchor.coordinate(wall, axis) else {
-            self.dimension_status = Some("The first dimension anchor no longer exists".to_owned());
-            return;
-        };
-        let Some(end_coordinate) = second.anchor.coordinate(wall, axis) else {
-            self.dimension_status = Some("The second dimension anchor no longer exists".to_owned());
-            return;
-        };
-        let measured = (end_coordinate - start_coordinate).abs();
-        if measured <= Length::ZERO {
-            self.dimension_status =
-                Some("Move the pointer to place a non-zero dimension".to_owned());
-            return;
-        }
+            let Some(wall) = app.model.walls.get_mut(wall_index) else {
+                return;
+            };
+            let Some(start_coordinate) = first.anchor.coordinate(wall, axis) else {
+                app.dimension_status =
+                    Some("The first dimension anchor no longer exists".to_owned());
+                return;
+            };
+            let Some(end_coordinate) = second.anchor.coordinate(wall, axis) else {
+                app.dimension_status =
+                    Some("The second dimension anchor no longer exists".to_owned());
+                return;
+            };
+            let measured = (end_coordinate - start_coordinate).abs();
+            if measured <= Length::ZERO {
+                app.dimension_status =
+                    Some("Move the pointer to place a non-zero dimension".to_owned());
+                return;
+            }
 
-        let kind = self.dimension_tool.kind;
-        let (id, index) = next_dimension_id(wall);
-        let direction = if end_coordinate >= start_coordinate {
-            DimensionDirection::Forward
-        } else {
-            DimensionDirection::Backward
-        };
-        let value = if kind == DimensionKind::Driving {
-            Some(measured)
-        } else {
-            None
-        };
-        let dimension = DimensionConstraint::new(
-            id.clone(),
-            format!("Dimension {index}"),
-            kind,
-            first.anchor,
-            second.anchor,
-            direction,
-            value,
-        )
-        .with_axis(axis)
-        .with_line_offset(line_offset);
-        if wall.would_overconstrain_driving_dimension(&dimension) {
-            self.dimension_status =
-                Some("Driving dimension would overconstrain this wall".to_owned());
-            return;
-        }
-        wall.dimensions.push(dimension);
-        self.dimension_tool.axis = axis;
-        self.dimension_tool.clear_picks();
+            let kind = app.dimension_tool.kind;
+            let (id, index) = next_dimension_id(wall);
+            let direction = if end_coordinate >= start_coordinate {
+                DimensionDirection::Forward
+            } else {
+                DimensionDirection::Backward
+            };
+            let value = if kind == DimensionKind::Driving {
+                Some(measured)
+            } else {
+                None
+            };
+            let dimension = DimensionConstraint::new(
+                id.clone(),
+                format!("Dimension {index}"),
+                kind,
+                first.anchor,
+                second.anchor,
+                direction,
+                value,
+            )
+            .with_axis(axis)
+            .with_line_offset(line_offset);
+            if wall.would_overconstrain_driving_dimension(&dimension) {
+                app.dimension_status =
+                    Some("Driving dimension would overconstrain this wall".to_owned());
+                return;
+            }
+            wall.dimensions.push(dimension);
+            app.dimension_tool.axis = axis;
+            app.dimension_tool.clear_picks();
 
-        self.selected_wall = wall_index;
-        self.selected = Selection::Dimension(id);
-        self.dimension_status = Some(format!(
-            "Added {} {} dimension",
-            dimension_axis_name(axis),
-            dimension_kind_name(kind)
-        ));
-        self.rebuild();
+            app.selected_wall = wall_index;
+            app.selected = Selection::Dimension(id);
+            app.dimension_status = Some(format!(
+                "Added {} {} dimension",
+                dimension_axis_name(axis),
+                dimension_kind_name(kind)
+            ));
+        });
     }
 
     fn selected_member(&self, wall_id: &str, member_id: &str) -> Option<&FrameMember> {
@@ -877,6 +1006,13 @@ impl eframe::App for FramerApp {
         CentralPanel::default()
             .frame(Frame::new().fill(theme::workspace_bg()))
             .show_inside(ui, |ui| self.workspace(ui));
+
+        // All panels have rendered; any inspector edit run has opened its
+        // transaction. Settle it into a single undo step once the interaction
+        // ends (pointer released and no text field focused).
+        let interacting =
+            ui.ctx().input(|input| input.pointer.any_down()) || ui.ctx().text_edit_focused();
+        self.settle_history(interacting);
     }
 }
 
