@@ -35,10 +35,10 @@
         "level": "level-1",
         "start": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
           }
         },
         "end": {
@@ -46,11 +46,11 @@
             "ticks": 0
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
           }
         },
         "length": {
-          "ticks": 5376
+          "ticks": 4608
         },
         "height": {
           "ticks": 1536
@@ -63,42 +63,43 @@
           "stud": "TwoByFour",
           "sheathing": "Osb716"
         },
-        "openings": [
-          {
-            "id": "opening-back-left-window",
-            "name": "Back left window",
-            "kind": "Window",
-            "center": {
-              "ticks": 1344
-            },
-            "width": {
-              "ticks": 768
-            },
-            "height": {
-              "ticks": 768
-            },
-            "sill_height": {
-              "ticks": 576
-            }
+        "openings": []
+      },
+      {
+        "id": "wall-bed",
+        "name": "Bedroom partition",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 0
           },
-          {
-            "id": "opening-back-right-window",
-            "name": "Back right window",
-            "kind": "Window",
-            "center": {
-              "ticks": 3840
-            },
-            "width": {
-              "ticks": 768
-            },
-            "height": {
-              "ticks": 768
-            },
-            "sill_height": {
-              "ticks": 576
-            }
+          "y": {
+            "ticks": 1536
           }
-        ]
+        },
+        "end": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 1536
+          }
+        },
+        "length": {
+          "ticks": 2304
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
       },
       {
         "id": "wall-front",
@@ -114,14 +115,14 @@
         },
         "end": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
             "ticks": 0
           }
         },
         "length": {
-          "ticks": 5376
+          "ticks": 4608
         },
         "height": {
           "ticks": 1536
@@ -140,30 +141,13 @@
             "name": "Front door",
             "kind": "Door",
             "center": {
-              "ticks": 960
+              "ticks": 1152
             },
             "width": {
               "ticks": 576
             },
             "height": {
               "ticks": 1280
-            },
-            "sill_height": {
-              "ticks": 0
-            }
-          },
-          {
-            "id": "opening-front-garage",
-            "name": "Garage door",
-            "kind": "GarageDoor",
-            "center": {
-              "ticks": 3744
-            },
-            "width": {
-              "ticks": 1536
-            },
-            "height": {
-              "ticks": 1344
             },
             "sill_height": {
               "ticks": 0
@@ -180,7 +164,7 @@
             "ticks": 0
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
           }
         },
         "end": {
@@ -192,7 +176,7 @@
           }
         },
         "length": {
-          "ticks": 3840
+          "ticks": 3072
         },
         "height": {
           "ticks": 1536
@@ -205,25 +189,43 @@
           "stud": "TwoByFour",
           "sheathing": "Osb716"
         },
-        "openings": [
-          {
-            "id": "opening-left-service-door",
-            "name": "Service door",
-            "kind": "Door",
-            "center": {
-              "ticks": 1536
-            },
-            "width": {
-              "ticks": 576
-            },
-            "height": {
-              "ticks": 1280
-            },
-            "sill_height": {
-              "ticks": 0
-            }
+        "openings": []
+      },
+      {
+        "id": "wall-mid",
+        "name": "Center partition",
+        "level": "level-1",
+        "start": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 0
           }
-        ]
+        },
+        "end": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 3072
+          }
+        },
+        "length": {
+          "ticks": 3072
+        },
+        "height": {
+          "ticks": 1536
+        },
+        "stud_spacing": {
+          "ticks": 256
+        },
+        "assembly": {
+          "exposure": "Exterior",
+          "stud": "TwoByFour",
+          "sheathing": "Osb716"
+        },
+        "openings": []
       },
       {
         "id": "wall-right",
@@ -231,7 +233,7 @@
         "level": "level-1",
         "start": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
             "ticks": 0
@@ -239,14 +241,14 @@
         },
         "end": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
           }
         },
         "length": {
-          "ticks": 3840
+          "ticks": 3072
         },
         "height": {
           "ticks": 1536
@@ -259,25 +261,7 @@
           "stud": "TwoByFour",
           "sheathing": "Osb716"
         },
-        "openings": [
-          {
-            "id": "opening-right-window",
-            "name": "Right window",
-            "kind": "Window",
-            "center": {
-              "ticks": 1920
-            },
-            "width": {
-              "ticks": 672
-            },
-            "height": {
-              "ticks": 672
-            },
-            "sill_height": {
-              "ticks": 576
-            }
-          }
-        ]
+        "openings": []
       }
     ],
     "wall_joins": [
@@ -292,7 +276,37 @@
             "ticks": 0
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
+          }
+        }
+      },
+      {
+        "id": "join-bed-left",
+        "name": "Bedroom partition at left",
+        "kind": "Tee",
+        "first_wall": "wall-left",
+        "second_wall": "wall-bed",
+        "point": {
+          "x": {
+            "ticks": 0
+          },
+          "y": {
+            "ticks": 1536
+          }
+        }
+      },
+      {
+        "id": "join-bed-mid",
+        "name": "Bedroom partition at center",
+        "kind": "Tee",
+        "first_wall": "wall-mid",
+        "second_wall": "wall-bed",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 1536
           }
         }
       },
@@ -304,7 +318,7 @@
         "second_wall": "wall-right",
         "point": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
             "ticks": 0
@@ -327,6 +341,36 @@
         }
       },
       {
+        "id": "join-mid-back",
+        "name": "Center partition at back",
+        "kind": "Tee",
+        "first_wall": "wall-back",
+        "second_wall": "wall-mid",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 3072
+          }
+        }
+      },
+      {
+        "id": "join-mid-front",
+        "name": "Center partition at front",
+        "kind": "Tee",
+        "first_wall": "wall-front",
+        "second_wall": "wall-mid",
+        "point": {
+          "x": {
+            "ticks": 2304
+          },
+          "y": {
+            "ticks": 0
+          }
+        }
+      },
+      {
         "id": "join-right-back",
         "name": "Right back corner",
         "kind": "Corner",
@@ -334,10 +378,54 @@
         "second_wall": "wall-back",
         "point": {
           "x": {
-            "ticks": 5376
+            "ticks": 4608
           },
           "y": {
-            "ticks": 3840
+            "ticks": 3072
+          }
+        }
+      }
+    ],
+    "rooms": [
+      {
+        "id": "room-bed-1",
+        "name": "Bedroom 1",
+        "usage": "Bedroom",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 1152
+          },
+          "y": {
+            "ticks": 768
+          }
+        }
+      },
+      {
+        "id": "room-bed-2",
+        "name": "Bedroom 2",
+        "usage": "Bedroom",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 1152
+          },
+          "y": {
+            "ticks": 2304
+          }
+        }
+      },
+      {
+        "id": "room-living",
+        "name": "Living",
+        "usage": "Living",
+        "level": "level-1",
+        "seed": {
+          "x": {
+            "ticks": 3456
+          },
+          "y": {
+            "ticks": 1536
           }
         }
       }

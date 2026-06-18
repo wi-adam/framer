@@ -19,9 +19,18 @@ use framer_render::math::Vec3;
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
+use super::draw_wall::resolve_draw_point;
 use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
+
+/// Plan-view input for the draw-wall tool: whether it is active, the in-progress
+/// run's start point, and the active grid snap increment.
+pub(super) struct DrawWallPlanInput {
+    pub(super) active: bool,
+    pub(super) start: Option<Point2>,
+    pub(super) snap_step: Option<Length>,
+}
 
 /// Frames to stay in reduced-resolution "moving" mode after the last camera
 /// input, so a continuous orbit (which produces frequent tiny inputs) doesn't
@@ -471,7 +480,10 @@ mod view_2d_tests {
             cam.zoom
         );
         let now = cam.apply(base_under_cursor, d);
-        assert!(close(now, cursor), "cursor drifted at clamp: {now:?} vs {cursor:?}");
+        assert!(
+            close(now, cursor),
+            "cursor drifted at clamp: {now:?} vs {cursor:?}"
+        );
     }
 
     #[test]
@@ -530,16 +542,25 @@ impl FramerApp {
         self.cursor_model = None;
         let mut toolbar_anchor = None;
         let click = match self.viewport_mode {
-            ViewportMode::Plan => draw_project_plan(
-                ui,
-                &self.model,
-                self.selected_wall,
-                &self.selected,
-                self.grid,
-                &mut self.cursor_model,
-                &mut toolbar_anchor,
-                &mut self.plan_view,
-            ),
+            ViewportMode::Plan => {
+                let draw_tool = DrawWallPlanInput {
+                    active: self.draw_wall_tool.active,
+                    start: self.draw_wall_tool.start,
+                    snap_step: self.snap_step,
+                };
+                draw_project_plan(
+                    ui,
+                    &self.model,
+                    self.selected_wall,
+                    &self.selected,
+                    self.grid,
+                    &mut self.cursor_model,
+                    &mut toolbar_anchor,
+                    &mut self.plan_view,
+                    &draw_tool,
+                    self.room_tool_active,
+                )
+            }
             ViewportMode::Elevation => {
                 let Some(wall) = self.model.walls.get(self.selected_wall) else {
                     ui.label("No wall selected");
@@ -1277,6 +1298,8 @@ fn draw_project_plan(
     cursor_out: &mut Option<Point2>,
     toolbar_out: &mut Option<Pos2>,
     camera: &mut View2dState,
+    draw_tool: &DrawWallPlanInput,
+    room_tool_active: bool,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
@@ -1293,9 +1316,21 @@ fn draw_project_plan(
     }
     draw_view_border(&painter, drawing);
 
-    let Some(bounds) = ModelBounds::from_model(model) else {
-        draw_view_empty(&painter, rect, "No wall segments");
-        return None;
+    let bounds = match ModelBounds::from_model(model) {
+        Some(bounds) => bounds,
+        // An empty model has no bounds. When the draw-wall tool is active, fall
+        // back to a default region around the origin so the user can still place
+        // the first wall (which re-establishes real bounds next frame).
+        None if draw_tool.active => ModelBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 240.0,
+            max_y: 240.0,
+        },
+        None => {
+            draw_view_empty(&painter, rect, "No wall segments");
+            return None;
+        }
     };
 
     if let Some(hover) = response.hover_pos()
@@ -1307,7 +1342,53 @@ fn draw_project_plan(
     let pointer = response.interact_pointer_pos();
     let mut clicked_wall = None;
     let mut clicked_opening = None;
+    let mut clicked_room = None;
     let mut over_element = false;
+
+    // Room fills + labels, drawn under the walls. Boundaries are derived from the
+    // wall loop each frame (never stored); resolve them all in one graph pass.
+    let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
+    let room_boundaries = framer_core::room_boundaries(model, &room_seeds);
+    for (room, boundary) in model.rooms.iter().zip(&room_boundaries) {
+        let Some(boundary) = boundary else {
+            continue;
+        };
+        let screen: Vec<Pos2> = boundary
+            .vertices
+            .iter()
+            .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
+            .collect();
+        let selected = matches!(selection, Selection::Room(id) if id == &room.id.0);
+        let fill = if selected {
+            theme::active_blue().gamma_multiply(0.22)
+        } else {
+            theme::framing_line().gamma_multiply(0.10)
+        };
+        painter.add(egui::Shape::convex_polygon(
+            screen.clone(),
+            fill,
+            Stroke::NONE,
+        ));
+        let label = plan_point(room.seed, bounds, drawing, camera);
+        painter.text(
+            label,
+            Align2::CENTER_CENTER,
+            format!("{}\n{:.0} sq ft", room.name, boundary.area_square_feet()),
+            FontId::proportional(11.0),
+            theme::framing_line_dark(),
+        );
+        // Selecting a room by click is the lowest-priority hit (walls/openings win),
+        // and only when no tool is active.
+        if !draw_tool.active
+            && !room_tool_active
+            && response.clicked()
+            && pointer.is_some_and(|position| point_in_screen_polygon(position, &screen))
+        {
+            clicked_room = Some(ViewClick::Room {
+                room_id: room.id.0.clone(),
+            });
+        }
+    }
 
     for join in &model.wall_joins {
         let point = plan_point(join.point, bounds, drawing, camera);
@@ -1339,7 +1420,7 @@ fn draw_project_plan(
         if selected {
             draw_selected_wall_handles(&painter, start, end);
         }
-        if hovered && response.clicked() {
+        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
             clicked_wall = Some(ViewClick::Wall(index));
         }
 
@@ -1353,8 +1434,18 @@ fn draw_project_plan(
         );
 
         for opening in &wall.openings {
-            let left = plan_point(wall.point_at_local_x(opening.left()), bounds, drawing, camera);
-            let right = plan_point(wall.point_at_local_x(opening.right()), bounds, drawing, camera);
+            let left = plan_point(
+                wall.point_at_local_x(opening.left()),
+                bounds,
+                drawing,
+                camera,
+            );
+            let right = plan_point(
+                wall.point_at_local_x(opening.right()),
+                bounds,
+                drawing,
+                camera,
+            );
             let opening_hovered =
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             over_element |= opening_hovered;
@@ -1382,7 +1473,7 @@ fn draw_project_plan(
                     },
                 ),
             );
-            if opening_hovered && response.clicked() {
+            if opening_hovered && response.clicked() && !draw_tool.active && !room_tool_active {
                 clicked_opening = Some(ViewClick::Opening {
                     wall_index: index,
                     opening_id: opening.id.0.clone(),
@@ -1398,8 +1489,122 @@ fn draw_project_plan(
     draw_view_title(&painter, drawing, "Whole-project plan");
     draw_plan_axis_indicator(&painter, drawing);
 
-    reset_view_on_empty_double_click(&response, camera, over_element);
-    clicked_opening.or(clicked_wall)
+    // Skip double-click-to-refit while a placement tool is active, so a quick
+    // second click that places a point/room doesn't also reset the camera.
+    if !draw_tool.active && !room_tool_active {
+        reset_view_on_empty_double_click(&response, camera, over_element);
+    }
+
+    if draw_tool.active {
+        if let Some(click) = draw_wall_overlay(
+            &painter, &response, model, bounds, drawing, camera, scale, draw_tool,
+        ) {
+            return Some(click);
+        }
+    }
+
+    if room_tool_active && response.clicked() {
+        if let Some(cursor) = response
+            .interact_pointer_pos()
+            .filter(|c| drawing.contains(*c))
+        {
+            return Some(ViewClick::PlaceRoom {
+                point: plan_inverse_point(cursor, bounds, drawing, camera),
+            });
+        }
+    }
+
+    clicked_opening.or(clicked_wall).or(clicked_room)
+}
+
+/// Even-odd point-in-polygon test in screen space, for picking a room by click.
+fn point_in_screen_polygon(point: Pos2, vertices: &[Pos2]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (xi, yi) = (vertices[i].x, vertices[i].y);
+        let (xj, yj) = (vertices[j].x, vertices[j].y);
+        if (yi > point.y) != (yj > point.y) && point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Render the draw-wall tool's live preview (snap marker, rubber band, length
+/// readout) and translate pointer input into draw clicks. Returns a draw-wall
+/// `ViewClick` on a primary click (place a point) or secondary click (cancel
+/// the run).
+#[allow(clippy::too_many_arguments)]
+fn draw_wall_overlay(
+    painter: &egui::Painter,
+    response: &egui::Response,
+    model: &BuildingModel,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+    scale: f32,
+    draw_tool: &DrawWallPlanInput,
+) -> Option<ViewClick> {
+    if response.secondary_clicked() {
+        return Some(ViewClick::DrawWallCancel);
+    }
+
+    let cursor = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos())?;
+    if !drawing.contains(cursor) {
+        return None;
+    }
+
+    let raw = plan_inverse_point(cursor, bounds, drawing, camera);
+    // Snap tolerance of ~12 screen px expressed in model inches, capped so that
+    // zooming far out can't make snapping reach across the whole model.
+    let tolerance = Length::from_inches(((12.0 / scale.max(0.0001)) as f64).min(24.0));
+    let resolved = resolve_draw_point(model, draw_tool.start, raw, draw_tool.snap_step, tolerance);
+    let candidate = plan_point(resolved.point, bounds, drawing, camera);
+
+    if let Some(start) = draw_tool.start {
+        let start_screen = plan_point(start, bounds, drawing, camera);
+        painter.line_segment(
+            [start_screen, candidate],
+            Stroke::new(2.5, theme::active_blue()),
+        );
+        painter.circle_filled(start_screen, 4.0, theme::active_blue());
+
+        // Ortho-locked, so exactly one axis differs; max gives the wall length.
+        let length = (resolved.point.x - start.x)
+            .abs()
+            .max((resolved.point.y - start.y).abs());
+        if length > Length::ZERO {
+            let mid = Pos2::new(
+                (start_screen.x + candidate.x) / 2.0,
+                (start_screen.y + candidate.y) / 2.0,
+            );
+            painter.text(
+                mid + Vec2::new(8.0, -8.0),
+                Align2::LEFT_CENTER,
+                length.to_string(),
+                FontId::proportional(12.0),
+                theme::active_blue(),
+            );
+        }
+    }
+
+    // Candidate endpoint marker; a larger ring marks a snap onto existing geometry.
+    painter.circle_filled(candidate, 3.5, theme::active_blue());
+    if resolved.on_existing {
+        painter.circle_stroke(candidate, 8.0, Stroke::new(2.0, theme::active_blue()));
+    }
+
+    response.clicked().then_some(ViewClick::DrawWallPoint {
+        point: resolved.point,
+    })
 }
 
 /// A drafting scale bar at the bottom-left of the plan, sized to a round number
@@ -2402,7 +2607,12 @@ fn plan_point(point: Point2, bounds: ModelBounds, drawing: Rect, view: &View2dSt
 }
 
 /// Inverse of [`plan_point`]: map a screen position back to model coordinates.
-fn plan_inverse_point(screen: Pos2, bounds: ModelBounds, drawing: Rect, view: &View2dState) -> Point2 {
+fn plan_inverse_point(
+    screen: Pos2,
+    bounds: ModelBounds,
+    drawing: Rect,
+    view: &View2dState,
+) -> Point2 {
     let width = (bounds.max_x - bounds.min_x).max(1.0);
     let depth = (bounds.max_y - bounds.min_y).max(1.0);
     let scale = (drawing.width() / width).min(drawing.height() / depth);
@@ -2411,8 +2621,8 @@ fn plan_inverse_point(screen: Pos2, bounds: ModelBounds, drawing: Rect, view: &V
     // Undo the pan/zoom first, then invert the fit-to-bounds base mapping.
     let base = view.unapply(screen, drawing);
     let x = bounds.min_x + (base.x - drawing.left() - (drawing.width() - used_width) / 2.0) / scale;
-    let y = bounds.min_y
-        + (drawing.bottom() - (drawing.height() - used_height) / 2.0 - base.y) / scale;
+    let y =
+        bounds.min_y + (drawing.bottom() - (drawing.height() - used_height) / 2.0 - base.y) / scale;
     Point2::new(Length::from_inches(x as f64), Length::from_inches(y as f64))
 }
 
@@ -3341,7 +3551,13 @@ fn draw_wall_design_elevation(
     );
     // Pan/zoom before laying out the wall. While an opening drag is active,
     // Space+drag must not be claimed for panning, so it can't hijack the drag.
-    let panning = apply_view_2d_input(ui, &response, drawing, camera, active_opening_drag.is_none());
+    let panning = apply_view_2d_input(
+        ui,
+        &response,
+        drawing,
+        camera,
+        active_opening_drag.is_none(),
+    );
     let layout = WallElevationLayout::new(drawing, wall, camera);
     let wall_rect = layout.wall_rect;
     let scale = layout.scale;
@@ -4472,6 +4688,8 @@ fn member_color(kind: MemberKind) -> Color32 {
     match kind {
         MemberKind::BottomPlate | MemberKind::TopPlate => Color32::from_rgb(99, 85, 67),
         MemberKind::CornerPost => Color32::from_rgb(52, 95, 127),
+        MemberKind::PartitionStud => Color32::from_rgb(79, 127, 95),
+        MemberKind::BackingStud => Color32::from_rgb(127, 111, 79),
         MemberKind::CommonStud => Color32::from_rgb(186, 145, 94),
         MemberKind::KingStud => Color32::from_rgb(151, 100, 61),
         MemberKind::JackStud => Color32::from_rgb(211, 168, 95),
@@ -4497,9 +4715,11 @@ fn section_position(wall: &Wall, selection: &Selection) -> Option<Length> {
                 let end = dimension.end.local_x(wall)?;
                 Some((start + end) / 2)
             }),
-        Selection::Member { .. } | Selection::Join(_) | Selection::Level(_) | Selection::Wall => {
-            Some(wall.length / 2)
-        }
+        Selection::Member { .. }
+        | Selection::Join(_)
+        | Selection::Level(_)
+        | Selection::Room(_)
+        | Selection::Wall => Some(wall.length / 2),
     }
 }
 
@@ -4705,16 +4925,25 @@ mod tests {
 
         let mut close = View3dState::default();
         close.dolly_by(0.0001);
-        assert!((close.dolly - DOLLY_MIN).abs() < 1e-6, "dolly clamps to DOLLY_MIN");
+        assert!(
+            (close.dolly - DOLLY_MIN).abs() < 1e-6,
+            "dolly clamps to DOLLY_MIN"
+        );
 
         let mut far = View3dState::default();
         far.dolly_by(1000.0);
-        assert!((far.dolly - DOLLY_MAX).abs() < 1e-6, "dolly clamps to DOLLY_MAX");
+        assert!(
+            (far.dolly - DOLLY_MAX).abs() < 1e-6,
+            "dolly clamps to DOLLY_MAX"
+        );
 
         let mut keep = View3dState::default();
         keep.dolly_by(-1.0);
         keep.dolly_by(f32::NAN);
-        assert!((keep.dolly - 1.0).abs() < 1e-6, "invalid factors are ignored");
+        assert!(
+            (keep.dolly - 1.0).abs() < 1e-6,
+            "invalid factors are ignored"
+        );
     }
 
     #[test]
@@ -4727,7 +4956,10 @@ mod tests {
         v.dolly = 0.4;
         v.snap_to(ViewCubeAction::FRONT);
         assert_eq!(v.pan, Vec3::ZERO, "face snap must recenter the pan");
-        assert!((v.dolly - 1.0).abs() < 1e-6, "face snap must reset the dolly");
+        assert!(
+            (v.dolly - 1.0).abs() < 1e-6,
+            "face snap must reset the dolly"
+        );
     }
 
     /// The Render view and the interactive 3D view share one `View3dState`, so a
@@ -4737,7 +4969,6 @@ mod tests {
     /// switching back to 3D can never flip or mirror the camera.
     #[test]
     fn render_camera_matches_orbit_projector_orientation() {
-
         // Project a world point through the path tracer's camera into normalized
         // device coordinates (origin centered, +x right, +y up), plus its
         // view-space depth so we can require the probe sits in front of the eye.
@@ -4845,7 +5076,6 @@ mod tests {
     /// scale.
     #[test]
     fn render_zoom_magnifies_uniformly_like_the_orbit_projector() {
-
         fn render_ndc(camera: &framer_render::camera::Camera, point: Point3) -> (f32, f32) {
             let to_point = Vec3::new(point.x, point.y, point.z) - camera.eye;
             let depth = to_point.dot(camera.forward);
@@ -4899,12 +5129,9 @@ mod tests {
         ];
 
         for zoom in [0.5_f32, 1.5, 2.5] {
-            let zoom_proj = OrbitProjector::from_points(
-                &points,
-                drawing,
-                View3dState { zoom, ..base_view },
-            )
-            .unwrap();
+            let zoom_proj =
+                OrbitProjector::from_points(&points, drawing, View3dState { zoom, ..base_view })
+                    .unwrap();
             let zoom_cam = make_camera(zoom);
             for (ox, oy, oz) in offsets {
                 let point = Point3::vector(center.x + ox, center.y + oy, center.z + oz);
@@ -5400,7 +5627,10 @@ mod tests {
         let (w, h) = render_resolution(1500.0, 1000.0, 2.0, 1.0);
         assert_eq!(w.max(h), MAX_RENDER_DIM);
         let ratio = w as f32 / h as f32;
-        assert!((ratio - 1.5).abs() < 0.01, "aspect {ratio} should match 1.5");
+        assert!(
+            (ratio - 1.5).abs() < 0.01,
+            "aspect {ratio} should match 1.5"
+        );
     }
 
     #[test]

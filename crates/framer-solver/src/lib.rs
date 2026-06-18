@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use framer_core::{
     BoardProfile, BuildingModel, CodeProfile, ElementId, Length, ModelError, Opening, Point2, Wall,
-    WallJoinKind,
+    WallJoin, WallJoinKind, room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -25,6 +25,28 @@ impl WallFramePlan {
 pub struct ProjectFramePlan {
     pub wall_plans: Vec<WallFramePlan>,
     pub diagnostics: Vec<PlanDiagnostic>,
+    #[serde(default)]
+    pub rooms: Vec<RoomSchedule>,
+}
+
+/// A derived room takeoff row: identity plus the area/perimeter computed from the
+/// room's bounding wall loop. `closed` is false when the room is not enclosed
+/// (in which case area/perimeter are zero and a diagnostic is emitted). Area is
+/// stored in whole square inches to keep the plan `Eq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSchedule {
+    pub room: ElementId,
+    pub name: String,
+    pub usage: String,
+    pub closed: bool,
+    pub area_square_inches: i64,
+    pub perimeter: Length,
+}
+
+impl RoomSchedule {
+    pub fn area_square_feet(&self) -> f64 {
+        self.area_square_inches as f64 / 144.0
+    }
 }
 
 impl ProjectFramePlan {
@@ -103,6 +125,8 @@ pub enum MemberKind {
     BottomPlate,
     TopPlate,
     CornerPost,
+    PartitionStud,
+    BackingStud,
     CommonStud,
     KingStud,
     JackStud,
@@ -117,6 +141,8 @@ impl MemberKind {
             Self::BottomPlate => "bottom plate",
             Self::TopPlate => "top plate",
             Self::CornerPost => "corner post",
+            Self::PartitionStud => "partition stud",
+            Self::BackingStud => "backing stud",
             Self::CommonStud => "common stud",
             Self::KingStud => "king stud",
             Self::JackStud => "jack stud",
@@ -303,6 +329,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
     let mut plan = ProjectFramePlan {
         wall_plans: Vec::with_capacity(model.walls.len()),
         diagnostics: project_diagnostics(model),
+        rooms: Vec::new(),
     };
 
     for wall in &model.walls {
@@ -310,8 +337,52 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
     }
 
     add_join_members(&mut plan, model)?;
+    plan.rooms = room_schedule(model, &mut plan.diagnostics);
 
     Ok(plan)
+}
+
+/// Derive a takeoff row for each authored room from its bounding wall loop. Rooms
+/// that are not enclosed get a zeroed row plus a `Warning` diagnostic.
+fn room_schedule(
+    model: &BuildingModel,
+    diagnostics: &mut Vec<PlanDiagnostic>,
+) -> Vec<RoomSchedule> {
+    let seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
+    let boundaries = room_boundaries(model, &seeds);
+    let mut schedule = Vec::with_capacity(model.rooms.len());
+    for (room, boundary) in model.rooms.iter().zip(boundaries) {
+        match boundary {
+            Some(boundary) => schedule.push(RoomSchedule {
+                room: room.id.clone(),
+                name: room.name.clone(),
+                usage: room.usage.label().to_owned(),
+                closed: true,
+                area_square_inches: boundary.area_square_inches().round() as i64,
+                perimeter: boundary.perimeter,
+            }),
+            None => {
+                diagnostics.push(PlanDiagnostic::new(
+                    DiagnosticSeverity::Warning,
+                    "room.boundary.open",
+                    Some(room.id.clone()),
+                    format!(
+                        "{} is not enclosed by a closed wall loop, so its area and perimeter cannot be computed.",
+                        room.name
+                    ),
+                ));
+                schedule.push(RoomSchedule {
+                    room: room.id.clone(),
+                    name: room.name.clone(),
+                    usage: room.usage.label().to_owned(),
+                    closed: false,
+                    area_square_inches: 0,
+                    perimeter: Length::ZERO,
+                });
+            }
+        }
+    }
+    schedule
 }
 
 fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
@@ -334,79 +405,169 @@ fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
 
 fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Result<(), SolverError> {
     let plate_thickness = model.code.plate_profile.thickness();
-    let stud_base = plate_thickness;
     let top_plate_count = if model.code.double_top_plate { 2 } else { 1 };
 
+    let find_wall = |id: &ElementId| model.walls.iter().find(|candidate| candidate.id == *id);
+
     for join in &model.wall_joins {
-        if !matches!(join.kind, WallJoinKind::Corner | WallJoinKind::EndToEnd) {
-            plan.diagnostics.push(PlanDiagnostic::new(
-                DiagnosticSeverity::Unsupported,
-                "wall.join.unsupported-kind",
-                Some(join.id.clone()),
-                format!(
-                    "{} is stored as an authored {:?} join, but only corner/end-to-end join framing is generated in this alpha.",
-                    join.name, join.kind
-                ),
-            ));
-            continue;
-        }
-
-        for wall_id in [&join.first_wall, &join.second_wall] {
-            let wall = model
-                .walls
-                .iter()
-                .find(|candidate| candidate.id == *wall_id)
-                .ok_or_else(|| SolverError::MissingWallForJoin {
-                    join: join.id.clone(),
-                    wall: wall_id.clone(),
-                })?;
-            let join_x = wall.local_x_for_point(join.point).ok_or_else(|| {
-                SolverError::JoinPointOutsideWall {
-                    join: join.id.clone(),
-                    wall: wall.id.clone(),
-                }
+        let first = find_wall(&join.first_wall).ok_or_else(|| SolverError::MissingWallForJoin {
+            join: join.id.clone(),
+            wall: join.first_wall.clone(),
+        })?;
+        let second =
+            find_wall(&join.second_wall).ok_or_else(|| SolverError::MissingWallForJoin {
+                join: join.id.clone(),
+                wall: join.second_wall.clone(),
             })?;
-            let wall_stud = wall.assembly.stud_profile();
-            let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
-            let stud_top = wall.height - plate_thickness * top_plate_count as i64;
-            let stud_length = stud_top - stud_base;
 
-            if stud_length <= Length::ZERO {
-                return Err(SolverError::WallTooShortForPlateStack {
-                    wall: wall.id.clone(),
-                });
+        match join.kind {
+            WallJoinKind::Corner | WallJoinKind::EndToEnd => {
+                for wall in [first, second] {
+                    push_join_stud(
+                        plan,
+                        join,
+                        wall,
+                        MemberKind::CornerPost,
+                        "corner-post",
+                        plate_thickness,
+                        top_plate_count,
+                        RuleProvenance::new(
+                            "wall.join.corner-posts",
+                            format!(
+                                "A corner post is generated on {} with its faces inside the wall edge to make the authored {} join visible in the framing plan.",
+                                wall.name, join.name
+                            ),
+                        ),
+                    )?;
+                }
             }
-
-            let wall_plan =
-                plan.wall_plan_mut(&wall.id)
-                    .ok_or_else(|| SolverError::MissingWallPlan {
-                        wall: wall.id.clone(),
-                    })?;
-            wall_plan.members.push(frame_member(
-                format!("{}-{}-corner-post", join.id.0, wall.id.0),
-                &join.id,
-                MemberKind::CornerPost,
-                wall_stud,
-                FrameMemberPlacement::new(
-                    MemberOrientation::Vertical,
-                    post_x,
-                    stud_base,
-                    stud_length,
-                    wall_stud.thickness(),
-                ),
-                RuleProvenance::new(
-                    "wall.join.corner-posts",
+            WallJoinKind::Tee => {
+                // The partition meets the through wall at the partition's endpoint;
+                // the through wall owns the join on its interior. This derives the
+                // roles from geometry, so it is correct regardless of which wall the
+                // author stored as first/second (validation guarantees exactly one
+                // endpoint owner).
+                let (partition, through) = if first.has_endpoint(join.point) {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                push_join_stud(
+                    plan,
+                    join,
+                    partition,
+                    MemberKind::PartitionStud,
+                    "partition-stud",
+                    plate_thickness,
+                    top_plate_count,
+                    RuleProvenance::new(
+                        "wall.join.tee-partition-stud",
+                        format!(
+                            "A partition end stud terminates {} where it meets {} at the {} tee join.",
+                            partition.name, through.name, join.name
+                        ),
+                    ),
+                )?;
+                push_join_stud(
+                    plan,
+                    join,
+                    through,
+                    MemberKind::BackingStud,
+                    "backing-stud",
+                    plate_thickness,
+                    top_plate_count,
+                    RuleProvenance::new(
+                        "wall.join.tee-backing",
+                        format!(
+                            "A backing stud is added in {} to receive the {} partition and drywall at the {} tee join.",
+                            through.name, partition.name, join.name
+                        ),
+                    ),
+                )?;
+            }
+            WallJoinKind::Cross => {
+                for wall in [first, second] {
+                    push_join_stud(
+                        plan,
+                        join,
+                        wall,
+                        MemberKind::BackingStud,
+                        "backing-stud",
+                        plate_thickness,
+                        top_plate_count,
+                        RuleProvenance::new(
+                            "wall.join.cross-backing",
+                            format!(
+                                "A backing stud is added in {} at the {} cross join.",
+                                wall.name, join.name
+                            ),
+                        ),
+                    )?;
+                }
+                plan.diagnostics.push(PlanDiagnostic::new(
+                    DiagnosticSeverity::Info,
+                    "wall.join.cross-simplified",
+                    Some(join.id.clone()),
                     format!(
-                        "A corner post is generated on {} with its faces inside the wall edge at {} to make the authored {} wall join visible in the project framing plan.",
-                        wall.name,
-                        post_x,
+                        "{} is framed with backing studs on both walls; interrupting one wall for a true cross intersection is not yet modelled.",
                         join.name
                     ),
-                ),
-            ));
+                ));
+            }
         }
     }
 
+    Ok(())
+}
+
+/// Push one vertical join stud (corner post / partition end stud / backing stud)
+/// onto the given wall's plan, face-aligned at the join point.
+#[allow(clippy::too_many_arguments)]
+fn push_join_stud(
+    plan: &mut ProjectFramePlan,
+    join: &WallJoin,
+    wall: &Wall,
+    kind: MemberKind,
+    member_suffix: &str,
+    plate_thickness: Length,
+    top_plate_count: usize,
+    provenance: RuleProvenance,
+) -> Result<(), SolverError> {
+    let join_x =
+        wall.local_x_for_point(join.point)
+            .ok_or_else(|| SolverError::JoinPointOutsideWall {
+                join: join.id.clone(),
+                wall: wall.id.clone(),
+            })?;
+    let wall_stud = wall.assembly.stud_profile();
+    let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
+    let stud_top = wall.height - plate_thickness * top_plate_count as i64;
+    let stud_length = stud_top - plate_thickness;
+    if stud_length <= Length::ZERO {
+        return Err(SolverError::WallTooShortForPlateStack {
+            wall: wall.id.clone(),
+        });
+    }
+
+    let wall_plan = plan
+        .wall_plan_mut(&wall.id)
+        .ok_or_else(|| SolverError::MissingWallPlan {
+            wall: wall.id.clone(),
+        })?;
+    wall_plan.members.push(frame_member(
+        format!("{}-{}-{}", join.id.0, wall.id.0, member_suffix),
+        &join.id,
+        kind,
+        wall_stud,
+        FrameMemberPlacement::new(
+            MemberOrientation::Vertical,
+            post_x,
+            plate_thickness,
+            stud_length,
+            wall_stud.thickness(),
+        ),
+        provenance,
+    ));
     Ok(())
 }
 
@@ -779,6 +940,32 @@ pub fn export_bom_csv(bom: &[BomItem]) -> String {
     csv
 }
 
+pub fn export_room_schedule_csv(rooms: &[RoomSchedule]) -> String {
+    let mut rows = rooms.to_vec();
+    rows.sort_by(|a, b| a.room.0.cmp(&b.room.0));
+
+    let mut csv = "room,name,usage,enclosed,area_sqft,perimeter_ft\n".to_owned();
+    for room in rows {
+        let fields = [
+            room.room.0.clone(),
+            room.name.clone(),
+            room.usage.clone(),
+            room.closed.to_string(),
+            format!("{:.1}", room.area_square_feet()),
+            format!("{:.1}", room.perimeter.feet()),
+        ];
+        csv.push_str(
+            &fields
+                .iter()
+                .map(|field| csv_field(field))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        csv.push('\n');
+    }
+    csv
+}
+
 pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     let width = wall.length.inches().max(1.0);
     let height = wall.height.inches().max(1.0);
@@ -997,6 +1184,27 @@ pub fn export_project_svg(model: &BuildingModel, plan: &ProjectFramePlan) -> Str
         }
     }
 
+    for room in &model.rooms {
+        let Some(schedule) = plan.rooms.iter().find(|entry| entry.room == room.id) else {
+            continue;
+        };
+        let anchor = project_svg_point(room.seed, bounds.min, margin, plan_height - margin);
+        let label = if schedule.closed {
+            format!("{} ({:.0} sq ft)", room.name, schedule.area_square_feet())
+        } else {
+            format!("{} (open)", room.name)
+        };
+        writeln!(
+            svg,
+            r##"  <text data-room="{}" x="{}" y="{}" font-family="Arial, sans-serif" font-size="4" fill="#46433d" text-anchor="middle">{}</text>"##,
+            escape_xml(&room.id.0),
+            svg_number(anchor.0),
+            svg_number(anchor.1),
+            escape_xml(&label)
+        )
+        .unwrap();
+    }
+
     let mut elevation_y = plan_height + margin;
     for wall in &model.walls {
         if let Some(wall_plan) = plan.wall_plan(&wall.id) {
@@ -1076,6 +1284,8 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
     match kind {
         MemberKind::BottomPlate | MemberKind::TopPlate => "#635543",
         MemberKind::CornerPost => "#345f7f",
+        MemberKind::PartitionStud => "#4f7f5f",
+        MemberKind::BackingStud => "#7f6f4f",
         MemberKind::CommonStud => "#ba915e",
         MemberKind::KingStud => "#97643d",
         MemberKind::JackStud => "#d3a85f",
@@ -1193,6 +1403,233 @@ mod tests {
     };
 
     use super::*;
+
+    /// A closed 12ft × 8ft rectangle with one room seeded at its centre.
+    fn rectangle_with_room() -> BuildingModel {
+        use framer_core::{Point2, Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        let (w, h, z) = (
+            Length::from_feet(12.0),
+            Length::from_feet(8.0),
+            Length::ZERO,
+        );
+        let mut wall = |id: &str, a: Point2, b: Point2| {
+            model.walls.push(
+                Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", a, b),
+            );
+        };
+        wall("w-b", Point2::new(z, z), Point2::new(w, z));
+        wall("w-r", Point2::new(w, z), Point2::new(w, h));
+        wall("w-t", Point2::new(w, h), Point2::new(z, h));
+        wall("w-l", Point2::new(z, h), Point2::new(z, z));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Living",
+            RoomUsage::Living,
+            "level-1",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+        ));
+        model
+    }
+
+    fn placed(id: &str, a: Point2, b: Point2, code: &CodeProfile) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", a, b)
+    }
+
+    #[test]
+    fn two_bedroom_example_frames_three_rooms_via_tee_joins() {
+        let plan = generate_project_plan(&BuildingModel::demo_two_bedroom()).unwrap();
+
+        // Three enclosed rooms with the expected areas (96 + 96 + 192 sq ft).
+        assert_eq!(plan.rooms.len(), 3);
+        assert!(plan.rooms.iter().all(|room| room.closed));
+        let mut areas: Vec<i64> = plan
+            .rooms
+            .iter()
+            .map(|room| room.area_square_feet().round() as i64)
+            .collect();
+        areas.sort_unstable();
+        assert_eq!(areas, vec![96, 96, 192]);
+
+        // Interior partitions are framed, not diagnosed as unsupported.
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
+        assert!(plan.wall_plans.iter().any(|wall_plan| {
+            wall_plan
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::PartitionStud)
+        }));
+    }
+
+    #[test]
+    fn tee_join_frames_partition_end_stud_and_backing_no_corner_post() {
+        use framer_core::{WallJoin, WallJoinKind};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed(
+            "through",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed(
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-tee",
+            "Tee",
+            WallJoinKind::Tee,
+            "through",
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let through = plan.wall_plan(&ElementId::new("through")).unwrap();
+        let partition = plan.wall_plan(&ElementId::new("partition")).unwrap();
+
+        assert!(
+            through
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            partition
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::PartitionStud)
+        );
+        assert!(
+            through
+                .members
+                .iter()
+                .chain(&partition.members)
+                .all(|m| m.kind != MemberKind::CornerPost),
+            "a Tee must not generate corner posts"
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
+    }
+
+    #[test]
+    fn cross_join_frames_backing_on_both_walls() {
+        use framer_core::{WallJoin, WallJoinKind};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed(
+            "horizontal",
+            Point2::new(Length::ZERO, Length::from_feet(4.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(4.0)),
+            &code,
+        ));
+        model.walls.push(placed(
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-cross",
+            "Cross",
+            WallJoinKind::Cross,
+            "horizontal",
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(4.0)),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let horizontal = plan.wall_plan(&ElementId::new("horizontal")).unwrap();
+        let vertical = plan.wall_plan(&ElementId::new("vertical")).unwrap();
+
+        assert!(
+            horizontal
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            vertical
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
+    }
+
+    #[test]
+    fn room_schedule_reports_area_for_enclosed_room() {
+        let plan = generate_project_plan(&rectangle_with_room()).unwrap();
+
+        assert_eq!(plan.rooms.len(), 1);
+        let room = &plan.rooms[0];
+        assert!(room.closed);
+        assert!((room.area_square_feet() - 96.0).abs() < 0.01);
+        assert_eq!(room.perimeter, Length::from_feet(40.0));
+    }
+
+    #[test]
+    fn open_room_emits_warning_diagnostic() {
+        use framer_core::{Point2, Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(Wall::new("w-1", "Wall", Length::from_feet(12.0), &code));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "level-1",
+            Point2::new(Length::from_feet(2.0), Length::from_feet(2.0)),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert_eq!(plan.rooms.len(), 1);
+        assert!(!plan.rooms[0].closed);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "room.boundary.open"
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("room-1")
+                && matches!(diagnostic.severity, DiagnosticSeverity::Warning)
+        }));
+    }
+
+    #[test]
+    fn project_svg_labels_rooms() {
+        let model = rectangle_with_room();
+        let plan = generate_project_plan(&model).unwrap();
+        let svg = export_project_svg(&model, &plan);
+
+        assert!(svg.contains(r#"data-room="room-1""#));
+        assert!(svg.contains("Living"));
+    }
+
+    #[test]
+    fn room_schedule_csv_has_a_row_per_room() {
+        let plan = generate_project_plan(&rectangle_with_room()).unwrap();
+        let csv = export_room_schedule_csv(&plan.rooms);
+
+        assert!(csv.starts_with("room,name,usage,enclosed,area_sqft,perimeter_ft\n"));
+        assert!(csv.contains("room-1"));
+        assert!(csv.contains("Living"));
+        assert!(csv.contains("96.0"));
+    }
 
     #[test]
     fn wall_with_door_generates_kings_jacks_and_header() {

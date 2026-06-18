@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 5;
+pub const PROJECT_SCHEMA_VERSION: u32 = 6;
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 5,\n"));
+        assert!(json.contains("  \"schema_version\": 6,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -207,6 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn demo_two_bedroom_example_is_canonical() {
+        let example = include_str!("../../../examples/projects/demo-two-bedroom.framer");
+
+        let model = load_project(example).unwrap();
+
+        assert_eq!(model.walls.len(), 6);
+        assert_eq!(model.rooms.len(), 3);
+        assert_eq!(
+            model
+                .wall_joins
+                .iter()
+                .filter(|join| join.kind == crate::WallJoinKind::Tee)
+                .count(),
+            4
+        );
+        assert_eq!(save_project(&model).unwrap(), example);
+    }
+
+    #[test]
     fn demo_wall_example_is_canonical() {
         let example = include_str!("../../../examples/projects/demo-wall.framer");
 
@@ -253,6 +272,76 @@ mod tests {
             wall.tags,
             vec!["load-bearing".to_owned(), "shear".to_owned()]
         );
+    }
+
+    #[test]
+    fn room_round_trips_through_save_and_load() {
+        use crate::{Point2, Room, RoomUsage};
+
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Living room",
+            RoomUsage::Living,
+            "level-1",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+        ));
+
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"schema_version\": 6,"));
+        assert!(json.contains("\"rooms\": ["));
+        assert!(json.contains("\"usage\": \"Living\""));
+
+        let reloaded = load_project(&json).unwrap();
+        assert_eq!(reloaded.rooms.len(), 1);
+        assert_eq!(reloaded.rooms[0].usage, RoomUsage::Living);
+        assert_eq!(
+            reloaded.rooms[0].seed,
+            Point2::new(Length::from_feet(6.0), Length::from_feet(6.0))
+        );
+    }
+
+    #[test]
+    fn schema_v5_file_without_rooms_loads_with_empty_rooms() {
+        let source = r#"{
+  "format": "framer.project",
+  "schema_version": 5,
+  "authored": {
+    "code": {
+      "code": "Irc2021",
+      "display_name": "IRC 2021 prescriptive starter profile",
+      "default_wall_height": {"ticks": 1536},
+      "default_stud_spacing": {"ticks": 256},
+      "double_top_plate": true,
+      "default_header_depth": {"ticks": 144},
+      "stud_profile": "TwoByFour",
+      "plate_profile": "TwoByFour",
+      "header_profile": "TwoByTen"
+    },
+    "levels": [{"id": "level-1", "name": "Level 1", "elevation": {"ticks": 0}}],
+    "walls": [
+      {
+        "id": "wall",
+        "name": "Wall",
+        "level": "level-1",
+        "start": {"x": {"ticks": 0}, "y": {"ticks": 0}},
+        "end": {"x": {"ticks": 2304}, "y": {"ticks": 0}},
+        "length": {"ticks": 2304},
+        "height": {"ticks": 1536},
+        "stud_spacing": {"ticks": 256},
+        "openings": []
+      }
+    ],
+    "wall_joins": []
+  }
+}"#;
+
+        let model = load_project(source).unwrap();
+        assert!(model.rooms.is_empty());
     }
 
     #[test]

@@ -33,7 +33,11 @@ multi-system CAD alpha. The repository currently contains:
 The completed Phase 1 workflow still frames one straight wall with doors,
 windows, or garage-door-style openings. The current beyond-Phase-1 alpha also
 loads, edits, regenerates, exports, saves, and reopens a connected multi-wall
-shell. The code profile remains a starter data shape, not yet a complete
+shell. It adds interactive floor-plan authoring: draw and delete interior and
+exterior walls with ortho/grid/endpoint/mid-span snapping and automatic
+corner/tee joins, and place rooms that derive their area and perimeter from the
+enclosing wall loop. Interior partitions are framed with partition end studs and
+backing. The code profile remains a starter data shape, not yet a complete
 code-compliance engine.
 
 Project files use a schema-versioned, text-first `.framer` JSON format for
@@ -54,13 +58,15 @@ workflow is:
    inspector, including wall placement, openings, levels, joins, and dimension
    constraints.
 3. Add doors, windows, or garage doors from the catalog.
-4. Use the Design-mode `Dimension` tool in the wall view to click wall/opening
+4. Use the Design-mode `Wall` tool (W) to draw walls in the plan view and the
+   `Room` tool (R) to place a room inside an enclosed area.
+5. Use the Design-mode `Dimension` tool in the wall view to click wall/opening
    anchors and create driving or reference dimensions.
-5. Inspect regenerated whole-project framing, diagnostics, rule provenance, and
+6. Inspect regenerated whole-project framing, diagnostics, rule provenance, and
    the grouped BOM.
-6. Use `Save` to persist authored intent only.
-7. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
-8. Switch to the **Render** view (toolbar) for a path-traced architectural
+7. Use `Save` to persist authored intent only.
+8. Use `Export` to write sidecar SVG and CSV artifacts next to the project path.
+9. Switch to the **Render** view (toolbar) for a path-traced architectural
    rendering of the design — real raytraced lighting, glass, and soft shadows.
    It runs on the GPU (WGSL compute) in real time, drag to orbit and scroll to
    zoom; the image refines progressively while the camera is still.

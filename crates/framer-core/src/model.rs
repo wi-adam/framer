@@ -35,6 +35,8 @@ pub struct BuildingModel {
     pub walls: Vec<Wall>,
     #[serde(default)]
     pub wall_joins: Vec<WallJoin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rooms: Vec<Room>,
 }
 
 impl BuildingModel {
@@ -44,6 +46,7 @@ impl BuildingModel {
             levels: default_levels(),
             walls: Vec::new(),
             wall_joins: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 
@@ -81,6 +84,7 @@ impl BuildingModel {
             levels: default_levels(),
             walls: vec![wall],
             wall_joins: Vec::new(),
+            rooms: Vec::new(),
         }
     }
 
@@ -198,6 +202,162 @@ impl BuildingModel {
                     Point2::new(Length::ZERO, Length::ZERO),
                 ),
             ],
+            rooms: Vec::new(),
+        }
+        .into_deterministic()
+    }
+
+    /// A 24ft × 16ft shell partitioned into two bedrooms and a living area by
+    /// interior walls that meet the exterior (and each other) at tee joins. Used
+    /// as the rooms/interior-walls example project.
+    pub fn demo_two_bedroom() -> Self {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let ft = Length::from_feet;
+        let wall = |id: &str, name: &str, start: Point2, end: Point2| {
+            Wall::new(id, name, ft(1.0), &code).with_placement("level-1", start, end)
+        };
+
+        let mut front = wall(
+            "wall-front",
+            "Front wall",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(24.0), Length::ZERO),
+        );
+        front.openings.push(Opening::door(
+            "opening-front-door",
+            "Front door",
+            ft(6.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+
+        let walls = vec![
+            front,
+            wall(
+                "wall-right",
+                "Right wall",
+                Point2::new(ft(24.0), Length::ZERO),
+                Point2::new(ft(24.0), ft(16.0)),
+            ),
+            wall(
+                "wall-back",
+                "Back wall",
+                Point2::new(ft(24.0), ft(16.0)),
+                Point2::new(Length::ZERO, ft(16.0)),
+            ),
+            wall(
+                "wall-left",
+                "Left wall",
+                Point2::new(Length::ZERO, ft(16.0)),
+                Point2::new(Length::ZERO, Length::ZERO),
+            ),
+            wall(
+                "wall-mid",
+                "Center partition",
+                Point2::new(ft(12.0), Length::ZERO),
+                Point2::new(ft(12.0), ft(16.0)),
+            ),
+            wall(
+                "wall-bed",
+                "Bedroom partition",
+                Point2::new(Length::ZERO, ft(8.0)),
+                Point2::new(ft(12.0), ft(8.0)),
+            ),
+        ];
+
+        let wall_joins = vec![
+            WallJoin::corner(
+                "join-front-right",
+                "Front right corner",
+                "wall-front",
+                "wall-right",
+                Point2::new(ft(24.0), Length::ZERO),
+            ),
+            WallJoin::corner(
+                "join-right-back",
+                "Right back corner",
+                "wall-right",
+                "wall-back",
+                Point2::new(ft(24.0), ft(16.0)),
+            ),
+            WallJoin::corner(
+                "join-back-left",
+                "Back left corner",
+                "wall-back",
+                "wall-left",
+                Point2::new(Length::ZERO, ft(16.0)),
+            ),
+            WallJoin::corner(
+                "join-left-front",
+                "Left front corner",
+                "wall-left",
+                "wall-front",
+                Point2::new(Length::ZERO, Length::ZERO),
+            ),
+            WallJoin::new(
+                "join-mid-front",
+                "Center partition at front",
+                WallJoinKind::Tee,
+                "wall-front",
+                "wall-mid",
+                Point2::new(ft(12.0), Length::ZERO),
+            ),
+            WallJoin::new(
+                "join-mid-back",
+                "Center partition at back",
+                WallJoinKind::Tee,
+                "wall-back",
+                "wall-mid",
+                Point2::new(ft(12.0), ft(16.0)),
+            ),
+            WallJoin::new(
+                "join-bed-left",
+                "Bedroom partition at left",
+                WallJoinKind::Tee,
+                "wall-left",
+                "wall-bed",
+                Point2::new(Length::ZERO, ft(8.0)),
+            ),
+            WallJoin::new(
+                "join-bed-mid",
+                "Bedroom partition at center",
+                WallJoinKind::Tee,
+                "wall-mid",
+                "wall-bed",
+                Point2::new(ft(12.0), ft(8.0)),
+            ),
+        ];
+
+        let rooms = vec![
+            Room::new(
+                "room-bed-1",
+                "Bedroom 1",
+                RoomUsage::Bedroom,
+                "level-1",
+                Point2::new(ft(6.0), ft(4.0)),
+            ),
+            Room::new(
+                "room-bed-2",
+                "Bedroom 2",
+                RoomUsage::Bedroom,
+                "level-1",
+                Point2::new(ft(6.0), ft(12.0)),
+            ),
+            Room::new(
+                "room-living",
+                "Living",
+                RoomUsage::Living,
+                "level-1",
+                Point2::new(ft(18.0), ft(8.0)),
+            ),
+        ];
+
+        Self {
+            code,
+            levels: default_levels(),
+            walls,
+            wall_joins,
+            rooms,
         }
         .into_deterministic()
     }
@@ -251,9 +411,37 @@ impl BuildingModel {
                 });
             };
 
-            if !first.has_endpoint(join.point) || !second.has_endpoint(join.point) {
+            // The join point must connect the two walls per the join kind:
+            // - Corner/EndToEnd: an endpoint of both walls.
+            // - Tee: an endpoint of one (the partition) on the interior of the
+            //   other (the through wall).
+            // - Cross: interior to both walls.
+            let connects = match join.kind {
+                WallJoinKind::Corner | WallJoinKind::EndToEnd => {
+                    first.has_endpoint(join.point) && second.has_endpoint(join.point)
+                }
+                WallJoinKind::Tee => {
+                    (first.has_endpoint(join.point) && second.point_on_interior(join.point))
+                        || (second.has_endpoint(join.point) && first.point_on_interior(join.point))
+                }
+                WallJoinKind::Cross => {
+                    first.point_on_interior(join.point) && second.point_on_interior(join.point)
+                }
+            };
+            if !connects {
                 return Err(ModelError::JoinPointDoesNotConnectWalls {
                     join: join.id.clone(),
+                });
+            }
+        }
+
+        for room in &self.rooms {
+            validate_element_id(&room.id)?;
+            insert_unique_id(&mut ids, &room.id)?;
+            if !level_ids.contains(&room.level) {
+                return Err(ModelError::RoomReferencesUnknownLevel {
+                    room: room.id.clone(),
+                    level: room.level.clone(),
                 });
             }
         }
@@ -268,6 +456,7 @@ impl BuildingModel {
         }
         self.wall_joins
             .sort_by(|left, right| left.id.cmp(&right.id));
+        self.rooms.sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -297,6 +486,21 @@ impl BuildingModel {
             changed |= wall.apply_driving_dimensions();
         }
         changed
+    }
+
+    /// Remove a wall and every join that references it. The wall's nested
+    /// openings and dimensions are removed along with it. Returns whether a
+    /// wall was actually removed.
+    pub fn remove_wall(&mut self, wall: &ElementId) -> bool {
+        let before = self.walls.len();
+        self.walls.retain(|candidate| candidate.id != *wall);
+        if self.walls.len() == before {
+            return false;
+        }
+
+        self.wall_joins
+            .retain(|join| join.first_wall != *wall && join.second_wall != *wall);
+        true
     }
 }
 
@@ -677,6 +881,26 @@ impl Wall {
 
     pub fn has_endpoint(&self, point: Point2) -> bool {
         self.start == point || self.end == point
+    }
+
+    /// Whether `point` lies on this wall's segment (endpoints included). General
+    /// over straight segments via collinearity plus projection bounds.
+    pub fn point_on_segment(&self, point: Point2) -> bool {
+        let edge_x = (self.end.x - self.start.x).ticks();
+        let edge_y = (self.end.y - self.start.y).ticks();
+        let offset_x = (point.x - self.start.x).ticks();
+        let offset_y = (point.y - self.start.y).ticks();
+        if edge_x * offset_y - edge_y * offset_x != 0 {
+            return false;
+        }
+        let projection = offset_x * edge_x + offset_y * edge_y;
+        projection >= 0 && projection <= edge_x * edge_x + edge_y * edge_y
+    }
+
+    /// Whether `point` lies on the wall's interior (on the segment, not an
+    /// endpoint) — the mid-span condition for a Tee/Cross through wall.
+    pub fn point_on_interior(&self, point: Point2) -> bool {
+        self.point_on_segment(point) && !self.has_endpoint(point)
     }
 
     pub fn dimension_measurement(&self, dimension: &DimensionConstraint) -> Option<Length> {
@@ -1348,9 +1572,10 @@ pub struct WallJoin {
 }
 
 impl WallJoin {
-    pub fn corner(
+    pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
+        kind: WallJoinKind,
         first_wall: impl Into<String>,
         second_wall: impl Into<String>,
         point: Point2,
@@ -1358,11 +1583,28 @@ impl WallJoin {
         Self {
             id: ElementId::new(id),
             name: name.into(),
-            kind: WallJoinKind::Corner,
+            kind,
             first_wall: ElementId::new(first_wall),
             second_wall: ElementId::new(second_wall),
             point,
         }
+    }
+
+    pub fn corner(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        first_wall: impl Into<String>,
+        second_wall: impl Into<String>,
+        point: Point2,
+    ) -> Self {
+        Self::new(
+            id,
+            name,
+            WallJoinKind::Corner,
+            first_wall,
+            second_wall,
+            point,
+        )
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -1384,6 +1626,95 @@ pub enum WallJoinKind {
     EndToEnd,
     Tee,
     Cross,
+}
+
+/// How a room is used. Drives labelling now and, later, room-type code rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoomUsage {
+    #[default]
+    Unspecified,
+    Living,
+    Bedroom,
+    Bathroom,
+    Kitchen,
+    Dining,
+    Office,
+    Hallway,
+    Closet,
+    Utility,
+    Garage,
+    Other,
+}
+
+impl RoomUsage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::Living => "Living",
+            Self::Bedroom => "Bedroom",
+            Self::Bathroom => "Bathroom",
+            Self::Kitchen => "Kitchen",
+            Self::Dining => "Dining",
+            Self::Office => "Office",
+            Self::Hallway => "Hallway",
+            Self::Closet => "Closet",
+            Self::Utility => "Utility",
+            Self::Garage => "Garage",
+            Self::Other => "Other",
+        }
+    }
+
+    pub const ALL: [Self; 12] = [
+        Self::Unspecified,
+        Self::Living,
+        Self::Bedroom,
+        Self::Bathroom,
+        Self::Kitchen,
+        Self::Dining,
+        Self::Office,
+        Self::Hallway,
+        Self::Closet,
+        Self::Utility,
+        Self::Garage,
+        Self::Other,
+    ];
+}
+
+/// An authored room. Its identity (id, name, usage) and a `seed` point inside it
+/// persist; the boundary, area, and perimeter are derived from the surrounding
+/// walls at solve time and are never stored. See
+/// `docs/plans/2026-06-18-walls-and-rooms-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Room {
+    pub id: ElementId,
+    pub name: String,
+    #[serde(default)]
+    pub usage: RoomUsage,
+    pub level: ElementId,
+    /// A point inside the room, used to locate its bounding wall loop.
+    pub seed: Point2,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl Room {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        usage: RoomUsage,
+        level: impl Into<String>,
+        seed: Point2,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            usage,
+            level: ElementId::new(level),
+            seed,
+            tags: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1529,6 +1860,8 @@ pub enum ModelError {
     JoinReferencesSameWall { join: ElementId },
     #[error("wall join {join:?} point does not connect the referenced wall endpoints")]
     JoinPointDoesNotConnectWalls { join: ElementId },
+    #[error("room {room:?} references unknown level {level:?}")]
+    RoomReferencesUnknownLevel { room: ElementId, level: ElementId },
 }
 
 fn default_levels() -> Vec<Level> {
@@ -1844,6 +2177,152 @@ mod tests {
             vec!["other-offset", "wall-length"]
         );
         wall.validate().unwrap();
+    }
+
+    #[test]
+    fn room_validation_rejects_unknown_level() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code);
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "no-such-level",
+            Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoomReferencesUnknownLevel { .. })
+        ));
+    }
+
+    fn placed_wall(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", start, end)
+    }
+
+    #[test]
+    fn tee_join_validates_when_partition_meets_through_wall_midspan() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed_wall(
+            "through",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-tee",
+            "Tee",
+            WallJoinKind::Tee,
+            "through",
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn cross_join_validates_when_point_interior_to_both() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed_wall(
+            "horizontal",
+            Point2::new(Length::ZERO, Length::from_feet(4.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(4.0)),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-cross",
+            "Cross",
+            WallJoinKind::Cross,
+            "horizontal",
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(4.0)),
+        ));
+
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn tee_join_rejected_when_point_is_a_shared_endpoint() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // Two walls meeting at a shared endpoint (a corner) but mislabelled Tee.
+        model.walls.push(placed_wall(
+            "a",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed_wall(
+            "b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join",
+            "Bad tee",
+            WallJoinKind::Tee,
+            "a",
+            "b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::JoinPointDoesNotConnectWalls { .. })
+        ));
+    }
+
+    #[test]
+    fn removing_wall_cascades_joins_that_reference_it() {
+        let mut model = BuildingModel::demo_shell();
+
+        assert!(model.remove_wall(&ElementId::new("wall-front")));
+
+        // The wall and every join touching it are gone; unrelated walls/joins stay.
+        assert!(model.walls.iter().all(|wall| wall.id.0 != "wall-front"));
+        assert_eq!(model.walls.len(), 3);
+        assert!(model.wall_joins.iter().all(|join| {
+            join.first_wall.0 != "wall-front" && join.second_wall.0 != "wall-front"
+        }));
+        assert_eq!(
+            model
+                .wall_joins
+                .iter()
+                .map(|join| join.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["join-back-left", "join-right-back"]
+        );
+        // The remaining shell is still a valid model.
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_unknown_wall_is_a_no_op() {
+        let mut model = BuildingModel::demo_shell();
+        let walls_before = model.walls.len();
+        let joins_before = model.wall_joins.len();
+
+        assert!(!model.remove_wall(&ElementId::new("does-not-exist")));
+
+        assert_eq!(model.walls.len(), walls_before);
+        assert_eq!(model.wall_joins.len(), joins_before);
     }
 
     #[test]

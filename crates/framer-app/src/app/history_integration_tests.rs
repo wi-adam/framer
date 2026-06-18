@@ -6,7 +6,7 @@
 //! no-op edits, re-solves on restore, and is cleared by load/reset.
 
 use eframe::egui;
-use framer_core::{Length, OpeningKind};
+use framer_core::{Length, OpeningKind, Point2};
 
 use super::{FramerApp, Selection};
 
@@ -137,6 +137,145 @@ fn delete_opening_is_a_single_undoable_step() {
         with_opening,
         "undo restores the deleted opening"
     );
+}
+
+#[test]
+fn add_wall_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.walls.len();
+
+    // Draw a free-floating wall clear of the demo shell (no auto-joins).
+    app.add_wall(
+        Point2::new(Length::from_feet(0.0), Length::from_feet(30.0)),
+        Point2::new(Length::from_feet(10.0), Length::from_feet(30.0)),
+    );
+
+    assert_eq!(app.model.walls.len(), before + 1);
+    assert_eq!(app.history.undo_label(), Some("Draw wall"));
+
+    app.undo();
+    assert_eq!(
+        app.model.walls.len(),
+        before,
+        "undo should remove the drawn wall"
+    );
+    assert!(app.project_plan.is_some(), "solver re-ran on restore");
+}
+
+#[test]
+fn add_wall_auto_creates_corner_join_at_shared_endpoint() {
+    let mut app = FramerApp::default();
+    let joins_before = app.model.wall_joins.len();
+
+    // The demo shell has an endpoint at the origin; a wall drawn from there
+    // should auto-join the walls meeting at (0,0).
+    app.add_wall(
+        Point2::new(Length::from_feet(0.0), Length::from_feet(0.0)),
+        Point2::new(Length::from_feet(0.0), Length::from_feet(-10.0)),
+    );
+
+    assert!(
+        app.model.wall_joins.len() > joins_before,
+        "drawing onto a shared endpoint should record a corner join"
+    );
+}
+
+#[test]
+fn add_wall_rejects_non_ortho_segment() {
+    let mut app = FramerApp::default();
+    let before = app.model.walls.len();
+
+    // A diagonal segment is not a valid axis-aligned wall; it must not be added
+    // (and must not pollute undo history with an invalid model).
+    app.add_wall(
+        Point2::new(Length::from_feet(0.0), Length::from_feet(40.0)),
+        Point2::new(Length::from_feet(10.0), Length::from_feet(50.0)),
+    );
+
+    assert_eq!(
+        app.model.walls.len(),
+        before,
+        "diagonal wall must be rejected"
+    );
+    assert!(
+        !app.history.can_undo(),
+        "rejected wall records no undo step"
+    );
+}
+
+#[test]
+fn add_room_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.rooms.len();
+
+    // Seed inside the demo shell (28ft × 20ft).
+    app.add_room(Point2::new(
+        Length::from_feet(14.0),
+        Length::from_feet(10.0),
+    ));
+
+    assert_eq!(app.model.rooms.len(), before + 1);
+    assert_eq!(app.history.undo_label(), Some("Add room"));
+
+    app.undo();
+    assert_eq!(app.model.rooms.len(), before, "undo removes the added room");
+}
+
+#[test]
+fn delete_room_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    app.add_room(Point2::new(
+        Length::from_feet(14.0),
+        Length::from_feet(10.0),
+    ));
+    let id = match &app.selected {
+        Selection::Room(id) => id.clone(),
+        other => panic!("expected the new room selected, got {other:?}"),
+    };
+
+    app.delete_selected_room();
+    assert!(app.model.rooms.iter().all(|room| room.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete room"));
+
+    app.undo();
+    assert_eq!(app.model.rooms.len(), 1, "undo restores the deleted room");
+}
+
+#[test]
+fn delete_last_wall_leaves_consistent_state() {
+    let mut app = FramerApp::default();
+    // Delete every wall; this must not panic and must leave an empty model.
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    assert!(app.model.walls.is_empty());
+    assert!(app.model.wall_joins.is_empty(), "all joins cascade away");
+}
+
+#[test]
+fn delete_wall_drops_referencing_joins_in_one_step() {
+    let mut app = FramerApp::default();
+    let walls_before = app.model.walls.len();
+    let joins_before = app.model.wall_joins.len();
+    app.selected = Selection::Wall;
+    app.selected_wall = 0;
+    let removed_id = app.model.walls[0].id.0.clone();
+
+    app.delete_selected_wall();
+
+    assert_eq!(app.model.walls.len(), walls_before - 1);
+    assert!(app.model.walls.iter().all(|wall| wall.id.0 != removed_id));
+    assert!(
+        app.model.wall_joins.len() < joins_before,
+        "deleting a wall should drop the joins that reference it"
+    );
+    assert_eq!(app.history.undo_label(), Some("Delete wall"));
+
+    app.undo();
+    assert_eq!(app.model.walls.len(), walls_before);
+    assert_eq!(app.model.wall_joins.len(), joins_before);
 }
 
 #[test]
