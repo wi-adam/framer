@@ -26,7 +26,7 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
-use draw_wall::corner_joins_for_new_wall;
+use draw_wall::joins_for_new_wall;
 use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
@@ -773,7 +773,7 @@ impl FramerApp {
                 &app.model.code,
             )
             .with_placement(level, start, end);
-            let joins = corner_joins_for_new_wall(&app.model, &wall);
+            let joins = joins_for_new_wall(&app.model, &wall);
             app.model.walls.push(wall);
             app.model.wall_joins.extend(joins);
             app.selected_wall = app.model.walls.len() - 1;

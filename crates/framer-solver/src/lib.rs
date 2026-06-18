@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use framer_core::{
     BoardProfile, BuildingModel, CodeProfile, ElementId, Length, ModelError, Opening, Point2, Wall,
-    WallJoinKind, room_boundaries,
+    WallJoin, WallJoinKind, room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -125,6 +125,8 @@ pub enum MemberKind {
     BottomPlate,
     TopPlate,
     CornerPost,
+    PartitionStud,
+    BackingStud,
     CommonStud,
     KingStud,
     JackStud,
@@ -139,6 +141,8 @@ impl MemberKind {
             Self::BottomPlate => "bottom plate",
             Self::TopPlate => "top plate",
             Self::CornerPost => "corner post",
+            Self::PartitionStud => "partition stud",
+            Self::BackingStud => "backing stud",
             Self::CommonStud => "common stud",
             Self::KingStud => "king stud",
             Self::JackStud => "jack stud",
@@ -401,79 +405,166 @@ fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
 
 fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Result<(), SolverError> {
     let plate_thickness = model.code.plate_profile.thickness();
-    let stud_base = plate_thickness;
     let top_plate_count = if model.code.double_top_plate { 2 } else { 1 };
 
+    let find_wall = |id: &ElementId| model.walls.iter().find(|candidate| candidate.id == *id);
+
     for join in &model.wall_joins {
-        if !matches!(join.kind, WallJoinKind::Corner | WallJoinKind::EndToEnd) {
-            plan.diagnostics.push(PlanDiagnostic::new(
-                DiagnosticSeverity::Unsupported,
-                "wall.join.unsupported-kind",
-                Some(join.id.clone()),
-                format!(
-                    "{} is stored as an authored {:?} join, but only corner/end-to-end join framing is generated in this alpha.",
-                    join.name, join.kind
-                ),
-            ));
-            continue;
-        }
-
-        for wall_id in [&join.first_wall, &join.second_wall] {
-            let wall = model
-                .walls
-                .iter()
-                .find(|candidate| candidate.id == *wall_id)
-                .ok_or_else(|| SolverError::MissingWallForJoin {
-                    join: join.id.clone(),
-                    wall: wall_id.clone(),
-                })?;
-            let join_x = wall.local_x_for_point(join.point).ok_or_else(|| {
-                SolverError::JoinPointOutsideWall {
-                    join: join.id.clone(),
-                    wall: wall.id.clone(),
-                }
+        let first = find_wall(&join.first_wall).ok_or_else(|| SolverError::MissingWallForJoin {
+            join: join.id.clone(),
+            wall: join.first_wall.clone(),
+        })?;
+        let second =
+            find_wall(&join.second_wall).ok_or_else(|| SolverError::MissingWallForJoin {
+                join: join.id.clone(),
+                wall: join.second_wall.clone(),
             })?;
-            let wall_stud = wall.assembly.stud_profile();
-            let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
-            let stud_top = wall.height - plate_thickness * top_plate_count as i64;
-            let stud_length = stud_top - stud_base;
 
-            if stud_length <= Length::ZERO {
-                return Err(SolverError::WallTooShortForPlateStack {
-                    wall: wall.id.clone(),
-                });
+        match join.kind {
+            WallJoinKind::Corner | WallJoinKind::EndToEnd => {
+                for wall in [first, second] {
+                    push_join_stud(
+                        plan,
+                        join,
+                        wall,
+                        MemberKind::CornerPost,
+                        "corner-post",
+                        plate_thickness,
+                        top_plate_count,
+                        RuleProvenance::new(
+                            "wall.join.corner-posts",
+                            format!(
+                                "A corner post is generated on {} with its faces inside the wall edge to make the authored {} join visible in the framing plan.",
+                                wall.name, join.name
+                            ),
+                        ),
+                    )?;
+                }
             }
-
-            let wall_plan =
-                plan.wall_plan_mut(&wall.id)
-                    .ok_or_else(|| SolverError::MissingWallPlan {
-                        wall: wall.id.clone(),
-                    })?;
-            wall_plan.members.push(frame_member(
-                format!("{}-{}-corner-post", join.id.0, wall.id.0),
-                &join.id,
-                MemberKind::CornerPost,
-                wall_stud,
-                FrameMemberPlacement::new(
-                    MemberOrientation::Vertical,
-                    post_x,
-                    stud_base,
-                    stud_length,
-                    wall_stud.thickness(),
-                ),
-                RuleProvenance::new(
-                    "wall.join.corner-posts",
+            WallJoinKind::Tee => {
+                // The partition meets the through wall at the partition's endpoint;
+                // the through wall owns the join on its interior.
+                let (partition, through) = if first.has_endpoint(join.point) {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                push_join_stud(
+                    plan,
+                    join,
+                    partition,
+                    MemberKind::PartitionStud,
+                    "partition-stud",
+                    plate_thickness,
+                    top_plate_count,
+                    RuleProvenance::new(
+                        "wall.join.tee-partition-stud",
+                        format!(
+                            "A partition end stud terminates {} where it meets {} at the {} tee join.",
+                            partition.name, through.name, join.name
+                        ),
+                    ),
+                )?;
+                push_join_stud(
+                    plan,
+                    join,
+                    through,
+                    MemberKind::BackingStud,
+                    "backing-stud",
+                    plate_thickness,
+                    top_plate_count,
+                    RuleProvenance::new(
+                        "wall.join.tee-backing",
+                        format!(
+                            "A backing stud is added in {} to receive the {} partition and drywall at the {} tee join.",
+                            through.name, partition.name, join.name
+                        ),
+                    ),
+                )?;
+            }
+            WallJoinKind::Cross => {
+                for wall in [first, second] {
+                    push_join_stud(
+                        plan,
+                        join,
+                        wall,
+                        MemberKind::BackingStud,
+                        "backing-stud",
+                        plate_thickness,
+                        top_plate_count,
+                        RuleProvenance::new(
+                            "wall.join.cross-backing",
+                            format!(
+                                "A backing stud is added in {} at the {} cross join.",
+                                wall.name, join.name
+                            ),
+                        ),
+                    )?;
+                }
+                plan.diagnostics.push(PlanDiagnostic::new(
+                    DiagnosticSeverity::Info,
+                    "wall.join.cross-simplified",
+                    Some(join.id.clone()),
                     format!(
-                        "A corner post is generated on {} with its faces inside the wall edge at {} to make the authored {} wall join visible in the project framing plan.",
-                        wall.name,
-                        post_x,
+                        "{} is framed with backing studs on both walls; interrupting one wall for a true cross intersection is not yet modelled.",
                         join.name
                     ),
-                ),
-            ));
+                ));
+            }
         }
     }
 
+    Ok(())
+}
+
+/// Push one vertical join stud (corner post / partition end stud / backing stud)
+/// onto the given wall's plan, face-aligned at the join point.
+#[allow(clippy::too_many_arguments)]
+fn push_join_stud(
+    plan: &mut ProjectFramePlan,
+    join: &WallJoin,
+    wall: &Wall,
+    kind: MemberKind,
+    member_suffix: &str,
+    plate_thickness: Length,
+    top_plate_count: usize,
+    provenance: RuleProvenance,
+) -> Result<(), SolverError> {
+    let join_x =
+        wall.local_x_for_point(join.point)
+            .ok_or_else(|| SolverError::JoinPointOutsideWall {
+                join: join.id.clone(),
+                wall: wall.id.clone(),
+            })?;
+    let wall_stud = wall.assembly.stud_profile();
+    let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
+    let stud_top = wall.height - plate_thickness * top_plate_count as i64;
+    let stud_length = stud_top - plate_thickness;
+    if stud_length <= Length::ZERO {
+        return Err(SolverError::WallTooShortForPlateStack {
+            wall: wall.id.clone(),
+        });
+    }
+
+    let wall_plan = plan
+        .wall_plan_mut(&wall.id)
+        .ok_or_else(|| SolverError::MissingWallPlan {
+            wall: wall.id.clone(),
+        })?;
+    wall_plan.members.push(frame_member(
+        format!("{}-{}-{}", join.id.0, wall.id.0, member_suffix),
+        &join.id,
+        kind,
+        wall_stud,
+        FrameMemberPlacement::new(
+            MemberOrientation::Vertical,
+            post_x,
+            plate_thickness,
+            stud_length,
+            wall_stud.thickness(),
+        ),
+        provenance,
+    ));
     Ok(())
 }
 
@@ -1190,6 +1281,8 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
     match kind {
         MemberKind::BottomPlate | MemberKind::TopPlate => "#635543",
         MemberKind::CornerPost => "#345f7f",
+        MemberKind::PartitionStud => "#4f7f5f",
+        MemberKind::BackingStud => "#7f6f4f",
         MemberKind::CommonStud => "#ba915e",
         MemberKind::KingStud => "#97643d",
         MemberKind::JackStud => "#d3a85f",
@@ -1335,6 +1428,116 @@ mod tests {
             Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
         ));
         model
+    }
+
+    fn placed(id: &str, a: Point2, b: Point2, code: &CodeProfile) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", a, b)
+    }
+
+    #[test]
+    fn tee_join_frames_partition_end_stud_and_backing_no_corner_post() {
+        use framer_core::{WallJoin, WallJoinKind};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed(
+            "through",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed(
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-tee",
+            "Tee",
+            WallJoinKind::Tee,
+            "through",
+            "partition",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let through = plan.wall_plan(&ElementId::new("through")).unwrap();
+        let partition = plan.wall_plan(&ElementId::new("partition")).unwrap();
+
+        assert!(
+            through
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            partition
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::PartitionStud)
+        );
+        assert!(
+            through
+                .members
+                .iter()
+                .chain(&partition.members)
+                .all(|m| m.kind != MemberKind::CornerPost),
+            "a Tee must not generate corner posts"
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
+    }
+
+    #[test]
+    fn cross_join_frames_backing_on_both_walls() {
+        use framer_core::{WallJoin, WallJoinKind};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.walls.push(placed(
+            "horizontal",
+            Point2::new(Length::ZERO, Length::from_feet(4.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(4.0)),
+            &code,
+        ));
+        model.walls.push(placed(
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.wall_joins.push(WallJoin::new(
+            "join-cross",
+            "Cross",
+            WallJoinKind::Cross,
+            "horizontal",
+            "vertical",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(4.0)),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let horizontal = plan.wall_plan(&ElementId::new("horizontal")).unwrap();
+        let vertical = plan.wall_plan(&ElementId::new("vertical")).unwrap();
+
+        assert!(
+            horizontal
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            vertical
+                .members
+                .iter()
+                .any(|m| m.kind == MemberKind::BackingStud)
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .all(|d| d.code != "wall.join.unsupported-kind")
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! snapping, and snapping to existing wall endpoints. These are pure functions
 //! over the authored model so they can be unit-tested without the egui layer.
 
-use framer_core::{BuildingModel, ElementId, Length, Point2, Wall, WallJoin};
+use framer_core::{BuildingModel, ElementId, Length, Point2, Wall, WallJoin, WallJoinKind};
 
 use super::model_edit::maybe_snap;
 
@@ -67,14 +67,20 @@ pub(super) fn resolve_draw_point(
     step: Option<Length>,
     tolerance: Length,
 ) -> ResolvedPoint {
+    // 1. Snap to an existing endpoint (forms a Corner join).
     if let Some(endpoint) = snap_to_endpoint(model, raw, tolerance) {
-        let keeps_ortho = match start {
-            Some(start) => endpoint.x == start.x || endpoint.y == start.y,
-            None => true,
-        };
-        if keeps_ortho {
+        if keeps_ortho(start, endpoint) {
             return ResolvedPoint {
                 point: endpoint,
+                on_existing: true,
+            };
+        }
+    }
+    // 2. Snap onto an existing wall's mid-span (forms a Tee join).
+    if let Some(projected) = snap_to_wall_line(model, raw, tolerance) {
+        if keeps_ortho(start, projected) {
+            return ResolvedPoint {
+                point: projected,
                 on_existing: true,
             };
         }
@@ -90,6 +96,58 @@ pub(super) fn resolve_draw_point(
     }
 }
 
+/// Whether `candidate` keeps the wall axis-aligned relative to `start` (shares an
+/// axis), or is unconstrained when there is no start point yet.
+fn keeps_ortho(start: Option<Point2>, candidate: Point2) -> bool {
+    match start {
+        Some(start) => candidate.x == start.x || candidate.y == start.y,
+        None => true,
+    }
+}
+
+/// The projection of `point` onto the nearest wall segment within `tolerance`,
+/// but only when it lands on that wall's interior (endpoints are handled by
+/// [`snap_to_endpoint`]). This is what lets a wall snap mid-span to form a Tee.
+pub(super) fn snap_to_wall_line(
+    model: &BuildingModel,
+    point: Point2,
+    tolerance: Length,
+) -> Option<Point2> {
+    let tolerance_sq = squared(tolerance.ticks());
+    let mut best: Option<(i64, Point2)> = None;
+    for wall in &model.walls {
+        if wall.start == wall.end {
+            continue;
+        }
+        let projected = project_onto_segment(point, wall.start, wall.end);
+        if !wall.point_on_interior(projected) {
+            continue;
+        }
+        let distance_sq = point_distance_sq(point, projected);
+        if distance_sq <= tolerance_sq && best.is_none_or(|(best_sq, _)| distance_sq < best_sq) {
+            best = Some((distance_sq, projected));
+        }
+    }
+    best.map(|(_, projected)| projected)
+}
+
+/// Closest point to `point` on the segment `a`–`b`, rounded to whole ticks.
+fn project_onto_segment(point: Point2, a: Point2, b: Point2) -> Point2 {
+    let edge_x = (b.x - a.x).ticks() as f64;
+    let edge_y = (b.y - a.y).ticks() as f64;
+    let len_sq = edge_x * edge_x + edge_y * edge_y;
+    if len_sq == 0.0 {
+        return a;
+    }
+    let offset_x = (point.x - a.x).ticks() as f64;
+    let offset_y = (point.y - a.y).ticks() as f64;
+    let t = ((offset_x * edge_x + offset_y * edge_y) / len_sq).clamp(0.0, 1.0);
+    Point2::new(
+        Length::from_ticks((a.x.ticks() as f64 + t * edge_x).round() as i64),
+        Length::from_ticks((a.y.ticks() as f64 + t * edge_y).round() as i64),
+    )
+}
+
 /// Ids of every wall that has `point` as one of its endpoints, in model order.
 /// Used to record a corner join between a newly drawn wall and each wall it
 /// meets at a shared endpoint.
@@ -102,15 +160,13 @@ pub(super) fn walls_sharing_endpoint(model: &BuildingModel, point: Point2) -> Ve
         .collect()
 }
 
-/// Build the corner joins for a freshly drawn `new_wall` (not yet pushed into
-/// `model`): one `Corner` join to every existing wall that shares either of the
-/// new wall's endpoints. Ids are unique against both the model and the joins
-/// already produced in this call. Slice 1 records corners only; mid-span (Tee)
-/// joins arrive with interior-wall framing.
-pub(super) fn corner_joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) -> Vec<WallJoin> {
+/// Build the joins for a freshly drawn `new_wall` (not yet pushed into `model`):
+/// a `Corner` join to every existing wall that shares one of the new wall's
+/// endpoints, and a `Tee` join to every existing wall whose interior (mid-span)
+/// the new wall's endpoint lands on. Ids are unique against the model and the
+/// joins already produced in this call; at most one join per other wall.
+pub(super) fn joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) -> Vec<WallJoin> {
     let mut joins: Vec<WallJoin> = Vec::new();
-    // At most one join per other wall: a wall that shares both endpoints with the
-    // new wall (a coincident segment) still meets it once.
     let mut joined: Vec<ElementId> = Vec::new();
     for endpoint in [new_wall.start, new_wall.end] {
         for other in walls_sharing_endpoint(model, endpoint) {
@@ -118,18 +174,45 @@ pub(super) fn corner_joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) 
                 continue;
             }
             let id = next_join_id(model, &joins);
-            let name = format!("{} \u{2013} {} corner", new_wall.id.0, other.0);
-            joins.push(WallJoin::corner(
+            joins.push(WallJoin::new(
                 id,
-                name,
+                format!("{} \u{2013} {} corner", new_wall.id.0, other.0),
+                WallJoinKind::Corner,
                 new_wall.id.0.clone(),
                 other.0.clone(),
                 endpoint,
             ));
             joined.push(other);
         }
+        for through in walls_with_interior_point(model, endpoint) {
+            if joined.contains(&through) {
+                continue;
+            }
+            let id = next_join_id(model, &joins);
+            // first = through wall (owns the point mid-span), second = new partition.
+            joins.push(WallJoin::new(
+                id,
+                format!("{} \u{2013} {} tee", new_wall.id.0, through.0),
+                WallJoinKind::Tee,
+                through.0.clone(),
+                new_wall.id.0.clone(),
+                endpoint,
+            ));
+            joined.push(through);
+        }
     }
     joins
+}
+
+/// Ids of every wall whose interior (not an endpoint) contains `point` — the
+/// through walls for a new wall meeting them mid-span.
+fn walls_with_interior_point(model: &BuildingModel, point: Point2) -> Vec<ElementId> {
+    model
+        .walls
+        .iter()
+        .filter(|wall| wall.point_on_interior(point))
+        .map(|wall| wall.id.clone())
+        .collect()
 }
 
 /// The next free `join-N` id, unique against the model's existing joins and any
@@ -300,7 +383,7 @@ mod tests {
 
         // New wall shares the (120,0) endpoint with wall-1 and is otherwise free.
         let new_wall = wall_from("wall-2", p(120.0, 0.0), p(120.0, 96.0));
-        let joins = corner_joins_for_new_wall(&model, &new_wall);
+        let joins = joins_for_new_wall(&model, &new_wall);
 
         assert_eq!(joins.len(), 1);
         let join = &joins[0];
@@ -327,7 +410,7 @@ mod tests {
         // A new wall coincident with wall-1 shares BOTH endpoints with it; that
         // is still a single meeting, so only one corner join should be recorded.
         let new_wall = wall_from("wall-2", p(0.0, 0.0), p(120.0, 0.0));
-        let joins = corner_joins_for_new_wall(&model, &new_wall);
+        let joins = joins_for_new_wall(&model, &new_wall);
 
         assert_eq!(joins.len(), 1);
         assert_eq!(joins[0].second_wall, ElementId::new("wall-1"));
@@ -342,7 +425,54 @@ mod tests {
 
         let new_wall = wall_from("wall-2", p(0.0, 240.0), p(120.0, 240.0));
 
-        assert!(corner_joins_for_new_wall(&model, &new_wall).is_empty());
+        assert!(joins_for_new_wall(&model, &new_wall).is_empty());
+    }
+
+    #[test]
+    fn snap_to_wall_line_projects_onto_interior() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(0.0, 120.0)));
+
+        // A cursor 3in off the vertical wall at y=60 snaps onto the wall line.
+        let got = snap_to_wall_line(&model, p(3.0, 60.0), Length::from_inches(6.0));
+        assert_eq!(got, Some(p(0.0, 60.0)));
+    }
+
+    #[test]
+    fn snap_to_wall_line_ignores_endpoint_projection_and_far_points() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(0.0, 120.0)));
+
+        // Projects to the wall's endpoint (0,120) -> excluded (interior only).
+        assert_eq!(
+            snap_to_wall_line(&model, p(3.0, 130.0), Length::from_inches(6.0)),
+            None
+        );
+        // Too far from the wall line.
+        assert_eq!(
+            snap_to_wall_line(&model, p(60.0, 60.0), Length::from_inches(6.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn joins_for_new_wall_creates_tee_at_midspan() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("through", p(0.0, 0.0), p(240.0, 0.0)));
+
+        // A partition whose start lands on the through wall's interior -> Tee.
+        let new_wall = wall_from("partition", p(120.0, 0.0), p(120.0, 96.0));
+        let joins = joins_for_new_wall(&model, &new_wall);
+
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].kind, WallJoinKind::Tee);
+        assert_eq!(joins[0].point, p(120.0, 0.0));
     }
 
     #[test]

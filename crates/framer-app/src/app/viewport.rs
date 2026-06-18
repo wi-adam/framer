@@ -4688,6 +4688,8 @@ fn member_color(kind: MemberKind) -> Color32 {
     match kind {
         MemberKind::BottomPlate | MemberKind::TopPlate => Color32::from_rgb(99, 85, 67),
         MemberKind::CornerPost => Color32::from_rgb(52, 95, 127),
+        MemberKind::PartitionStud => Color32::from_rgb(79, 127, 95),
+        MemberKind::BackingStud => Color32::from_rgb(127, 111, 79),
         MemberKind::CommonStud => Color32::from_rgb(186, 145, 94),
         MemberKind::KingStud => Color32::from_rgb(151, 100, 61),
         MemberKind::JackStud => Color32::from_rgb(211, 168, 95),
