@@ -26,8 +26,17 @@ drawing or hit-testing code.
   demand via double-click on empty space or the `F` key.
 - **One elevation camera per wall, shared across both elevation variants.** Both
   the Design-workspace and Plan-workspace elevations fit the *same* wall
-  (length × height) to the canvas, so the base transform is identical and a
-  remembered zoom/pan is meaningful in either. Halves the bookkeeping.
+  (length × height), so a remembered zoom/pan is meaningful in either and the
+  bookkeeping halves. Note the two variants fit into slightly different content
+  rects — the Design elevation reserves asymmetric, dimension-count-dependent
+  margins for its annotation gutters, the Plan elevation uses a uniform margin —
+  so the *base fit* is not pixel-identical between them. Consequently a shared
+  non-default camera may frame the wall slightly differently in each variant, and
+  within the Design elevation the framing shifts when the dimension count changes
+  the margins (this is the pre-existing re-fit behavior, now also visible when
+  zoomed). The identity state (zoom 1, pan 0) is unaffected — `apply` reduces to
+  the original fit for any rect — so the no-op guarantee holds; only non-default
+  cameras drift. `F` / double-click re-fit at any time.
 
 ## Why fold into the existing transforms (not a new draw layer)
 
@@ -67,7 +76,8 @@ crates/framer-app
   └── app/mod.rs
         - FramerApp gains: plan_view: View2dState,
                            elevation_views: HashMap<String, View2dState>
-        - load/new clears elevation_views; wall delete prunes its entry
+        - load/new clears elevation_views; rebuild() prunes entries for
+          walls that no longer exist (keeps the map in sync however a wall leaves)
 ```
 
 ### Data structure (`viewport.rs`)
@@ -128,13 +138,25 @@ guarantee.
 ```rust
 const ZOOM_MIN: f32 = 0.2;
 const ZOOM_MAX: f32 = 40.0;
-/// Pan offset clamp, in multiples of the viewport half-extent, so the drawing
-/// can't be flung off-screen with no way back. F / double-click always recenters.
-const PAN_MAX_VIEWPORTS: f32 = 2.0;
+/// Pan clamp, as a fraction of the viewport half-extent *per unit zoom*. The
+/// bound scales with `zoom.max(1.0)` so that cursor-anchored zoom into a corner
+/// (which legitimately needs pan ∝ zoom) is never clipped, while pan is still
+/// bounded at fit (zoom 1) so the drawing can't be flung off-screen with no way
+/// back. F / double-click always recenters regardless.
+const PAN_LIMIT_FACTOR: f32 = 1.0;
 
 fn pan_by(&mut self, delta: Vec2, drawing: Rect) {
     self.pan += delta;
-    self.clamp_pan(drawing);     // per-axis clamp to ±PAN_MAX_VIEWPORTS · half-extent
+    self.clamp_pan(drawing);
+}
+
+/// Per-axis clamp: |pan| ≤ half-extent · PAN_LIMIT_FACTOR · zoom.max(1.0).
+fn clamp_pan(&mut self, drawing: Rect) {
+    let z = self.zoom.max(1.0);
+    let max_x = drawing.width() * 0.5 * PAN_LIMIT_FACTOR * z;
+    let max_y = drawing.height() * 0.5 * PAN_LIMIT_FACTOR * z;
+    self.pan.x = self.pan.x.clamp(-max_x, max_x);
+    self.pan.y = self.pan.y.clamp(-max_y, max_y);
 }
 
 /// Zoom by `factor`, keeping the model point under `cursor` fixed.
@@ -197,11 +219,18 @@ Rules, mirroring the Render view (`viewport.rs:450–485`):
   gates off `draw_wall_design_elevation`'s opening-handle drag for the frame, so
   Space-pan and handle-drag never fire together. Plain left-drag still drags
   handles.
-- **Per-wall key hygiene:** `elevation_views` is cleared on `new_project` /
-  `load_project_file` (stale wall-id keys); deleting a wall prunes its entry.
-- **Pan clamp:** `clamp_pan` bounds the offset to ±`PAN_MAX_VIEWPORTS` ·
-  half-extent per axis, so the drawing stays reachable; `F`/double-click always
-  recenters regardless.
+- **Per-wall key hygiene:** `elevation_views` is cleared wholesale on
+  `new_project` / `reset_demo` / `reset_wall_demo` / `load_project_file` via
+  `reset_2d_cameras`, and `rebuild()` prunes any entry whose wall id is no longer
+  in the model. The map therefore stays in sync however a wall is removed (no
+  single-wall delete exists today; this covers one without it having to remember
+  to prune). The double-click re-fit fires only over empty canvas (each view
+  passes `over_element`), so it never fights element selection.
+- **Pan clamp:** `clamp_pan` bounds the offset to ±half-extent ·
+  `PAN_LIMIT_FACTOR` · `zoom.max(1.0)` per axis. The zoom-scaling is what keeps
+  the clamp from fighting a cursor-anchored zoom into a corner (whose required
+  pan grows with zoom); at fit (zoom 1) it still bounds pan so the drawing stays
+  reachable. `F`/double-click always recenters regardless.
 - **Zoom-limit anchoring:** `zoom_at` recomputes the applied factor after
   clamping, so the cursor stays pinned at min/max zoom.
 - **Degenerate viewport / empty model:** guard `drawing` extent > 0; the

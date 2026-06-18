@@ -11,6 +11,7 @@ mod render_job;
 mod theme;
 mod viewport;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,7 +31,7 @@ use model_edit::{
     next_dimension_id, next_opening_id,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
-use viewport::View3dState;
+use viewport::{View2dState, View3dState};
 
 pub(crate) struct FramerApp {
     model: BuildingModel,
@@ -45,6 +46,12 @@ pub(crate) struct FramerApp {
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
+    /// Pan/zoom camera for the whole-project Plan ("shell") view.
+    plan_view: View2dState,
+    /// Per-wall pan/zoom cameras for the Elevation ("wall") views, keyed by wall
+    /// id and shared across the Design- and Plan-workspace elevation variants.
+    /// Presentation state: never serialized, cleared on new/load.
+    elevation_views: HashMap<String, View2dState>,
     render_view: render_job::RenderViewState,
     render_gpu: render::GpuRenderState,
     /// Frames remaining in "camera moving" mode (hysteresis after the last orbit/
@@ -207,6 +214,8 @@ impl Default for FramerApp {
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
+            plan_view: View2dState::default(),
+            elevation_views: HashMap::new(),
             render_view: render_job::RenderViewState::default(),
             render_gpu: render::GpuRenderState::default(),
             render_motion_cooldown: 0,
@@ -252,6 +261,16 @@ impl FramerApp {
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
             self.selected = Selection::Wall;
+        }
+
+        // Drop per-wall cameras whose wall no longer exists, so `elevation_views`
+        // stays in sync with the model however a wall is removed (keys are wall
+        // ids). new/load clear it wholesale via `reset_2d_cameras`; this covers
+        // any future single-wall deletion without it having to remember to prune.
+        if !self.elevation_views.is_empty() {
+            let live: std::collections::HashSet<&str> =
+                self.model.walls.iter().map(|wall| wall.id.0.as_str()).collect();
+            self.elevation_views.retain(|id, _| live.contains(id.as_str()));
         }
 
         self.model.apply_driving_dimensions();
@@ -343,6 +362,14 @@ impl FramerApp {
         }
     }
 
+    /// Clears the transient 2D view cameras (pan/zoom). Called whenever the
+    /// model is replaced wholesale, so cameras don't carry stale framing or
+    /// dangling wall-id keys into a different document.
+    fn reset_2d_cameras(&mut self) {
+        self.plan_view = View2dState::default();
+        self.elevation_views.clear();
+    }
+
     fn new_project(&mut self) {
         let code = framer_core::CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
@@ -363,6 +390,7 @@ impl FramerApp {
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
+        self.reset_2d_cameras();
         self.rebuild();
     }
 
@@ -378,6 +406,7 @@ impl FramerApp {
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
+        self.reset_2d_cameras();
         self.rebuild();
     }
 
@@ -393,6 +422,7 @@ impl FramerApp {
         self.opening_drag = None;
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
+        self.reset_2d_cameras();
         self.rebuild();
     }
 
@@ -431,6 +461,7 @@ impl FramerApp {
                 self.selected = Selection::Wall;
                 self.workspace_mode = WorkspaceMode::Design;
                 self.history.clear();
+                self.reset_2d_cameras();
                 self.rebuild();
                 self.file_status = Some(format!("Opened {}", path.display()));
                 self.artifact_status = None;
