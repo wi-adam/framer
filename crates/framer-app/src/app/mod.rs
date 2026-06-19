@@ -78,7 +78,9 @@ pub(crate) struct FramerApp {
     /// is set, force the Render view for N frames then close. `None` normally.
     render_smoke: Option<u32>,
     show_section: bool,
-    grid: bool,
+    /// Visual-layering state for the Plan and 3D views (wall display mode +
+    /// per-layer visibility), driven by the Layers popover.
+    layers: ViewLayers,
     ortho: bool,
     snap_step: Option<Length>,
     cursor_model: Option<Point2>,
@@ -136,6 +138,58 @@ enum ViewportMode {
     Elevation,
     Axonometric,
     Render,
+}
+
+/// How walls are drawn in the Plan and 3D views. A single shared presentation
+/// setting (not per-view) so toggling it reads consistently across both. The
+/// cleanest mode is the default so a fresh shell reads as an outline first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WallDisplay {
+    /// A single line per wall: no thickness, no color. Default.
+    #[default]
+    Outline,
+    /// Wall thickness without color — 2D: two dashed face lines; 3D: a
+    /// monochrome full-thickness volume.
+    Width,
+    /// True-thickness colored construction-layer bands (2D opaque, 3D
+    /// translucent so framing shows through).
+    Full,
+}
+
+impl WallDisplay {
+    /// Short label for the Layers popover selector.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Outline => "Outline",
+            Self::Width => "Width",
+            Self::Full => "Full",
+        }
+    }
+}
+
+/// The visual-layering state for the Plan and 3D views: the wall display mode
+/// plus per-layer visibility toggles. Presentation state only — never
+/// serialized; re-initialized to defaults each launch (everything visible,
+/// walls as outlines).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ViewLayers {
+    pub(crate) wall_display: WallDisplay,
+    pub(crate) grid: bool,
+    pub(crate) rooms: bool,
+    pub(crate) joins: bool,
+    pub(crate) wall_labels: bool,
+}
+
+impl Default for ViewLayers {
+    fn default() -> Self {
+        Self {
+            wall_display: WallDisplay::Outline,
+            grid: true,
+            rooms: true,
+            joins: true,
+            wall_labels: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -268,7 +322,7 @@ impl Default for FramerApp {
             gpu_compute_ok: false,
             render_smoke: None,
             show_section: true,
-            grid: true,
+            layers: ViewLayers::default(),
             ortho: true,
             snap_step: Some(Length::from_whole_inches(1)),
             cursor_model: None,
