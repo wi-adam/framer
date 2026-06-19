@@ -147,12 +147,16 @@ impl WallEditHandle {
     }
 }
 
-/// In-progress drag of a wall endpoint handle in the plan view. The whole gesture
-/// is one coalesced undo step (mirrors [`OpeningDragState`]).
+/// In-progress drag of a wall handle in the plan view. The whole gesture is one
+/// coalesced undo step (mirrors [`OpeningDragState`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WallDragState {
     pub(super) wall_index: usize,
     pub(super) handle: WallEditHandle,
+    /// Body translate only: the total perpendicular model delta applied so far
+    /// (from drag start), so the wall tracks the cursor absolutely and recovers
+    /// after a clamped frame instead of lagging behind.
+    pub(super) applied: (Length, Length),
 }
 
 /// Whether moving every wall endpoint currently at `old_point` to `new_point`
@@ -174,6 +178,26 @@ pub(super) fn endpoint_move_keeps_ortho(
         };
         // A degenerate wall whose both ends sit on the node imposes no constraint.
         other == old_point || new_point.x == other.x || new_point.y == other.y
+    })
+}
+
+/// Whether moving every endpoint at `old_point` to `new_point` keeps each
+/// affected wall non-degenerate — i.e. its moved end never lands on its fixed
+/// end (which would collapse it to zero length and fail `validate`).
+pub(super) fn endpoint_move_keeps_positive_length(
+    model: &BuildingModel,
+    old_point: Point2,
+    new_point: Point2,
+) -> bool {
+    model.walls.iter().all(|wall| {
+        let other = if wall.start == old_point {
+            wall.end
+        } else if wall.end == old_point {
+            wall.start
+        } else {
+            return true;
+        };
+        other != new_point
     })
 }
 
@@ -205,6 +229,30 @@ pub(super) fn translate_keeps_ortho(
                 let moved = Point2::new(wall.end.x + dx, wall.end.y + dy);
                 wall.start.x == moved.x || wall.start.y == moved.y
             }
+        }
+    })
+}
+
+/// Whether translating wall `moving` by `(dx, dy)` keeps every riding neighbour
+/// non-degenerate — its moved end must not land on its fixed end. The moving
+/// wall itself translates rigidly, so its length is unchanged.
+pub(super) fn translate_keeps_positive_length(
+    model: &BuildingModel,
+    moving: &framer_core::ElementId,
+    start: Point2,
+    end: Point2,
+    dx: Length,
+    dy: Length,
+) -> bool {
+    let rides = |point: Point2| point == start || point == end;
+    model.walls.iter().all(|wall| {
+        if wall.id == *moving {
+            return true;
+        }
+        match (rides(wall.start), rides(wall.end)) {
+            (true, false) => Point2::new(wall.start.x + dx, wall.start.y + dy) != wall.end,
+            (false, true) => Point2::new(wall.end.x + dx, wall.end.y + dy) != wall.start,
+            (false, false) | (true, true) => true,
         }
     })
 }
@@ -710,6 +758,47 @@ mod tests {
             ftp(10.0, 0.0),
             Length::from_feet(2.0),
             Length::ZERO,
+        ));
+    }
+
+    #[test]
+    fn endpoint_move_rejects_collapsing_a_wall_onto_its_fixed_end() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+
+        // Dragging the end (10,0) back onto the fixed start (0,0) would collapse it.
+        assert!(!endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(0.0, 0.0)));
+        // A normal extend keeps positive length.
+        assert!(endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(8.0, 0.0)));
+    }
+
+    #[test]
+    fn translate_rejects_collapsing_a_neighbour() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        // `a` horizontal at y=0; `b` vertical from the shared corner up to (0,8).
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        let a = framer_core::ElementId::new("a");
+
+        // Sliding `a` up by 8ft drives `b`'s bottom onto its top (0,8) → collapse.
+        assert!(!translate_keeps_positive_length(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(8.0),
+        ));
+        // A smaller slide keeps `b` non-degenerate.
+        assert!(translate_keeps_positive_length(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(2.0),
         ));
     }
 

@@ -30,8 +30,9 @@ use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
-    apply_opening_drag, endpoint_move_keeps_ortho, next_dimension_id, next_opening_id, next_room_id,
-    next_wall_id, translate_keeps_ortho,
+    apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
+    next_dimension_id, next_opening_id, next_room_id, next_wall_id, translate_keeps_ortho,
+    translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
@@ -667,6 +668,9 @@ impl FramerApp {
         if !self.draw_wall_tool.active {
             return;
         }
+        // Drop the held snap so the committed point's stale guides don't carry
+        // into the next segment's first frame.
+        self.draw_wall_tool.previous_snap = None;
         match self.draw_wall_tool.start {
             None => self.draw_wall_tool.start = Some(point),
             Some(start) => {
@@ -1072,7 +1076,11 @@ impl FramerApp {
         // One coalesced undo step for the whole gesture, captured after selecting
         // the wall so undo restores it as selected.
         self.history.begin(self.snapshot(), "Move wall");
-        self.wall_drag = Some(WallDragState { wall_index, handle });
+        self.wall_drag = Some(WallDragState {
+            wall_index,
+            handle,
+            applied: (Length::ZERO, Length::ZERO),
+        });
     }
 
     fn update_wall_drag(&mut self, point: Point2) {
@@ -1098,6 +1106,11 @@ impl FramerApp {
         if !endpoint_move_keeps_ortho(&self.model, old_point, point) {
             return;
         }
+        // Clamp a move that would collapse an affected wall to zero length (which
+        // would fail validation and drop the framing plan).
+        if !endpoint_move_keeps_positive_length(&self.model, old_point, point) {
+            return;
+        }
         // Clamp a move that a driving dimension would fight back on the next solve
         // (it rewrites the wall's length/end, which would tear the moved corner).
         if self.nodes_touch_driving_dimension(&[old_point]) {
@@ -1111,10 +1124,13 @@ impl FramerApp {
         self.settle_wall_geometry(drag.wall_index);
     }
 
-    /// Translate the whole dragged wall by an incremental delta, projecting onto
-    /// the wall's perpendicular so it slides sideways (the ortho-safe reposition),
-    /// and clamping any residual that would skew a neighbour.
-    fn translate_wall_drag(&mut self, dx: Length, dy: Length) {
+    /// Translate the whole dragged wall to track the cursor. `total` is the model
+    /// delta from drag start; it is projected onto the wall's perpendicular (so it
+    /// slides sideways — the ortho-safe reposition) and applied as the increment
+    /// since the last accepted frame, clamped if it would skew or collapse a
+    /// neighbour. The accepted total is recorded so a clamped frame is retried
+    /// (not lost) on the next.
+    fn translate_wall_drag(&mut self, total_dx: Length, total_dy: Length) {
         let Some(drag) = self.wall_drag else {
             return;
         };
@@ -1122,27 +1138,31 @@ impl FramerApp {
             self.wall_drag = None;
             return;
         };
-        // Project onto the wall's perpendicular axis: a horizontal wall slides in
-        // y, a vertical wall in x.
-        let (dx, dy) = if wall.start.y == wall.end.y {
-            (Length::ZERO, dy)
+        // Perpendicular projection: a horizontal wall slides in y, a vertical in x.
+        let target = if wall.start.y == wall.end.y {
+            (Length::ZERO, total_dy)
         } else {
-            (dx, Length::ZERO)
+            (total_dx, Length::ZERO)
         };
-        if dx == Length::ZERO && dy == Length::ZERO {
+        let inc_x = target.0 - drag.applied.0;
+        let inc_y = target.1 - drag.applied.1;
+        if inc_x == Length::ZERO && inc_y == Length::ZERO {
             return;
         }
         let wall_id = wall.id.clone();
         let (start, end) = (wall.start, wall.end);
-        if !translate_keeps_ortho(&self.model, &wall_id, start, end, dx, dy) {
-            return;
+        if !translate_keeps_ortho(&self.model, &wall_id, start, end, inc_x, inc_y)
+            || !translate_keeps_positive_length(&self.model, &wall_id, start, end, inc_x, inc_y)
+            || self.nodes_touch_driving_dimension(&[start, end])
+        {
+            return; // clamp this frame; `applied` unchanged so the next frame retries
         }
-        if self.nodes_touch_driving_dimension(&[start, end]) {
-            return;
-        }
-        let moved = self.model.translate_wall(&wall_id, dx, dy);
+        let moved = self.model.translate_wall(&wall_id, inc_x, inc_y);
         if moved.is_empty() {
             return;
+        }
+        if let Some(state) = self.wall_drag.as_mut() {
+            state.applied = target;
         }
         self.settle_wall_geometry(drag.wall_index);
     }

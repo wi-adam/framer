@@ -135,10 +135,9 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
     // Sticky: keep a genuine prior snap until the cursor leaves the release
     // radius, so the snap doesn't flicker between nearby candidates.
     if let Some(previous) = &ctx.previous
-        && is_sticky_kind(previous.kind)
-        && point_distance_sq(ctx.raw, previous.point) <= squared(ctx.release_tolerance.ticks())
+        && let Some(held) = hold_previous(ctx, previous)
     {
-        return *previous;
+        return held;
     }
 
     if let Some(point) = snap_to_endpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
@@ -173,17 +172,42 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
     free_result(ctx)
 }
 
-/// Snap kinds that should be held across frames (genuine geometry locks, not the
-/// free/grid fallback).
-fn is_sticky_kind(kind: SnapKind) -> bool {
-    matches!(
-        kind,
-        SnapKind::Endpoint
-            | SnapKind::Midpoint
-            | SnapKind::OnWall
-            | SnapKind::Intersection
-            | SnapKind::Alignment
-    )
+/// Apply sticky hysteresis to the previous frame's snap. A point lock (endpoint,
+/// midpoint, on-wall, intersection) is re-emitted whole while the cursor stays
+/// within the release radius. An `Alignment` only locks one axis, so it is
+/// *re-projected*: the guide's axis stays pinned (released by that axis's
+/// distance), while the free axis tracks the cursor. Returns `None` to release.
+fn hold_previous(ctx: &SnapContext, previous: &SnapResult) -> Option<SnapResult> {
+    let release = ctx.release_tolerance.ticks();
+    match previous.kind {
+        SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall | SnapKind::Intersection => {
+            (point_distance_sq(ctx.raw, previous.point) <= squared(release)).then_some(*previous)
+        }
+        SnapKind::Alignment => {
+            let guide = previous.guides.iter().flatten().next()?;
+            let base = match ctx.anchor {
+                Some(anchor) => ortho_lock(anchor, ctx.raw),
+                None => ctx.raw,
+            };
+            match guide.axis {
+                GuideAxis::Vertical => ((base.x - guide.at).ticks().abs() <= release).then(|| {
+                    SnapResult {
+                        point: Point2::new(guide.at, base.y),
+                        kind: SnapKind::Alignment,
+                        guides: [Some(*guide), None],
+                    }
+                }),
+                GuideAxis::Horizontal => ((base.y - guide.at).ticks().abs() <= release).then(|| {
+                    SnapResult {
+                        point: Point2::new(base.x, guide.at),
+                        kind: SnapKind::Alignment,
+                        guides: [None, Some(*guide)],
+                    }
+                }),
+            }
+        }
+        SnapKind::Grid | SnapKind::Free => None,
+    }
 }
 
 /// The ortho-locked, grid-snapped fallback when nothing snappable is in range.
@@ -945,6 +969,38 @@ mod tests {
         // Released, and nothing fresh is within acquire range → free passthrough.
         assert_eq!(result.kind, SnapKind::Free);
         assert_eq!(result.point, p(108.0, 9.0));
+    }
+
+    #[test]
+    fn resolve_snap_alignment_slides_along_held_guide() {
+        let mut model = empty_model();
+        // A wall whose endpoints sit at x=100 — the source for a vertical guide.
+        model
+            .walls
+            .push(wall_from("v", p(100.0, 0.0), p(100.0, 40.0)));
+
+        // Last frame aligned x→100 (vertical guide), at (100,30). The cursor slid
+        // down to y=38 — still within the 2D release radius of the old point, so
+        // the buggy "re-emit previous" path would freeze y at 30.
+        let mut context = ctx(&model, p(101.0, 38.0));
+        context.previous = Some(SnapResult {
+            point: p(100.0, 30.0),
+            kind: SnapKind::Alignment,
+            guides: [
+                Some(Guide {
+                    axis: GuideAxis::Vertical,
+                    at: Length::from_inches(100.0),
+                    source: p(100.0, 0.0),
+                }),
+                None,
+            ],
+        });
+
+        let result = resolve_snap(&context);
+
+        // The guide stays locked on x; the free y axis tracks the cursor (no freeze).
+        assert_eq!(result.kind, SnapKind::Alignment);
+        assert_eq!(result.point, p(100.0, 38.0));
     }
 
     #[test]

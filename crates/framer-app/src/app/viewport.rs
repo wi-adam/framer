@@ -1428,9 +1428,9 @@ fn draw_project_plan(
 
     draw_view_background(&painter, rect, theme::sheet());
     let drawing = viewport_drawing_rect(rect, 58.0);
-    // Pan/zoom the view before mapping any model point. The plan has no
-    // primary-drag interaction, so Space+drag panning is always permitted.
-    apply_view_2d_input(ui, &response, drawing, camera, true);
+    // Pan/zoom the view before mapping any model point. Space+primary-drag pans,
+    // except while a wall handle is being dragged (so the two don't fight).
+    apply_view_2d_input(ui, &response, drawing, camera, active_wall_drag.is_none());
     draw_drafting_rulers(&painter, rect, drawing);
     if show_grid {
         draw_drafting_grid(&painter, drawing);
@@ -1626,14 +1626,16 @@ fn draw_project_plan(
                 *wall_drag_out = Some(WallDragEvent::Stopped);
             } else if response.dragged_by(egui::PointerButton::Primary) {
                 if handle == WallEditHandle::Body {
-                    // Whole-wall translate: incremental screen delta → model delta
-                    // (y is flipped in the plan).
-                    let delta = response.drag_delta();
-                    let inv_scale = (1.0 / scale.max(0.0001)) as f64;
-                    let dx = Length::from_inches(delta.x as f64 * inv_scale);
-                    let dy = Length::from_inches(-delta.y as f64 * inv_scale);
-                    *wall_drag_out = Some(WallDragEvent::Translated { dx, dy });
-                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    // Whole-wall translate: total screen delta from drag start →
+                    // model delta (y is flipped). The app accounts for what's been
+                    // applied so the wall tracks the cursor absolutely.
+                    if let Some(delta) = response.total_drag_delta() {
+                        let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+                        let dx = Length::from_inches(delta.x as f64 * inv_scale);
+                        let dy = Length::from_inches(-delta.y as f64 * inv_scale);
+                        *wall_drag_out = Some(WallDragEvent::Translated { dx, dy });
+                        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    }
                 } else if let Some(cursor) = response.interact_pointer_pos() {
                     let suspend = ui.input(|input| input.modifiers.alt);
                     let point = snapped_wall_endpoint(
@@ -1653,6 +1655,7 @@ fn draw_project_plan(
                 }
             }
         } else if response.drag_started_by(egui::PointerButton::Primary)
+            && !ui.input(|input| input.key_down(egui::Key::Space))
             && let Some(hit) = ui
                 .input(|input| input.pointer.press_origin())
                 .and_then(|origin| {
