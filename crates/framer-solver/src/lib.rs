@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, CodeProfile, ConstructionSystem, ElementId, FramingSpec, Length,
-    ModelError, Opening, Point2, Wall, WallJoin, WallJoinKind, room_boundaries,
+    BoardProfile, BuildingModel, CodeProfile, ConstructionSystem, ElementId, FramingSpec,
+    LayerFunction, Length, Material, ModelError, Opening, Point2, Wall, WallJoin, WallJoinKind,
+    room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,6 +13,8 @@ use thiserror::Error;
 pub struct WallFramePlan {
     pub wall: ElementId,
     pub members: Vec<FrameMember>,
+    #[serde(default)]
+    pub layers: Vec<LayerBomItem>,
     pub diagnostics: Vec<PlanDiagnostic>,
 }
 
@@ -19,6 +22,29 @@ impl WallFramePlan {
     pub fn bom(&self) -> Vec<BomItem> {
         bom_from_members(self.members.iter())
     }
+
+    /// The per-layer material takeoff for this wall, aggregated by
+    /// (material, function, thickness).
+    pub fn layer_bom(&self) -> Vec<LayerBomItem> {
+        layer_bom_from(self.layers.iter())
+    }
+}
+
+/// A per-layer material takeoff row: how much of one material a layer requires.
+/// Area goods (finishes, sheathing, cladding, weather barriers, masonry) report
+/// `area_sq_in` (square inches); volumetric goods (continuous insulation and the
+/// framing layer's cavity material) report `volume_bd_in` (cubic inches = area ×
+/// layer thickness). The unused measure is zero. `LayerFunction` — not the
+/// material — decides which measure applies, keeping the takeoff logic on the
+/// closed enum. Quantities are whole units so the plan stays `Eq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerBomItem {
+    pub material: ElementId,
+    pub material_name: String,
+    pub function: LayerFunction,
+    pub thickness: Length,
+    pub area_sq_in: i64,
+    pub volume_bd_in: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +53,8 @@ pub struct ProjectFramePlan {
     pub diagnostics: Vec<PlanDiagnostic>,
     #[serde(default)]
     pub rooms: Vec<RoomSchedule>,
+    #[serde(default)]
+    pub layers: Vec<LayerBomItem>,
 }
 
 /// A derived room takeoff row: identity plus the area/perimeter computed from the
@@ -56,6 +84,12 @@ impl ProjectFramePlan {
                 .iter()
                 .flat_map(|wall_plan| wall_plan.members.iter()),
         )
+    }
+
+    /// The project-wide per-layer material takeoff, aggregated across every wall
+    /// by (material, function, thickness).
+    pub fn layer_bom(&self) -> Vec<LayerBomItem> {
+        layer_bom_from(self.layers.iter())
     }
 
     pub fn wall_plan(&self, wall: &ElementId) -> Option<&WallFramePlan> {
@@ -89,6 +123,124 @@ fn bom_from_members<'a>(members: impl IntoIterator<Item = &'a FrameMember>) -> V
             total_length: cut_length * quantity as i64,
         })
         .collect()
+}
+
+/// Aggregate per-layer takeoff rows by (material, function, thickness), summing
+/// area and volume. The key keeps material name out of grouping (it is identity,
+/// not a discriminator) so rows are deterministic and `BTreeMap`-ordered.
+fn layer_bom_from<'a>(layers: impl IntoIterator<Item = &'a LayerBomItem>) -> Vec<LayerBomItem> {
+    let mut grouped: BTreeMap<(ElementId, LayerFunction, Length), (String, i64, i64)> =
+        BTreeMap::new();
+    for layer in layers {
+        let entry = grouped
+            .entry((layer.material.clone(), layer.function, layer.thickness))
+            .or_insert_with(|| (layer.material_name.clone(), 0, 0));
+        entry.1 += layer.area_sq_in;
+        entry.2 += layer.volume_bd_in;
+    }
+
+    grouped
+        .into_iter()
+        .map(
+            |((material, function, thickness), (material_name, area_sq_in, volume_bd_in))| {
+                LayerBomItem {
+                    material,
+                    material_name,
+                    function,
+                    thickness,
+                    area_sq_in,
+                    volume_bd_in,
+                }
+            },
+        )
+        .collect()
+}
+
+/// Build the per-layer material takeoff for a single wall. Net face area is the
+/// wall face minus its openings (clamped non-negative). Area goods report area;
+/// continuous insulation and the framing layer's cavity material report
+/// area × thickness; air gaps, the framing layer's lumber, structure, and other
+/// roles are skipped (lumber is covered by the member BOM). The cavity material
+/// uses the framing layer's depth as its thickness.
+fn wall_layer_bom(
+    wall: &Wall,
+    system: &ConstructionSystem,
+    materials: &[Material],
+) -> Vec<LayerBomItem> {
+    let net_area = net_face_area_sq_in(wall);
+    let material_name = |id: &ElementId| {
+        materials
+            .iter()
+            .find(|material| material.id == *id)
+            .map(|material| material.name.clone())
+            .unwrap_or_else(|| id.0.clone())
+    };
+
+    let mut items = Vec::new();
+    for layer in &system.layers {
+        match layer.function {
+            LayerFunction::InteriorFinish
+            | LayerFunction::Sheathing
+            | LayerFunction::Cladding
+            | LayerFunction::WeatherBarrier
+            | LayerFunction::Masonry => {
+                items.push(LayerBomItem {
+                    material: layer.material.clone(),
+                    material_name: material_name(&layer.material),
+                    function: layer.function,
+                    thickness: layer.thickness,
+                    area_sq_in: net_area,
+                    volume_bd_in: 0,
+                });
+            }
+            LayerFunction::ContinuousInsulation => {
+                items.push(LayerBomItem {
+                    material: layer.material.clone(),
+                    material_name: material_name(&layer.material),
+                    function: layer.function,
+                    thickness: layer.thickness,
+                    area_sq_in: 0,
+                    volume_bd_in: volume_bd_in(net_area, layer.thickness),
+                });
+            }
+            LayerFunction::Framing => {
+                // The framing lumber itself is counted in the member BOM; here we
+                // only take off the between-studs cavity material (if any), filling
+                // the framing band's depth.
+                if let Some(framing) = &layer.framing
+                    && let Some(cavity) = &framing.cavity_material
+                {
+                    items.push(LayerBomItem {
+                        material: cavity.clone(),
+                        material_name: material_name(cavity),
+                        function: LayerFunction::ContinuousInsulation,
+                        thickness: layer.thickness,
+                        area_sq_in: 0,
+                        volume_bd_in: volume_bd_in(net_area, layer.thickness),
+                    });
+                }
+            }
+            LayerFunction::AirGap | LayerFunction::Structure | LayerFunction::Other => {}
+        }
+    }
+    items
+}
+
+/// The wall's clear face area in whole square inches: `length × height` minus the
+/// sum of opening areas, clamped to be non-negative.
+fn net_face_area_sq_in(wall: &Wall) -> i64 {
+    let gross = (wall.length.inches() * wall.height.inches()).round() as i64;
+    let openings: i64 = wall
+        .openings
+        .iter()
+        .map(|opening| (opening.width.inches() * opening.height.inches()).round() as i64)
+        .sum();
+    (gross - openings).max(0)
+}
+
+/// Volume (cubic inches) of an area good of the given thickness.
+fn volume_bd_in(area_sq_in: i64, thickness: Length) -> i64 {
+    (area_sq_in as f64 * thickness.inches()).round() as i64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +366,7 @@ fn wall_framing(system: &ConstructionSystem) -> Result<&FramingSpec, SolverError
 pub fn generate_wall_plan(
     wall: &Wall,
     system: &ConstructionSystem,
+    materials: &[Material],
     code: &CodeProfile,
 ) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
@@ -339,9 +492,12 @@ pub fn generate_wall_plan(
         );
     }
 
+    let layers = wall_layer_bom(wall, system, materials);
+
     Ok(WallFramePlan {
         wall: wall.id.clone(),
         members,
+        layers,
         diagnostics,
     })
 }
@@ -353,6 +509,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
         wall_plans: Vec::with_capacity(model.walls.len()),
         diagnostics: project_diagnostics(model),
         rooms: Vec::new(),
+        layers: Vec::new(),
     };
 
     for wall in &model.walls {
@@ -363,11 +520,16 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
                 system: wall.system.clone(),
             })?;
         plan.wall_plans
-            .push(generate_wall_plan(wall, system, &model.code)?);
+            .push(generate_wall_plan(wall, system, &model.materials, &model.code)?);
     }
 
     add_join_members(&mut plan, model)?;
     plan.rooms = room_schedule(model, &mut plan.diagnostics);
+    plan.layers = layer_bom_from(
+        plan.wall_plans
+            .iter()
+            .flat_map(|wall_plan| wall_plan.layers.iter()),
+    );
 
     Ok(plan)
 }
@@ -985,6 +1147,44 @@ pub fn export_bom_csv(bom: &[BomItem]) -> String {
     csv
 }
 
+/// Export the per-layer material takeoff (area goods and volumetric goods) as its
+/// own CSV, kept separate from the lumber `export_bom_csv` so each section stays a
+/// clean, single-shape table. Square-foot and board-foot columns are rendered for
+/// readability while the canonical integer square-inch / cubic-inch values remain.
+pub fn export_layer_bom_csv(layers: &[LayerBomItem]) -> String {
+    let mut items = layers.to_vec();
+    items.sort_by(|a, b| {
+        (&a.material, a.function, a.thickness).cmp(&(&b.material, b.function, b.thickness))
+    });
+
+    let mut csv =
+        "material,name,function,thickness_inches,thickness_display,area_sq_in,area_sq_ft,volume_cu_in,volume_bd_ft\n"
+            .to_owned();
+    for item in items {
+        let fields = [
+            item.material.0.clone(),
+            item.material_name.clone(),
+            item.function.label().to_owned(),
+            decimal_inches(item.thickness),
+            item.thickness.to_string(),
+            item.area_sq_in.to_string(),
+            format!("{:.2}", item.area_sq_in as f64 / 144.0),
+            item.volume_bd_in.to_string(),
+            format!("{:.2}", item.volume_bd_in as f64 / 144.0),
+        ];
+
+        csv.push_str(
+            &fields
+                .iter()
+                .map(|field| csv_field(field))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        csv.push('\n');
+    }
+    csv
+}
+
 pub fn export_room_schedule_csv(rooms: &[RoomSchedule]) -> String {
     let mut rows = rooms.to_vec();
     rows.sort_by(|a, b| a.room.0.cmp(&b.room.0));
@@ -1496,6 +1696,11 @@ mod tests {
             .expect("seeded exterior wall system")
     }
 
+    /// The seeded material library, used to resolve layer-BOM material names.
+    fn materials() -> Vec<Material> {
+        BuildingModel::starter_library().0
+    }
+
     /// A minimal single-framing-layer wall system using `member` at 16" o.c.
     fn framing_system(id: &str, member: BoardProfile) -> ConstructionSystem {
         ConstructionSystem {
@@ -1722,7 +1927,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
 
         assert_eq!(
             plan.members
@@ -1755,7 +1960,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
         let left_king = find_member(&plan, "door-king-left");
         let left_jack = find_member(&plan, "door-jack-left");
         let right_jack = find_member(&plan, "door-jack-right");
@@ -1783,7 +1988,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
         let bom = plan.bom();
 
         assert!(bom.iter().any(|item| {
@@ -1807,7 +2012,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &system, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
 
         for kind in [
             MemberKind::CommonStud,
@@ -1838,7 +2043,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
         let mut common_studs = plan
             .members
             .iter()
@@ -1861,7 +2066,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
 
         assert!(plan.members.iter().any(|member| {
             member.kind == MemberKind::CommonStud && member.cut_length == Length::from_inches(91.5)
@@ -1872,12 +2077,14 @@ mod tests {
     fn project_round_trip_regenerates_same_wall_plan() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let original = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
+        let original = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         let serialized = save_project(&model).unwrap();
         let loaded = load_project(&serialized).unwrap();
         let loaded_system = loaded.system_for(&loaded.walls[0]).unwrap();
-        let regenerated = generate_wall_plan(&loaded.walls[0], loaded_system, &loaded.code).unwrap();
+        let regenerated =
+            generate_wall_plan(&loaded.walls[0], loaded_system, &loaded.materials, &loaded.code)
+                .unwrap();
 
         assert_eq!(loaded, model);
         assert_eq!(regenerated, original);
@@ -1955,7 +2162,7 @@ mod tests {
             Length::from_inches(36.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
 
         assert!(
             plan.members
@@ -1973,7 +2180,7 @@ mod tests {
     fn generated_members_include_source_and_rule_provenance() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
+        let plan = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         let header = plan
             .members
@@ -1991,7 +2198,7 @@ mod tests {
     fn garage_door_reports_unsupported_starter_assumption() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
+        let plan = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         assert!(plan.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Unsupported
@@ -2008,7 +2215,7 @@ mod tests {
         let model = BuildingModel::demo_wall();
         let wall = &model.walls[0];
         let system = model.system_for(wall).unwrap();
-        let plan = generate_wall_plan(wall, system, &model.code).unwrap();
+        let plan = generate_wall_plan(wall, system, &model.materials, &model.code).unwrap();
 
         let first_svg = export_wall_elevation_svg(wall, &plan);
         let second_svg = export_wall_elevation_svg(wall, &plan);
@@ -2033,5 +2240,127 @@ mod tests {
             .iter()
             .find(|member| member.id == id)
             .unwrap_or_else(|| panic!("expected member {id}"))
+    }
+
+    fn find_layer<'a>(layers: &'a [LayerBomItem], material: &str) -> &'a LayerBomItem {
+        layers
+            .iter()
+            .find(|layer| layer.material.0 == material)
+            .unwrap_or_else(|| panic!("expected layer for material {material}"))
+    }
+
+    #[test]
+    fn layer_bom_area_goods_equal_net_face_area() {
+        // 12ft x 8ft = 144" x 96" = 13_824 sq in gross; a 36" x 80" door removes
+        // 2_880 sq in, leaving a 10_944 sq in net face.
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.height = Length::from_feet(8.0);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+
+        let net_area = 144 * 96 - 36 * 80;
+        assert_eq!(net_area, 10_944);
+
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+
+        // Area goods (drywall, plywood sheathing, fiber-cement cladding) each report
+        // exactly the net face area and carry no volume.
+        for material in ["mat-drywall", "mat-plywood", "mat-fiber-cement"] {
+            let layer = find_layer(&plan.layers, material);
+            assert_eq!(layer.area_sq_in, net_area, "{material} area");
+            assert_eq!(layer.volume_bd_in, 0, "{material} volume");
+        }
+
+        // The rain-screen air gap is skipped entirely.
+        assert!(
+            !plan.layers.iter().any(|layer| layer.material.0 == "mat-rainscreen"),
+            "air-gap layers must not appear in the takeoff"
+        );
+
+        // Material names are resolved from the library.
+        assert_eq!(find_layer(&plan.layers, "mat-drywall").material_name, "5/8\" Gypsum");
+    }
+
+    #[test]
+    fn layer_bom_volumetric_goods_equal_area_times_thickness() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.height = Length::from_feet(8.0);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+        let net_area = 144 * 96 - 36 * 80;
+
+        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+
+        // Continuous polyiso (2") reports area x thickness as cubic inches.
+        let polyiso = find_layer(&plan.layers, "mat-polyiso");
+        assert_eq!(polyiso.function, LayerFunction::ContinuousInsulation);
+        assert_eq!(polyiso.area_sq_in, 0);
+        assert_eq!(polyiso.volume_bd_in, net_area * 2);
+
+        // The framing layer's cavity mineral wool fills the 4" framing depth and is
+        // taken off volumetrically; the lumber itself stays in the member BOM.
+        let cavity = find_layer(&plan.layers, "mat-mineral-wool");
+        assert_eq!(cavity.area_sq_in, 0);
+        assert_eq!(cavity.volume_bd_in, net_area * 4);
+        assert!(
+            !plan.layers.iter().any(|layer| layer.material.0 == "mat-spf"),
+            "framing lumber is counted in the member BOM, not the layer takeoff"
+        );
+    }
+
+    #[test]
+    fn project_layer_bom_aggregates_across_walls() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+
+        // Each wall contributes a drywall area row; the project takeoff aggregates
+        // them into a single grouped row whose area is the sum of the per-wall areas.
+        let expected: i64 = plan
+            .wall_plans
+            .iter()
+            .flat_map(|wall_plan| wall_plan.layers.iter())
+            .filter(|layer| layer.material.0 == "mat-drywall")
+            .map(|layer| layer.area_sq_in)
+            .sum();
+        assert!(expected > 0);
+
+        let aggregated: Vec<&LayerBomItem> = plan
+            .layers
+            .iter()
+            .filter(|layer| layer.material.0 == "mat-drywall")
+            .collect();
+        // One thickness of drywall => one aggregated row across the whole shell.
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(aggregated[0].area_sq_in, expected);
+
+        // layer_bom() on the project mirrors the stored aggregate.
+        assert_eq!(plan.layer_bom(), plan.layers);
+    }
+
+    #[test]
+    fn export_layer_bom_csv_has_header_and_rows() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+        let csv = export_layer_bom_csv(&plan.layers);
+
+        assert!(csv.starts_with(
+            "material,name,function,thickness_inches,thickness_display,area_sq_in,area_sq_ft,volume_cu_in,volume_bd_ft\n"
+        ));
+        assert!(csv.contains("mat-drywall"));
+        assert!(csv.contains("Continuous insulation"));
+        // The lumber CSV is left untouched.
+        assert!(export_bom_csv(&plan.bom()).starts_with("quantity,profile,kind"));
     }
 }

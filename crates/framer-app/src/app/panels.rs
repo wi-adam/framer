@@ -1957,6 +1957,7 @@ fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
 fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
     panel_subheader(ui, "BOM");
     if let Some(plan) = plan {
+        ui.label(RichText::new("Lumber").color(theme::text_secondary()));
         egui::Grid::new("bom-grid")
             .num_columns(5)
             .spacing([12.0, 6.0])
@@ -1978,6 +1979,41 @@ fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
                     ui.end_row();
                 }
             });
+
+        let layers = plan.layer_bom();
+        if !layers.is_empty() {
+            ui.add_space(10.0);
+            ui.label(RichText::new("Materials").color(theme::text_secondary()));
+            egui::Grid::new("layer-bom-grid")
+                .num_columns(5)
+                .spacing([12.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Material");
+                    ui.strong("Function");
+                    ui.strong("Thickness");
+                    ui.strong("Area");
+                    ui.strong("Volume");
+                    ui.end_row();
+
+                    for item in layers {
+                        ui.label(&item.material_name);
+                        ui.label(item.function.label());
+                        ui.label(item.thickness.to_string());
+                        if item.area_sq_in > 0 {
+                            ui.label(format!("{:.0} sq ft", item.area_sq_in as f64 / 144.0));
+                        } else {
+                            ui.label("—");
+                        }
+                        if item.volume_bd_in > 0 {
+                            ui.label(format!("{:.1} cu ft", item.volume_bd_in as f64 / 1728.0));
+                        } else {
+                            ui.label("—");
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
     }
 }
 
