@@ -518,12 +518,15 @@ impl BuildingModel {
         which_end: WallEnd,
         new_point: Point2,
     ) -> Vec<ElementId> {
-        let Some(old_point) = self.walls.iter().find(|candidate| candidate.id == *wall).map(
-            |candidate| match which_end {
+        let Some(old_point) = self
+            .walls
+            .iter()
+            .find(|candidate| candidate.id == *wall)
+            .map(|candidate| match which_end {
                 WallEnd::Start => candidate.start,
                 WallEnd::End => candidate.end,
-            },
-        ) else {
+            })
+        else {
             return Vec::new();
         };
         if old_point == new_point {
@@ -552,7 +555,8 @@ impl BuildingModel {
             return Vec::new();
         }
 
-        let mut affected = self.move_coincident_endpoints(start, Point2::new(start.x + dx, start.y + dy));
+        let mut affected =
+            self.move_coincident_endpoints(start, Point2::new(start.x + dx, start.y + dy));
         let new_end = Point2::new(end.x + dx, end.y + dy);
         for id in self.move_coincident_endpoints(end, new_end) {
             if !affected.contains(&id) {
@@ -564,7 +568,11 @@ impl BuildingModel {
 
     /// Move every wall endpoint at `old_point` to `new_point`, re-syncing each
     /// moved wall's length. Shared by endpoint and whole-wall moves.
-    fn move_coincident_endpoints(&mut self, old_point: Point2, new_point: Point2) -> Vec<ElementId> {
+    fn move_coincident_endpoints(
+        &mut self,
+        old_point: Point2,
+        new_point: Point2,
+    ) -> Vec<ElementId> {
         if old_point == new_point {
             return Vec::new();
         }
@@ -749,10 +757,7 @@ fn next_reconciled_join_id(existing: &[WallJoin], staged: &[WallJoin]) -> String
     let mut index = existing.len() + staged.len() + 1;
     loop {
         let id = format!("join-{index}");
-        let collides = existing
-            .iter()
-            .chain(staged)
-            .any(|join| join.id.0 == id);
+        let collides = existing.iter().chain(staged).any(|join| join.id.0 == id);
         if !collides {
             return id;
         }
@@ -2550,9 +2555,12 @@ mod tests {
         model
             .walls
             .push(placed_wall("through", rp(0.0, 0.0), rp(20.0, 0.0), &code));
-        model
-            .walls
-            .push(placed_wall("partition", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+        model.walls.push(placed_wall(
+            "partition",
+            rp(10.0, 0.0),
+            rp(10.0, 8.0),
+            &code,
+        ));
 
         model.reconcile_joins();
 
@@ -2569,9 +2577,12 @@ mod tests {
     fn reconcile_detects_cross() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
-        model
-            .walls
-            .push(placed_wall("horizontal", rp(0.0, 4.0), rp(20.0, 4.0), &code));
+        model.walls.push(placed_wall(
+            "horizontal",
+            rp(0.0, 4.0),
+            rp(20.0, 4.0),
+            &code,
+        ));
         model
             .walls
             .push(placed_wall("vertical", rp(10.0, 0.0), rp(10.0, 8.0), &code));
@@ -2679,11 +2690,16 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
         // L-corner at (0,0): horizontal `a` and vertical `b`.
-        model.walls.push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
-        model.walls.push(placed_wall("b", rp(0.0, 0.0), rp(0.0, 8.0), &code));
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(0.0, 0.0), rp(0.0, 8.0), &code));
 
         // Slide `a` up by 2ft (perpendicular to itself).
-        let affected = model.translate_wall(&ElementId::new("a"), Length::ZERO, Length::from_feet(2.0));
+        let affected =
+            model.translate_wall(&ElementId::new("a"), Length::ZERO, Length::from_feet(2.0));
 
         assert_eq!(affected.len(), 2);
         assert_eq!(model.walls[0].start, rp(0.0, 2.0));
@@ -2705,7 +2721,8 @@ mod tests {
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
 
-        let affected = model.move_wall_endpoint(&ElementId::new("missing"), WallEnd::End, rp(8.0, 0.0));
+        let affected =
+            model.move_wall_endpoint(&ElementId::new("missing"), WallEnd::End, rp(8.0, 0.0));
 
         assert!(affected.is_empty());
         assert_eq!(model.walls[0].end, rp(10.0, 0.0));

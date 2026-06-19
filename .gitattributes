@@ -1,0 +1,11 @@
+# Force LF for all text files on checkout. The `*_is_canonical` round-trip tests
+# `include_str!` the committed .framer examples and compare them to
+# `save_project` output, which always emits LF — so a Windows checkout (where
+# git's autocrlf would hand back CRLF) must be pinned to LF or those tests fail.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending normalized.
+*.framer text eol=lf
+*.ttf binary
+*.rgba binary
+*.png binary

@@ -1094,10 +1094,10 @@ impl FramerApp {
         match deferred_remove {
             Some(DeferredRemove::Opening(opening_id)) => {
                 self.edit("Remove opening", |app| {
-                    if let Some(wall) = app.model.walls.get_mut(app.selected_wall) {
-                        if wall.remove_opening(&ElementId::new(opening_id)) {
-                            app.selected = Selection::Wall;
-                        }
+                    if let Some(wall) = app.model.walls.get_mut(app.selected_wall)
+                        && wall.remove_opening(&ElementId::new(opening_id))
+                    {
+                        app.selected = Selection::Wall;
                     }
                 });
             }

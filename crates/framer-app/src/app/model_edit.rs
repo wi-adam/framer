@@ -709,8 +709,12 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = framer_core::BuildingModel::new(code.clone());
         // L-corner at (10,0): horizontal `a` meets vertical `b`.
-        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
-        model.walls.push(placed("b", ftp(10.0, 0.0), ftp(10.0, 8.0), &code));
+        model
+            .walls
+            .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("b", ftp(10.0, 0.0), ftp(10.0, 8.0), &code));
         let node = ftp(10.0, 0.0);
 
         // Moving in X keeps `a` horizontal but skews `b`; moving in Y skews `a`.
@@ -723,8 +727,12 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = framer_core::BuildingModel::new(code.clone());
         // Collinear run a—b sharing the node at (10,0).
-        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
-        model.walls.push(placed("b", ftp(10.0, 0.0), ftp(20.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("b", ftp(10.0, 0.0), ftp(20.0, 0.0), &code));
         let node = ftp(10.0, 0.0);
 
         // Sliding the node along the shared row keeps both horizontal.
@@ -737,8 +745,12 @@ mod tests {
     fn translate_keeps_ortho_allows_perpendicular_clamps_along_axis() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = framer_core::BuildingModel::new(code.clone());
-        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
-        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        model
+            .walls
+            .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
         let a = framer_core::ElementId::new("a");
 
         // Sliding horizontal `a` perpendicular (in Y) keeps vertical `b` ortho.
@@ -765,12 +777,22 @@ mod tests {
     fn endpoint_move_rejects_collapsing_a_wall_onto_its_fixed_end() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = framer_core::BuildingModel::new(code.clone());
-        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
 
         // Dragging the end (10,0) back onto the fixed start (0,0) would collapse it.
-        assert!(!endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(0.0, 0.0)));
+        assert!(!endpoint_move_keeps_positive_length(
+            &model,
+            ftp(10.0, 0.0),
+            ftp(0.0, 0.0)
+        ));
         // A normal extend keeps positive length.
-        assert!(endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(8.0, 0.0)));
+        assert!(endpoint_move_keeps_positive_length(
+            &model,
+            ftp(10.0, 0.0),
+            ftp(8.0, 0.0)
+        ));
     }
 
     #[test]
@@ -778,8 +800,12 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = framer_core::BuildingModel::new(code.clone());
         // `a` horizontal at y=0; `b` vertical from the shared corner up to (0,8).
-        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
-        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        model
+            .walls
+            .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
         let a = framer_core::ElementId::new("a");
 
         // Sliding `a` up by 8ft drives `b`'s bottom onto its top (0,8) → collapse.

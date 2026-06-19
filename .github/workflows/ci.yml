@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR; let main runs finish so they
+# always populate the shared build cache.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: rustfmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The @ref must match `channel` in rust-toolchain.toml so CI and local
+      # builds format and lint identically. Bump both together.
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install Linux build deps (eframe / winit / wgpu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      # --all-features so the `cli` and `parallel` paths in framer-render are
+      # linted too; --all-targets covers tests, benches, and examples.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: build + test (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install Linux build deps (eframe / winit / wgpu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Build
+        run: cargo build --workspace --all-features --locked
+      # Runs the headless egui_kittest UI tests on every OS, plus the cli/golden
+      # render tests (via --all-features). The GPU↔CPU parity test runs here on
+      # macOS (real Metal adapter) and skips on Linux/Windows for lack of one —
+      # the dedicated `gpu` job exercises it under software Vulkan.
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  gpu:
+    name: gpu parity (linux / lavapipe)
+    needs: lint
+    runs-on: ubuntu-latest
+    # Point the Vulkan loader at Mesa's lavapipe — a CPU Vulkan driver with full
+    # compute support — so the WGSL compute path tracer is validated against the
+    # CPU reference on Linux instead of skipping for lack of an adapter. wgpu's
+    # backend selection is not env-driven here (gpu_parity builds the instance
+    # with Backends::all()); lavapipe is the only ICD installed, and these loader
+    # vars are what make request_adapter return it.
+    env:
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install build deps + Mesa lavapipe (software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools
+      - name: Verify lavapipe is active
+        # The parity test SKIPS (passes) when no adapter is found, so without
+        # this gate a broken Mesa install would turn the job green while testing
+        # nothing. Print diagnostics, then hard-fail if no software adapter is
+        # present so a real ICD/packaging regression shows up as red.
+        run: |
+          echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+          ls -l /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary || true
+          if ! vulkaninfo --summary 2>/dev/null | grep -qiE 'llvmpipe|lavapipe'; then
+            echo "::error::No lavapipe/llvmpipe Vulkan adapter found; gpu_parity would silently skip."
+            exit 1
+          fi
+      - name: GPU↔CPU parity test
+        run: cargo test -p framer-app --test gpu_parity --locked -- --nocapture

@@ -24,7 +24,7 @@ fn press_key(app: &mut FramerApp, key: egui::Key, modifiers: egui::Modifiers) {
         repeat: false,
         modifiers,
     });
-    ctx.run(input, |ctx| app.handle_keyboard_shortcuts(ctx));
+    let _ = ctx.run_ui(input, |ui| app.handle_keyboard_shortcuts(ui.ctx()));
 }
 
 /// A solver-safe authored mutation: `stud_spacing` is never rewritten by
@@ -71,9 +71,10 @@ fn undo_then_redo_round_trips_the_model() {
 
 #[test]
 fn undo_restores_the_prior_selection() {
+    // `FramerApp::default()` already starts with the first wall selected — the
+    // selection this test expects `undo` to restore after re-selecting a level.
     let mut app = FramerApp::default();
-    app.selected = Selection::Wall;
-    app.selected_wall = 0;
+    assert_eq!(app.selected, Selection::Wall);
 
     app.edit("Adjust and reselect", |app| {
         bump_stud_spacing(app);
@@ -348,10 +349,16 @@ fn wall_endpoint_drag_extends_a_free_end_as_one_undo_step() {
     app.handle_wall_drag_event(WallDragEvent::Stopped);
 
     assert!(app.history.can_undo());
-    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(12.0), Length::ZERO));
+    assert_eq!(
+        app.model.walls[0].end,
+        Point2::new(Length::from_feet(12.0), Length::ZERO)
+    );
     assert_eq!(app.model.walls[0].length, Length::from_feet(12.0));
     // The shared corner and its join are untouched.
-    assert_eq!(app.model.walls[1].start, Point2::new(Length::ZERO, Length::ZERO));
+    assert_eq!(
+        app.model.walls[1].start,
+        Point2::new(Length::ZERO, Length::ZERO)
+    );
     assert_eq!(app.model.wall_joins.len(), 1);
 
     // The whole drag undoes in a single step.
@@ -372,7 +379,9 @@ fn wall_endpoint_drag_drags_shared_node_along_a_collinear_run() {
     app.model.wall_joins.clear();
     app.model.rooms.clear();
     app.model.walls.push(wall("a", pt(0.0, 0.0), pt(10.0, 0.0)));
-    app.model.walls.push(wall("b", pt(10.0, 0.0), pt(20.0, 0.0)));
+    app.model
+        .walls
+        .push(wall("b", pt(10.0, 0.0), pt(20.0, 0.0)));
     app.model.reconcile_joins();
     app.rebuild();
     app.selected = Selection::Wall;
@@ -388,8 +397,14 @@ fn wall_endpoint_drag_drags_shared_node_along_a_collinear_run() {
     app.handle_wall_drag_event(WallDragEvent::Stopped);
 
     // The shared node moved on both walls (node-follow): a grew, b shrank.
-    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(12.0), Length::ZERO));
-    assert_eq!(app.model.walls[1].start, Point2::new(Length::from_feet(12.0), Length::ZERO));
+    assert_eq!(
+        app.model.walls[0].end,
+        Point2::new(Length::from_feet(12.0), Length::ZERO)
+    );
+    assert_eq!(
+        app.model.walls[1].start,
+        Point2::new(Length::from_feet(12.0), Length::ZERO)
+    );
     assert_eq!(app.model.walls[0].length, Length::from_feet(12.0));
     assert_eq!(app.model.walls[1].length, Length::from_feet(8.0));
 }
@@ -415,9 +430,18 @@ fn whole_wall_translate_slides_perpendicular_and_stretches_neighbour() {
     app.handle_wall_drag_event(WallDragEvent::Stopped);
 
     // a slid up 2ft (x unchanged); b's shared corner followed up, shortening it.
-    assert_eq!(app.model.walls[0].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
-    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(10.0), Length::from_feet(2.0)));
-    assert_eq!(app.model.walls[1].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
+    assert_eq!(
+        app.model.walls[0].start,
+        Point2::new(Length::ZERO, Length::from_feet(2.0))
+    );
+    assert_eq!(
+        app.model.walls[0].end,
+        Point2::new(Length::from_feet(10.0), Length::from_feet(2.0))
+    );
+    assert_eq!(
+        app.model.walls[1].start,
+        Point2::new(Length::ZERO, Length::from_feet(2.0))
+    );
     assert_eq!(app.model.walls[1].length, Length::from_feet(6.0));
 
     app.undo();

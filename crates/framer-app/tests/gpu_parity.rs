@@ -150,6 +150,7 @@ const PARITY_SPP: u32 = 64;
 /// Runs the WGSL compute path tracer for `spp` samples of `scene` and returns
 /// the running-sum accumulator buffer (`STORAGE | COPY_SRC`, `vec4<f32>` per
 /// pixel). This is the exact kernel the in-app Render view dispatches.
+#[allow(clippy::too_many_arguments)] // mirrors the kernel's dispatch parameters
 fn accumulate_on_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -360,8 +361,16 @@ fn wgsl_burst_matches_single_sample() {
     let accum_bytes = (W * H) as u64 * 16;
 
     let read_accum = |spp_per_dispatch: u32| -> Vec<f32> {
-        let accum_buf =
-            accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED, spp_per_dispatch);
+        let accum_buf = accumulate_on_gpu(
+            &device,
+            &queue,
+            &scene,
+            W,
+            H,
+            PARITY_SPP,
+            SEED,
+            spp_per_dispatch,
+        );
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("burst_staging"),
             size: accum_bytes,
@@ -614,14 +623,22 @@ fn run_denoise(
             usage: wgpu::BufferUsages::STORAGE | extra,
         })
     };
-    let accum_buf = storage_init("accum", bytemuck::cast_slice(accum), wgpu::BufferUsages::empty());
+    let accum_buf = storage_init(
+        "accum",
+        bytemuck::cast_slice(accum),
+        wgpu::BufferUsages::empty(),
+    );
     let gbuffer = storage_init(
         "gbuffer",
         bytemuck::cast_slice(gbuffer_data),
         wgpu::BufferUsages::empty(),
     );
     let zeros = vec![0f32; n * 4];
-    let color_a = storage_init("color_a", bytemuck::cast_slice(&zeros), wgpu::BufferUsages::empty());
+    let color_a = storage_init(
+        "color_a",
+        bytemuck::cast_slice(&zeros),
+        wgpu::BufferUsages::empty(),
+    );
     let color_b = storage_init(
         "color_b",
         bytemuck::cast_slice(&zeros),
@@ -670,7 +687,10 @@ fn run_denoise(
             entries: &e,
         })
     };
-    let resolve_bg = bg(resolve.get_bind_group_layout(0), &[&du[0], &accum_buf, &color_a]);
+    let resolve_bg = bg(
+        resolve.get_bind_group_layout(0),
+        &[&du[0], &accum_buf, &color_a],
+    );
     let atrous_bgs: Vec<_> = (0..5usize)
         .map(|i| {
             let (input, output) = if i % 2 == 0 {
@@ -714,7 +734,9 @@ fn run_denoise(
 #[test]
 fn denoise_preserves_flat_image_and_reduces_noise() {
     let Some((device, queue)) = device_queue() else {
-        eprintln!("no GPU adapter available; skipping denoise_preserves_flat_image_and_reduces_noise");
+        eprintln!(
+            "no GPU adapter available; skipping denoise_preserves_flat_image_and_reduces_noise"
+        );
         return;
     };
     let (w, h) = (32u32, 32u32);
@@ -776,7 +798,10 @@ fn denoise_preserves_flat_image_and_reduces_noise() {
     let v_out = var(&den, 1);
     let mean_out = (0..n).map(|p| den[p * 4 + 1] as f64).sum::<f64>() / n as f64;
     eprintln!("denoise variance: in={v_in:.4} out={v_out:.4} mean_out={mean_out:.4}");
-    assert!(v_out < v_in * 0.5, "denoiser barely reduced variance ({v_in} -> {v_out})");
+    assert!(
+        v_out < v_in * 0.5,
+        "denoiser barely reduced variance ({v_in} -> {v_out})"
+    );
     // Mean is preserved (low-pass on a flat surface conserves energy).
     assert!(
         (mean_out - sum_in[1] / n as f64).abs() < 0.05,
