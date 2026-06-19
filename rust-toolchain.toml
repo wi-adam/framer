@@ -1,0 +1,11 @@
+# Pin the toolchain so local builds and CI format/lint identically. Without a
+# pin, a newer stable rustfmt silently reformats the tree and `cargo fmt
+# --check` starts failing in CI. Bump this channel (and the matching
+# `dtolnay/rust-toolchain@<channel>` refs in .github/workflows/ci.yml) together,
+# then run `cargo fmt --all` once to absorb any new formatting.
+#
+# This is the build/format toolchain, independent of the crates' `rust-version`
+# (1.92), which is the minimum-supported floor, not what we build with.
+[toolchain]
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]
