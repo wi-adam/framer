@@ -63,6 +63,7 @@ pub(crate) enum Icon {
     Filter,
     Menu,
     ChevronDown,
+    ChevronUp,
     ChevronRight,
     Plus,
     Minus,
@@ -119,6 +120,7 @@ impl Icon {
             Icon::Filter => '\u{e460}',        // list-filter
             Icon::Menu => '\u{e184}',          // align-justify
             Icon::ChevronDown => '\u{e06d}',   // chevron-down
+            Icon::ChevronUp => '\u{e06e}',     // chevron-up
             Icon::ChevronRight => '\u{e06f}',  // chevron-right
             Icon::Plus => '\u{e13d}',          // plus
             Icon::Minus => '\u{e11c}',         // minus

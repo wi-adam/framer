@@ -548,6 +548,8 @@ impl FramerApp {
                     }
                 });
 
+            self.library_tree(ui);
+
             if self.workspace_mode.shows_generated_plan() {
                 let generated_count = self
                     .project_plan
@@ -632,11 +634,87 @@ impl FramerApp {
         });
     }
 
+    /// The construction-system / material library browser: a collapsible header
+    /// with Systems and Materials sub-lists. Rows select the matching library
+    /// element; the footer buttons author new systems/materials.
+    fn library_tree(&mut self, ui: &mut Ui) {
+        let systems: Vec<(String, String, &'static str)> = self
+            .model
+            .systems
+            .iter()
+            .map(|system| {
+                (
+                    system.id.0.clone(),
+                    system.name.clone(),
+                    system.kind.label(),
+                )
+            })
+            .collect();
+        let materials: Vec<(String, String, [u8; 3])> = self
+            .model
+            .materials
+            .iter()
+            .map(|material| (material.id.0.clone(), material.name.clone(), material.color()))
+            .collect();
+
+        egui::CollapsingHeader::new("Library")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.strong("Systems");
+                for (id, name, kind) in &systems {
+                    let selected = matches!(&self.selected, Selection::System(s) if s == id);
+                    if ui
+                        .selectable_label(selected, format!("{name} ({kind})"))
+                        .clicked()
+                    {
+                        self.selected = Selection::System(id.clone());
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("+ Wall system").clicked() {
+                        self.add_wall_system(true);
+                    }
+                    if ui.button("+ Interior system").clicked() {
+                        self.add_wall_system(false);
+                    }
+                });
+
+                ui.separator();
+                ui.strong("Materials");
+                for (id, name, color) in &materials {
+                    let selected = matches!(&self.selected, Selection::Material(m) if m == id);
+                    let [r, g, b] = *color;
+                    if ui
+                        .horizontal(|ui| {
+                            color_swatch(ui, Color32::from_rgb(r, g, b));
+                            ui.selectable_label(selected, name).clicked()
+                        })
+                        .inner
+                    {
+                        self.selected = Selection::Material(id.clone());
+                    }
+                }
+                if ui.button("+ Material").clicked() {
+                    self.add_material();
+                }
+            });
+    }
+
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let mut changed = false;
         // A Remove click sets this; executed through edit() after the model
         // borrow below ends, so deletions are one labelled, undoable step.
         let mut deferred_remove: Option<DeferredRemove> = None;
+        // Library actions deferred past the inspector's `&mut model` borrow, each
+        // replayed through edit() as one labelled, undoable step.
+        //   - add a layer to the selected system
+        let mut deferred_add_layer: Option<String> = None;
+        //   - reorder a layer within the selected system: (system id, index, dir)
+        let mut deferred_move_layer: Option<(String, usize, isize)> = None;
+        //   - remove a layer from the selected system: (system id, index)
+        let mut deferred_remove_layer: Option<(String, usize)> = None;
+        //   - jump the selection to a construction system (Wall "Edit system").
+        let mut deferred_select_system: Option<String> = None;
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
@@ -680,6 +758,41 @@ impl FramerApp {
                 )
             })
             .collect::<Vec<_>>();
+        // Richer per-wall-system summaries (stacked swatch, R-value, layer count)
+        // for the Wall inspector's read-only System block, collected before the
+        // mutable wall borrow.
+        let wall_system_summaries = self
+            .model
+            .systems
+            .iter()
+            .filter(|system| system.kind == framer_core::SystemKind::Wall)
+            .map(|system| WallSystemSummary::from_system(system, &self.model))
+            .collect::<Vec<_>>();
+        // Material picklist + swatch colors, collected before any `&mut system`
+        // borrow so layer ComboBoxes/swatches don't alias the system iter_mut().
+        let material_options = self
+            .model
+            .materials
+            .iter()
+            .map(|material| (material.id.0.clone(), material.name.clone()))
+            .collect::<Vec<(String, String)>>();
+        let material_colors = self
+            .model
+            .materials
+            .iter()
+            .map(|material| (material.id.0.clone(), material.color()))
+            .collect::<Vec<(String, [u8; 3])>>();
+        // R-value of the selected system (clear-wall, milli-R), computed before the
+        // mutable borrow since it reads the whole material library.
+        let selected_system_r_milli = if let Selection::System(id) = &selection {
+            self.model
+                .systems
+                .iter()
+                .find(|system| system.id.0 == *id)
+                .map(|system| system.r_value_milli(&self.model.materials))
+        } else {
+            None
+        };
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
@@ -825,13 +938,33 @@ impl FramerApp {
                                 wall.system.0 != before
                             });
                             ui.add_space(design::space::XS);
-                            if let Some((_, name, thickness, exposure)) = wall_systems
+                            if let Some(summary) = wall_system_summaries
                                 .iter()
-                                .find(|(id, ..)| *id == wall.system.0)
+                                .find(|summary| summary.id == wall.system.0)
                             {
-                                summary_row(ui, "Name", name);
-                                summary_row(ui, "Total thickness", thickness);
-                                summary_row(ui, "Exposure", exposure);
+                                stacked_swatch(ui, &summary.bands);
+                                ui.add_space(design::space::XS);
+                                egui::Grid::new("wall-system-summary")
+                                    .num_columns(2)
+                                    .spacing([12.0, 4.0])
+                                    .show(ui, |ui| {
+                                        summary_row(ui, "Name", &summary.name);
+                                        summary_row(ui, "Layers", summary.layer_count);
+                                        summary_row(
+                                            ui,
+                                            "Total thickness",
+                                            &summary.total_thickness,
+                                        );
+                                        summary_row(ui, "Exposure", summary.exposure);
+                                        summary_row(
+                                            ui,
+                                            "R-value",
+                                            format_r_value(summary.r_value_milli),
+                                        );
+                                    });
+                                if ui.button("Edit system").clicked() {
+                                    deferred_select_system = Some(summary.id.clone());
+                                }
                             } else {
                                 ui.label(
                                     RichText::new("System not found in the model library.")
@@ -1063,6 +1196,96 @@ impl FramerApp {
                     ui.label("Generated member no longer exists");
                 }
             }
+            Selection::System(id) => {
+                if let Some(system) = self
+                    .model
+                    .systems
+                    .iter_mut()
+                    .find(|system| system.id.0 == id)
+                {
+                    inspector_object_id(ui, &system.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut system.name);
+
+                        property_row(ui, "Kind", |ui| {
+                            ComboBox::from_id_salt("system-kind")
+                                .selected_text(system.kind.label())
+                                .show_ui(ui, |ui| {
+                                    for kind in framer_core::SystemKind::ALL {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut system.kind,
+                                                kind,
+                                                kind.label(),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                        });
+
+                        widgets::section(ui, "system-layers", "Layers", true, |ui| {
+                            let layer_count = system.layers.len();
+                            for (index, layer) in system.layers.iter_mut().enumerate() {
+                                changed |= system_layer_editor(
+                                    ui,
+                                    &id,
+                                    index,
+                                    layer_count,
+                                    layer,
+                                    &material_options,
+                                    &material_colors,
+                                    &mut deferred_move_layer,
+                                    &mut deferred_remove_layer,
+                                );
+                                ui.add_space(design::space::XS);
+                            }
+                            if ui.button("+ Layer").clicked() {
+                                deferred_add_layer = Some(id.clone());
+                            }
+                        });
+
+                        ui.add_space(design::space::XS);
+                        egui::Grid::new("system-footer")
+                            .num_columns(2)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                summary_row(
+                                    ui,
+                                    "Total thickness",
+                                    system.total_thickness().to_string(),
+                                );
+                                if let Some(milli) = selected_system_r_milli {
+                                    summary_row(ui, "R-value", format_r_value(milli));
+                                }
+                            });
+                    } else {
+                        system_summary(ui, system, selected_system_r_milli);
+                    }
+                } else {
+                    ui.label("System no longer exists");
+                }
+            }
+            Selection::Material(id) => {
+                if let Some(material) =
+                    self.model.materials.iter_mut().find(|m| m.id.0 == id)
+                {
+                    inspector_object_id(ui, &material.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut material.name);
+                        changed |= material_appearance_editor(ui, material);
+                        widgets::section(ui, "material-props", "Properties", true, |ui| {
+                            changed |= material_properties_editor(ui, material);
+                        });
+                        widgets::section(ui, "material-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut material.tags);
+                        });
+                    } else {
+                        material_summary(ui, material);
+                    }
+                } else {
+                    ui.label("Material no longer exists");
+                }
+            }
         }
 
         // Replay a deferred Remove as one discrete, labelled undo step now that
@@ -1091,6 +1314,23 @@ impl FramerApp {
                 });
             }
             None => {}
+        }
+
+        // Replay deferred library actions (layer add/reorder/remove and the Wall
+        // inspector's "Edit system" jump) now that the model borrow has ended.
+        // Each *_layer action is one labelled, undoable edit; the selection jump is
+        // pure presentation state, so it is applied directly.
+        if let Some(system_id) = deferred_add_layer {
+            self.add_layer(&system_id);
+        }
+        if let Some((system_id, index, dir)) = deferred_move_layer {
+            self.move_layer(&system_id, index, dir);
+        }
+        if let Some((system_id, index)) = deferred_remove_layer {
+            self.remove_layer(&system_id, index);
+        }
+        if let Some(system_id) = deferred_select_system {
+            self.selected = Selection::System(system_id);
         }
 
         if changed {
@@ -1292,6 +1532,8 @@ impl FramerApp {
             Selection::Join(id) => format!("Join: {id}"),
             Selection::Room(id) => format!("Room: {id}"),
             Selection::Member { member_id, .. } => format!("Member: {member_id}"),
+            Selection::System(id) => format!("System: {id}"),
+            Selection::Material(id) => format!("Material: {id}"),
         }
     }
 
@@ -1409,6 +1651,8 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Join(_) => "Edit join",
         Selection::Room(_) => "Edit room",
         Selection::Member { .. } => "Edit",
+        Selection::System(_) => "Edit system",
+        Selection::Material(_) => "Edit material",
     }
 }
 
@@ -1558,6 +1802,8 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Join(_) => "Join",
         Selection::Room(_) => "Room",
         Selection::Member { .. } => "Member",
+        Selection::System(_) => "System",
+        Selection::Material(_) => "Material",
     }
 }
 
@@ -1626,6 +1872,359 @@ fn level_summary(ui: &mut Ui, level: &Level) {
         .show(ui, |ui| {
             summary_row(ui, "Name", &level.name);
             summary_row(ui, "Elevation", level.elevation.to_string());
+        });
+}
+
+/// A read-only summary of a wall-kind construction system, prepared before the
+/// inspector's mutable wall borrow so the Wall inspector can show the applied
+/// system's layer build-up (stacked swatch + totals) without re-borrowing.
+struct WallSystemSummary {
+    id: String,
+    name: String,
+    total_thickness: String,
+    exposure: &'static str,
+    r_value_milli: i64,
+    layer_count: usize,
+    /// Per-layer (interior -> exterior) swatch color and thickness weight in
+    /// ticks, for the stacked mini-swatch.
+    bands: Vec<(Color32, i64)>,
+}
+
+impl WallSystemSummary {
+    fn from_system(
+        system: &framer_core::ConstructionSystem,
+        model: &framer_core::BuildingModel,
+    ) -> Self {
+        let bands = system
+            .layers
+            .iter()
+            .map(|layer| {
+                let [r, g, b] = model
+                    .material(&layer.material)
+                    .map(|material| material.color())
+                    .unwrap_or([188, 179, 158]);
+                (Color32::from_rgb(r, g, b), layer.thickness.ticks().max(1))
+            })
+            .collect();
+        Self {
+            id: system.id.0.clone(),
+            name: system.name.clone(),
+            total_thickness: system.total_thickness().to_string(),
+            exposure: system.exposure().label(),
+            r_value_milli: system.r_value_milli(&model.materials),
+            layer_count: system.layers.len(),
+            bands,
+        }
+    }
+}
+
+/// Format a milli-R value (R x 1000) as a one-decimal "R-#.#" string.
+fn format_r_value(milli: i64) -> String {
+    format!("R-{:.1}", milli as f64 / 1000.0)
+}
+
+/// A small horizontal stacked swatch: one band per construction layer
+/// (interior -> exterior), each width-weighted by its thickness.
+fn stacked_swatch(ui: &mut Ui, bands: &[(Color32, i64)]) {
+    let height = 18.0;
+    let width = ui.available_width().clamp(60.0, 220.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let total: i64 = bands.iter().map(|(_, weight)| *weight).sum::<i64>().max(1);
+    let mut x = rect.left();
+    for (index, (color, weight)) in bands.iter().enumerate() {
+        let band_width = if index + 1 == bands.len() {
+            rect.right() - x
+        } else {
+            width * (*weight as f32 / total as f32)
+        };
+        let band = egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2(x + band_width, rect.bottom()),
+        );
+        ui.painter().rect_filled(band, 0.0, *color);
+        x += band_width;
+    }
+    ui.painter()
+        .rect_stroke(rect, 2.0, theme::soft_stroke(), egui::StrokeKind::Inside);
+}
+
+/// Board profiles offered in the framing-member picker (interior -> exterior is
+/// irrelevant here; this is the size menu).
+const BOARD_PROFILES: [framer_core::BoardProfile; 5] = [
+    framer_core::BoardProfile::TwoByFour,
+    framer_core::BoardProfile::TwoBySix,
+    framer_core::BoardProfile::TwoByEight,
+    framer_core::BoardProfile::TwoByTen,
+    framer_core::BoardProfile::TwoByTwelve,
+];
+
+/// Paint a small solid color swatch (used to preview a layer's material).
+fn color_swatch(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
+    ui.painter()
+        .rect_stroke(rect, 2.0, theme::soft_stroke(), egui::StrokeKind::Inside);
+}
+
+/// Look up a material's swatch color by id, falling back to a neutral tone.
+fn material_color(material_colors: &[(String, [u8; 3])], id: &str) -> Color32 {
+    material_colors
+        .iter()
+        .find(|(candidate, _)| candidate == id)
+        .map(|(_, [r, g, b])| Color32::from_rgb(*r, *g, *b))
+        .unwrap_or_else(|| Color32::from_rgb(188, 179, 158))
+}
+
+/// Look up a material's display name by id, falling back to the raw id.
+fn material_name(material_options: &[(String, String)], id: &str) -> String {
+    material_options
+        .iter()
+        .find(|(candidate, _)| candidate == id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| id.to_owned())
+}
+
+/// Inline editor for one construction layer (interior -> exterior). Returns
+/// whether the layer's data changed; reorder/remove are deferred to the caller.
+#[allow(clippy::too_many_arguments)]
+fn system_layer_editor(
+    ui: &mut Ui,
+    system_id: &str,
+    index: usize,
+    layer_count: usize,
+    layer: &mut framer_core::ConstructionLayer,
+    material_options: &[(String, String)],
+    material_colors: &[(String, [u8; 3])],
+    deferred_move: &mut Option<(String, usize, isize)>,
+    deferred_remove: &mut Option<(String, usize)>,
+) -> bool {
+    use framer_core::{BoardProfile, ElementId, FramingPattern, LayerFunction};
+
+    let mut changed = false;
+    Frame::new()
+        .fill(design::active().control)
+        .stroke(theme::soft_stroke())
+        .corner_radius(design::radius::SM)
+        .inner_margin(Margin::same(6))
+        .show(ui, |ui| {
+            // Header row: material swatch, ordinal, and reorder/remove controls.
+            ui.horizontal(|ui| {
+                color_swatch(ui, material_color(material_colors, &layer.material.0));
+                ui.label(
+                    RichText::new(format!("Layer {}", index + 1))
+                        .strong()
+                        .size(design::text_size::LABEL)
+                        .color(theme::text_secondary()),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add_enabled(layer_count > 1, |ui: &mut Ui| {
+                            widgets::icon_button(ui, Icon::Delete, "Remove layer")
+                        })
+                        .clicked()
+                    {
+                        *deferred_remove = Some((system_id.to_owned(), index));
+                    }
+                    if ui
+                        .add_enabled(index + 1 < layer_count, |ui: &mut Ui| {
+                            widgets::icon_button(ui, Icon::ChevronDown, "Move toward exterior")
+                        })
+                        .clicked()
+                    {
+                        *deferred_move = Some((system_id.to_owned(), index, 1));
+                    }
+                    if ui
+                        .add_enabled(index > 0, |ui: &mut Ui| {
+                            widgets::icon_button(ui, Icon::ChevronUp, "Move toward interior")
+                        })
+                        .clicked()
+                    {
+                        *deferred_move = Some((system_id.to_owned(), index, -1));
+                    }
+                });
+            });
+
+            // Material picker.
+            changed |= property_row(ui, "Material", |ui| {
+                let before = layer.material.0.clone();
+                ComboBox::from_id_salt(("layer-material", index))
+                    .selected_text(material_name(material_options, &layer.material.0))
+                    .show_ui(ui, |ui| {
+                        for (id, name) in material_options {
+                            ui.selectable_value(
+                                &mut layer.material,
+                                ElementId::new(id.clone()),
+                                name,
+                            );
+                        }
+                    });
+                layer.material.0 != before
+            });
+
+            // Thickness (inches; layers are small so an inch display reads best).
+            changed |= length_drag(ui, "Thickness", &mut layer.thickness, 0.0, 48.0, "in");
+
+            // Function. Switching to/from Framing keeps `framing` consistent so the
+            // model stays valid (framing.is_some() iff function == Framing).
+            changed |= property_row(ui, "Function", |ui| {
+                let before = layer.function;
+                ComboBox::from_id_salt(("layer-function", index))
+                    .selected_text(layer.function.label())
+                    .show_ui(ui, |ui| {
+                        for function in LayerFunction::ALL {
+                            ui.selectable_value(
+                                &mut layer.function,
+                                function,
+                                function.label(),
+                            );
+                        }
+                    });
+                if layer.function != before {
+                    if layer.function == LayerFunction::Framing && layer.framing.is_none() {
+                        layer.framing = Some(framer_core::FramingSpec {
+                            member: BoardProfile::TwoByFour,
+                            spacing: Length::from_whole_inches(16),
+                            pattern: FramingPattern::Single,
+                            cavity_material: None,
+                        });
+                    } else if layer.function != LayerFunction::Framing {
+                        layer.framing = None;
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
+
+            // Framing detail, revealed only for the Framing layer.
+            if let Some(framing) = layer.framing.as_mut() {
+                changed |= property_row(ui, "Member", |ui| {
+                    let before = framing.member;
+                    ComboBox::from_id_salt(("layer-member", index))
+                        .selected_text(framing.member.label())
+                        .show_ui(ui, |ui| {
+                            for profile in BOARD_PROFILES {
+                                ui.selectable_value(&mut framing.member, profile, profile.label());
+                            }
+                        });
+                    framing.member != before
+                });
+                changed |= length_drag(ui, "Spacing", &mut framing.spacing, 1.0, 48.0, "in");
+                changed |= property_row(ui, "Pattern", |ui| {
+                    let before = framing.pattern;
+                    ComboBox::from_id_salt(("layer-pattern", index))
+                        .selected_text(framing.pattern.label())
+                        .show_ui(ui, |ui| {
+                            for pattern in FramingPattern::ALL {
+                                ui.selectable_value(
+                                    &mut framing.pattern,
+                                    pattern,
+                                    pattern.label(),
+                                );
+                            }
+                        });
+                    framing.pattern != before
+                });
+                changed |= property_row(ui, "Cavity fill", |ui| {
+                    let selected = framing
+                        .cavity_material
+                        .as_ref()
+                        .map(|id| material_name(material_options, &id.0))
+                        .unwrap_or_else(|| "None".to_owned());
+                    let before = framing.cavity_material.clone();
+                    ComboBox::from_id_salt(("layer-cavity", index))
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut framing.cavity_material, None, "None");
+                            for (id, name) in material_options {
+                                ui.selectable_value(
+                                    &mut framing.cavity_material,
+                                    Some(ElementId::new(id.clone())),
+                                    name,
+                                );
+                            }
+                        });
+                    framing.cavity_material != before
+                });
+            }
+        });
+    changed
+}
+
+/// Read-only summary of a construction system (Plan workspace).
+fn system_summary(
+    ui: &mut Ui,
+    system: &framer_core::ConstructionSystem,
+    r_value_milli: Option<i64>,
+) {
+    egui::Grid::new("system-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", &system.name);
+            summary_row(ui, "Kind", system.kind.label());
+            summary_row(ui, "Layers", system.layers.len());
+            summary_row(ui, "Total thickness", system.total_thickness().to_string());
+            summary_row(ui, "Exposure", system.exposure().label());
+            if let Some(milli) = r_value_milli {
+                summary_row(ui, "R-value", format_r_value(milli));
+            }
+        });
+}
+
+/// Appearance editor for a material. Returns whether it changed. Currently the
+/// only `Appearance` variant is `SolidColor`, edited via an sRGB color button.
+fn material_appearance_editor(ui: &mut Ui, material: &mut framer_core::Material) -> bool {
+    let mut changed = false;
+    property_row(ui, "Appearance", |ui| match &mut material.appearance {
+        framer_core::Appearance::SolidColor(rgb) => {
+            changed |= ui.color_edit_button_srgb(rgb).changed();
+        }
+    });
+    changed
+}
+
+/// Editor for the well-known material property keys surfaced as labelled
+/// `i64` drag values. Returns whether any property changed.
+fn material_properties_editor(ui: &mut Ui, material: &mut framer_core::Material) -> bool {
+    use framer_core::PropertyValue;
+    let mut changed = false;
+    for (key, label) in [
+        ("r_per_inch_milli", "R / inch (milli-R)"),
+        ("cost_cents", "Cost (cents)"),
+    ] {
+        let mut value = match material.properties.get(key) {
+            Some(PropertyValue::Int(v)) => *v,
+            _ => 0,
+        };
+        let response = property_row(ui, label, |ui| {
+            ui.add(egui::DragValue::new(&mut value).speed(1.0).range(0..=i64::MAX))
+        });
+        if response.changed() {
+            material
+                .properties
+                .insert(key.to_owned(), PropertyValue::Int(value));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Read-only summary of a material (Plan workspace).
+fn material_summary(ui: &mut Ui, material: &framer_core::Material) {
+    ui.horizontal(|ui| {
+        let [r, g, b] = material.color();
+        color_swatch(ui, Color32::from_rgb(r, g, b));
+        ui.label(RichText::new(&material.name).strong().color(theme::text_primary()));
+    });
+    egui::Grid::new("material-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "R / inch", format_r_value(material.r_per_inch_milli()));
+            if !material.tags.is_empty() {
+                summary_row(ui, "Tags", material.tags.join(", "));
+            }
         });
 }
 

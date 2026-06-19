@@ -33,8 +33,8 @@ use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
-    next_dimension_id, next_opening_id, next_room_id, next_wall_id, translate_keeps_ortho,
-    translate_keeps_positive_length,
+    next_dimension_id, next_material_id, next_opening_id, next_room_id, next_system_id,
+    next_wall_id, translate_keeps_ortho, translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
@@ -110,6 +110,8 @@ enum Selection {
     Join(String),
     Room(String),
     Member { wall_id: String, member_id: String },
+    System(String),
+    Material(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,14 +615,69 @@ impl FramerApp {
         }
     }
 
-    /// Delete whatever authored element is selected (wall, opening, or room).
+    /// Delete whatever authored element is selected (wall, opening, room,
+    /// construction system, or material).
     fn delete_selected(&mut self) {
         match &self.selected {
             Selection::Opening(_) => self.delete_selected_opening(),
             Selection::Wall => self.delete_selected_wall(),
             Selection::Room(_) => self.delete_selected_room(),
+            Selection::System(_) => self.delete_selected_system(),
+            Selection::Material(_) => self.delete_selected_material(),
             _ => {}
         }
+    }
+
+    /// Delete the selected construction system as one undo step, refusing when any
+    /// wall still references it (deleting it would dangle `wall.system`).
+    fn delete_selected_system(&mut self) {
+        let Selection::System(id) = self.selected.clone() else {
+            return;
+        };
+        if self.model.walls.iter().any(|wall| wall.system.0 == id) {
+            self.error = Some(format!(
+                "Cannot delete system '{id}': it is still applied to one or more walls"
+            ));
+            return;
+        }
+        self.edit("Delete system", |app| {
+            let before = app.model.systems.len();
+            app.model.systems.retain(|system| system.id.0 != id);
+            if app.model.systems.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    /// Delete the selected material as one undo step, refusing when any layer or
+    /// framing cavity still references it (deleting it would dangle the reference).
+    fn delete_selected_material(&mut self) {
+        let Selection::Material(id) = self.selected.clone() else {
+            return;
+        };
+        let referenced = self.model.systems.iter().any(|system| {
+            system.layers.iter().any(|layer| {
+                layer.material.0 == id
+                    || layer
+                        .framing
+                        .as_ref()
+                        .and_then(|framing| framing.cavity_material.as_ref())
+                        .is_some_and(|cavity| cavity.0 == id)
+            })
+        });
+        if referenced {
+            self.error = Some(format!(
+                "Cannot delete material '{id}': it is still used by one or more layers"
+            ));
+            return;
+        }
+        self.edit("Delete material", |app| {
+            let before = app.model.materials.len();
+            app.model.materials.retain(|material| material.id.0 != id);
+            if app.model.materials.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
     }
 
     fn activate_dimension_tool(&mut self) {
@@ -753,7 +810,9 @@ impl FramerApp {
             Selection::Level(_)
             | Selection::Opening(_)
             | Selection::Join(_)
-            | Selection::Room(_) => {
+            | Selection::Room(_)
+            | Selection::System(_)
+            | Selection::Material(_) => {
                 self.selected = Selection::Wall;
             }
             Selection::Dimension(_) => unreachable!("dimension selections exit above"),
@@ -876,6 +935,168 @@ impl FramerApp {
             app.model.rooms.retain(|room| room.id.0 != id);
             if app.model.rooms.len() != before {
                 app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    /// Add a new wall-kind construction system as one undo step, seeded with a
+    /// minimal valid stack so it passes validation immediately and renders
+    /// sensibly. `exterior` adds an outboard cladding layer (so the derived
+    /// exposure is `Exterior`); otherwise it is a drywall/framing/drywall
+    /// partition. Selects the new system.
+    fn add_wall_system(&mut self, exterior: bool) {
+        use framer_core::{
+            BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
+            FramingSpec, LayerFunction, SystemKind,
+        };
+        self.edit("Add system", |app| {
+            let (id, index) = next_system_id(&app.model);
+            // Resolve seed material ids, falling back to the library when present.
+            let finish = app.first_material_with_tag("finish", "mat-drywall");
+            let framing = app.first_material_with_tag("framing", "mat-spf");
+            let cladding = app.first_material_with_tag("cladding", "mat-fiber-cement");
+
+            let mut layers = vec![
+                ConstructionLayer::new(
+                    LayerFunction::InteriorFinish,
+                    finish.clone(),
+                    Length::from_inches(0.625),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    framing,
+                    BoardProfile::TwoByFour.nominal_depth(),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByFour,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: FramingPattern::Single,
+                    cavity_material: None,
+                }),
+            ];
+            if exterior {
+                layers.push(ConstructionLayer::new(
+                    LayerFunction::Cladding,
+                    cladding,
+                    Length::from_inches(0.3125),
+                ));
+            } else {
+                layers.push(ConstructionLayer::new(
+                    LayerFunction::InteriorFinish,
+                    finish,
+                    Length::from_inches(0.625),
+                ));
+            }
+
+            let name = if exterior {
+                format!("Exterior wall {index}")
+            } else {
+                format!("Interior partition {index}")
+            };
+            app.model.systems.push(ConstructionSystem {
+                id: ElementId::new(id.clone()),
+                name,
+                kind: SystemKind::Wall,
+                layers,
+            });
+            app.selected = Selection::System(id);
+        });
+    }
+
+    /// The id of the first material carrying `tag`, or `fallback` if none does
+    /// (e.g. an empty library). Used to seed new systems with sensible materials.
+    fn first_material_with_tag(&self, tag: &str, fallback: &str) -> String {
+        self.model
+            .materials
+            .iter()
+            .find(|material| material.tags.iter().any(|t| t == tag))
+            .map(|material| material.id.0.clone())
+            .unwrap_or_else(|| {
+                self.model
+                    .materials
+                    .first()
+                    .map(|material| material.id.0.clone())
+                    .unwrap_or_else(|| fallback.to_owned())
+            })
+    }
+
+    /// Add a new project material as one undo step, with a neutral grey solid
+    /// color and no extra properties. Selects the new material.
+    fn add_material(&mut self) {
+        self.edit("Add material", |app| {
+            let (id, index) = next_material_id(&app.model);
+            app.model.materials.push(framer_core::Material::solid_color(
+                id.clone(),
+                format!("Material {index}"),
+                [190, 190, 190],
+            ));
+            app.selected = Selection::Material(id);
+        });
+    }
+
+    /// Append a new layer to the system with id `system_id` as one undo step. The
+    /// layer is a non-framing `Other` 1" stub referencing the first material, kept
+    /// minimal and valid; the system inspector edits it inline afterwards.
+    fn add_layer(&mut self, system_id: &str) {
+        let system_id = system_id.to_owned();
+        self.edit("Add layer", |app| {
+            let material = app
+                .model
+                .materials
+                .first()
+                .map(|material| material.id.0.clone())
+                .unwrap_or_else(|| "mat-drywall".to_owned());
+            if let Some(system) = app
+                .model
+                .systems
+                .iter_mut()
+                .find(|system| system.id.0 == system_id)
+            {
+                system.layers.push(framer_core::ConstructionLayer::new(
+                    framer_core::LayerFunction::Other,
+                    material,
+                    Length::from_whole_inches(1),
+                ));
+            }
+        });
+    }
+
+    /// Reorder a layer within its system by swapping it with its neighbour as one
+    /// undo step. `index` is the layer's current position; `dir` is -1 (up /
+    /// toward interior) or +1 (down / toward exterior). Out-of-range moves no-op.
+    fn move_layer(&mut self, system_id: &str, index: usize, dir: isize) {
+        let system_id = system_id.to_owned();
+        self.edit("Reorder layer", |app| {
+            if let Some(system) = app
+                .model
+                .systems
+                .iter_mut()
+                .find(|system| system.id.0 == system_id)
+            {
+                let Some(target) = index.checked_add_signed(dir) else {
+                    return;
+                };
+                if target < system.layers.len() {
+                    system.layers.swap(index, target);
+                }
+            }
+        });
+    }
+
+    /// Remove the layer at `index` from the system with id `system_id` as one undo
+    /// step. The last remaining layer is kept (an empty system fails validation).
+    fn remove_layer(&mut self, system_id: &str, index: usize) {
+        let system_id = system_id.to_owned();
+        self.edit("Remove layer", |app| {
+            if let Some(system) = app
+                .model
+                .systems
+                .iter_mut()
+                .find(|system| system.id.0 == system_id)
+                && system.layers.len() > 1
+                && index < system.layers.len()
+            {
+                system.layers.remove(index);
             }
         });
     }

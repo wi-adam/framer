@@ -345,6 +345,8 @@ pub(super) fn section_position(wall: &Wall, selection: &Selection) -> Option<Len
         | Selection::Join(_)
         | Selection::Level(_)
         | Selection::Room(_)
+        | Selection::System(_)
+        | Selection::Material(_)
         | Selection::Wall => Some(wall.length / 2),
     }
 }
