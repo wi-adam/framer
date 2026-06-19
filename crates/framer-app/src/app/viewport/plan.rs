@@ -4,10 +4,12 @@
 //! bundle to keep its call site legible (mirroring `AxonometricView` /
 //! `DesignElevationView`).
 
+use std::collections::BTreeMap;
+
 use eframe::egui::{
-    self, Align2, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
-use framer_core::{BuildingModel, Length, Point2};
+use framer_core::{BuildingModel, ElementId, Length, Point2, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
 use super::geom::{ModelBounds, distance_to_segment, plan_inverse_point, plan_point};
@@ -177,6 +179,180 @@ fn snapped_wall_endpoint(
     .point
 }
 
+/// The 2D part of `scene_build::WallBasis`: the wall's along/perpendicular unit
+/// vectors in model space (inches), used to offset the centerline into thickness
+/// bands. The side axis is `(-along_y, along_x)` — the same convention the 3D
+/// renderer uses — so plan and 3D agree on which way "exterior" lies.
+struct PlanWallBasis {
+    side_x: f64,
+    side_y: f64,
+}
+
+impl PlanWallBasis {
+    fn new(wall: &Wall) -> Self {
+        let dx = (wall.end.x - wall.start.x).inches();
+        let dy = (wall.end.y - wall.start.y).inches();
+        let length = (dx * dx + dy * dy).sqrt().max(1.0);
+        let along_x = dx / length;
+        let along_y = dy / length;
+        Self {
+            side_x: -along_y,
+            side_y: along_x,
+        }
+    }
+
+    /// Offset a centerline model point perpendicular to the wall by `side` inches.
+    fn offset(&self, point: Point2, side: f64) -> Point2 {
+        Point2::new(
+            point.x + Length::from_inches(self.side_x * side),
+            point.y + Length::from_inches(self.side_y * side),
+        )
+    }
+}
+
+/// A band quad spanning `start..end` along the wall and `side0..side1` across its
+/// thickness, projected to screen so its fill scales with zoom. Corners are wound
+/// interior(side0)-start → interior-end → exterior(side1)-end → exterior-start.
+#[allow(clippy::too_many_arguments)]
+fn band_quad(
+    basis: &PlanWallBasis,
+    start: Point2,
+    end: Point2,
+    side0: f64,
+    side1: f64,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) -> [Pos2; 4] {
+    [
+        plan_point(basis.offset(start, side0), bounds, drawing, camera),
+        plan_point(basis.offset(end, side0), bounds, drawing, camera),
+        plan_point(basis.offset(end, side1), bounds, drawing, camera),
+        plan_point(basis.offset(start, side1), bounds, drawing, camera),
+    ]
+}
+
+/// Which way a wall's layer stack runs on the side axis (`(-along_y, along_x)`):
+/// `+1` when the room interior is toward the plus-side, `-1` when toward the
+/// minus-side. Walls absent from the topology map (ambiguous partitions / no
+/// enclosing room) DEFAULT to `-1`, matching the 3D renderer so plan and 3D agree.
+fn interior_sign(interior_sides: &BTreeMap<ElementId, bool>, wall_id: &ElementId) -> f64 {
+    match interior_sides.get(wall_id) {
+        Some(true) => 1.0,
+        _ => -1.0,
+    }
+}
+
+/// The side-axis span `[min, max]` (inches) of one layer band, laid out interior
+/// -> exterior, mirroring `scene_build::layer_band_span` so plan and 3D place each
+/// layer on the same physical side. With cumulative interior offset `off` and
+/// thickness `t` the interior face is at `interior_sign * (total/2 - off)` and the
+/// exterior face at `interior_sign * (total/2 - (off + t))`.
+fn layer_band_span(interior_sign: f64, total: f64, off: f64, t: f64) -> (f64, f64) {
+    let half = total / 2.0;
+    let side_a = interior_sign * (half - off);
+    let side_b = interior_sign * (half - (off + t));
+    (side_a.min(side_b), side_a.max(side_b))
+}
+
+/// A material's plan-fill color, with a fallback neutral tone for a dangling id.
+fn plan_layer_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color32 {
+    match model.material(id) {
+        Some(material) => {
+            let [r, g, b] = material.color();
+            Color32::from_rgb(r, g, b)
+        }
+        None => Color32::from_rgb(188, 179, 158),
+    }
+}
+
+/// Fill the wall as a true-thickness layered cross-section: one band quad per
+/// construction layer, stacked interior -> exterior across `total_thickness`,
+/// each filled with its material color. `interior_sign` (from topology) decides
+/// which physical side faces the room, so reversing a wall no longer mirrors the
+/// assembly; the stack still spans the full thickness across the centerline.
+/// Openings widen to a full-thickness white gap drawn on top. This is FILL ONLY —
+/// the centerline hit-test, drag handles, snapping, and selection/hover stroke
+/// are unchanged and drawn over these bands.
+fn draw_wall_layers(
+    painter: &egui::Painter,
+    model: &BuildingModel,
+    wall: &Wall,
+    interior_sign: f64,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) {
+    let basis = PlanWallBasis::new(wall);
+    match model.system_for(wall) {
+        Some(system) => {
+            let total = system.total_thickness().inches();
+            let mut off = 0.0;
+            for layer in &system.layers {
+                let thickness = layer.thickness.inches();
+                let (side0, side1) = layer_band_span(interior_sign, total, off, thickness);
+                off += thickness;
+                let color = plan_layer_color(model, &layer.material);
+                let quad = band_quad(
+                    &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
+                );
+                painter.add(egui::Shape::convex_polygon(
+                    quad.to_vec(),
+                    color,
+                    Stroke::NONE,
+                ));
+            }
+        }
+        // Degenerate model with no resolvable system: fall back to the code stud
+        // depth so the wall still reads as a thick band.
+        None => {
+            let total = model.code.stud_profile.nominal_depth().inches();
+            let (side0, side1) = layer_band_span(interior_sign, total, 0.0, total);
+            let quad = band_quad(
+                &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
+            );
+            painter.add(egui::Shape::convex_polygon(
+                quad.to_vec(),
+                Color32::from_rgb(188, 179, 158),
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+/// Widen an opening's gap to the wall's full thickness: a white band quad over the
+/// opening span, drawn on top of the layer bands so the cut reads at any zoom.
+#[allow(clippy::too_many_arguments)]
+fn draw_opening_gap(
+    painter: &egui::Painter,
+    model: &BuildingModel,
+    wall: &Wall,
+    left: Point2,
+    right: Point2,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) {
+    let total = wall_plan_thickness(model, wall);
+    let basis = PlanWallBasis::new(wall);
+    let half = total / 2.0;
+    let quad = band_quad(&basis, left, right, -half, half, bounds, drawing, camera);
+    painter.add(egui::Shape::convex_polygon(
+        quad.to_vec(),
+        theme::sheet(),
+        Stroke::NONE,
+    ));
+}
+
+/// The wall's plan-fill total thickness in inches: its system's `total_thickness`,
+/// or the code stud depth when no system resolves.
+fn wall_plan_thickness(model: &BuildingModel, wall: &Wall) -> f64 {
+    model
+        .system_for(wall)
+        .map(|system| system.total_thickness().inches())
+        .unwrap_or_else(|| model.code.stud_profile.nominal_depth().inches())
+}
+
 pub(super) fn draw_project_plan(
     ui: &mut Ui,
     plan: PlanView<'_>,
@@ -258,6 +434,11 @@ pub(super) fn draw_project_plan(
         .flatten()
         .map(|(_, handle)| handle);
 
+    // Which side of each wall faces the room interior, derived from topology once
+    // per frame so the layered fill lays out interior -> exterior independent of
+    // wall winding (matching the 3D renderer).
+    let interior_sides = framer_core::wall_interior_sides(model);
+
     // Room fills + labels, drawn under the walls. Boundaries are derived from the
     // wall loop each frame (never stored); resolve them all in one graph pass.
     let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
@@ -322,12 +503,17 @@ pub(super) fn draw_project_plan(
             pointer.is_some_and(|position| distance_to_segment(position, start, end) < 8.0);
         over_element |= hovered;
         let selected = selected_wall == index && matches!(selection, Selection::Wall);
+        // True-thickness layered fill (the wall body). The centerline stroke is
+        // drawn on top only to emphasize selection/hover; hit-testing, handles,
+        // and snapping all stay on the centerline below.
+        let sign = interior_sign(&interior_sides, &wall.id);
+        draw_wall_layers(&painter, model, wall, sign, bounds, drawing, camera);
         let stroke = if selected {
-            Stroke::new(5.0, theme::active_blue())
+            Stroke::new(2.5, theme::active_blue())
         } else if hovered {
-            Stroke::new(4.5, theme::framing_line_dark())
+            Stroke::new(2.0, theme::framing_line_dark())
         } else {
-            Stroke::new(3.5, theme::framing_line())
+            Stroke::new(1.0, theme::framing_line_dark())
         };
         painter.line_segment([start, end], stroke);
         if selected {
@@ -347,18 +533,10 @@ pub(super) fn draw_project_plan(
         );
 
         for opening in &wall.openings {
-            let left = plan_point(
-                wall.point_at_local_x(opening.left()),
-                bounds,
-                drawing,
-                camera,
-            );
-            let right = plan_point(
-                wall.point_at_local_x(opening.right()),
-                bounds,
-                drawing,
-                camera,
-            );
+            let left_model = wall.point_at_local_x(opening.left());
+            let right_model = wall.point_at_local_x(opening.right());
+            let left = plan_point(left_model, bounds, drawing, camera);
+            let right = plan_point(right_model, bounds, drawing, camera);
             let opening_hovered =
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             over_element |= opening_hovered;
@@ -370,7 +548,18 @@ pub(super) fn draw_project_plan(
                     (left.y + right.y) / 2.0,
                 ));
             }
-            painter.line_segment([left, right], Stroke::new(7.0, theme::sheet()));
+            // Widen the gap to the wall's full thickness: a white band quad cuts
+            // through the layered fill, then a thin line marks the opening run.
+            draw_opening_gap(
+                &painter,
+                model,
+                wall,
+                left_model,
+                right_model,
+                bounds,
+                drawing,
+                camera,
+            );
             painter.line_segment(
                 [left, right],
                 Stroke::new(

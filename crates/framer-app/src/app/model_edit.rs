@@ -427,6 +427,32 @@ pub(super) fn next_wall_id(model: &BuildingModel) -> (String, usize) {
     }
 }
 
+/// Generate the next free `system-N` id, unique across every construction system
+/// in the model. System ids must be globally unique (walls reference them by id).
+pub(super) fn next_system_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.systems.len() + 1;
+    loop {
+        let id = format!("system-{index}");
+        if model.systems.iter().all(|system| system.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
+/// Generate the next free `mat-N` id, unique across every material in the model.
+/// Material ids must be globally unique (layers reference them by id).
+pub(super) fn next_material_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.materials.len() + 1;
+    loop {
+        let id = format!("mat-{index}");
+        if model.materials.iter().all(|material| material.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
 /// Generate the next free `room-N` id, unique across every room in the model.
 pub(super) fn next_room_id(model: &BuildingModel) -> (String, usize) {
     let mut index = model.rooms.len() + 1;
