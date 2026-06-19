@@ -5,7 +5,10 @@ use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
 pub const PROJECT_SCHEMA_VERSION: u32 = 7;
-const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// The model is v7-only — older on-disk shapes (pre-v7 wall `assembly`,
+/// `stud_spacing`, etc.) are no longer representable, so loading them must fail
+/// with a clear unsupported-schema error rather than confusing serde errors.
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,10 +66,37 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
+    // Peek the format/version header before deserializing into the v7-only model,
+    // so an old schema fails with an explicit unsupported-schema error instead of
+    // serde errors about fields that no longer exist in the current model shape.
+    let header: SchemaHeader = serde_json::from_str(source)?;
+    if header.format != PROJECT_FORMAT {
+        return Err(ProjectError::InvalidFormat {
+            found: header.format,
+        });
+    }
+    if !(MIN_SUPPORTED_SCHEMA_VERSION..=PROJECT_SCHEMA_VERSION).contains(&header.schema_version) {
+        return Err(ProjectError::UnsupportedSchemaVersion {
+            found: header.schema_version,
+            supported: PROJECT_SCHEMA_VERSION,
+        });
+    }
+
     let mut document: ProjectDocument = serde_json::from_str(source)?;
     document.validate()?;
     document.authored.sort_deterministically();
     Ok(document.into_model())
+}
+
+/// A minimal view of a project file's header, used to reject unsupported formats
+/// and schema versions before attempting the full (v7-only) deserialization.
+/// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
+/// other body fields, including ones from older schemas.
+#[derive(Deserialize)]
+struct SchemaHeader {
+    #[serde(default)]
+    format: String,
+    schema_version: u32,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +187,38 @@ mod tests {
 }"#;
 
         assert!(matches!(load_project(source), Err(ProjectError::Json(_))));
+    }
+
+    #[test]
+    fn load_project_rejects_old_schema_with_unsupported_version_error() {
+        // A v6 document with the pre-v7 wall shape ("assembly", "stud_spacing")
+        // must be rejected by the header peek with a clear unsupported-schema
+        // error, NOT a serde error about the removed fields.
+        let source = r#"{
+  "format": "framer.project",
+  "schema_version": 6,
+  "authored": {
+    "walls": [
+      {
+        "id": "wall-1",
+        "name": "Wall",
+        "length": {"ticks": 2304},
+        "height": {"ticks": 1536},
+        "assembly": "WoodStud2x4",
+        "stud_spacing": {"ticks": 256},
+        "openings": []
+      }
+    ]
+  }
+}"#;
+
+        assert!(matches!(
+            load_project(source),
+            Err(ProjectError::UnsupportedSchemaVersion {
+                found: 6,
+                supported: PROJECT_SCHEMA_VERSION
+            })
+        ));
     }
 
     #[test]

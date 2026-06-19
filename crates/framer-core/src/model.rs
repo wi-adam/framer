@@ -244,7 +244,7 @@ impl BuildingModel {
             Length::from_inches(80.0),
         ));
 
-        let walls = vec![
+        let mut walls = vec![
             front,
             wall(
                 "wall-right",
@@ -277,6 +277,14 @@ impl BuildingModel {
                 Point2::new(ft(12.0), ft(8.0)),
             ),
         ];
+
+        // The two interior partitions use the interior-partition system; only the
+        // perimeter (front/right/back/left) stays on the exterior system.
+        for wall in &mut walls {
+            if wall.id == ElementId::new("wall-mid") || wall.id == ElementId::new("wall-bed") {
+                wall.system = ElementId::new("system-wall-interior-1");
+            }
+        }
 
         let wall_joins = vec![
             WallJoin::corner(
@@ -1226,24 +1234,24 @@ impl ConstructionSystem {
         }
     }
 
-    /// Clear-wall R-value in milli-R (R × 1000), integer math: the sum over layers
-    /// of `round(thickness_in_inches) * material.r_per_inch_milli`. The framing
-    /// layer additionally contributes its cavity material's R over the framing
-    /// depth. This is a clear-wall approximation — it ignores the framing-factor
-    /// (parallel-path) derate, which is deferred.
+    /// Clear-wall R-value in milli-R (R × 1000), exact integer math: the sum over
+    /// layers of each layer material's [`Material::r_value_milli`] across the
+    /// layer thickness (no inch rounding, so a 5/8" layer counts as 5/8"). The
+    /// framing layer additionally contributes its cavity material's R over the
+    /// framing depth. This is a clear-wall approximation — it ignores the
+    /// framing-factor (parallel-path) derate, which is deferred.
     pub fn r_value_milli(&self, materials: &[Material]) -> i64 {
         let lookup = |id: &ElementId| materials.iter().find(|material| material.id == *id);
         let mut total = 0i64;
         for layer in &self.layers {
-            let inches = layer.thickness.inches().round() as i64;
             if let Some(material) = lookup(&layer.material) {
-                total += inches * material.r_per_inch_milli();
+                total += material.r_value_milli(layer.thickness);
             }
             if let Some(framing) = &layer.framing
                 && let Some(cavity) = &framing.cavity_material
                 && let Some(material) = lookup(cavity)
             {
-                total += inches * material.r_per_inch_milli();
+                total += material.r_value_milli(layer.thickness);
             }
         }
         total
@@ -1430,6 +1438,13 @@ impl Material {
             Some(PropertyValue::Int(value)) => *value,
             _ => 0,
         }
+    }
+
+    /// This material's R-value in milli-R (R × 1000) across `thickness`, by exact
+    /// integer math over ticks (no inch rounding): a 5/8" layer of an R/in=900
+    /// material contributes 562 milli-R, not 900.
+    pub fn r_value_milli(&self, thickness: Length) -> i64 {
+        self.r_per_inch_milli() * thickness.ticks() / Length::TICKS_PER_INCH
     }
 }
 
@@ -3729,5 +3744,42 @@ mod tests {
             wall.validate(),
             Err(ModelError::OverconstrainedDimension { .. })
         ));
+    }
+
+    #[test]
+    fn layer_r_value_uses_exact_thickness_not_whole_inches() {
+        // 5/8" (0.625") of an R/in = 900 material: 0.625 * 16 = 10 ticks; the
+        // exact contribution is 900 * 10 / 16 = 562 milli-R, NOT 900 (which
+        // whole-inch rounding would yield).
+        let drywall = Material::solid_color("mat-drywall", "Drywall", [240, 240, 240])
+            .with_r_per_inch_milli(900);
+        let thickness = Length::from_inches(0.625);
+        assert_eq!(thickness.ticks(), 10);
+        assert_eq!(drywall.r_value_milli(thickness), 562);
+
+        // A whole-inch system swatch must agree: one 5/8" drywall layer over a
+        // single positive-thickness framing layer contributes the exact 562, not
+        // a rounded 900.
+        let stud = Material::solid_color("mat-stud", "Stud", [200, 170, 120]);
+        let system = ConstructionSystem {
+            id: ElementId::new("system-test"),
+            name: "Test".to_owned(),
+            kind: SystemKind::Wall,
+            layers: vec![
+                ConstructionLayer::new(LayerFunction::InteriorFinish, "mat-drywall", thickness),
+                ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-stud",
+                    Length::from_whole_inches(4),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByFour,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: FramingPattern::Single,
+                    cavity_material: None,
+                }),
+            ],
+        };
+        assert_eq!(system.r_value_milli(&[drywall, stud]), 562);
     }
 }

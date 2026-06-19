@@ -313,7 +313,7 @@
         "height": {
           "ticks": 1536
         },
-        "system": "system-wall-exterior-1",
+        "system": "system-wall-interior-1",
         "openings": []
       },
       {
@@ -418,7 +418,7 @@
         "height": {
           "ticks": 1536
         },
-        "system": "system-wall-exterior-1",
+        "system": "system-wall-interior-1",
         "openings": []
       },
       {

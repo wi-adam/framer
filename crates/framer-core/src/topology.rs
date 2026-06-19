@@ -8,9 +8,9 @@
 //! split into sub-edges so interior walls carve rooms. The math is general over
 //! straight segments.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use crate::{BuildingModel, Length, Point2};
+use crate::{BuildingModel, ElementId, Length, Point2};
 
 /// The derived geometry of a room: its boundary loop (counterclockwise), its
 /// perimeter, and its area. None of this is persisted — it is recomputed from
@@ -197,6 +197,58 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
 /// the count rises across an edit, a room was enclosed.
 pub fn enclosed_room_count(model: &BuildingModel) -> usize {
     bounded_faces(model).len()
+}
+
+/// For each wall whose interior side can be determined from the enclosed rooms,
+/// which side faces the room interior. The plus-side unit normal is
+/// `(-along.y, along.x)` where `along = normalize(end - start)` — the SAME
+/// convention the renderers use to lay layers out interior -> exterior. A `true`
+/// entry means the interior/room is toward that plus-side.
+///
+/// Each wall's midpoint is probed a few inches to either side against the bounded
+/// faces: if exactly one probe lands inside a room, that determines the side.
+/// Walls where both or neither probe is inside (interior partitions dividing two
+/// rooms, or open/free walls) are ambiguous and OMITTED from the map.
+pub fn wall_interior_sides(model: &BuildingModel) -> BTreeMap<ElementId, bool> {
+    let faces = bounded_faces(model);
+    let probe = Length::from_whole_inches(6).inches();
+    let mut sides = BTreeMap::new();
+    for wall in &model.walls {
+        if wall.start == wall.end {
+            continue;
+        }
+        let dx = (wall.end.x - wall.start.x).inches();
+        let dy = (wall.end.y - wall.start.y).inches();
+        let length = (dx * dx + dy * dy).sqrt();
+        if length == 0.0 {
+            continue;
+        }
+        let (along_x, along_y) = (dx / length, dy / length);
+        // Plus-side unit normal, matching the renderers' `(-along.y, along.x)`.
+        let (side_x, side_y) = (-along_y, along_x);
+        let mid_x = (wall.start.x + wall.end.x).inches() / 2.0;
+        let mid_y = (wall.start.y + wall.end.y).inches() / 2.0;
+        let plus = inches_point(mid_x + probe * side_x, mid_y + probe * side_y);
+        let minus = inches_point(mid_x - probe * side_x, mid_y - probe * side_y);
+
+        let plus_inside = faces.iter().any(|face| point_in_polygon(plus, face));
+        let minus_inside = faces.iter().any(|face| point_in_polygon(minus, face));
+        match (plus_inside, minus_inside) {
+            (true, false) => {
+                sides.insert(wall.id.clone(), true);
+            }
+            (false, true) => {
+                sides.insert(wall.id.clone(), false);
+            }
+            // Ambiguous: interior partition (both inside) or free wall (neither).
+            _ => {}
+        }
+    }
+    sides
+}
+
+fn inches_point(x: f64, y: f64) -> Point2 {
+    Point2::new(Length::from_inches(x), Length::from_inches(y))
 }
 
 /// Shoelace signed area in square inches (counterclockwise positive).
@@ -406,5 +458,42 @@ mod tests {
         let first = room_boundary(&model, p(60.0, 60.0)).unwrap();
         let second = room_boundary(&model, p(60.0, 60.0)).unwrap();
         assert_eq!(first.vertices, second.vertices);
+    }
+
+    #[test]
+    fn wall_interior_sides_orients_perimeter_and_omits_partitions() {
+        // The two-bedroom shell: a 24ft × 16ft CCW perimeter (front/right/back/
+        // left) with two interior partitions (wall-mid, wall-bed). Every
+        // perimeter wall must get a determinate side that places the room on its
+        // plus-side (the renderers' interior face); the partitions divide two
+        // rooms and are ambiguous, so they are omitted.
+        let model = BuildingModel::demo_two_bedroom();
+        let sides = wall_interior_sides(&model);
+
+        for id in ["wall-front", "wall-right", "wall-back", "wall-left"] {
+            assert_eq!(
+                sides.get(&ElementId::new(id)),
+                Some(&true),
+                "perimeter wall {id} should put the room on its plus-side",
+            );
+        }
+        assert!(!sides.contains_key(&ElementId::new("wall-mid")));
+        assert!(!sides.contains_key(&ElementId::new("wall-bed")));
+
+        // The reported plus-side must actually face the enclosed room: probe the
+        // midpoint of `wall-front` (along +x) toward its plus-side normal (+y)
+        // and confirm that lands inside a bounded face.
+        let faces = bounded_faces(&model);
+        let front = model
+            .walls
+            .iter()
+            .find(|wall| wall.id == ElementId::new("wall-front"))
+            .unwrap();
+        let mid = p(
+            (front.start.x + front.end.x).inches() / 2.0,
+            (front.start.y + front.end.y).inches() / 2.0,
+        );
+        let toward_interior = p(mid.x.inches(), mid.y.inches() + 6.0);
+        assert!(faces.iter().any(|face| point_in_polygon(toward_interior, face)));
     }
 }
