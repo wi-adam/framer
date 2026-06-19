@@ -675,11 +675,29 @@ impl FramerApp {
             None => self.draw_wall_tool.start = Some(point),
             Some(start) => {
                 if start != point {
+                    // If committing this segment closes a loop — the count of
+                    // enclosed rooms (bounded faces) rises — the user just drew a
+                    // full room, so finish the run and leave the tool, the way
+                    // Revit and Chief Architect end a closed wall sketch.
+                    let faces_before = framer_core::enclosed_room_count(&self.model);
                     self.add_wall(start, point);
+                    if framer_core::enclosed_room_count(&self.model) > faces_before {
+                        self.finish_draw_wall_on_enclosure();
+                        return;
+                    }
                 }
                 self.draw_wall_tool.start = Some(point);
             }
         }
+    }
+
+    /// Leave the draw-wall tool because the last committed segment enclosed a
+    /// room. Mirrors the deactivation half of [`Self::toggle_draw_wall_tool`],
+    /// but reports the closure in the status bar rather than clearing it — the
+    /// status line is the only cue that the tool turned itself off.
+    fn finish_draw_wall_on_enclosure(&mut self) {
+        self.draw_wall_tool = DrawWallToolState::default();
+        self.dimension_status = Some("Room enclosed — draw-wall tool off".to_owned());
     }
 
     fn exit_current_context(&mut self) {
@@ -1862,6 +1880,117 @@ mod tests {
             app.dimension_status
                 .as_deref()
                 .is_some_and(|status| status.contains("overconstrain"))
+        );
+    }
+
+    fn pt(x_in: f64, y_in: f64) -> Point2 {
+        Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
+    }
+
+    /// A draw-wall session over an empty model. Starting empty avoids the demo
+    /// shell's pre-existing room (1 bounded face) skewing the enclosure delta.
+    /// `toggle_draw_wall_tool` both activates the tool and enters Design mode,
+    /// which `add_wall` requires.
+    fn empty_draw_wall_app() -> FramerApp {
+        let mut app = FramerApp {
+            model: BuildingModel::new(framer_core::CodeProfile::irc_2021_prescriptive()),
+            ..FramerApp::default()
+        };
+        app.toggle_draw_wall_tool();
+        assert!(app.draw_wall_tool.active);
+        app
+    }
+
+    fn click_wall_point(app: &mut FramerApp, x_in: f64, y_in: f64) {
+        app.handle_view_click(ViewClick::DrawWallPoint {
+            point: pt(x_in, y_in),
+        });
+    }
+
+    #[test]
+    fn closing_a_rectangle_exits_the_draw_wall_tool() {
+        let mut app = empty_draw_wall_app();
+
+        // Three corners of a rectangle: the run stays active, chaining segments.
+        click_wall_point(&mut app, 0.0, 0.0);
+        click_wall_point(&mut app, 120.0, 0.0);
+        click_wall_point(&mut app, 120.0, 96.0);
+        click_wall_point(&mut app, 0.0, 96.0);
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, Some(pt(0.0, 96.0)));
+        assert_eq!(app.model.walls.len(), 3);
+
+        // Closing back onto the start encloses the room: tool turns itself off.
+        click_wall_point(&mut app, 0.0, 0.0);
+
+        assert!(!app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
+        assert_eq!(app.model.walls.len(), 4);
+        assert_eq!(framer_core::enclosed_room_count(&app.model), 1);
+        assert_eq!(
+            app.dimension_status.as_deref(),
+            Some("Room enclosed — draw-wall tool off")
+        );
+    }
+
+    #[test]
+    fn open_wall_chain_keeps_the_draw_wall_tool_active() {
+        let mut app = empty_draw_wall_app();
+
+        // An open U: three segments, never closed.
+        click_wall_point(&mut app, 0.0, 0.0);
+        click_wall_point(&mut app, 120.0, 0.0);
+        click_wall_point(&mut app, 120.0, 96.0);
+        click_wall_point(&mut app, 0.0, 96.0);
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, Some(pt(0.0, 96.0)));
+        assert_eq!(app.model.walls.len(), 3);
+        assert_eq!(framer_core::enclosed_room_count(&app.model), 0);
+    }
+
+    #[test]
+    fn repeated_point_is_a_noop_and_keeps_the_run_going() {
+        let mut app = empty_draw_wall_app();
+
+        click_wall_point(&mut app, 0.0, 0.0);
+        click_wall_point(&mut app, 120.0, 0.0);
+        // Clicking the same point again is a zero-length no-op, not a closure.
+        click_wall_point(&mut app, 120.0, 0.0);
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, Some(pt(120.0, 0.0)));
+        assert_eq!(app.model.walls.len(), 1);
+    }
+
+    #[test]
+    fn splitting_a_room_with_a_partition_exits_the_draw_wall_tool() {
+        let mut app = empty_draw_wall_app();
+
+        // Draw and close a rectangle; the tool auto-exits on the closing click.
+        click_wall_point(&mut app, 0.0, 0.0);
+        click_wall_point(&mut app, 120.0, 0.0);
+        click_wall_point(&mut app, 120.0, 96.0);
+        click_wall_point(&mut app, 0.0, 96.0);
+        click_wall_point(&mut app, 0.0, 0.0);
+        assert!(!app.draw_wall_tool.active);
+        assert_eq!(framer_core::enclosed_room_count(&app.model), 1);
+
+        // Re-arm the tool and run a partition across the room. Its endpoints land
+        // mid-span on the top and bottom walls (a Tee at each end), dividing the
+        // room into two — another enclosure, so the tool exits again.
+        app.toggle_draw_wall_tool();
+        assert!(app.draw_wall_tool.active);
+        click_wall_point(&mut app, 60.0, 0.0);
+        click_wall_point(&mut app, 60.0, 96.0);
+
+        assert!(!app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(framer_core::enclosed_room_count(&app.model), 2);
+        assert_eq!(
+            app.dimension_status.as_deref(),
+            Some("Room enclosed — draw-wall tool off")
         );
     }
 }
