@@ -2,8 +2,10 @@
 //! model + frame plan: wall envelopes, member cuboids, opening pick volumes, and
 //! the color helpers shared with the view cube.
 
+use std::collections::BTreeMap;
+
 use eframe::egui::{Color32, Pos2};
-use framer_core::{BuildingModel, ConstructionSystem, Length, Material, Wall};
+use framer_core::{BuildingModel, ConstructionSystem, ElementId, Length, Material, Wall};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
 use super::geom::{OrbitProjector, Point3, point_hits_projected_quad};
@@ -43,8 +45,9 @@ impl WallSegmentSpan {
     }
 }
 
-/// One construction-layer band across the wall section: its interior/exterior
-/// face positions on the side axis (inches, interior-anchored) and fill color.
+/// One construction-layer band across the wall section: its two face positions on
+/// the side axis (inches, span `[side0, side1]` with `side0 <= side1`) and fill
+/// color. The interior face may be either end depending on the wall's orientation.
 #[derive(Clone, Copy)]
 struct LayerBand {
     side0: f32,
@@ -77,11 +80,16 @@ impl Scene3d {
         // Fall back to the code stud depth only when a wall has no system (a
         // degenerate model); resolved per-wall below.
         let fallback_depth = model.code.stud_profile.nominal_depth();
+        // Which side of each wall faces the room interior, derived from topology
+        // once per frame. Layers (and members) lay out interior -> exterior from
+        // this, so reversing a wall no longer mirrors the assembly.
+        let interior_sides = framer_core::wall_interior_sides(model);
         let mut builder = SceneBuilder::default();
 
         if workspace_mode.shows_generated_plan() {
             for (wall_index, wall) in model.walls.iter().enumerate() {
                 let total = wall_total_thickness(model, wall, fallback_depth);
+                let sign = interior_sign(&interior_sides, &wall.id);
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
                     let wall_selected = selected_wall == wall_index;
                     for member in &wall_plan.members {
@@ -94,6 +102,7 @@ impl Scene3d {
                             wall,
                             member,
                             total,
+                            sign,
                             wall_selected,
                             member_selected,
                         );
@@ -106,10 +115,11 @@ impl Scene3d {
 
         for (wall_index, wall) in model.walls.iter().enumerate() {
             let total = wall_total_thickness(model, wall, fallback_depth);
+            let sign = interior_sign(&interior_sides, &wall.id);
             let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
-            builder.push_wall_envelope(model, wall, wall_index, total, wall_selected);
+            builder.push_wall_envelope(model, wall, wall_index, total, sign, wall_selected);
             for opening in &wall.openings {
-                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), total);
+                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), total, sign);
             }
         }
 
@@ -139,6 +149,7 @@ impl SceneBuilder {
         wall: &Wall,
         member: &FrameMember,
         total: Length,
+        interior_sign: f32,
         wall_selected: bool,
         selected: bool,
     ) {
@@ -164,12 +175,11 @@ impl SceneBuilder {
         } else {
             member_color(member.kind)
         };
-        // Studs/plates sit inside the framing-layer band, interior-anchored at
-        // -total/2: the solver gives the band as [side_offset, side_offset +
-        // side_depth] running interior -> exterior.
-        let interior = interior_face(total);
-        let side0 = interior + member.side_offset.inches() as f32;
-        let side1 = side0 + member.side_depth.inches() as f32;
+        // Studs/plates sit inside the framing-layer band: the solver gives the
+        // band as [side_offset, side_offset + side_depth] running interior ->
+        // exterior, so `interior_sign` decides which way that runs in side space.
+        let (side0, side1) =
+            layer_band_span(interior_sign, total, member.side_offset, member.side_depth);
         let solid = WallCuboid::new(wall, x0, x1, side0, side1, z0, z1);
         self.push_cuboid(&solid, color_to_rgba(color));
         self.picks.push(PickSolid {
@@ -188,20 +198,21 @@ impl SceneBuilder {
         wall: &Wall,
         wall_index: usize,
         total: Length,
+        interior_sign: f32,
         selected: bool,
     ) {
-        let interior = interior_face(total);
         match model.system_for(wall) {
             // Render a true layered cross-section: one cuboid per (layer x wall
             // segment), so every layer is cut by every opening. Layers run
             // interior -> exterior; `off` accumulates each layer's through-wall
-            // offset from the interior face.
+            // offset from the interior face, and `interior_sign` decides which
+            // physical side that interior face sits on.
             Some(system) => {
-                let mut off = 0.0f32;
+                let mut off = Length::ZERO;
                 for layer in &system.layers {
-                    let side0 = interior + off;
-                    let side1 = side0 + layer.thickness.inches() as f32;
-                    off += layer.thickness.inches() as f32;
+                    let (side0, side1) =
+                        layer_band_span(interior_sign, total, off, layer.thickness);
+                    off += layer.thickness;
                     let base = material_color(model, &layer.material);
                     let color = layer_band_color(base, selected);
                     self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
@@ -212,20 +223,20 @@ impl SceneBuilder {
             None => {
                 let base = neutral_band_color();
                 let color = layer_band_color(base, selected);
-                self.push_wall_layer(
-                    wall,
-                    LayerBand::new(interior, interior + total.inches() as f32, color),
-                );
+                let (side0, side1) = layer_band_span(interior_sign, total, Length::ZERO, total);
+                self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
             }
         }
 
-        // The pick envelope spans the full wall thickness regardless of layering.
+        // The pick envelope spans the full wall thickness regardless of layering
+        // or which side is interior.
+        let (env0, env1) = layer_band_span(interior_sign, total, Length::ZERO, total);
         let solid = WallCuboid::new(
             wall,
             0.0,
             wall.length.inches() as f32,
-            interior,
-            interior + total.inches() as f32,
+            env0,
+            env1,
             0.0,
             wall.height.inches() as f32,
         );
@@ -305,6 +316,7 @@ impl SceneBuilder {
         wall_index: usize,
         opening_id: String,
         total: Length,
+        interior_sign: f32,
     ) {
         let Some(opening) = wall
             .openings
@@ -313,13 +325,14 @@ impl SceneBuilder {
         else {
             return;
         };
-        let interior = interior_face(total);
+        // Openings span the full thickness regardless of which side is interior.
+        let (side0, side1) = layer_band_span(interior_sign, total, Length::ZERO, total);
         let solid = WallCuboid::new(
             wall,
             opening.left().inches() as f32,
             opening.right().inches() as f32,
-            interior,
-            interior + total.inches() as f32,
+            side0,
+            side1,
             opening.sill_height.inches() as f32,
             opening.top().inches() as f32,
         );
@@ -516,11 +529,30 @@ pub(super) fn material_color_to_rgba(material: &Material) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, LAYER_BAND_ALPHA)
 }
 
-/// The side-axis position of the wall's interior face under the interior-anchored
-/// convention: the cross-section is centered on the wall centerline so the
-/// interior face sits at `-total / 2`.
-fn interior_face(total: Length) -> f32 {
-    -(total.inches() as f32) / 2.0
+/// Which way a wall's layer stack runs on the side axis (`(-along_y, along_x)`):
+/// `+1` when the room interior is toward the plus-side, `-1` when toward the
+/// minus-side. Walls absent from the topology map (ambiguous partitions / no
+/// enclosing room) DEFAULT to `-1` so their assembly stays stable.
+fn interior_sign(interior_sides: &BTreeMap<ElementId, bool>, wall_id: &ElementId) -> f32 {
+    match interior_sides.get(wall_id) {
+        Some(true) => 1.0,
+        _ => -1.0,
+    }
+}
+
+/// The side-axis span `[min, max]` of one layer band, laid out interior ->
+/// exterior. With cumulative interior offset `off` and thickness `t` the band's
+/// interior face is at `interior_sign * (total/2 - off)` and its exterior face at
+/// `interior_sign * (total/2 - (off + t))`. Flipping `interior_sign` mirrors the
+/// whole stack across the centerline, so reversing a wall keeps each layer on the
+/// room side it belongs to. The cross-section keeps spanning the full `total`.
+fn layer_band_span(interior_sign: f32, total: Length, off: Length, t: Length) -> (f32, f32) {
+    let half = total.inches() as f32 / 2.0;
+    let off = off.inches() as f32;
+    let t = t.inches() as f32;
+    let side_a = interior_sign * (half - off);
+    let side_b = interior_sign * (half - (off + t));
+    (side_a.min(side_b), side_a.max(side_b))
 }
 
 /// The total through-wall thickness of a wall's construction system, falling back

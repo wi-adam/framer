@@ -1296,9 +1296,10 @@ mod tests {
         let plan = framer_solver::generate_project_plan(&model).unwrap();
         let scene =
             Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
-        // The wall cross-section spans its full system thickness, interior-anchored
-        // at -total/2 on the side axis (no longer the bare stud depth). Every demo
-        // wall shares one system, so any wall gives the section thickness.
+        // The wall cross-section spans its full system thickness, centered on the
+        // centerline so it reaches +/- total/2 on the side axis (no longer the
+        // bare stud depth) regardless of which side topology marks as interior.
+        // Every demo wall shares one system, so any wall gives the section thickness.
         let total = model
             .system_for(&model.walls[0])
             .expect("wall resolves a system")

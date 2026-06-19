@@ -4,10 +4,12 @@
 //! bundle to keep its call site legible (mirroring `AxonometricView` /
 //! `DesignElevationView`).
 
+use std::collections::BTreeMap;
+
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
-use framer_core::{BuildingModel, Length, Point2, Wall};
+use framer_core::{BuildingModel, ElementId, Length, Point2, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
 use super::geom::{ModelBounds, distance_to_segment, plan_inverse_point, plan_point};
@@ -230,6 +232,29 @@ fn band_quad(
     ]
 }
 
+/// Which way a wall's layer stack runs on the side axis (`(-along_y, along_x)`):
+/// `+1` when the room interior is toward the plus-side, `-1` when toward the
+/// minus-side. Walls absent from the topology map (ambiguous partitions / no
+/// enclosing room) DEFAULT to `-1`, matching the 3D renderer so plan and 3D agree.
+fn interior_sign(interior_sides: &BTreeMap<ElementId, bool>, wall_id: &ElementId) -> f64 {
+    match interior_sides.get(wall_id) {
+        Some(true) => 1.0,
+        _ => -1.0,
+    }
+}
+
+/// The side-axis span `[min, max]` (inches) of one layer band, laid out interior
+/// -> exterior, mirroring `scene_build::layer_band_span` so plan and 3D place each
+/// layer on the same physical side. With cumulative interior offset `off` and
+/// thickness `t` the interior face is at `interior_sign * (total/2 - off)` and the
+/// exterior face at `interior_sign * (total/2 - (off + t))`.
+fn layer_band_span(interior_sign: f64, total: f64, off: f64, t: f64) -> (f64, f64) {
+    let half = total / 2.0;
+    let side_a = interior_sign * (half - off);
+    let side_b = interior_sign * (half - (off + t));
+    (side_a.min(side_b), side_a.max(side_b))
+}
+
 /// A material's plan-fill color, with a fallback neutral tone for a dangling id.
 fn plan_layer_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color32 {
     match model.material(id) {
@@ -243,15 +268,17 @@ fn plan_layer_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color
 
 /// Fill the wall as a true-thickness layered cross-section: one band quad per
 /// construction layer, stacked interior -> exterior across `total_thickness`,
-/// each filled with its material color. The stack is centered on the centerline
-/// (interior face at `-total/2`), matching the 3D renderer's convention. Openings
-/// widen to a full-thickness white gap drawn on top. This is FILL ONLY — the
-/// centerline hit-test, drag handles, snapping, and selection/hover stroke are
-/// unchanged and drawn over these bands.
+/// each filled with its material color. `interior_sign` (from topology) decides
+/// which physical side faces the room, so reversing a wall no longer mirrors the
+/// assembly; the stack still spans the full thickness across the centerline.
+/// Openings widen to a full-thickness white gap drawn on top. This is FILL ONLY —
+/// the centerline hit-test, drag handles, snapping, and selection/hover stroke
+/// are unchanged and drawn over these bands.
 fn draw_wall_layers(
     painter: &egui::Painter,
     model: &BuildingModel,
     wall: &Wall,
+    interior_sign: f64,
     bounds: ModelBounds,
     drawing: Rect,
     camera: &View2dState,
@@ -260,13 +287,11 @@ fn draw_wall_layers(
     match model.system_for(wall) {
         Some(system) => {
             let total = system.total_thickness().inches();
-            // Interior-anchored at -total/2 so the band stack straddles the
-            // centerline symmetrically.
-            let mut off = -total / 2.0;
+            let mut off = 0.0;
             for layer in &system.layers {
-                let side0 = off;
-                let side1 = off + layer.thickness.inches();
-                off = side1;
+                let thickness = layer.thickness.inches();
+                let (side0, side1) = layer_band_span(interior_sign, total, off, thickness);
+                off += thickness;
                 let color = plan_layer_color(model, &layer.material);
                 let quad = band_quad(
                     &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
@@ -282,15 +307,9 @@ fn draw_wall_layers(
         // depth so the wall still reads as a thick band.
         None => {
             let total = model.code.stud_profile.nominal_depth().inches();
+            let (side0, side1) = layer_band_span(interior_sign, total, 0.0, total);
             let quad = band_quad(
-                &basis,
-                wall.start,
-                wall.end,
-                -total / 2.0,
-                total / 2.0,
-                bounds,
-                drawing,
-                camera,
+                &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
             );
             painter.add(egui::Shape::convex_polygon(
                 quad.to_vec(),
@@ -415,6 +434,11 @@ pub(super) fn draw_project_plan(
         .flatten()
         .map(|(_, handle)| handle);
 
+    // Which side of each wall faces the room interior, derived from topology once
+    // per frame so the layered fill lays out interior -> exterior independent of
+    // wall winding (matching the 3D renderer).
+    let interior_sides = framer_core::wall_interior_sides(model);
+
     // Room fills + labels, drawn under the walls. Boundaries are derived from the
     // wall loop each frame (never stored); resolve them all in one graph pass.
     let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
@@ -482,7 +506,8 @@ pub(super) fn draw_project_plan(
         // True-thickness layered fill (the wall body). The centerline stroke is
         // drawn on top only to emphasize selection/hover; hit-testing, handles,
         // and snapping all stay on the centerline below.
-        draw_wall_layers(&painter, model, wall, bounds, drawing, camera);
+        let sign = interior_sign(&interior_sides, &wall.id);
+        draw_wall_layers(&painter, model, wall, sign, bounds, drawing, camera);
         let stroke = if selected {
             Stroke::new(2.5, theme::active_blue())
         } else if hovered {
