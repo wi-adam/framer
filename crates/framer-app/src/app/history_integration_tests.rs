@@ -27,11 +27,10 @@ fn press_key(app: &mut FramerApp, key: egui::Key, modifiers: egui::Modifiers) {
     let _ = ctx.run_ui(input, |ui| app.handle_keyboard_shortcuts(ui.ctx()));
 }
 
-/// A solver-safe authored mutation: `stud_spacing` is never rewritten by
+/// A solver-safe authored mutation: a wall's `name` is never rewritten by
 /// `apply_driving_dimensions`, so the change survives `rebuild()` verbatim.
-fn bump_stud_spacing(app: &mut FramerApp) {
-    let spacing = app.model.walls[0].stud_spacing;
-    app.model.walls[0].stud_spacing = spacing + Length::from_inches(1.0);
+fn rename_first_wall(app: &mut FramerApp) {
+    app.model.walls[0].name.push('*');
 }
 
 #[test]
@@ -39,7 +38,7 @@ fn edit_records_an_undo_step_and_undo_restores_the_model() {
     let mut app = FramerApp::default();
     let original = app.model.clone();
 
-    app.edit("Adjust stud spacing", bump_stud_spacing);
+    app.edit("Rename wall", rename_first_wall);
 
     assert!(app.history.can_undo());
     assert_ne!(app.model, original, "edit should have changed the model");
@@ -60,7 +59,7 @@ fn no_op_edit_records_nothing() {
 #[test]
 fn undo_then_redo_round_trips_the_model() {
     let mut app = FramerApp::default();
-    app.edit("Adjust stud spacing", bump_stud_spacing);
+    app.edit("Rename wall", rename_first_wall);
     let edited = app.model.clone();
 
     app.undo();
@@ -77,7 +76,7 @@ fn undo_restores_the_prior_selection() {
     assert_eq!(app.selected, Selection::Wall);
 
     app.edit("Adjust and reselect", |app| {
-        bump_stud_spacing(app);
+        rename_first_wall(app);
         app.selected = Selection::Level("level-1".to_owned());
     });
     assert_eq!(app.selected, Selection::Level("level-1".to_owned()));
@@ -93,7 +92,7 @@ fn undo_restores_the_prior_selection() {
 #[test]
 fn reset_demo_clears_history() {
     let mut app = FramerApp::default();
-    app.edit("Adjust stud spacing", bump_stud_spacing);
+    app.edit("Rename wall", rename_first_wall);
     assert!(app.history.can_undo());
 
     app.reset_demo();
@@ -285,7 +284,7 @@ fn delete_wall_drops_referencing_joins_in_one_step() {
 fn cmd_z_undoes_via_keyboard() {
     let mut app = FramerApp::default();
     let original = app.model.clone();
-    app.edit("Adjust stud spacing", bump_stud_spacing);
+    app.edit("Rename wall", rename_first_wall);
     assert_ne!(app.model, original);
 
     press_key(&mut app, egui::Key::Z, egui::Modifiers::COMMAND);
@@ -296,7 +295,7 @@ fn cmd_z_undoes_via_keyboard() {
 fn cmd_shift_z_redoes_via_keyboard() {
     let mut app = FramerApp::default();
     let original = app.model.clone();
-    app.edit("Adjust stud spacing", bump_stud_spacing);
+    app.edit("Rename wall", rename_first_wall);
     let edited = app.model.clone();
     app.undo();
     assert_eq!(app.model, original);

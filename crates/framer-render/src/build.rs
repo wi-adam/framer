@@ -231,10 +231,20 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
     let base = level_elevation(model, wall);
     let height = wall.height.inches() as f32;
     let length = wall.length.inches() as f32;
-    let depth = wall.assembly.stud.nominal_depth().inches() as f32;
+    // Through-wall depth and exposure come from the wall's construction system.
+    // Fall back to the code stud profile / Exterior when the system is missing
+    // so scene building stays infallible.
+    let system = model.system_for(wall);
+    let depth = system
+        .map(|system| system.total_thickness())
+        .unwrap_or_else(|| model.code.stud_profile.nominal_depth())
+        .inches() as f32;
     let half = depth * 0.5;
     let basis = WallBasis::new(wall);
-    let wall_mat = match wall.assembly.exposure {
+    let exposure = system
+        .map(|system| system.exposure())
+        .unwrap_or(WallExposure::Exterior);
+    let wall_mat = match exposure {
         WallExposure::Exterior => MAT_CLADDING,
         WallExposure::Interior => MAT_DRYWALL,
     };
@@ -394,7 +404,10 @@ mod tests {
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.start = Point2::new(Length::ZERO, Length::ZERO);
         wall.end = Point2::new(Length::from_feet(12.0), Length::ZERO);
-        wall.assembly.exposure = exposure;
+        wall.system = match exposure {
+            WallExposure::Exterior => framer_core::ElementId::new("system-wall-exterior-1"),
+            WallExposure::Interior => framer_core::ElementId::new("system-wall-interior-1"),
+        };
         wall.openings = openings;
         model.walls.push(wall);
         model

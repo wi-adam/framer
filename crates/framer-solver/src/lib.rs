@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, CodeProfile, ElementId, Length, ModelError, Opening, Point2, Wall,
-    WallJoin, WallJoinKind, room_boundaries,
+    BoardProfile, BuildingModel, CodeProfile, ConstructionSystem, ElementId, FramingSpec, Length,
+    ModelError, Opening, Point2, Wall, WallJoin, WallJoinKind, room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -199,13 +199,35 @@ pub enum DiagnosticSeverity {
     Unsupported,
 }
 
-pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePlan, SolverError> {
+/// The framing detail of a wall's construction system: the single `Framing`
+/// layer's `FramingSpec`. Studs and plates use `member`; spacing is the o.c.
+/// layout.
+fn wall_framing(system: &ConstructionSystem) -> Result<&FramingSpec, SolverError> {
+    system
+        .framing_layer()
+        .and_then(|layer| layer.framing.as_ref())
+        .ok_or_else(|| SolverError::SystemHasNoFramingLayer {
+            system: system.id.clone(),
+        })
+}
+
+pub fn generate_wall_plan(
+    wall: &Wall,
+    system: &ConstructionSystem,
+    code: &CodeProfile,
+) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
+
+    let framing = wall_framing(system)?;
+    // The framing member is both the stud and the plate; spacing drives the
+    // on-center layout. TODO: honor FramingPattern::Double/Staggered (extra
+    // studs); every pattern is currently treated as Single.
+    let wall_stud = framing.member;
+    let wall_plate = framing.member;
+    let stud_spacing = framing.spacing;
 
     let mut members = Vec::new();
     let mut diagnostics = starter_profile_diagnostics(wall, code);
-    let wall_stud = wall.assembly.stud_profile();
-    let wall_plate = wall.assembly.plate_profile();
     let plate_thickness = wall_plate.thickness();
     let stud_thickness = wall_stud.thickness();
     let top_plate_count = if code.double_top_plate { 2 } else { 1 };
@@ -278,7 +300,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
     }
 
     let stud_base = plate_thickness;
-    for x in stud_positions(wall.length, wall.stud_spacing, stud_thickness) {
+    for x in stud_positions(wall.length, stud_spacing, stud_thickness) {
         if !is_inside_opening_framing_assembly(x, &wall.openings, stud_thickness) {
             members.push(frame_member(
                 format!("stud-{}", x.ticks()),
@@ -296,7 +318,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
                     "wall.studs.on-center",
                     format!(
                         "End studs align with wall faces, interior common studs are placed at {} layout marks, and authored opening framing assemblies are kept clear.",
-                        wall.stud_spacing
+                        stud_spacing
                     ),
                 ),
             ));
@@ -311,6 +333,7 @@ pub fn generate_wall_plan(wall: &Wall, code: &CodeProfile) -> Result<WallFramePl
             &mut diagnostics,
             wall,
             code,
+            wall_stud,
             &opening,
             top_plate_count,
         );
@@ -333,7 +356,14 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
     };
 
     for wall in &model.walls {
-        plan.wall_plans.push(generate_wall_plan(wall, &model.code)?);
+        let system = model
+            .system_for(wall)
+            .ok_or_else(|| SolverError::MissingSystem {
+                wall: wall.id.clone(),
+                system: wall.system.clone(),
+            })?;
+        plan.wall_plans
+            .push(generate_wall_plan(wall, system, &model.code)?);
     }
 
     add_join_members(&mut plan, model)?;
@@ -409,6 +439,17 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
 
     let find_wall = |id: &ElementId| model.walls.iter().find(|candidate| candidate.id == *id);
 
+    // The join stud uses the same framing member as the wall it terminates in.
+    let wall_member = |wall: &Wall| -> Result<BoardProfile, SolverError> {
+        let system = model
+            .system_for(wall)
+            .ok_or_else(|| SolverError::MissingSystem {
+                wall: wall.id.clone(),
+                system: wall.system.clone(),
+            })?;
+        Ok(wall_framing(system)?.member)
+    };
+
     for join in &model.wall_joins {
         let first = find_wall(&join.first_wall).ok_or_else(|| SolverError::MissingWallForJoin {
             join: join.id.clone(),
@@ -427,6 +468,7 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                         plan,
                         join,
                         wall,
+                        wall_member(wall)?,
                         MemberKind::CornerPost,
                         "corner-post",
                         plate_thickness,
@@ -456,6 +498,7 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                     plan,
                     join,
                     partition,
+                    wall_member(partition)?,
                     MemberKind::PartitionStud,
                     "partition-stud",
                     plate_thickness,
@@ -472,6 +515,7 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                     plan,
                     join,
                     through,
+                    wall_member(through)?,
                     MemberKind::BackingStud,
                     "backing-stud",
                     plate_thickness,
@@ -491,6 +535,7 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                         plan,
                         join,
                         wall,
+                        wall_member(wall)?,
                         MemberKind::BackingStud,
                         "backing-stud",
                         plate_thickness,
@@ -527,6 +572,7 @@ fn push_join_stud(
     plan: &mut ProjectFramePlan,
     join: &WallJoin,
     wall: &Wall,
+    wall_stud: BoardProfile,
     kind: MemberKind,
     member_suffix: &str,
     plate_thickness: Length,
@@ -539,7 +585,6 @@ fn push_join_stud(
                 join: join.id.clone(),
                 wall: wall.id.clone(),
             })?;
-    let wall_stud = wall.assembly.stud_profile();
     let post_x = face_aligned_center(join_x, wall.length, wall_stud.thickness());
     let stud_top = wall.height - plate_thickness * top_plate_count as i64;
     let stud_length = stud_top - plate_thickness;
@@ -585,6 +630,7 @@ fn add_opening_members(
     diagnostics: &mut Vec<PlanDiagnostic>,
     wall: &Wall,
     code: &CodeProfile,
+    wall_stud: BoardProfile,
     opening: &Opening,
     top_plate_count: usize,
 ) {
@@ -596,7 +642,6 @@ fn add_opening_members(
     let header_top = header_bottom + header_depth;
     let left = opening.left();
     let right = opening.right();
-    let wall_stud = wall.assembly.stud_profile();
     let stud_thickness = wall_stud.thickness();
     let side_positions = OpeningSidePositions::new(left, right, stud_thickness);
 
@@ -1394,6 +1439,10 @@ pub enum SolverError {
         "opening {opening:?} in wall {wall:?} is too close to a wall end for starter king/jack framing"
     )]
     OpeningTooCloseToWallEnd { wall: ElementId, opening: ElementId },
+    #[error("wall {wall:?} references construction system {system:?} which was not found")]
+    MissingSystem { wall: ElementId, system: ElementId },
+    #[error("construction system {system:?} has no framing layer")]
+    SystemHasNoFramingLayer { system: ElementId },
 }
 
 #[cfg(test)]
@@ -1435,6 +1484,36 @@ mod tests {
 
     fn placed(id: &str, a: Point2, b: Point2, code: &CodeProfile) -> Wall {
         Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", a, b)
+    }
+
+    /// The seeded exterior wall system (2x4 framing @ 16" o.c.) — the default a
+    /// freshly built `Wall` references. Drives `generate_wall_plan` in tests.
+    fn wall_system() -> ConstructionSystem {
+        BuildingModel::starter_library()
+            .1
+            .into_iter()
+            .find(|system| system.id == ElementId::new("system-wall-exterior-1"))
+            .expect("seeded exterior wall system")
+    }
+
+    /// A minimal single-framing-layer wall system using `member` at 16" o.c.
+    fn framing_system(id: &str, member: BoardProfile) -> ConstructionSystem {
+        ConstructionSystem {
+            id: ElementId::new(id),
+            name: id.to_owned(),
+            kind: framer_core::SystemKind::Wall,
+            layers: vec![framer_core::ConstructionLayer::new(
+                framer_core::LayerFunction::Framing,
+                "mat-spf",
+                member.nominal_depth(),
+            )
+            .with_framing(FramingSpec {
+                member,
+                spacing: Length::from_whole_inches(16),
+                pattern: framer_core::FramingPattern::Single,
+                cavity_material: None,
+            })],
+        }
     }
 
     #[test]
@@ -1643,7 +1722,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
 
         assert_eq!(
             plan.members
@@ -1676,7 +1755,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
         let left_king = find_member(&plan, "door-king-left");
         let left_jack = find_member(&plan, "door-jack-left");
         let right_jack = find_member(&plan, "door-jack-right");
@@ -1704,7 +1783,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
         let bom = plan.bom();
 
         assert!(bom.iter().any(|item| {
@@ -1715,10 +1794,11 @@ mod tests {
     }
 
     #[test]
-    fn wall_assembly_stud_profile_sizes_studs_and_plates() {
+    fn framing_member_sizes_studs_and_plates() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
-        wall.assembly.stud = BoardProfile::TwoBySix;
+        let system = framing_system("system-2x6", BoardProfile::TwoBySix);
+        wall.system = system.id.clone();
         wall.openings.push(Opening::door(
             "opening-door",
             "Door",
@@ -1727,7 +1807,7 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &system, &code).unwrap();
 
         for kind in [
             MemberKind::CommonStud,
@@ -1758,7 +1838,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
         let mut common_studs = plan
             .members
             .iter()
@@ -1781,7 +1861,7 @@ mod tests {
         let code = CodeProfile::irc_2021_prescriptive();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
 
         assert!(plan.members.iter().any(|member| {
             member.kind == MemberKind::CommonStud && member.cut_length == Length::from_inches(91.5)
@@ -1791,11 +1871,13 @@ mod tests {
     #[test]
     fn project_round_trip_regenerates_same_wall_plan() {
         let model = BuildingModel::demo_wall();
-        let original = generate_wall_plan(&model.walls[0], &model.code).unwrap();
+        let system = model.system_for(&model.walls[0]).unwrap();
+        let original = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
 
         let serialized = save_project(&model).unwrap();
         let loaded = load_project(&serialized).unwrap();
-        let regenerated = generate_wall_plan(&loaded.walls[0], &loaded.code).unwrap();
+        let loaded_system = loaded.system_for(&loaded.walls[0]).unwrap();
+        let regenerated = generate_wall_plan(&loaded.walls[0], loaded_system, &loaded.code).unwrap();
 
         assert_eq!(loaded, model);
         assert_eq!(regenerated, original);
@@ -1873,7 +1955,7 @@ mod tests {
             Length::from_inches(36.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &code).unwrap();
+        let plan = generate_wall_plan(&wall, &wall_system(), &code).unwrap();
 
         assert!(
             plan.members
@@ -1890,7 +1972,8 @@ mod tests {
     #[test]
     fn generated_members_include_source_and_rule_provenance() {
         let model = BuildingModel::demo_wall();
-        let plan = generate_wall_plan(&model.walls[0], &model.code).unwrap();
+        let system = model.system_for(&model.walls[0]).unwrap();
+        let plan = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
 
         let header = plan
             .members
@@ -1907,7 +1990,8 @@ mod tests {
     #[test]
     fn garage_door_reports_unsupported_starter_assumption() {
         let model = BuildingModel::demo_wall();
-        let plan = generate_wall_plan(&model.walls[0], &model.code).unwrap();
+        let system = model.system_for(&model.walls[0]).unwrap();
+        let plan = generate_wall_plan(&model.walls[0], system, &model.code).unwrap();
 
         assert!(plan.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Unsupported
@@ -1923,7 +2007,8 @@ mod tests {
     fn exports_are_deterministic_and_useful() {
         let model = BuildingModel::demo_wall();
         let wall = &model.walls[0];
-        let plan = generate_wall_plan(wall, &model.code).unwrap();
+        let system = model.system_for(wall).unwrap();
+        let plan = generate_wall_plan(wall, system, &model.code).unwrap();
 
         let first_svg = export_wall_elevation_svg(wall, &plan);
         let second_svg = export_wall_elevation_svg(wall, &plan);

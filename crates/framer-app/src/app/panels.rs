@@ -5,9 +5,9 @@ use eframe::egui::{
     Ui, Vec2,
 };
 use framer_core::{
-    BoardProfile, DimensionAnchor, DimensionAxis, DimensionConstraint,
-    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId, Length,
-    Level, Opening, OpeningKind, Sheathing, Wall, WallExposure, WallJoin, WallJoinKind,
+    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
+    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind, Wall,
+    WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -664,6 +664,22 @@ impl FramerApp {
             .iter()
             .map(|wall| (wall.id.0.clone(), wall.name.clone()))
             .collect::<Vec<_>>();
+        // Snapshot of the wall-kind construction systems for the System picker,
+        // collected before the mutable wall borrow: (id, name, thickness, exposure).
+        let wall_systems = self
+            .model
+            .systems
+            .iter()
+            .filter(|system| system.kind == framer_core::SystemKind::Wall)
+            .map(|system| {
+                (
+                    system.id.0.clone(),
+                    system.name.clone(),
+                    system.total_thickness().to_string(),
+                    system.exposure().label().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
@@ -770,14 +786,6 @@ impl FramerApp {
                                 wall_height_driver.as_ref(),
                                 &mut select_dimension,
                             );
-                            changed |= driven_length_drag(
-                                ui,
-                                "Stud spacing",
-                                &mut wall.stud_spacing,
-                                length_drag_spec(8.0, 32.0, "in"),
-                                None,
-                                &mut select_dimension,
-                            );
                         });
 
                         widgets::section(ui, "wall-placement", "Placement", true, |ui| {
@@ -794,88 +802,57 @@ impl FramerApp {
                             }
                         });
 
-                        changed |= widgets::section(ui, "wall-type", "Wall Type", true, |ui| {
+                        changed |= widgets::section(ui, "wall-system", "System", true, |ui| {
                             let mut c = false;
-                            ui.horizontal(|ui| {
-                                wall_type_swatch(ui);
-                                ui.label(
-                                    RichText::new(wall.assembly.display())
-                                        .strong()
-                                        .color(design::active().text),
-                                );
-                            });
-                            ui.add_space(design::space::XS);
-                            c |= property_row(ui, "Exposure", |ui| {
-                                let before = wall.assembly.exposure;
-                                ComboBox::from_id_salt("wall-exposure")
-                                    .selected_text(wall.assembly.exposure.label())
+                            let selected_text = wall_systems
+                                .iter()
+                                .find(|(id, ..)| *id == wall.system.0)
+                                .map(|(_, name, ..)| name.clone())
+                                .unwrap_or_else(|| wall.system.0.clone());
+                            c |= property_row(ui, "System", |ui| {
+                                let before = wall.system.0.clone();
+                                ComboBox::from_id_salt("wall-system")
+                                    .selected_text(selected_text)
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut wall.assembly.exposure,
-                                            WallExposure::Exterior,
-                                            "Exterior",
-                                        );
-                                        ui.selectable_value(
-                                            &mut wall.assembly.exposure,
-                                            WallExposure::Interior,
-                                            "Interior",
-                                        );
-                                    });
-                                wall.assembly.exposure != before
-                            });
-                            c |= property_row(ui, "Stud size", |ui| {
-                                let before = wall.assembly.stud;
-                                ComboBox::from_id_salt("wall-stud")
-                                    .selected_text(wall.assembly.stud.label())
-                                    .show_ui(ui, |ui| {
-                                        for profile in BOARD_PROFILES {
+                                        for (id, name, _, _) in &wall_systems {
                                             ui.selectable_value(
-                                                &mut wall.assembly.stud,
-                                                profile,
-                                                profile.label(),
+                                                &mut wall.system,
+                                                ElementId::new(id.clone()),
+                                                name,
                                             );
                                         }
                                     });
-                                wall.assembly.stud != before
+                                wall.system.0 != before
                             });
+                            ui.add_space(design::space::XS);
+                            if let Some((_, name, thickness, exposure)) = wall_systems
+                                .iter()
+                                .find(|(id, ..)| *id == wall.system.0)
+                            {
+                                summary_row(ui, "Name", name);
+                                summary_row(ui, "Total thickness", thickness);
+                                summary_row(ui, "Exposure", exposure);
+                            } else {
+                                ui.label(
+                                    RichText::new("System not found in the model library.")
+                                        .size(design::text_size::LABEL)
+                                        .color(design::active().text_muted),
+                                );
+                            }
                             c
                         })
                         .unwrap_or(false);
-
-                        widgets::section(ui, "wall-materials", "Materials", false, |ui| {
-                            summary_row(ui, "Top Plate", wall.assembly.plate_profile().label());
-                            summary_row(ui, "Bottom Plate", wall.assembly.plate_profile().label());
-                            summary_row(ui, "Stud", wall.assembly.stud.label());
-                            changed |= property_row(ui, "Sheathing", |ui| {
-                                let before = wall.assembly.sheathing;
-                                ComboBox::from_id_salt("wall-sheathing")
-                                    .selected_text(wall.assembly.sheathing.label())
-                                    .show_ui(ui, |ui| {
-                                        for sheathing in SHEATHINGS {
-                                            ui.selectable_value(
-                                                &mut wall.assembly.sheathing,
-                                                sheathing,
-                                                sheathing.label(),
-                                            );
-                                        }
-                                    });
-                                wall.assembly.sheathing != before
-                            });
-                            ui.add_space(design::space::XS);
-                            ui.label(
-                                RichText::new(
-                                    "Sheathing is authored intent; not yet quantified in the BOM.",
-                                )
-                                .size(design::text_size::LABEL)
-                                .color(design::active().text_muted),
-                            );
-                        });
 
                         widgets::section(ui, "wall-tags", "Tags", false, |ui| {
                             changed |= tags_editor(ui, &mut wall.tags);
                         });
                     } else {
-                        wall_summary(ui, wall, &level_options);
+                        let system_name = wall_systems
+                            .iter()
+                            .find(|(id, ..)| *id == wall.system.0)
+                            .map(|(_, name, ..)| name.as_str())
+                            .unwrap_or(wall.system.0.as_str());
+                        wall_summary(ui, wall, &level_options, system_name);
                     }
                 }
 
@@ -1501,45 +1478,6 @@ fn inspector_object_id(ui: &mut Ui, id: &str) {
     ui.add_space(2.0);
 }
 
-const BOARD_PROFILES: [BoardProfile; 5] = [
-    BoardProfile::TwoByFour,
-    BoardProfile::TwoBySix,
-    BoardProfile::TwoByEight,
-    BoardProfile::TwoByTen,
-    BoardProfile::TwoByTwelve,
-];
-
-const SHEATHINGS: [Sheathing; 4] = [
-    Sheathing::None,
-    Sheathing::Osb716,
-    Sheathing::Plywood12,
-    Sheathing::Plywood58,
-];
-
-/// A small wall-type preview: a framed-stud pattern on a sheet.
-fn wall_type_swatch(ui: &mut Ui) {
-    let t = design::active();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(30.0, 18.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, design::radius::SM, t.field);
-    ui.painter().rect_stroke(
-        rect,
-        design::radius::SM,
-        t.soft_stroke(),
-        egui::StrokeKind::Inside,
-    );
-    let mut x = rect.left() + 4.0;
-    while x < rect.right() - 2.0 {
-        ui.painter().line_segment(
-            [
-                egui::Pos2::new(x, rect.top() + 3.0),
-                egui::Pos2::new(x, rect.bottom() - 3.0),
-            ],
-            Stroke::new(1.5, t.framing),
-        );
-        x += 5.0;
-    }
-}
-
 /// Removable tag chips plus an add field. Returns whether `tags` changed.
 fn tags_editor(ui: &mut Ui, tags: &mut Vec<String>) -> bool {
     let t = design::active();
@@ -1691,7 +1629,12 @@ fn level_summary(ui: &mut Ui, level: &Level) {
         });
 }
 
-fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)]) {
+fn wall_summary(
+    ui: &mut Ui,
+    wall: &Wall,
+    level_options: &[(String, String)],
+    system_name: &str,
+) {
     ui.label(&wall.id.0);
     egui::Grid::new("wall-summary")
         .num_columns(2)
@@ -1705,7 +1648,7 @@ fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)]) {
             );
             summary_row(ui, "Length", wall.length.to_string());
             summary_row(ui, "Height", wall.height.to_string());
-            summary_row(ui, "Stud spacing", wall.stud_spacing.to_string());
+            summary_row(ui, "System", system_name);
             summary_row(ui, "Openings", wall.openings.len().to_string());
             summary_row(ui, "Start", format!("{}, {}", wall.start.x, wall.start.y));
             summary_row(ui, "End", format!("{}, {}", wall.end.x, wall.end.y));

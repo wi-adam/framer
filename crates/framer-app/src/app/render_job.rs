@@ -182,11 +182,18 @@ pub(super) fn model_signature(model: &BuildingModel) -> u64 {
         mix(wall.end.y.ticks());
         mix(wall.height.ticks());
         mix(wall.length.ticks());
-        mix(wall.assembly.stud.nominal_depth().ticks());
-        mix(match wall.assembly.exposure {
-            framer_core::WallExposure::Exterior => 1,
-            framer_core::WallExposure::Interior => 2,
-        });
+        // The wall's construction system drives its through-wall depth and
+        // exposure, so fold the system id, total thickness, and exposure in.
+        for byte in wall.system.0.bytes() {
+            mix(byte as i64);
+        }
+        if let Some(system) = model.system_for(wall) {
+            mix(system.total_thickness().ticks());
+            mix(match system.exposure() {
+                framer_core::WallExposure::Exterior => 1,
+                framer_core::WallExposure::Interior => 2,
+            });
+        }
         for opening in &wall.openings {
             mix(opening.center.ticks());
             mix(opening.width.ticks());
