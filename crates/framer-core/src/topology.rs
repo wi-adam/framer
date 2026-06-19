@@ -190,6 +190,15 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
     faces
 }
 
+/// The number of enclosed rooms (bounded faces) in the wall graph — the count of
+/// closed loops the walls form. Equivalent to the length of [`room_boundaries`]
+/// for a seed inside every face, but without needing seed points. The draw-wall
+/// tool uses this to detect when a freshly committed wall just closed a loop: if
+/// the count rises across an edit, a room was enclosed.
+pub fn enclosed_room_count(model: &BuildingModel) -> usize {
+    bounded_faces(model).len()
+}
+
 /// Shoelace signed area in square inches (counterclockwise positive).
 fn signed_area_square_inches(vertices: &[Point2]) -> f64 {
     if vertices.len() < 3 {
@@ -272,6 +281,28 @@ mod tests {
     fn seed_outside_walls_has_no_boundary() {
         let model = rect_model(12.0, 8.0);
         assert!(room_boundary(&model, p(10_000.0, 10_000.0)).is_none());
+    }
+
+    #[test]
+    fn enclosed_room_count_tracks_closed_loops() {
+        // An empty model encloses nothing; an open L of two walls still encloses
+        // nothing; closing the rectangle encloses one room; a mid-span partition
+        // splits it into two.
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        assert_eq!(enclosed_room_count(&model), 0);
+
+        model.walls.push(wall("w-b", p(0.0, 0.0), p(96.0, 0.0)));
+        model.walls.push(wall("w-r", p(96.0, 0.0), p(96.0, 96.0)));
+        assert_eq!(enclosed_room_count(&model), 0);
+
+        model.walls.push(wall("w-t", p(96.0, 96.0), p(0.0, 96.0)));
+        model.walls.push(wall("w-l", p(0.0, 96.0), p(0.0, 0.0)));
+        assert_eq!(enclosed_room_count(&model), 1);
+
+        model
+            .walls
+            .push(wall("w-part", p(48.0, 0.0), p(48.0, 96.0)));
+        assert_eq!(enclosed_room_count(&model), 2);
     }
 
     #[test]
