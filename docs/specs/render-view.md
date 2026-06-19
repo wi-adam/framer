@@ -1,7 +1,10 @@
-# Render View Mode — Design
+# Render View Mode
 
-Status: accepted (2026-06-15)
-Branch: `feat/render-view-mode`
+> **Feature spec** — durable intent, requirements, and locked decisions for this feature.
+> Kept current as the feature evolves; point-in-time task breakdowns live in
+> [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
+>
+> **Status:** Implemented · **Linked goal:** — · **Plan:** [2026-06-15-render-view-mode](../plans/2026-06-15-render-view-mode.md)
 
 ## Goal
 
@@ -203,7 +206,7 @@ refinement — has landed, behind the same `Scene`/camera as the CPU tracer and
 with a CPU fallback. The version-correct implementation reference (the
 `egui_wgpu` integration pattern, storage-buffer layout, WGSL kernel snippets, and
 the wgpu-29 breaking-change checklist) lives in
-[2026-06-15-gpu-pathtracer-research.md](2026-06-15-gpu-pathtracer-research.md).
+[2026-06-15-gpu-pathtracer-research.md](../plans/2026-06-15-gpu-pathtracer-research.md).
 What shipped:
 
 - **Scene flattening** (`framer-render/src/gpu.rs`): `#[repr(C)] bytemuck::Pod`

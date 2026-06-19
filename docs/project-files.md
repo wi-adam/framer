@@ -5,10 +5,10 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v4 format stores only the canonical intent model. Generated framing plans,
+The v7 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
-v4 file.
+file.
 
 This matches Framer's Design Mode / Plan Mode split. Design Mode writes the
 authored model saved here. Plan Mode regenerates framing layouts, diagnostics,
@@ -16,19 +16,27 @@ drawings, schedules, and exports from that authored model.
 
 See
 [../examples/projects/demo-shell.framer](../examples/projects/demo-shell.framer)
-for a complete checked-in multi-wall alpha example with a connected shell,
-corner joins, doors, windows, and a garage-door-style opening. The Phase 1
-single-wall example remains checked in at
-[../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer).
+for a complete checked-in multi-wall example with a connected shell, corner
+joins, doors, windows, and a garage-door-style opening;
+[../examples/projects/demo-two-bedroom.framer](../examples/projects/demo-two-bedroom.framer)
+for interior partitions (tee joins) and rooms; and
+[../examples/projects/demo-wall.framer](../examples/projects/demo-wall.framer)
+for the single-wall example.
 
-## V6 Shape
+> For the in-memory types behind this format, see
+> [code-map.md](code-map.md#framer-core--the-domain-model). The serialization code
+> is `crates/framer-core/src/project.rs`.
+
+## V7 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 6,
+  "schema_version": 7,
   "authored": {
     "code": {},
+    "materials": [],
+    "systems": [],
     "levels": [],
     "walls": [],
     "wall_joins": [],
@@ -38,25 +46,21 @@ single-wall example remains checked in at
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `6` when saving from the current app.
+- `schema_version` must be `7` when saving from the current app.
 - `authored` contains the user-authored semantic model.
-- Unknown top-level keys are rejected. Do not add `generated`, `cache`,
-  `exports`, or presentation data to project files.
-- Schema v1 single-wall files are accepted on load and migrated to the current
-  placed-wall shape with a default `level-1` level and a straight wall segment.
-- Schema v2 and v3 shell files are accepted on load; missing wall dimensions
-  default to an empty list and missing dimension axes default to horizontal.
-- Schema v4 files are accepted on load; each wall gains a default `assembly`
-  (`Exterior`, `TwoByFour` studs, `Osb716` sheathing) and an empty `tags` list.
-- Schema v5 files are accepted on load; `rooms` defaults to an empty list. The
-  `rooms` key is omitted when empty, so room-free v6 files are byte-identical to
-  the equivalent v5 file apart from the version number.
+- Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
+  `generated`, `cache`, `exports`, or presentation data to project files.
+- `materials`, `systems`, and `rooms` are omitted when empty; `wall_joins`
+  defaults to an empty list; `levels` defaults to a single `level-1`.
 
-Each wall carries an `assembly` describing its construction: `exposure`
-(`Exterior`/`Interior`), `stud` (a board profile that also sizes the plates),
-and `sheathing`. The generated framing uses the wall's `stud` profile, so
-changing it re-sizes that wall's studs, plates, and corner posts in the plan and
-BOM. Optional `tags` are a free-form string list, omitted when empty.
+### Schema versioning is v7-only
+
+The current build is **v7-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `7` with an explicit
+`unsupported Framer project schema version N` error — pre-v7 files are *not*
+migrated in place, because the older wall shape (inline `assembly`,
+`stud_spacing`) is no longer representable in the model. Convert old files with an
+older Framer build, or re-author them.
 
 Lengths are exact integer ticks:
 
@@ -78,43 +82,140 @@ Example:
 
 ## Authored Model
 
-The current v4 authored model supports the completed Phase 1 single-wall
-workflow and the first beyond-Phase-1 multi-wall shell workflow:
+The v7 authored model holds:
 
-- `code`: starter framing defaults used by the current solver.
+- `code`: the prescriptive code profile (starter framing defaults).
+- `materials`: the project's material library (see below).
+- `systems`: the project's construction systems (layered assemblies, see below).
 - `levels`: deterministic list of project levels.
 - `walls`: deterministic list of placed rectilinear wall segments.
 - `wall_joins`: deterministic list of authored wall joins/corners.
-- `openings`: deterministic list of wall openings hosted by each wall segment.
-- `dimensions`: deterministic wall-local dimension constraints hosted by a wall
-  segment.
+- `rooms`: deterministic list of authored rooms (spaces).
+- Per wall: `openings` (wall openings) and `dimensions` (wall-local dimension
+  constraints).
 
-Each wall stores both a local framing length and a project placement:
+Each wall stores a local framing length, a project placement, and a **reference to
+a construction system** (it does not embed its assembly):
 
 - `level`: the level that owns the wall segment.
 - `start` and `end`: rectilinear project coordinates in ticks.
 - `length`: the wall's local framing length; it must match the axis-aligned
   distance between `start` and `end`.
-- `dimensions`: optional driving or reference dimensions between wall-local
-  anchors on either the horizontal or vertical wall-elevation axis.
+- `height`: the wall's framing height.
+- `system`: the `id` of a `ConstructionSystem` in the project `systems` list. The
+  generated framing uses that system's framing layer, so changing it re-sizes the
+  wall's studs, plates, corner posts, and per-layer takeoff.
+- `openings`, `dimensions`, and optional `tags` (a free-form string list, omitted
+  when empty).
 
-Each dimension stores:
+```json
+{
+  "id": "wall-1",
+  "name": "Front wall",
+  "level": "level-1",
+  "start": { "x": { "ticks": 0 }, "y": { "ticks": 0 } },
+  "end": { "x": { "ticks": 3072 }, "y": { "ticks": 0 } },
+  "length": { "ticks": 3072 },
+  "height": { "ticks": 1536 },
+  "system": "system-wall-exterior-1",
+  "openings": []
+}
+```
 
+## Construction Systems & Materials
+
+A **construction system** is a named, reusable assembly: an ordered stack of
+material layers across the element's thickness, applied to walls by reference. New
+projects seed a starter library (exterior + interior wall systems and their
+materials). The durable intent behind this model is documented in the
+[Construction Systems spec](specs/construction-systems.md).
+
+Each material in `materials` stores:
+
+- `id`: a stable semantic identifier (e.g. `mat-drywall`).
+- `name`: a human-readable name.
+- `source`: `Project` (default, omitted) or `External { "reference": "..." }`.
+- `appearance`: an authored finish, currently `{ "SolidColor": [r, g, b] }`.
+- `tags`: optional free-form string list, omitted when empty.
+- `properties`: an extensible, **float-free** map of typed values
+  (`Int` / `Length` / `Text` / `Flag`). Substance lives here rather than in the
+  schema — e.g. `"r_per_inch_milli": { "Int": 900 }` (R-value × 1000 per inch).
+
+```json
+{
+  "id": "mat-drywall",
+  "name": "5/8\" Gypsum",
+  "appearance": { "SolidColor": [228, 226, 220] },
+  "tags": ["finish"],
+  "properties": { "r_per_inch_milli": { "Int": 900 } }
+}
+```
+
+Each system in `systems` stores:
+
+- `id`, `name`.
+- `kind`: `Wall`, `Floor`, or `Roof` (only `Wall` is wired today).
+- `layers`: an ordered list from **interior → exterior**. Layer order is semantic
+  and is **never sorted**.
+
+Each layer stores:
+
+- `function`: one of `InteriorFinish`, `Framing`, `ContinuousInsulation`,
+  `Sheathing`, `WeatherBarrier`, `AirGap`, `Cladding`, `Masonry`, `Structure`,
+  `Other`.
+- `material`: the `id` of a material in the library.
+- `thickness`: the layer thickness in ticks.
+- `framing`: present **if and only if** `function == Framing`. It stores `member`
+  (a `BoardProfile` such as `TwoByFour`), `spacing`, `pattern`
+  (`Single`/`Staggered`/`Double`), and an optional `cavity_material` (insulation
+  between studs, which adds no extra through-wall depth).
+
+A **wall system must have exactly one framing layer.** Validation rejects systems
+with no layers, an unknown material reference, a framing/`function` mismatch,
+non-positive thickness or spacing, or the wrong framing-layer count. A wall that
+references an unknown `system` is also rejected.
+
+```json
+{
+  "id": "system-wall-interior-1",
+  "name": "Interior 2x4 partition",
+  "kind": "Wall",
+  "layers": [
+    { "function": "InteriorFinish", "material": "mat-drywall", "thickness": { "ticks": 10 } },
+    {
+      "function": "Framing",
+      "material": "mat-spf",
+      "thickness": { "ticks": 56 },
+      "framing": { "member": "TwoByFour", "spacing": { "ticks": 256 }, "pattern": "Single" }
+    },
+    { "function": "InteriorFinish", "material": "mat-drywall", "thickness": { "ticks": 10 } }
+  ]
+}
+```
+
+Total through-wall thickness, derived exposure (Exterior vs Interior), and the
+clear-wall R-value are *derived* from the layer stack and materials — they are not
+stored. The R-value is a clear-wall approximation; the framing-factor
+(parallel-path) derate is not yet applied.
+
+## Dimensions
+
+Each wall may carry driving or reference dimensions between wall-local anchors on
+either the horizontal or vertical wall-elevation axis. Each dimension stores:
+
+- `id`, `name`.
 - `kind`: `Driving` or `Reference`.
-- `axis`: `Horizontal` or `Vertical`. Missing `axis` defaults to `Horizontal`
-  for projects created before schema v4.
-- `start` and `end`: wall-local anchors. Legacy horizontal anchors such as
-  `wall_start`, `wall_end`, `opening_left`, `opening_center`, and
-  `opening_right` remain valid. New point anchors use `wall_point` or
-  `opening_point` with horizontal `Left`/`Center`/`Right` and vertical
-  `Bottom`/`Center`/`Top` references, allowing dimensions to snap to edges,
-  vertices, and centers.
+- `axis`: `Horizontal` or `Vertical`.
+- `start` and `end`: wall-local anchors. Anchors use `wall_point` or
+  `opening_point` with a horizontal `Left`/`Center`/`Right` and a vertical
+  `Bottom`/`Center`/`Top` reference, allowing dimensions to snap to edges,
+  vertices, and centers. (The earlier shorthand anchors `wall_start`, `wall_end`,
+  `opening_left`, `opening_center`, `opening_right` remain accepted.)
 - `direction`: `Forward` or `Backward`, preserving the click order used to place
   the dimension.
 - `line_offset`: optional wall-local annotation placement on the axis
   perpendicular to the dimension. Horizontal dimensions use this as the line's
   local Y position; vertical dimensions use it as the line's local X position.
-  Missing offsets use the legacy outside-of-wall stacked layout.
 - `value`: present only for `Driving` dimensions. Reference dimensions are
   measured from the current model and must not store a target value.
 
@@ -162,18 +263,20 @@ rough opening height:
 }
 ```
 
-The current app applies wall-local driving dimensions for wall length and
-height, opening horizontal position and width, and opening vertical bottom and
-height. Reference dimensions are non-driving annotations that display the
-current measured distance. Dimension `line_offset` values only place annotation
-graphics; cross-wall projections and alignment constraints are future schema
-extensions, not implicit behavior in v4.
+The app applies wall-local driving dimensions for wall length and height, opening
+horizontal position and width, and opening vertical bottom and height. Reference
+dimensions are non-driving annotations that display the current measured distance.
+Dimension `line_offset` values only place annotation graphics; cross-wall
+projections and alignment constraints are future schema extensions, not implicit
+behavior.
 
 Driving dimensions must be simultaneously satisfied by the authored wall and
-opening geometry. If a new or edited driving dimension contradicts another
-driving dimension on the same wall, the app rejects it during creation or
-validation reports the dimension set as overconstrained instead of silently
-choosing one target over another.
+opening geometry. If a new or edited driving dimension contradicts another driving
+dimension on the same wall, the app rejects it during creation or validation
+reports the dimension set as overconstrained instead of silently choosing one
+target over another.
+
+## Wall Joins
 
 Each wall join stores:
 
@@ -222,24 +325,18 @@ Each room stores:
 }
 ```
 
-See
-[../examples/projects/demo-two-bedroom.framer](../examples/projects/demo-two-bedroom.framer)
-for a checked-in example with interior partitions (tee joins) dividing a shell
-into two bedrooms and a living area.
+## Stable IDs
 
-Level, wall, join, opening, and dimension IDs are stable semantic identifiers.
-They must be non-empty and contain only lowercase letters, digits, or hyphens.
-Examples:
+Material, system, level, wall, join, opening, dimension, and room IDs are stable
+semantic identifiers. They must be non-empty and contain only lowercase letters,
+digits, or hyphens. Examples:
 
-- `level-1`
-- `wall-1`
-- `join-front-right`
-- `opening-door-1`
-- `opening-window-1`
-- `dimension-1`
+- `mat-drywall`, `system-wall-exterior-1`
+- `level-1`, `wall-1`, `join-front-right`
+- `opening-door-1`, `opening-window-1`, `dimension-1`, `room-bed-1`
 
-Do not rewrite existing IDs when changing dimensions or names. Add a new stable
-ID only when adding a new authored object.
+Do not rewrite existing IDs when changing properties or names. Add a new stable ID
+only when adding a new authored object.
 
 The checked-in IRC 2021 profile is named `IRC 2021 prescriptive starter profile`
 because it is only a starter data shape for the early wall solver. It is not a
@@ -247,23 +344,27 @@ complete code-compliance claim.
 
 Garage doors are stored as authored semantic openings, but the current solver
 frames them as wide rough openings with starter king, jack, and header rules. It
-emits an unsupported-condition diagnostic because garage-door-specific
-structural design is not implemented.
+emits an unsupported-condition diagnostic because garage-door-specific structural
+design is not implemented.
 
 ## Determinism
 
 Framer canonicalizes project files before saving:
 
-- Levels are sorted by `id`.
-- Walls are sorted by `id`.
-- Openings within each wall are sorted by `id`.
-- Dimensions within each wall are sorted by `id`.
-- Wall joins are sorted by `id`.
-- Rooms are sorted by `id`.
+- Materials are sorted by `id`.
+- Systems are sorted by `id`; **layers within a system are not sorted** (layer
+  order is semantic: interior → exterior).
+- Levels, walls, wall joins, and rooms are sorted by `id`.
+- Openings and dimensions within each wall are sorted by `id`.
+- A material's `properties` map is ordered (a `BTreeMap`), so property insertion
+  order does not affect output.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing is deterministic output and is not saved in v4 files.
+- Generated framing is deterministic output and is not saved.
 
-This keeps `.framer` files stable for Git diffs, code review, and agent edits.
+This keeps `.framer` files stable for Git diffs, code review, and agent edits. The
+three checked-in `examples/projects/*.framer` files are verified byte-for-byte
+against canonical serialization by the round-trip tests in
+`crates/framer-core/src/project.rs`.
 
 ## Agent Editing Contract
 
@@ -271,17 +372,20 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` unless performing an explicit schema
-   migration.
+3. Preserve `format` and `schema_version` (`7`). The build is v7-only; do not
+   hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,
    drawings, BOM exports, and UI state.
-6. Use exact tick values for dimensions.
-7. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
-8. Do not present the starter IRC 2021 profile as complete code compliance.
-9. Represent plan adjustments as authored design changes or explicit override
-   records if the schema supports them; do not add generated members directly.
-10. Validate after edits.
+6. Use exact tick values for dimensions and thicknesses.
+7. Apply construction by *reference*: point a wall's `system` at a system `id`, and
+   a layer's `material` at a material `id`. Do not dangle references — every
+   referenced `system`/`material` must exist. Keep layer order interior → exterior.
+8. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
+9. Do not present the starter IRC 2021 profile as complete code compliance.
+10. Represent plan adjustments as authored design changes or explicit override
+    records if the schema supports them; do not add generated members directly.
+11. Validate after edits.
 
 Recommended validation:
 
@@ -291,7 +395,7 @@ cargo test --workspace
 ```
 
 If an agent only changes example project files, it should still run the workspace
-tests because the fixture is checked against canonical serialization and solver
+tests because the fixtures are checked against canonical serialization and solver
 round-tripping.
 
 ## App Support
@@ -301,26 +405,25 @@ The desktop app opens with the demo shell model and a default project path of
 
 Use:
 
-- `New` to create a fresh single-wall project.
-- `Shell Demo` to return to the connected multi-wall alpha example.
-- `Wall Demo` to return to the completed Phase 1 straight-wall example.
+- `New` to create a fresh single-wall project (seeded with the starter material +
+  system library).
+- `Shell Demo` / `Wall Demo` to return to the connected multi-wall or single-wall
+  examples.
 - `Open` and `Save` to load or persist the authored `.framer` file.
-- `Design` to edit authored levels, wall placement, openings, and joins through
-  the model tree, inspector, catalog, and authored-object viewports.
-- `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode
-  for laying out authored openings on the selected wall. Selecting a wall or
-  opening in the Shell view opens the selected wall in Wall view.
-- `Dimension` in Design Mode to pick two wall/opening anchors in Wall view and
-  create either a driving dimension or a non-driving reference dimension. Driving
-  dimension values can be edited in the inspector.
-- `Plan` to inspect generated framing, diagnostics, BOM rows, read-only authored
-  summaries, and selectable generated members.
-- the catalog in Design Mode to add doors, windows, and garage doors to the
-  selected wall.
-- `Export` in Plan Mode to write disposable sidecar artifacts next to the
-  project path:
-  `<project>.svg` for the whole-project shell plan plus wall elevations and
-  `<project>.csv` for the grouped whole-project BOM/cut list.
+- `Design` to edit authored levels, wall placement, openings, joins, construction
+  systems, and materials through the model tree, inspector, catalog, and authored
+  viewports.
+- `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode for
+  laying out authored openings on the selected wall.
+- the Design-mode `Wall` (W) and `Room` (R) tools to draw walls and place rooms in
+  the plan view, and the `Dimension` tool in the wall view to create driving or
+  reference dimensions.
+- `Plan` to inspect generated framing, diagnostics, BOM rows (including the
+  per-layer material takeoff), read-only authored summaries, and selectable
+  generated members.
+- `Export` in Plan Mode to write disposable sidecar artifacts next to the project
+  path: `<project>.svg` for the shell plan plus wall elevations and `<project>.csv`
+  for the grouped whole-project BOM/cut list.
 
 The SVG and CSV exports are regenerated outputs. Do not copy them back into the
 canonical project document.

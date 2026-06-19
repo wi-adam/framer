@@ -114,3 +114,13 @@ jobs:
           fi
       - name: GPU↔CPU parity test
         run: cargo test -p framer-app --test gpu_parity --locked -- --nocapture
+
+  docs:
+    name: docs (markdown links)
+    runs-on: ubuntu-latest
+    # Independent of the Rust build (no toolchain needed) so it reports fast and
+    # in parallel. Validates relative links only — external URLs are not fetched.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check markdown links
+        run: python3 scripts/check-markdown-links.py

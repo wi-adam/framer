@@ -93,10 +93,15 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
-## Architecture
+## Docs
 
-See [docs/vision.md](docs/vision.md),
-[docs/architecture.md](docs/architecture.md),
-[docs/project-files.md](docs/project-files.md),
-[docs/plans/2026-05-21-phase-1.md](docs/plans/2026-05-21-phase-1.md), and
-[docs/plans/2026-06-15-render-view-mode-design.md](docs/plans/2026-06-15-render-view-mode-design.md).
+Start with **[AGENTS.md](AGENTS.md)** — the contributor & agent contract (repo map,
+architecture invariants, how we work, verification gates). Then:
+
+- [docs/vision.md](docs/vision.md) — product source of truth, principles, milestones, goals.
+- [docs/architecture.md](docs/architecture.md) — conceptual system shape & layering.
+- [docs/code-map.md](docs/code-map.md) — concrete code navigation (modules, types, data-flow).
+- [docs/project-files.md](docs/project-files.md) — the `.framer` format + agent editing contract.
+- [docs/spec-driven-development.md](docs/spec-driven-development.md) — how specs & plans work.
+- [docs/specs/](docs/specs/) — durable feature specs · [docs/plans/](docs/plans/) — dated plans.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, build/run, verification, Definition of Done.

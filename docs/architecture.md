@@ -3,6 +3,10 @@
 Framer is organized around a semantic model, a rule-driven framing solver, and a
 desktop CAD surface.
 
+> This document is the *conceptual* architecture (layering and product intent).
+> For the *concrete* map — crates, modules, key types, data-flow, and "where to add
+> X" — see [code-map.md](code-map.md).
+
 ## Product Boundary
 
 Framer is not a general mesh modeler. It should preserve construction intent:
@@ -16,8 +20,12 @@ small buildings, garages, decks, and wood framed BBQ islands.
 ## Workspace
 
 - `crates/framer-core`: shared domain types, units, structure model, openings,
-  code profiles, and validation.
-- `crates/framer-solver`: deterministic framing-plan and BOM generation.
+  construction systems, the material library, code profiles, room topology, and
+  validation.
+- `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
+  and BOM generation.
+- `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
+  rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and viewport.
 
 The app may become visually rich over time, but core modeling and solving must
@@ -116,8 +124,11 @@ multi-wall CAD shell:
   level, four placed wall segments, four corner joins, doors, windows, and a
   garage-door-style opening on different walls.
 - `framer-core` represents levels, wall segment placement, wall joins/corners,
-  wall openings, and deterministic project ordering. Schema v1 single-wall files
-  migrate into the current placed-wall shape on load.
+  wall openings, rooms, a reusable material library, layered construction systems
+  (applied to walls by reference), and deterministic project ordering. The
+  `.framer` format is schema **v7** and v7-only: pre-v7 files are rejected with an
+  explicit unsupported-schema error rather than migrated. See the
+  [Construction Systems spec](specs/construction-systems.md).
 - `framer-solver` deterministically generates per-wall plates, common studs,
   king studs, jack studs, headers, rough sills, cripples, join corner posts,
   grouped whole-project BOM rows, diagnostics, and per-member rule provenance.
@@ -155,10 +166,11 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v4 `.framer` format is documented in
-[project-files.md](project-files.md). It stores the authored intent model only;
-derived framing plans, cached view state, and exports remain disposable outputs
-that are regenerated from the project.
+The current v7 `.framer` format is documented in
+[project-files.md](project-files.md). It stores the authored intent model only
+(including the material library and construction systems); derived framing plans,
+cached view state, and exports remain disposable outputs that are regenerated from
+the project.
 
 Binary caches are acceptable only as disposable acceleration data. They must not
 be the only source of truth for a design.
