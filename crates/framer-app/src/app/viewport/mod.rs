@@ -1293,7 +1293,18 @@ mod tests {
         let plan = framer_solver::generate_project_plan(&model).unwrap();
         let scene =
             Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
-        let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+        // The wall cross-section spans its full system thickness, interior-anchored
+        // at -total/2 on the side axis (no longer the bare stud depth). Every demo
+        // wall shares one system, so any wall gives the section thickness.
+        let total = model
+            .system_for(&model.walls[0])
+            .expect("wall resolves a system")
+            .total_thickness()
+            .inches() as f32;
+        // The full system is thicker than the framing layer alone, so layering
+        // genuinely deepens the wall in the side axis.
+        let stud_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+        assert!(total > stud_depth);
 
         assert!(!scene.vertices.is_empty());
         assert!(scene.opaque_index_count > 0);
@@ -1307,8 +1318,8 @@ mod tests {
             .map(|point| point.y)
             .fold(f32::MAX, f32::min);
         assert!(
-            min_y <= -wall_depth / 2.0,
-            "front wall should have real thickness in plan depth"
+            min_y <= -total / 2.0,
+            "front wall should have full system thickness in plan depth"
         );
     }
 

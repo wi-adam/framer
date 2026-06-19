@@ -254,6 +254,15 @@ pub struct FrameMember {
     pub elevation: Length,
     pub cut_length: Length,
     pub cross_section_depth: Length,
+    /// Through-wall offset (interior -> exterior) of the framing band this member
+    /// sits in: the summed thickness of the layers inboard of the framing layer.
+    /// Lets the renderer place studs inside the framing layer rather than centered
+    /// across the full wall thickness.
+    pub side_offset: Length,
+    /// Through-wall depth of the framing band: the framing layer's thickness
+    /// (== `member.nominal_depth()`). The member occupies `[side_offset,
+    /// side_offset + side_depth]` across the wall section.
+    pub side_depth: Length,
     pub provenance: RuleProvenance,
 }
 
@@ -363,6 +372,35 @@ fn wall_framing(system: &ConstructionSystem) -> Result<&FramingSpec, SolverError
         })
 }
 
+/// The through-wall band a system's framing members occupy: `offset` is the
+/// summed thickness of every layer inboard (interior) of the framing layer, and
+/// `depth` is the framing layer's own thickness. Members are placed inside
+/// `[offset, offset + depth]` so studs sit in the framing layer rather than
+/// spanning the full wall section.
+#[derive(Clone, Copy)]
+struct FramingBand {
+    offset: Length,
+    depth: Length,
+}
+
+impl FramingBand {
+    fn for_system(system: &ConstructionSystem) -> Result<Self, SolverError> {
+        let mut offset = Length::ZERO;
+        for layer in &system.layers {
+            if layer.function == LayerFunction::Framing {
+                return Ok(Self {
+                    offset,
+                    depth: layer.thickness,
+                });
+            }
+            offset += layer.thickness;
+        }
+        Err(SolverError::SystemHasNoFramingLayer {
+            system: system.id.clone(),
+        })
+    }
+}
+
 pub fn generate_wall_plan(
     wall: &Wall,
     system: &ConstructionSystem,
@@ -372,6 +410,9 @@ pub fn generate_wall_plan(
     wall.validate()?;
 
     let framing = wall_framing(system)?;
+    // Members live inside the framing layer's through-wall band so studs render
+    // in the framing layer rather than centered across the whole wall section.
+    let band = FramingBand::for_system(system)?;
     // The framing member is both the stud and the plate; spacing drives the
     // on-center layout. TODO: honor FramingPattern::Double/Staggered (extra
     // studs); every pattern is currently treated as Single.
@@ -422,6 +463,7 @@ pub fn generate_wall_plan(
             wall.length,
             plate_thickness,
         ),
+        band,
         RuleProvenance::new(
             "wall.plate.continuous",
             "Bottom plate runs the authored wall length using the configured plate profile.",
@@ -441,6 +483,7 @@ pub fn generate_wall_plan(
                 wall.length,
                 plate_thickness,
             ),
+            band,
             RuleProvenance::new(
                 "wall.plate.double-top",
                 format!(
@@ -467,6 +510,7 @@ pub fn generate_wall_plan(
                     stud_length,
                     stud_thickness,
                 ),
+                band,
                 RuleProvenance::new(
                     "wall.studs.on-center",
                     format!(
@@ -489,6 +533,7 @@ pub fn generate_wall_plan(
             wall_stud,
             &opening,
             top_plate_count,
+            band,
         );
     }
 
@@ -601,15 +646,16 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
 
     let find_wall = |id: &ElementId| model.walls.iter().find(|candidate| candidate.id == *id);
 
-    // The join stud uses the same framing member as the wall it terminates in.
-    let wall_member = |wall: &Wall| -> Result<BoardProfile, SolverError> {
+    // The join stud uses the same framing member and through-wall band as the
+    // wall it terminates in, so it renders inside that wall's framing layer.
+    let wall_member = |wall: &Wall| -> Result<(BoardProfile, FramingBand), SolverError> {
         let system = model
             .system_for(wall)
             .ok_or_else(|| SolverError::MissingSystem {
                 wall: wall.id.clone(),
                 system: wall.system.clone(),
             })?;
-        Ok(wall_framing(system)?.member)
+        Ok((wall_framing(system)?.member, FramingBand::for_system(system)?))
     };
 
     for join in &model.wall_joins {
@@ -626,11 +672,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
         match join.kind {
             WallJoinKind::Corner | WallJoinKind::EndToEnd => {
                 for wall in [first, second] {
+                    let (member, band) = wall_member(wall)?;
                     push_join_stud(
                         plan,
                         join,
                         wall,
-                        wall_member(wall)?,
+                        member,
+                        band,
                         MemberKind::CornerPost,
                         "corner-post",
                         plate_thickness,
@@ -656,11 +704,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 } else {
                     (second, first)
                 };
+                let (partition_member, partition_band) = wall_member(partition)?;
                 push_join_stud(
                     plan,
                     join,
                     partition,
-                    wall_member(partition)?,
+                    partition_member,
+                    partition_band,
                     MemberKind::PartitionStud,
                     "partition-stud",
                     plate_thickness,
@@ -673,11 +723,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                         ),
                     ),
                 )?;
+                let (through_member, through_band) = wall_member(through)?;
                 push_join_stud(
                     plan,
                     join,
                     through,
-                    wall_member(through)?,
+                    through_member,
+                    through_band,
                     MemberKind::BackingStud,
                     "backing-stud",
                     plate_thickness,
@@ -693,11 +745,13 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
             }
             WallJoinKind::Cross => {
                 for wall in [first, second] {
+                    let (member, band) = wall_member(wall)?;
                     push_join_stud(
                         plan,
                         join,
                         wall,
-                        wall_member(wall)?,
+                        member,
+                        band,
                         MemberKind::BackingStud,
                         "backing-stud",
                         plate_thickness,
@@ -735,6 +789,7 @@ fn push_join_stud(
     join: &WallJoin,
     wall: &Wall,
     wall_stud: BoardProfile,
+    band: FramingBand,
     kind: MemberKind,
     member_suffix: &str,
     plate_thickness: Length,
@@ -773,6 +828,7 @@ fn push_join_stud(
             stud_length,
             wall_stud.thickness(),
         ),
+        band,
         provenance,
     ));
     Ok(())
@@ -795,6 +851,7 @@ fn add_opening_members(
     wall_stud: BoardProfile,
     opening: &Opening,
     top_plate_count: usize,
+    band: FramingBand,
 ) {
     let plate_thickness = code.plate_profile.thickness();
     let stud_base = plate_thickness;
@@ -839,6 +896,7 @@ fn add_opening_members(
                 stud_top - stud_base,
                 stud_thickness,
             ),
+            band,
             RuleProvenance::new(
                 "opening.king-studs.each-side",
                 format!(
@@ -860,6 +918,7 @@ fn add_opening_members(
                 header_bottom - stud_base,
                 stud_thickness,
             ),
+            band,
             RuleProvenance::new(
                 "opening.jack-studs.header-bearing",
                 format!(
@@ -881,6 +940,7 @@ fn add_opening_members(
             opening.width + stud_thickness * 2,
             header_depth,
         ),
+        band,
         RuleProvenance::new(
             "opening.header.default-profile",
             format!(
@@ -904,6 +964,7 @@ fn add_opening_members(
                 opening.width,
                 stud_thickness,
             ),
+            band,
             RuleProvenance::new(
                 "opening.window.rough-sill",
                 format!(
@@ -921,11 +982,12 @@ fn add_opening_members(
             "lower",
             plate_thickness,
             opening.sill_height,
+            band,
         );
     }
 
     add_cripples(
-        members, code, wall_stud, opening, "upper", header_top, stud_top,
+        members, code, wall_stud, opening, "upper", header_top, stud_top, band,
     );
 }
 
@@ -958,6 +1020,7 @@ fn add_cripples(
     label: &str,
     bottom: Length,
     top: Length,
+    band: FramingBand,
 ) {
     let cut_length = top - bottom;
     if cut_length <= Length::ZERO {
@@ -977,6 +1040,7 @@ fn add_cripples(
                 cut_length,
                 stud_profile.thickness(),
             ),
+            band,
             RuleProvenance::new(
                 "opening.cripples.on-center",
                 format!(
@@ -1022,6 +1086,7 @@ fn frame_member(
     kind: MemberKind,
     profile: BoardProfile,
     placement: FrameMemberPlacement,
+    band: FramingBand,
     provenance: RuleProvenance,
 ) -> FrameMember {
     FrameMember {
@@ -1034,6 +1099,8 @@ fn frame_member(
         elevation: placement.elevation,
         cut_length: placement.cut_length,
         cross_section_depth: placement.cross_section_depth,
+        side_offset: band.offset,
+        side_depth: band.depth,
         provenance,
     }
 }
@@ -1946,6 +2013,51 @@ mod tests {
         assert!(plan.members.iter().any(|member| {
             member.kind == MemberKind::Header && member.cut_length == Length::from_inches(39.0)
         }));
+    }
+
+    #[test]
+    fn members_sit_in_the_framing_layer_band() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(5.0),
+            Length::from_inches(36.0),
+            Length::from_inches(48.0),
+            Length::from_inches(30.0),
+        ));
+        let system = wall_system();
+
+        // The framing band starts after every inboard layer and is exactly the
+        // framing layer's own thickness (== the framing member's nominal depth).
+        let framing = system.framing_layer().expect("seeded framing layer");
+        let expected_depth = framing.thickness;
+        let expected_offset = system
+            .layers
+            .iter()
+            .take_while(|layer| layer.function != LayerFunction::Framing)
+            .fold(Length::ZERO, |total, layer| total + layer.thickness);
+        assert!(expected_offset > Length::ZERO, "exterior system has interior layers");
+        assert_eq!(
+            expected_depth,
+            framing.framing.as_ref().unwrap().member.nominal_depth()
+        );
+
+        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
+        assert!(!plan.members.is_empty());
+        for member in &plan.members {
+            assert_eq!(
+                member.side_offset, expected_offset,
+                "{} should sit at the framing-layer offset",
+                member.id
+            );
+            assert_eq!(
+                member.side_depth, expected_depth,
+                "{} should fill the framing-layer depth",
+                member.id
+            );
+        }
     }
 
     #[test]

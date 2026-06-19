@@ -3,7 +3,7 @@
 //! the color helpers shared with the view cube.
 
 use eframe::egui::{Color32, Pos2};
-use framer_core::{BuildingModel, Length, Wall};
+use framer_core::{BuildingModel, ConstructionSystem, Length, Material, Wall};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
 use super::geom::{OrbitProjector, Point3, point_hits_projected_quad};
@@ -43,6 +43,25 @@ impl WallSegmentSpan {
     }
 }
 
+/// One construction-layer band across the wall section: its interior/exterior
+/// face positions on the side axis (inches, interior-anchored) and fill color.
+#[derive(Clone, Copy)]
+struct LayerBand {
+    side0: f32,
+    side1: f32,
+    color: Color32,
+}
+
+impl LayerBand {
+    fn new(side0: f32, side1: f32, color: Color32) -> Self {
+        Self {
+            side0,
+            side1,
+            color,
+        }
+    }
+}
+
 impl Scene3d {
     pub(super) fn from_project(
         model: &BuildingModel,
@@ -55,11 +74,14 @@ impl Scene3d {
             return None;
         }
 
-        let wall_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+        // Fall back to the code stud depth only when a wall has no system (a
+        // degenerate model); resolved per-wall below.
+        let fallback_depth = model.code.stud_profile.nominal_depth();
         let mut builder = SceneBuilder::default();
 
         if workspace_mode.shows_generated_plan() {
             for (wall_index, wall) in model.walls.iter().enumerate() {
+                let total = wall_total_thickness(model, wall, fallback_depth);
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
                     let wall_selected = selected_wall == wall_index;
                     for member in &wall_plan.members {
@@ -71,7 +93,7 @@ impl Scene3d {
                         builder.push_member(
                             wall,
                             member,
-                            wall_depth,
+                            total,
                             wall_selected,
                             member_selected,
                         );
@@ -83,10 +105,11 @@ impl Scene3d {
         builder.finish_opaque();
 
         for (wall_index, wall) in model.walls.iter().enumerate() {
+            let total = wall_total_thickness(model, wall, fallback_depth);
             let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
-            builder.push_wall_envelope(wall, wall_index, wall_depth, wall_selected);
+            builder.push_wall_envelope(model, wall, wall_index, total, wall_selected);
             for opening in &wall.openings {
-                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), wall_depth);
+                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), total);
             }
         }
 
@@ -115,7 +138,7 @@ impl SceneBuilder {
         &mut self,
         wall: &Wall,
         member: &FrameMember,
-        wall_depth: f32,
+        total: Length,
         wall_selected: bool,
         selected: bool,
     ) {
@@ -141,7 +164,13 @@ impl SceneBuilder {
         } else {
             member_color(member.kind)
         };
-        let solid = WallCuboid::new(wall, x0, x1, -wall_depth / 2.0, wall_depth / 2.0, z0, z1);
+        // Studs/plates sit inside the framing-layer band, interior-anchored at
+        // -total/2: the solver gives the band as [side_offset, side_offset +
+        // side_depth] running interior -> exterior.
+        let interior = interior_face(total);
+        let side0 = interior + member.side_offset.inches() as f32;
+        let side1 = side0 + member.side_depth.inches() as f32;
+        let solid = WallCuboid::new(wall, x0, x1, side0, side1, z0, z1);
         self.push_cuboid(&solid, color_to_rgba(color));
         self.picks.push(PickSolid {
             click: ViewClick::Member {
@@ -155,16 +184,62 @@ impl SceneBuilder {
 
     fn push_wall_envelope(
         &mut self,
+        model: &BuildingModel,
         wall: &Wall,
         wall_index: usize,
-        wall_depth: f32,
+        total: Length,
         selected: bool,
     ) {
-        let color = if selected {
-            Color32::from_rgba_unmultiplied(92, 145, 190, 82)
-        } else {
-            Color32::from_rgba_unmultiplied(188, 179, 158, 54)
-        };
+        let interior = interior_face(total);
+        match model.system_for(wall) {
+            // Render a true layered cross-section: one cuboid per (layer x wall
+            // segment), so every layer is cut by every opening. Layers run
+            // interior -> exterior; `off` accumulates each layer's through-wall
+            // offset from the interior face.
+            Some(system) => {
+                let mut off = 0.0f32;
+                for layer in &system.layers {
+                    let side0 = interior + off;
+                    let side1 = side0 + layer.thickness.inches() as f32;
+                    off += layer.thickness.inches() as f32;
+                    let base = material_color(model, &layer.material);
+                    let color = layer_band_color(base, selected);
+                    self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
+                }
+            }
+            // Degenerate model with no resolvable system: draw a single band over
+            // the full thickness so the wall is still visible.
+            None => {
+                let base = neutral_band_color();
+                let color = layer_band_color(base, selected);
+                self.push_wall_layer(
+                    wall,
+                    LayerBand::new(interior, interior + total.inches() as f32, color),
+                );
+            }
+        }
+
+        // The pick envelope spans the full wall thickness regardless of layering.
+        let solid = WallCuboid::new(
+            wall,
+            0.0,
+            wall.length.inches() as f32,
+            interior,
+            interior + total.inches() as f32,
+            0.0,
+            wall.height.inches() as f32,
+        );
+        self.picks.push(PickSolid {
+            click: ViewClick::Wall(wall_index),
+            priority: 1,
+            corners: solid.corners,
+        });
+    }
+
+    /// Extrude one layer band across the wall face, applying the 4-segment
+    /// opening decomposition (clear span left/right + sill apron + header apron)
+    /// so the layer is cut by every opening.
+    fn push_wall_layer(&mut self, wall: &Wall, band: LayerBand) {
         let mut openings = wall.openings.iter().collect::<Vec<_>>();
         openings.sort_by_key(|opening| opening.left());
         let mut cursor = Length::ZERO;
@@ -173,8 +248,7 @@ impl SceneBuilder {
             self.push_wall_segment(
                 wall,
                 WallSegmentSpan::new(cursor, opening.left(), Length::ZERO, wall.height),
-                wall_depth,
-                color,
+                band,
             );
             if opening.sill_height > Length::ZERO {
                 self.push_wall_segment(
@@ -185,8 +259,7 @@ impl SceneBuilder {
                         Length::ZERO,
                         opening.sill_height,
                     ),
-                    wall_depth,
-                    color,
+                    band,
                 );
             }
             if opening.top() < wall.height {
@@ -198,8 +271,7 @@ impl SceneBuilder {
                         opening.top(),
                         wall.height,
                     ),
-                    wall_depth,
-                    color,
+                    band,
                 );
             }
             cursor = opening.right();
@@ -207,33 +279,11 @@ impl SceneBuilder {
         self.push_wall_segment(
             wall,
             WallSegmentSpan::new(cursor, wall.length, Length::ZERO, wall.height),
-            wall_depth,
-            color,
+            band,
         );
-
-        let solid = WallCuboid::new(
-            wall,
-            0.0,
-            wall.length.inches() as f32,
-            -wall_depth / 2.0,
-            wall_depth / 2.0,
-            0.0,
-            wall.height.inches() as f32,
-        );
-        self.picks.push(PickSolid {
-            click: ViewClick::Wall(wall_index),
-            priority: 1,
-            corners: solid.corners,
-        });
     }
 
-    fn push_wall_segment(
-        &mut self,
-        wall: &Wall,
-        span: WallSegmentSpan,
-        wall_depth: f32,
-        color: Color32,
-    ) {
+    fn push_wall_segment(&mut self, wall: &Wall, span: WallSegmentSpan, band: LayerBand) {
         if span.x1 <= span.x0 || span.z1 <= span.z0 {
             return;
         }
@@ -241,12 +291,12 @@ impl SceneBuilder {
             wall,
             span.x0.inches() as f32,
             span.x1.inches() as f32,
-            -wall_depth / 2.0,
-            wall_depth / 2.0,
+            band.side0,
+            band.side1,
             span.z0.inches() as f32,
             span.z1.inches() as f32,
         );
-        self.push_cuboid(&solid, color_to_rgba(color));
+        self.push_cuboid(&solid, color_to_rgba(band.color));
     }
 
     fn push_opening_pick(
@@ -254,7 +304,7 @@ impl SceneBuilder {
         wall: &Wall,
         wall_index: usize,
         opening_id: String,
-        wall_depth: f32,
+        total: Length,
     ) {
         let Some(opening) = wall
             .openings
@@ -263,12 +313,13 @@ impl SceneBuilder {
         else {
             return;
         };
+        let interior = interior_face(total);
         let solid = WallCuboid::new(
             wall,
             opening.left().inches() as f32,
             opening.right().inches() as f32,
-            -wall_depth / 2.0,
-            wall_depth / 2.0,
+            interior,
+            interior + total.inches() as f32,
             opening.sill_height.inches() as f32,
             opening.top().inches() as f32,
         );
@@ -450,6 +501,60 @@ pub(super) fn color_to_rgba(color: Color32) -> [f32; 4] {
         color.b() as f32 / 255.0,
         color.a() as f32 / 255.0,
     ]
+}
+
+/// Layer bands render in the transparent (non-depth-writing) pass so framing
+/// members stay visible inside the wall; this alpha keeps the layered
+/// cross-section legible while letting studs show through.
+const LAYER_BAND_ALPHA: u8 = 168;
+
+/// A material's representative appearance color as a translucent `Color32` for a
+/// layer band, so the colored cross-section reads while framing members inside
+/// the wall remain visible through it.
+pub(super) fn material_color_to_rgba(material: &Material) -> Color32 {
+    let [r, g, b] = material.color();
+    Color32::from_rgba_unmultiplied(r, g, b, LAYER_BAND_ALPHA)
+}
+
+/// The side-axis position of the wall's interior face under the interior-anchored
+/// convention: the cross-section is centered on the wall centerline so the
+/// interior face sits at `-total / 2`.
+fn interior_face(total: Length) -> f32 {
+    -(total.inches() as f32) / 2.0
+}
+
+/// The total through-wall thickness of a wall's construction system, falling back
+/// to the code stud depth for a wall with no resolvable system.
+fn wall_total_thickness(model: &BuildingModel, wall: &Wall, fallback: Length) -> Length {
+    model
+        .system_for(wall)
+        .map(ConstructionSystem::total_thickness)
+        .unwrap_or(fallback)
+}
+
+/// The fill color for a layer band: the resolved material color, brightened a
+/// touch when the wall is selected.
+fn layer_band_color(base: Color32, selected: bool) -> Color32 {
+    if selected {
+        brighten(base, 24)
+    } else {
+        base
+    }
+}
+
+/// Resolve a layer material's color, falling back to a neutral tone when the
+/// material id is dangling.
+fn material_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color32 {
+    model
+        .material(id)
+        .map(material_color_to_rgba)
+        .unwrap_or_else(neutral_band_color)
+}
+
+/// The neutral fallback band color (translucent) used when a layer or wall has no
+/// resolvable material/system.
+fn neutral_band_color() -> Color32 {
+    Color32::from_rgba_unmultiplied(188, 179, 158, LAYER_BAND_ALPHA)
 }
 
 pub(super) fn brighten(color: Color32, amount: u8) -> Color32 {
