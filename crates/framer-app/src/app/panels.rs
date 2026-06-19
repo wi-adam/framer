@@ -638,6 +638,9 @@ impl FramerApp {
     /// with Systems and Materials sub-lists. Rows select the matching library
     /// element; the footer buttons author new systems/materials.
     fn library_tree(&mut self, ui: &mut Ui) {
+        // Authoring buttons (add system/material) are only offered when design
+        // edits are allowed; selecting library rows stays allowed in Plan mode.
+        let can_edit = self.workspace_mode.allows_design_edits();
         let systems: Vec<(String, String, &'static str)> = self
             .model
             .systems
@@ -670,14 +673,16 @@ impl FramerApp {
                         self.selected = Selection::System(id.clone());
                     }
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("+ Wall system").clicked() {
-                        self.add_wall_system(true);
-                    }
-                    if ui.button("+ Interior system").clicked() {
-                        self.add_wall_system(false);
-                    }
-                });
+                if can_edit {
+                    ui.horizontal(|ui| {
+                        if ui.button("+ Wall system").clicked() {
+                            self.add_wall_system(true);
+                        }
+                        if ui.button("+ Interior system").clicked() {
+                            self.add_wall_system(false);
+                        }
+                    });
+                }
 
                 ui.separator();
                 ui.strong("Materials");
@@ -694,7 +699,7 @@ impl FramerApp {
                         self.selected = Selection::Material(id.clone());
                     }
                 }
-                if ui.button("+ Material").clicked() {
+                if can_edit && ui.button("+ Material").clicked() {
                     self.add_material();
                 }
             });
@@ -792,6 +797,14 @@ impl FramerApp {
                 .map(|system| system.r_value_milli(&self.model.materials))
         } else {
             None
+        };
+        // Whether the selected system is applied to any wall. A referenced
+        // Wall-kind system must keep `kind == Wall` (switching it to Floor/Roof
+        // would invalidate every wall that uses it), so its Kind row is locked.
+        let selected_system_referenced = if let Selection::System(id) = &selection {
+            self.model.walls.iter().any(|wall| wall.system.0 == *id)
+        } else {
+            false
         };
 
         panel_header(ui, "Inspector", selection_badge(&selection));
@@ -1207,30 +1220,51 @@ impl FramerApp {
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut system.name);
 
-                        property_row(ui, "Kind", |ui| {
-                            ComboBox::from_id_salt("system-kind")
-                                .selected_text(system.kind.label())
-                                .show_ui(ui, |ui| {
-                                    for kind in framer_core::SystemKind::ALL {
-                                        changed |= ui
-                                            .selectable_value(
-                                                &mut system.kind,
-                                                kind,
-                                                kind.label(),
-                                            )
-                                            .changed();
-                                    }
-                                });
-                        });
+                        // A wall-referenced system cannot change kind (a Floor/Roof
+                        // system on a wall is invalid), so its Kind row is a plain
+                        // read-only label; unreferenced systems keep the picker.
+                        if selected_system_referenced {
+                            summary_row(ui, "Kind", system.kind.label());
+                        } else {
+                            property_row(ui, "Kind", |ui| {
+                                ComboBox::from_id_salt("system-kind")
+                                    .selected_text(system.kind.label())
+                                    .show_ui(ui, |ui| {
+                                        for kind in framer_core::SystemKind::ALL {
+                                            changed |= ui
+                                                .selectable_value(
+                                                    &mut system.kind,
+                                                    kind,
+                                                    kind.label(),
+                                                )
+                                                .changed();
+                                        }
+                                    });
+                            });
+                        }
 
                         widgets::section(ui, "system-layers", "Layers", true, |ui| {
                             let layer_count = system.layers.len();
+                            // Wall systems require exactly one positive-thickness
+                            // framing layer; the editor uses this count to keep the
+                            // sole framing layer un-removable and block adding a
+                            // second one.
+                            let is_wall = system.kind == framer_core::SystemKind::Wall;
+                            let framing_count = system
+                                .layers
+                                .iter()
+                                .filter(|layer| {
+                                    layer.function == framer_core::LayerFunction::Framing
+                                })
+                                .count();
                             for (index, layer) in system.layers.iter_mut().enumerate() {
                                 changed |= system_layer_editor(
                                     ui,
                                     &id,
                                     index,
                                     layer_count,
+                                    is_wall,
+                                    framing_count,
                                     layer,
                                     &material_options,
                                     &material_colors,
@@ -1992,6 +2026,8 @@ fn system_layer_editor(
     system_id: &str,
     index: usize,
     layer_count: usize,
+    is_wall: bool,
+    framing_count: usize,
     layer: &mut framer_core::ConstructionLayer,
     material_options: &[(String, String)],
     material_colors: &[(String, [u8; 3])],
@@ -2001,6 +2037,11 @@ fn system_layer_editor(
     use framer_core::{BoardProfile, ElementId, FramingPattern, LayerFunction};
 
     let mut changed = false;
+    let is_framing = layer.function == LayerFunction::Framing;
+    // A Wall system must keep exactly one framing layer, so its sole framing
+    // layer cannot be removed (in addition to the general "keep one layer"
+    // guard) and the Function picker may not introduce a second one.
+    let is_only_framing = is_framing && is_wall && framing_count <= 1;
     Frame::new()
         .fill(design::active().control)
         .stroke(theme::soft_stroke())
@@ -2018,7 +2059,7 @@ fn system_layer_editor(
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
-                        .add_enabled(layer_count > 1, |ui: &mut Ui| {
+                        .add_enabled(layer_count > 1 && !is_only_framing, |ui: &mut Ui| {
                             widgets::icon_button(ui, Icon::Delete, "Remove layer")
                         })
                         .clicked()
@@ -2062,16 +2103,38 @@ fn system_layer_editor(
             });
 
             // Thickness (inches; layers are small so an inch display reads best).
-            changed |= length_drag(ui, "Thickness", &mut layer.thickness, 0.0, 48.0, "in");
+            // A framing layer's depth is the member's nominal depth, so geometry
+            // and BOM agree; show it read-only. Other layers stay editable, with a
+            // one-tick minimum so a layer can never be zero-thickness.
+            if is_framing {
+                let depth = layer
+                    .framing
+                    .as_ref()
+                    .map(|framing| framing.member)
+                    .unwrap_or(BoardProfile::TwoByFour);
+                summary_row(
+                    ui,
+                    "Thickness",
+                    format!("follows {} = {}", depth.label(), layer.thickness),
+                );
+            } else {
+                changed |= length_drag(ui, "Thickness", &mut layer.thickness, 0.0625, 48.0, "in");
+            }
 
             // Function. Switching to/from Framing keeps `framing` consistent so the
-            // model stays valid (framing.is_some() iff function == Framing).
+            // model stays valid (framing.is_some() iff function == Framing). A second
+            // Framing layer is never offered when another layer already frames the
+            // wall, so the system keeps exactly one framing layer.
+            let another_layer_is_framing = !is_framing && framing_count >= 1;
             changed |= property_row(ui, "Function", |ui| {
                 let before = layer.function;
                 ComboBox::from_id_salt(("layer-function", index))
                     .selected_text(layer.function.label())
                     .show_ui(ui, |ui| {
                         for function in LayerFunction::ALL {
+                            if function == LayerFunction::Framing && another_layer_is_framing {
+                                continue;
+                            }
                             ui.selectable_value(
                                 &mut layer.function,
                                 function,
@@ -2081,12 +2144,15 @@ fn system_layer_editor(
                     });
                 if layer.function != before {
                     if layer.function == LayerFunction::Framing && layer.framing.is_none() {
+                        let member = BoardProfile::TwoByFour;
                         layer.framing = Some(framer_core::FramingSpec {
-                            member: BoardProfile::TwoByFour,
+                            member,
                             spacing: Length::from_whole_inches(16),
                             pattern: FramingPattern::Single,
                             cavity_material: None,
                         });
+                        // Depth follows the member so geometry and BOM agree.
+                        layer.thickness = member.nominal_depth();
                     } else if layer.function != LayerFunction::Framing {
                         layer.framing = None;
                     }
@@ -2096,7 +2162,10 @@ fn system_layer_editor(
                 }
             });
 
-            // Framing detail, revealed only for the Framing layer.
+            // Framing detail, revealed only for the Framing layer. A member change
+            // also re-syncs the layer depth (applied after the `framing` borrow
+            // ends) so geometry and BOM agree.
+            let mut new_member_depth = None;
             if let Some(framing) = layer.framing.as_mut() {
                 changed |= property_row(ui, "Member", |ui| {
                     let before = framing.member;
@@ -2107,7 +2176,12 @@ fn system_layer_editor(
                                 ui.selectable_value(&mut framing.member, profile, profile.label());
                             }
                         });
-                    framing.member != before
+                    if framing.member != before {
+                        new_member_depth = Some(framing.member.nominal_depth());
+                        true
+                    } else {
+                        false
+                    }
                 });
                 changed |= length_drag(ui, "Spacing", &mut framing.spacing, 1.0, 48.0, "in");
                 changed |= property_row(ui, "Pattern", |ui| {
@@ -2146,6 +2220,10 @@ fn system_layer_editor(
                         });
                     framing.cavity_material != before
                 });
+            }
+            // Re-sync the framing layer depth to the chosen member's nominal depth.
+            if let Some(depth) = new_member_depth {
+                layer.thickness = depth;
             }
         });
     changed

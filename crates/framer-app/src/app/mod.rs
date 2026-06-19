@@ -631,6 +631,9 @@ impl FramerApp {
     /// Delete the selected construction system as one undo step, refusing when any
     /// wall still references it (deleting it would dangle `wall.system`).
     fn delete_selected_system(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         let Selection::System(id) = self.selected.clone() else {
             return;
         };
@@ -652,6 +655,9 @@ impl FramerApp {
     /// Delete the selected material as one undo step, refusing when any layer or
     /// framing cavity still references it (deleting it would dangle the reference).
     fn delete_selected_material(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         let Selection::Material(id) = self.selected.clone() else {
             return;
         };
@@ -945,6 +951,9 @@ impl FramerApp {
     /// exposure is `Exterior`); otherwise it is a drywall/framing/drywall
     /// partition. Selects the new system.
     fn add_wall_system(&mut self, exterior: bool) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         use framer_core::{
             BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
             FramingSpec, LayerFunction, SystemKind,
@@ -1023,6 +1032,9 @@ impl FramerApp {
     /// Add a new project material as one undo step, with a neutral grey solid
     /// color and no extra properties. Selects the new material.
     fn add_material(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         self.edit("Add material", |app| {
             let (id, index) = next_material_id(&app.model);
             app.model.materials.push(framer_core::Material::solid_color(
@@ -1038,6 +1050,9 @@ impl FramerApp {
     /// layer is a non-framing `Other` 1" stub referencing the first material, kept
     /// minimal and valid; the system inspector edits it inline afterwards.
     fn add_layer(&mut self, system_id: &str) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         let system_id = system_id.to_owned();
         self.edit("Add layer", |app| {
             let material = app
@@ -1065,6 +1080,9 @@ impl FramerApp {
     /// undo step. `index` is the layer's current position; `dir` is -1 (up /
     /// toward interior) or +1 (down / toward exterior). Out-of-range moves no-op.
     fn move_layer(&mut self, system_id: &str, index: usize, dir: isize) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         let system_id = system_id.to_owned();
         self.edit("Reorder layer", |app| {
             if let Some(system) = app
@@ -1086,6 +1104,9 @@ impl FramerApp {
     /// Remove the layer at `index` from the system with id `system_id` as one undo
     /// step. The last remaining layer is kept (an empty system fails validation).
     fn remove_layer(&mut self, system_id: &str, index: usize) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
         let system_id = system_id.to_owned();
         self.edit("Remove layer", |app| {
             if let Some(system) = app
