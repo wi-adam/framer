@@ -88,6 +88,7 @@ format + the agent editing contract).
 This is deliberately lightweight. Possible later additions, none required today:
 
 - `/spec` and `/goal` slash-commands/skills that scaffold a spec/plan from the templates.
-- A CI doc-lint that checks internal links and flags specs whose **Last reviewed** is stale.
+- A CI lint that flags specs whose **Last reviewed** is stale. *(Internal markdown link
+  checking is already enforced — see [build-and-ci.md](specs/build-and-ci.md).)*
 - Migrating the remaining historical `docs/plans/` research notes under per-feature spec
   folders if the spec set grows large.

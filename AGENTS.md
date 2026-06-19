@@ -80,6 +80,8 @@ Feature-specific checks when relevant:
   (skips without a GPU adapter; CI runs it on macOS Metal + Linux lavapipe).
 - Golden render regen (intentional only): `UPDATE_GOLDEN=1 cargo test -p framer-render --test golden`.
 - Editing example `.framer` files still requires `cargo test --workspace` (round-trip fixtures).
+- Editing docs/markdown: `python3 scripts/check-markdown-links.py` (relative-link check; CI's
+  `docs` job runs it on every PR).
 
 Definition of Done: [docs/vision.md](docs/vision.md#definition-of-done).
 

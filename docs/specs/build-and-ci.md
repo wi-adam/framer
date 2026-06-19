@@ -37,6 +37,10 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 - **Fast feedback.** `lint` runs first; `test` and `gpu` depend on it. In-progress runs on a
   non-`main` ref are cancelled when superseded; `main` runs always finish so they populate the
   shared build cache (`Swatinem/rust-cache`, `cache-on-failure: true`).
+- **Docs don't rot.** A `docs` job runs `scripts/check-markdown-links.py` and fails the build
+  if any relative link in tracked markdown points at a missing file (local links only;
+  external URLs are not fetched). This is the mechanized version of a real failure mode — a
+  link broke during the docs reorg when a spec moved between `docs/specs/` and `docs/plans/`.
 
 ## Decisions (locked)
 
@@ -58,9 +62,12 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 ## Architecture (grounded in the codebase)
 
-- CI: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — three jobs: `lint`
+- CI: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — four jobs: `lint`
   (rustfmt + clippy, Linux), `test` (build + test matrix on Linux/macOS/Windows), `gpu`
-  (lavapipe parity, Linux). Triggers: push to `main`, pull requests, `workflow_dispatch`.
+  (lavapipe parity, Linux), and `docs` (markdown link check, no Rust toolchain). Triggers:
+  push to `main`, pull requests, `workflow_dispatch`.
+- Markdown link check: [`scripts/check-markdown-links.py`](../../scripts/check-markdown-links.py)
+  (stdlib-only; runnable locally with the same command CI uses).
 - Toolchain: [`rust-toolchain.toml`](../../rust-toolchain.toml).
 - Workspace: [`Cargo.toml`](../../Cargo.toml) (members, edition 2024, resolver 3, MSRV 1.92,
   pinned `[workspace.dependencies]`).
@@ -82,7 +89,9 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 - Release packaging and signing of distributable artifacts (that's **G-010 Packaging**; this
   spec covers verification, not distribution).
-- Coverage reporting, benchmark tracking/regression gates, and a CI markdown doc-link/spec-
-  staleness lint (noted as possible future work in
-  [spec-driven-development.md](../spec-driven-development.md#future-work-not-built-now)).
+- Coverage reporting, benchmark tracking/regression gates, and a spec-staleness lint (flagging
+  specs whose **Last reviewed** is old) — noted as possible future work in
+  [spec-driven-development.md](../spec-driven-development.md#future-work-not-built-now).
+  Markdown link checking *is* enforced (see Requirements); external-URL liveness is
+  deliberately not, to keep CI deterministic.
 - A hardware-GPU CI runner (lavapipe + macOS Metal cover the parity need today).

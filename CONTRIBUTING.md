@@ -56,6 +56,7 @@ Feature-specific checks:
 | Renderer output intentionally | `UPDATE_GOLDEN=1 cargo test -p framer-render --test golden` (commits the new reference) |
 | The `.framer` schema | bump `PROJECT_SCHEMA_VERSION`, update the three `examples/projects/*.framer`, add/adjust round-trip tests, update [docs/project-files.md](docs/project-files.md) |
 | An example `.framer` file | `cargo test --workspace` (fixtures are byte-checked against canonical serialization) |
+| Any markdown / docs | `python3 scripts/check-markdown-links.py` (relative-link check; CI runs it too) |
 
 ## How we work: spec-driven
 
