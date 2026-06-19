@@ -64,6 +64,7 @@ pub(super) struct PlanView<'a> {
 
 // === extracted plan block appended below; draw_project_plan signature reshaped ===
 
+/// A draggable square handle; grows and thickens its outline when hovered.
 fn draw_wall_handle(painter: &egui::Painter, point: Pos2, hovered: bool) {
     let size = if hovered { 11.0 } else { 8.0 };
     let handle = Rect::from_center_size(point, Vec2::splat(size));
