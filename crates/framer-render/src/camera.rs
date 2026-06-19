@@ -176,9 +176,36 @@ mod tests {
         // leaving the pivot and the field of view untouched. A 0.5× dolly halves
         // the eye→center distance; 2× doubles it. (Contrast telephoto zoom, which
         // moves the eye not at all — see `zoom_narrows_the_fov...`.)
-        let base = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 1.0);
-        let close = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 0.5);
-        let far = Camera::orbit(Vec3::new(10.0, 20.0, 5.0), 8.0, -0.785, 0.55, 1.0, 1.6, 36.0, 2.0);
+        let base = Camera::orbit(
+            Vec3::new(10.0, 20.0, 5.0),
+            8.0,
+            -0.785,
+            0.55,
+            1.0,
+            1.6,
+            36.0,
+            1.0,
+        );
+        let close = Camera::orbit(
+            Vec3::new(10.0, 20.0, 5.0),
+            8.0,
+            -0.785,
+            0.55,
+            1.0,
+            1.6,
+            36.0,
+            0.5,
+        );
+        let far = Camera::orbit(
+            Vec3::new(10.0, 20.0, 5.0),
+            8.0,
+            -0.785,
+            0.55,
+            1.0,
+            1.6,
+            36.0,
+            2.0,
+        );
 
         // Pivot and FOV are invariant under dolly.
         assert_eq!(base.center, close.center);

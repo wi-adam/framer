@@ -140,7 +140,8 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
         return held;
     }
 
-    if let Some(point) = snap_to_endpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
+    if let Some(point) =
+        snap_to_endpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
     {
         return SnapResult {
             point,
@@ -148,7 +149,8 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
             guides: NO_GUIDES,
         };
     }
-    if let Some(point) = snap_to_midpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
+    if let Some(point) =
+        snap_to_midpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
     {
         return SnapResult {
             point,
@@ -190,20 +192,20 @@ fn hold_previous(ctx: &SnapContext, previous: &SnapResult) -> Option<SnapResult>
                 None => ctx.raw,
             };
             match guide.axis {
-                GuideAxis::Vertical => ((base.x - guide.at).ticks().abs() <= release).then(|| {
-                    SnapResult {
+                GuideAxis::Vertical => {
+                    ((base.x - guide.at).ticks().abs() <= release).then(|| SnapResult {
                         point: Point2::new(guide.at, base.y),
                         kind: SnapKind::Alignment,
                         guides: [Some(*guide), None],
-                    }
-                }),
-                GuideAxis::Horizontal => ((base.y - guide.at).ticks().abs() <= release).then(|| {
-                    SnapResult {
+                    })
+                }
+                GuideAxis::Horizontal => {
+                    ((base.y - guide.at).ticks().abs() <= release).then(|| SnapResult {
                         point: Point2::new(base.x, guide.at),
                         kind: SnapKind::Alignment,
                         guides: [None, Some(*guide)],
-                    }
-                }),
+                    })
+                }
             }
         }
         SnapKind::Grid | SnapKind::Free => None,
@@ -1033,7 +1035,9 @@ mod tests {
         model
             .walls
             .push(wall_from("a", p(100.0, 0.0), p(100.0, 40.0)));
-        model.walls.push(wall_from("b", p(0.0, 80.0), p(40.0, 80.0)));
+        model
+            .walls
+            .push(wall_from("b", p(0.0, 80.0), p(40.0, 80.0)));
 
         // Unanchored cursor near (98,82) aligns x→100 and y→80 simultaneously.
         let result = resolve_snap(&ctx(&model, p(98.0, 82.0)));

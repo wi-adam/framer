@@ -199,7 +199,12 @@ fn dispatch_spp(frame: u32, pixels: u64, moving: bool) -> u32 {
 /// Hashes everything that, if changed, invalidates progressive accumulation:
 /// geometry, the full camera (orbit + pan + dolly + zoom), and the render size.
 /// Shared by the GPU path and the CPU fallback so they reset identically.
-pub(crate) fn accumulation_key(geom_key: u64, opts: &RenderOptions, width: u32, height: u32) -> u64 {
+pub(crate) fn accumulation_key(
+    geom_key: u64,
+    opts: &RenderOptions,
+    width: u32,
+    height: u32,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     geom_key.hash(&mut hasher);
@@ -231,9 +236,13 @@ pub(crate) fn paint(
     target_format: wgpu::TextureFormat,
 ) -> bool {
     state.sync(model, opts, width, height);
-    let Some(callback) =
-        state.callback(width, height, target_format.is_srgb(), moving, target_format)
-    else {
+    let Some(callback) = state.callback(
+        width,
+        height,
+        target_format.is_srgb(),
+        moving,
+        target_format,
+    ) else {
         return false;
     };
     painter.add(egui_wgpu::Callback::new_paint_callback(drawing, callback));
@@ -486,8 +495,13 @@ impl PtResources {
         let color_b = make_pixel_buffer(device, "framer_pt_color_b", width, height);
         let du_bufs = make_denoise_uniforms(device, width, height);
 
-        let frame_bg =
-            make_frame_bind_group(device, &compute_pipeline, &uniform_buf, &accum_buf, &gbuffer);
+        let frame_bg = make_frame_bind_group(
+            device,
+            &compute_pipeline,
+            &uniform_buf,
+            &accum_buf,
+            &gbuffer,
+        );
         let blit_bg =
             make_blit_bind_group(device, &blit_pipeline, &uniform_buf, &accum_buf, &accum_buf);
         let blit_bg_denoised =
@@ -828,13 +842,18 @@ mod tests {
             pan: Vec3::new(0.1, -0.2, 0.05),
             ..base
         };
-        let dollied = RenderOptions {
-            dolly: 0.5,
-            ..base
-        };
+        let dollied = RenderOptions { dolly: 0.5, ..base };
 
-        assert_ne!(base_key, key(&panned), "pan must invalidate the accumulator");
-        assert_ne!(base_key, key(&dollied), "dolly must invalidate the accumulator");
+        assert_ne!(
+            base_key,
+            key(&panned),
+            "pan must invalidate the accumulator"
+        );
+        assert_ne!(
+            base_key,
+            key(&dollied),
+            "dolly must invalidate the accumulator"
+        );
     }
 
     /// The original budget-bounded burst, kept here as the reference the still
@@ -883,7 +902,10 @@ mod tests {
         for &pixels in &[64u64 * 64, 250_000, 391_680, 1_000_000, 16_000_000] {
             for frame in [0u32, 1, 31, 255, 256, 1000] {
                 let spp = dispatch_spp(frame, pixels, true);
-                assert!(spp >= 1, "spp must stay >= 1 (pixels={pixels} frame={frame})");
+                assert!(
+                    spp >= 1,
+                    "spp must stay >= 1 (pixels={pixels} frame={frame})"
+                );
                 assert!(
                     spp <= MOTION_SPP_CAP,
                     "moving spp must not exceed MOTION_SPP_CAP (pixels={pixels} frame={frame})"
