@@ -7,23 +7,49 @@ use framer_core::{BuildingModel, ElementId, Length, Point2, Wall, WallJoin, Wall
 use super::model_edit::maybe_snap;
 
 /// What kind of geometry a resolved snap landed on. Drives the on-screen
-/// indicator and whether committing the point forms a wall join. (Slice 2 adds
-/// `Intersection` and `Alignment` once inference guides exist.)
+/// indicator and whether committing the point forms a wall join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SnapKind {
     Endpoint,
     Midpoint,
+    /// Crossing of two alignment guides — the cursor is level with one source and
+    /// in line with another.
+    Intersection,
     OnWall,
+    /// Cursor shares an axis with an existing endpoint/midpoint (extension guide).
+    Alignment,
     Grid,
     Free,
 }
 
-/// The outcome of resolving a raw cursor point: the committed point and what it
-/// snapped to.
+/// Orientation of an inference guide. A `Vertical` guide holds a constant x
+/// (`at`); a `Horizontal` guide holds a constant y.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuideAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// A dashed inference line shown while snapping, anchored at a `source` point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Guide {
+    pub(super) axis: GuideAxis,
+    /// The constant coordinate of the guide (x for `Vertical`, y for `Horizontal`).
+    pub(super) at: Length,
+    /// The existing point the guide extends from (its tick is drawn there).
+    pub(super) source: Point2,
+}
+
+/// At most one vertical (x) and one horizontal (y) guide are ever live at once.
+pub(super) const NO_GUIDES: [Option<Guide>; 2] = [None, None];
+
+/// The outcome of resolving a raw cursor point: the committed point, what it
+/// snapped to, and any inference guides to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SnapResult {
     pub(super) point: Point2,
     pub(super) kind: SnapKind,
+    pub(super) guides: [Option<Guide>; 2],
 }
 
 /// Everything [`resolve_snap`] needs to turn a raw cursor point into a snapped
@@ -120,6 +146,7 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
         return SnapResult {
             point,
             kind: SnapKind::Endpoint,
+            guides: NO_GUIDES,
         };
     }
     if let Some(point) = snap_to_midpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
@@ -127,6 +154,7 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
         return SnapResult {
             point,
             kind: SnapKind::Midpoint,
+            guides: NO_GUIDES,
         };
     }
     if let Some(point) =
@@ -135,7 +163,11 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
         return SnapResult {
             point,
             kind: SnapKind::OnWall,
+            guides: NO_GUIDES,
         };
+    }
+    if let Some(result) = snap_to_alignment(ctx) {
+        return result;
     }
 
     free_result(ctx)
@@ -146,7 +178,11 @@ pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
 fn is_sticky_kind(kind: SnapKind) -> bool {
     matches!(
         kind,
-        SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall
+        SnapKind::Endpoint
+            | SnapKind::Midpoint
+            | SnapKind::OnWall
+            | SnapKind::Intersection
+            | SnapKind::Alignment
     )
 }
 
@@ -162,7 +198,102 @@ fn free_result(ctx: &SnapContext) -> SnapResult {
     } else {
         SnapKind::Free
     };
-    SnapResult { point, kind }
+    SnapResult {
+        point,
+        kind,
+        guides: NO_GUIDES,
+    }
+}
+
+/// Snap a *free* axis (one not pinned by ortho-lock) onto an existing
+/// endpoint/midpoint's coordinate, surfacing an extension guide. When both axes
+/// are free and each finds a source, the result is their `Intersection`.
+fn snap_to_alignment(ctx: &SnapContext) -> Option<SnapResult> {
+    let base = match ctx.anchor {
+        Some(anchor) => ortho_lock(anchor, ctx.raw),
+        None => ctx.raw,
+    };
+    // With an anchor the wall is ortho-locked: the axis equal to the anchor is
+    // pinned, so only the *other* axis may snap to an alignment source.
+    let (free_x, free_y) = match ctx.anchor {
+        Some(anchor) => (base.y == anchor.y, base.x == anchor.x),
+        None => (true, true),
+    };
+
+    let sources = alignment_sources(ctx);
+    let vguide = free_x
+        .then(|| nearest_source_on_axis(&sources, GuideAxis::Vertical, base.x, ctx.tolerance))
+        .flatten();
+    let hguide = free_y
+        .then(|| nearest_source_on_axis(&sources, GuideAxis::Horizontal, base.y, ctx.tolerance))
+        .flatten();
+
+    match (vguide, hguide) {
+        (Some(v), Some(h)) => Some(SnapResult {
+            point: Point2::new(v.at, h.at),
+            kind: SnapKind::Intersection,
+            guides: [Some(v), Some(h)],
+        }),
+        (Some(v), None) => Some(SnapResult {
+            point: Point2::new(v.at, base.y),
+            kind: SnapKind::Alignment,
+            guides: [Some(v), None],
+        }),
+        (None, Some(h)) => Some(SnapResult {
+            point: Point2::new(base.x, h.at),
+            kind: SnapKind::Alignment,
+            guides: [None, Some(h)],
+        }),
+        (None, None) => None,
+    }
+}
+
+/// Endpoints and midpoints of every non-excluded wall — the points the cursor can
+/// align to. The anchor itself is skipped (aligning to it is redundant with
+/// ortho-lock).
+fn alignment_sources(ctx: &SnapContext) -> Vec<Point2> {
+    let mut sources = Vec::new();
+    for wall in &ctx.model.walls {
+        if wall.start == wall.end || ctx.exclude.contains(&wall.id) {
+            continue;
+        }
+        for point in [wall.start, wall.end, midpoint(wall.start, wall.end)] {
+            if Some(point) == ctx.anchor {
+                continue;
+            }
+            sources.push(point);
+        }
+    }
+    sources
+}
+
+/// The nearest source whose coordinate on `axis` is within `tolerance` of
+/// `target`, returned as a guide. `Vertical` compares x; `Horizontal` compares y.
+fn nearest_source_on_axis(
+    sources: &[Point2],
+    axis: GuideAxis,
+    target: Length,
+    tolerance: Length,
+) -> Option<Guide> {
+    let tol = tolerance.ticks();
+    let mut best: Option<(i64, Point2)> = None;
+    for &source in sources {
+        let coord = match axis {
+            GuideAxis::Vertical => source.x,
+            GuideAxis::Horizontal => source.y,
+        };
+        let distance = (coord - target).ticks().abs();
+        if distance <= tol && best.is_none_or(|(best_d, _)| distance < best_d) {
+            best = Some((distance, source));
+        }
+    }
+    best.map(|(_, source)| {
+        let at = match axis {
+            GuideAxis::Vertical => source.x,
+            GuideAxis::Horizontal => source.y,
+        };
+        Guide { axis, at, source }
+    })
 }
 
 /// Whether `candidate` keeps the wall axis-aligned relative to `start` (shares an
@@ -784,6 +915,7 @@ mod tests {
         context.previous = Some(SnapResult {
             point: p(120.0, 0.0),
             kind: SnapKind::Endpoint,
+            guides: NO_GUIDES,
         });
 
         let result = resolve_snap(&context);
@@ -805,6 +937,7 @@ mod tests {
         context.previous = Some(SnapResult {
             point: p(120.0, 0.0),
             kind: SnapKind::Endpoint,
+            guides: NO_GUIDES,
         });
 
         let result = resolve_snap(&context);
@@ -812,5 +945,64 @@ mod tests {
         // Released, and nothing fresh is within acquire range → free passthrough.
         assert_eq!(result.kind, SnapKind::Free);
         assert_eq!(result.point, p(108.0, 9.0));
+    }
+
+    #[test]
+    fn resolve_snap_aligns_free_axis_to_source_with_guide() {
+        let mut model = empty_model();
+        // A wall whose endpoints sit at y=50, far from where we're drawing.
+        model
+            .walls
+            .push(wall_from("wall-1", p(100.0, 50.0), p(200.0, 50.0)));
+
+        // Drawing a vertical wall up from (0,0); the cursor near (2,48) ortho-locks
+        // to x=0, and its free y aligns to the existing endpoints' y=50.
+        let mut context = ctx(&model, p(2.0, 48.0));
+        context.anchor = Some(p(0.0, 0.0));
+
+        let result = resolve_snap(&context);
+
+        assert_eq!(result.kind, SnapKind::Alignment);
+        assert_eq!(result.point, p(0.0, 50.0));
+        assert!(result.guides.iter().flatten().any(|guide| {
+            guide.axis == GuideAxis::Horizontal && guide.at == Length::from_inches(50.0)
+        }));
+    }
+
+    #[test]
+    fn resolve_snap_intersects_two_guides() {
+        let mut model = empty_model();
+        // Source A contributes a vertical guide at x=100; source B a horizontal
+        // guide at y=80.
+        model
+            .walls
+            .push(wall_from("a", p(100.0, 0.0), p(100.0, 40.0)));
+        model.walls.push(wall_from("b", p(0.0, 80.0), p(40.0, 80.0)));
+
+        // Unanchored cursor near (98,82) aligns x→100 and y→80 simultaneously.
+        let result = resolve_snap(&ctx(&model, p(98.0, 82.0)));
+
+        assert_eq!(result.kind, SnapKind::Intersection);
+        assert_eq!(result.point, p(100.0, 80.0));
+        let live: Vec<_> = result.guides.iter().flatten().collect();
+        assert_eq!(live.len(), 2);
+    }
+
+    #[test]
+    fn resolve_snap_endpoint_beats_alignment() {
+        let mut model = empty_model();
+        // An endpoint right under the cursor, plus another wall sharing its y.
+        model
+            .walls
+            .push(wall_from("near", p(10.0, 10.0), p(10.0, 60.0)));
+        model
+            .walls
+            .push(wall_from("aligned", p(80.0, 10.0), p(140.0, 10.0)));
+
+        // (12,11) is within acquire of endpoint (10,10); alignment must not win.
+        let result = resolve_snap(&ctx(&model, p(12.0, 11.0)));
+
+        assert_eq!(result.kind, SnapKind::Endpoint);
+        assert_eq!(result.point, p(10.0, 10.0));
     }
 }

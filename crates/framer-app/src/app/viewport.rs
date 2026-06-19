@@ -19,7 +19,7 @@ use framer_render::math::Vec3;
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
-use super::draw_wall::{SnapContext, SnapKind, SnapResult, resolve_snap};
+use super::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
 use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
@@ -1629,11 +1629,49 @@ fn draw_wall_overlay(
         }
     }
 
+    // Inference guides, drawn under the indicator so the marker stays legible.
+    let guide_stroke = Stroke::new(1.0, theme::active_blue_soft());
+    for guide in resolved.guides.iter().flatten() {
+        let (a, b) = match guide.axis {
+            GuideAxis::Vertical => {
+                let x = plan_point(Point2::new(guide.at, guide.source.y), bounds, drawing, camera).x;
+                (Pos2::new(x, drawing.top()), Pos2::new(x, drawing.bottom()))
+            }
+            GuideAxis::Horizontal => {
+                let y = plan_point(Point2::new(guide.source.x, guide.at), bounds, drawing, camera).y;
+                (Pos2::new(drawing.left(), y), Pos2::new(drawing.right(), y))
+            }
+        };
+        draw_dashed_line(painter, a, b, guide_stroke);
+        let source_screen = plan_point(guide.source, bounds, drawing, camera);
+        painter.circle_stroke(source_screen, 3.0, guide_stroke);
+    }
+
     draw_snap_indicator(painter, candidate, resolved.kind, suspend);
 
     response.clicked().then_some(ViewClick::DrawWallPoint {
         point: resolved.point,
     })
+}
+
+/// Draw a dashed line `a`→`b`. egui has no stable dashed primitive we rely on
+/// here, so we emit short segments with gaps.
+fn draw_dashed_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
+    const DASH: f32 = 6.0;
+    const GAP: f32 = 4.0;
+    let span = b - a;
+    let len = span.length();
+    if len < 1.0 {
+        return;
+    }
+    let dir = span / len;
+    let mut t = 0.0;
+    while t < len {
+        let start = a + dir * t;
+        let end = a + dir * (t + DASH).min(len);
+        painter.line_segment([start, end], stroke);
+        t += DASH + GAP;
+    }
 }
 
 /// Draw a snap marker whose glyph identifies *what* the cursor snapped to, so the
@@ -1688,6 +1726,22 @@ fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspen
             painter.line_segment([bottom, left], stroke);
             painter.line_segment([left, top], stroke);
         }
+        SnapKind::Intersection => {
+            // Crossing of two guides — an X.
+            let r = 6.0;
+            painter.line_segment(
+                [Pos2::new(at.x - r, at.y - r), Pos2::new(at.x + r, at.y + r)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(at.x - r, at.y + r), Pos2::new(at.x + r, at.y - r)],
+                stroke,
+            );
+        }
+        SnapKind::Alignment => {
+            // Hollow circle; the dashed guide line conveys the alignment.
+            painter.circle_stroke(at, 4.5, stroke);
+        }
         SnapKind::Grid => {
             // Small plus.
             let r = 5.0;
@@ -1716,7 +1770,8 @@ fn snap_kind_label(kind: SnapKind) -> Option<&'static str> {
         SnapKind::Endpoint => Some("end"),
         SnapKind::Midpoint => Some("mid"),
         SnapKind::OnWall => Some("wall"),
-        SnapKind::Grid | SnapKind::Free => None,
+        SnapKind::Alignment => Some("align"),
+        SnapKind::Intersection | SnapKind::Grid | SnapKind::Free => None,
     }
 }
 
