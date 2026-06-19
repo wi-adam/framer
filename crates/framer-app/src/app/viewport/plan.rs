@@ -22,7 +22,7 @@ use super::{DrawWallPlanInput, theme};
 use crate::app::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
 use crate::app::labels::join_kind_label;
 use crate::app::model_edit::WallEditHandle;
-use crate::app::{Selection, ViewClick};
+use crate::app::{Selection, ViewClick, ViewLayers, WallDisplay};
 
 /// Screen-pixel radius within which the draw tool *acquires* a snap. Converted to
 /// model units per frame so the feel is constant across zoom levels.
@@ -58,7 +58,7 @@ pub(super) struct PlanView<'a> {
     pub(super) model: &'a BuildingModel,
     pub(super) selected_wall: usize,
     pub(super) selection: &'a Selection,
-    pub(super) show_grid: bool,
+    pub(super) layers: ViewLayers,
     pub(super) draw_tool: &'a DrawWallPlanInput,
     pub(super) room_tool_active: bool,
     pub(super) active_wall_drag: Option<(usize, WallEditHandle)>,
@@ -320,6 +320,33 @@ fn draw_wall_layers(
     }
 }
 
+/// Draw the wall's full plan thickness as two parallel DASHED face lines (a
+/// "width" outline) with no color fill — the [`WallDisplay::Width`] mode. The
+/// faces are the wall's long edges at `±half` thickness on the side axis;
+/// `band_quad` projects them so they scale with zoom. Uses `wall_plan_thickness`
+/// so it works with or without a resolved construction system. The centerline,
+/// handles, and hit-test are drawn over this by the caller, unchanged. No end
+/// caps: walls butt at joins, so capping each independently would double-draw.
+fn draw_wall_width(
+    painter: &egui::Painter,
+    model: &BuildingModel,
+    wall: &Wall,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) {
+    let half = wall_plan_thickness(model, wall) / 2.0;
+    let basis = PlanWallBasis::new(wall);
+    // band_quad winds [start@-half, end@-half, end@+half, start@+half], so the two
+    // long faces are [0,1] (minus side) and [3,2] (plus side).
+    let quad = band_quad(
+        &basis, wall.start, wall.end, -half, half, bounds, drawing, camera,
+    );
+    let stroke = Stroke::new(1.0, theme::framing_line());
+    draw_dashed_line(painter, quad[0], quad[1], stroke);
+    draw_dashed_line(painter, quad[3], quad[2], stroke);
+}
+
 /// Widen an opening's gap to the wall's full thickness: a white band quad over the
 /// opening span, drawn on top of the layer bands so the cut reads at any zoom.
 #[allow(clippy::too_many_arguments)]
@@ -366,7 +393,7 @@ pub(super) fn draw_project_plan(
         model,
         selected_wall,
         selection,
-        show_grid,
+        layers,
         draw_tool,
         room_tool_active,
         active_wall_drag,
@@ -381,7 +408,7 @@ pub(super) fn draw_project_plan(
     // except while a wall handle is being dragged (so the two don't fight).
     apply_view_2d_input(ui, &response, drawing, camera, active_wall_drag.is_none());
     draw_drafting_rulers(&painter, rect, drawing);
-    if show_grid {
+    if layers.grid {
         draw_drafting_grid(&painter, drawing);
     }
     draw_view_border(&painter, drawing);
@@ -434,15 +461,24 @@ pub(super) fn draw_project_plan(
         .flatten()
         .map(|(_, handle)| handle);
 
-    // Which side of each wall faces the room interior, derived from topology once
-    // per frame so the layered fill lays out interior -> exterior independent of
-    // wall winding (matching the 3D renderer).
-    let interior_sides = framer_core::wall_interior_sides(model);
+    // Which side of each wall faces the room interior, derived from topology so the
+    // layered fill lays out interior -> exterior independent of wall winding
+    // (matching the 3D renderer). Only the `Full` wall mode reads this, and the
+    // derivation is a non-trivial graph pass, so compute it once per frame only when
+    // that mode is active (mirroring the room-boundary guard below).
+    let interior_sides = matches!(layers.wall_display, WallDisplay::Full)
+        .then(|| framer_core::wall_interior_sides(model));
 
     // Room fills + labels, drawn under the walls. Boundaries are derived from the
     // wall loop each frame (never stored); resolve them all in one graph pass.
+    // When the Rooms layer is hidden, skip the graph pass entirely — the empty
+    // boundary list makes the draw/pick loop below a no-op.
     let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
-    let room_boundaries = framer_core::room_boundaries(model, &room_seeds);
+    let room_boundaries = if layers.rooms {
+        framer_core::room_boundaries(model, &room_seeds)
+    } else {
+        Vec::new()
+    };
     for (room, boundary) in model.rooms.iter().zip(&room_boundaries) {
         let Some(boundary) = boundary else {
             continue;
@@ -484,16 +520,18 @@ pub(super) fn draw_project_plan(
         }
     }
 
-    for join in &model.wall_joins {
-        let point = plan_point(join.point, bounds, drawing, camera);
-        painter.circle_filled(point, 4.5, theme::active_blue());
-        painter.text(
-            point + Vec2::new(6.0, -7.0),
-            Align2::LEFT_CENTER,
-            join_kind_label(join.kind),
-            FontId::proportional(10.0),
-            theme::active_blue(),
-        );
+    if layers.joins {
+        for join in &model.wall_joins {
+            let point = plan_point(join.point, bounds, drawing, camera);
+            painter.circle_filled(point, 4.5, theme::active_blue());
+            painter.text(
+                point + Vec2::new(6.0, -7.0),
+                Align2::LEFT_CENTER,
+                join_kind_label(join.kind),
+                FontId::proportional(10.0),
+                theme::active_blue(),
+            );
+        }
     }
 
     for (index, wall) in model.walls.iter().enumerate() {
@@ -503,11 +541,23 @@ pub(super) fn draw_project_plan(
             pointer.is_some_and(|position| distance_to_segment(position, start, end) < 8.0);
         over_element |= hovered;
         let selected = selected_wall == index && matches!(selection, Selection::Wall);
-        // True-thickness layered fill (the wall body). The centerline stroke is
-        // drawn on top only to emphasize selection/hover; hit-testing, handles,
-        // and snapping all stay on the centerline below.
-        let sign = interior_sign(&interior_sides, &wall.id);
-        draw_wall_layers(&painter, model, wall, sign, bounds, drawing, camera);
+        // The wall body, per display mode. The centerline stroke is drawn on top
+        // in every mode (hit-testing, handles, and snapping all stay on the
+        // centerline below), so selection/hover read regardless of mode.
+        //   Outline -> centerline only (no body)
+        //   Width   -> two dashed face lines at the full thickness
+        //   Full    -> true-thickness colored construction-layer bands
+        match layers.wall_display {
+            WallDisplay::Outline => {}
+            WallDisplay::Width => draw_wall_width(&painter, model, wall, bounds, drawing, camera),
+            WallDisplay::Full => {
+                // `interior_sides` is `Some` in Full mode (guarded above).
+                if let Some(interior_sides) = &interior_sides {
+                    let sign = interior_sign(interior_sides, &wall.id);
+                    draw_wall_layers(&painter, model, wall, sign, bounds, drawing, camera);
+                }
+            }
+        }
         let stroke = if selected {
             Stroke::new(2.5, theme::active_blue())
         } else if hovered {
@@ -523,14 +573,16 @@ pub(super) fn draw_project_plan(
             clicked_wall = Some(ViewClick::Wall(index));
         }
 
-        let midpoint = Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
-        painter.text(
-            midpoint + Vec2::new(5.0, -10.0),
-            Align2::LEFT_CENTER,
-            &wall.name,
-            FontId::proportional(12.0),
-            theme::framing_line_dark(),
-        );
+        if layers.wall_labels {
+            let midpoint = Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+            painter.text(
+                midpoint + Vec2::new(5.0, -10.0),
+                Align2::LEFT_CENTER,
+                &wall.name,
+                FontId::proportional(12.0),
+                theme::framing_line_dark(),
+            );
+        }
 
         for opening in &wall.openings {
             let left_model = wall.point_at_local_x(opening.left());
@@ -550,16 +602,21 @@ pub(super) fn draw_project_plan(
             }
             // Widen the gap to the wall's full thickness: a white band quad cuts
             // through the layered fill, then a thin line marks the opening run.
-            draw_opening_gap(
-                &painter,
-                model,
-                wall,
-                left_model,
-                right_model,
-                bounds,
-                drawing,
-                camera,
-            );
+            // Only `Full` has a fill to cut — in Outline/Width the white band
+            // would just erase the grid, so skip it and let the marker line carry
+            // the opening (drawn in every mode below).
+            if layers.wall_display == WallDisplay::Full {
+                draw_opening_gap(
+                    &painter,
+                    model,
+                    wall,
+                    left_model,
+                    right_model,
+                    bounds,
+                    drawing,
+                    camera,
+                );
+            }
             painter.line_segment(
                 [left, right],
                 Stroke::new(

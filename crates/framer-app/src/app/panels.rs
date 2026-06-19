@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use eframe::egui::{
-    self, Align, Color32, ComboBox, Frame, Layout, Margin, Response, RichText, ScrollArea, Stroke,
-    Ui, Vec2,
+    self, Align, Color32, ComboBox, Frame, Layout, Margin, PopupCloseBehavior, Response, RichText,
+    ScrollArea, Stroke, Ui, Vec2,
+    containers::menu::{MenuButton, MenuConfig},
 };
 use framer_core::{
     DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
@@ -18,7 +19,10 @@ use super::labels::{
 use super::model_edit::{
     opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
-use super::{DrawWallToolState, FramerApp, Selection, ViewportMode, WorkspaceMode, design, theme};
+use super::{
+    DrawWallToolState, FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design,
+    theme,
+};
 
 impl FramerApp {
     pub(super) fn app_header(&mut self, ui: &mut Ui) {
@@ -1463,7 +1467,53 @@ impl FramerApp {
                 );
                 toolbar_divider(ui);
                 widgets::toggle_switch(ui, &mut self.ortho, "Ortho");
-                widgets::toggle_switch(ui, &mut self.grid, "Grid");
+                // Layers popover: the wall display mode (shared by Plan + 3D) plus
+                // per-layer visibility toggles. `CloseOnClickOutside` keeps it open
+                // while the user flips several layers — it dismisses on an
+                // outside-click or Escape, not on each toggle.
+                let (layers_button, _) =
+                    MenuButton::new(design::icon_text(Icon::Eye, 14.0).color(t.text_secondary))
+                        .config(
+                            MenuConfig::new()
+                                .close_behavior(PopupCloseBehavior::CloseOnClickOutside),
+                        )
+                        .ui(ui, |ui| {
+                            ui.set_min_width(168.0);
+                            ui.label(
+                                RichText::new("WALLS")
+                                    .size(design::text_size::LABEL)
+                                    .color(t.text_muted),
+                            );
+                            ui.horizontal(|ui| {
+                                for mode in
+                                    [WallDisplay::Outline, WallDisplay::Width, WallDisplay::Full]
+                                {
+                                    ui.selectable_value(
+                                        &mut self.layers.wall_display,
+                                        mode,
+                                        mode.label(),
+                                    );
+                                }
+                            });
+                            ui.separator();
+                            ui.label(
+                                RichText::new("SHOW")
+                                    .size(design::text_size::LABEL)
+                                    .color(t.text_muted),
+                            );
+                            widgets::toggle_switch(ui, &mut self.layers.grid, "Grid");
+                            widgets::toggle_switch(ui, &mut self.layers.rooms, "Rooms");
+                            widgets::toggle_switch(ui, &mut self.layers.joins, "Joins");
+                            widgets::toggle_switch(ui, &mut self.layers.wall_labels, "Wall labels");
+                        });
+                // The trigger is icon-only, so give it an explicit accessible name
+                // (otherwise a screen reader announces the raw glyph). The tooltip
+                // keeps the longer description for sighted users.
+                let layers_enabled = layers_button.enabled();
+                layers_button.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, layers_enabled, "Layers")
+                });
+                layers_button.on_hover_text("Layers — wall display mode and element visibility");
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(design::icon_text(Icon::Snap, 13.0).color(t.text_secondary));

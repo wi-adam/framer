@@ -2,7 +2,7 @@
 //! the GPU callback, view-cube interaction, and picking. Uses the
 //! `AxonometricView<'_>` bundle to keep the call site legible.
 
-use eframe::egui::{self, Sense, Ui};
+use eframe::egui::{self, Sense, Stroke, Ui};
 use eframe::{egui_wgpu, wgpu};
 use framer_core::BuildingModel;
 use framer_solver::ProjectFramePlan;
@@ -17,7 +17,7 @@ use super::view_common::{
     pointer_started_in_rect, viewport_drawing_rect, viewport_size,
 };
 use super::view_cube::{draw_view_cube, view_cube_rect};
-use crate::app::{Selection, ViewClick, WorkspaceMode};
+use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
 
 // === extracted block appended below; visibility adjusted in place ===
 
@@ -27,6 +27,7 @@ pub(super) struct AxonometricView<'a> {
     pub(super) selected_wall: usize,
     pub(super) selection: &'a Selection,
     pub(super) workspace_mode: WorkspaceMode,
+    pub(super) wall_display: WallDisplay,
     pub(super) gpu_target_format: Option<wgpu::TextureFormat>,
 }
 
@@ -41,6 +42,7 @@ pub(super) fn draw_project_axonometric(
         selected_wall,
         selection,
         workspace_mode,
+        wall_display,
         gpu_target_format,
     } = axonometric;
 
@@ -82,8 +84,14 @@ pub(super) fn draw_project_axonometric(
         }
     }
 
-    let Some(scene) = Scene3d::from_project(model, plan, selected_wall, selection, workspace_mode)
-    else {
+    let Some(scene) = Scene3d::from_project(
+        model,
+        plan,
+        selected_wall,
+        selection,
+        workspace_mode,
+        wall_display,
+    ) else {
         draw_view_empty(&painter, rect, "No 3D geometry");
         return None;
     };
@@ -97,22 +105,51 @@ pub(super) fn draw_project_axonometric(
         .and_then(|position| scene.pick(position, &projector))
         .filter(|_| response.clicked());
 
-    if let Some(target_format) = gpu_target_format {
-        let callback = egui_wgpu::Callback::new_paint_callback(
-            drawing,
-            Framer3dCallback {
-                frame_key: Framer3dFrameKey::MODEL,
-                vertices: scene.vertices,
-                indices: scene.indices,
-                opaque_index_count: scene.opaque_index_count,
-                transparent_index_count: scene.transparent_index_count,
-                uniforms: GpuUniforms::from_projector(&projector, drawing),
-                target_format,
-            },
+    // Fill geometry goes through the wgpu pipeline. Outline mode produces no fill
+    // triangles (and in the Design workspace there are no members either), so guard
+    // against an empty draw — the painter overlay below carries the walls instead.
+    match gpu_target_format {
+        Some(target_format) if !scene.vertices.is_empty() => {
+            let callback = egui_wgpu::Callback::new_paint_callback(
+                drawing,
+                Framer3dCallback {
+                    frame_key: Framer3dFrameKey::MODEL,
+                    vertices: scene.vertices,
+                    indices: scene.indices,
+                    opaque_index_count: scene.opaque_index_count,
+                    transparent_index_count: scene.transparent_index_count,
+                    uniforms: GpuUniforms::from_projector(&projector, drawing),
+                    target_format,
+                },
+            );
+            painter.add(callback);
+        }
+        // GPU present but nothing to fill (Outline mode) — the overlay carries it.
+        Some(_) => {}
+        // No GPU adapter: warn only when there is fill geometry we cannot draw AND
+        // the outline overlay below isn't already carrying the walls — otherwise the
+        // error would be painted under a perfectly good wireframe (Outline mode).
+        None if !scene.vertices.is_empty() && scene.outline_edges.is_empty() => {
+            draw_view_empty(&painter, drawing, "WGPU renderer unavailable");
+        }
+        None => {}
+    }
+
+    // Wall outline overlay (Outline mode only; empty otherwise). Drawn after the
+    // GPU callback so it composites over the scene, exactly like the view cube.
+    for edge in &scene.outline_edges {
+        let color = if edge.selected {
+            theme::active_blue()
+        } else {
+            theme::framing_line_dark()
+        };
+        painter.line_segment(
+            [
+                projector.project_point(edge.a).pos,
+                projector.project_point(edge.b).pos,
+            ],
+            Stroke::new(1.0, color),
         );
-        painter.add(callback);
-    } else {
-        draw_view_empty(&painter, drawing, "WGPU renderer unavailable");
     }
 
     let cube_action = draw_view_cube(

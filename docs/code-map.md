@@ -189,7 +189,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, dimensions, draw-wall + room tools, endpoint drag. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
@@ -250,6 +250,7 @@ the real symbols:
 | **New construction layer function / material** | `LayerFunction` / `Material` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material in `framer-render/src/build.rs`. |
 | **New solver rule / member** | `MemberKind` + rule in `framer-solver/src/lib.rs` | attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
+| **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
 | **Schema change** | bump `PROJECT_SCHEMA_VERSION` in `project.rs`; add types in `model.rs` | update the three `examples/projects/*.framer` (round-trip tests are byte-exact); update [project-files.md](project-files.md); add a rejection/round-trip test. |
 | **New UI control / styling** | `framer-app/src/app/design/` | use semantic tokens; don't hard-code colors inline. |
 | **Render math change** | `framer-render` integrator/material (CPU = reference) | mirror it in `app/render/*.wgsl`; keep `tests/gpu_parity.rs` green. |

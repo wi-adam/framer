@@ -10,7 +10,7 @@ use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan
 
 use super::geom::{OrbitProjector, Point3, point_hits_projected_quad};
 use super::gpu::GpuVertex;
-use crate::app::{Selection, ViewClick, WorkspaceMode};
+use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
 
 // === extracted block appended below; visibility adjusted in place ===
 
@@ -21,6 +21,19 @@ pub(super) struct Scene3d {
     pub(super) transparent_index_count: u32,
     pub(super) points: Vec<Point3>,
     pub(super) picks: Vec<PickSolid>,
+    /// Wall envelope edges for [`WallDisplay::Outline`], projected + drawn as a
+    /// painter overlay by the axonometric view (the wgpu pipeline is triangle-only,
+    /// so there is no GPU wireframe). Empty in the Width/Full modes.
+    pub(super) outline_edges: Vec<OutlineEdge>,
+}
+
+/// One wall-outline edge in world space, with whether its wall is selected so the
+/// overlay can highlight it. See [`Scene3d::outline_edges`].
+#[derive(Clone, Copy)]
+pub(super) struct OutlineEdge {
+    pub(super) a: Point3,
+    pub(super) b: Point3,
+    pub(super) selected: bool,
 }
 
 #[derive(Default)]
@@ -29,6 +42,7 @@ struct SceneBuilder {
     indices: Vec<u32>,
     points: Vec<Point3>,
     picks: Vec<PickSolid>,
+    outline_edges: Vec<OutlineEdge>,
     opaque_index_count: u32,
 }
 
@@ -72,6 +86,7 @@ impl Scene3d {
         selected_wall: usize,
         selection: &Selection,
         workspace_mode: WorkspaceMode,
+        wall_display: WallDisplay,
     ) -> Option<Self> {
         if model.walls.is_empty() {
             return None;
@@ -117,7 +132,15 @@ impl Scene3d {
             let total = wall_total_thickness(model, wall, fallback_depth);
             let sign = interior_sign(&interior_sides, &wall.id);
             let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
-            builder.push_wall_envelope(model, wall, wall_index, total, sign, wall_selected);
+            builder.push_wall_envelope(
+                model,
+                wall,
+                wall_index,
+                total,
+                sign,
+                wall_selected,
+                wall_display,
+            );
             for opening in &wall.openings {
                 builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), total, sign);
             }
@@ -192,6 +215,7 @@ impl SceneBuilder {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_wall_envelope(
         &mut self,
         model: &BuildingModel,
@@ -200,38 +224,12 @@ impl SceneBuilder {
         total: Length,
         interior_sign: f32,
         selected: bool,
+        wall_display: WallDisplay,
     ) {
-        match model.system_for(wall) {
-            // Render a true layered cross-section: one cuboid per (layer x wall
-            // segment), so every layer is cut by every opening. Layers run
-            // interior -> exterior; `off` accumulates each layer's through-wall
-            // offset from the interior face, and `interior_sign` decides which
-            // physical side that interior face sits on.
-            Some(system) => {
-                let mut off = Length::ZERO;
-                for layer in &system.layers {
-                    let (side0, side1) =
-                        layer_band_span(interior_sign, total, off, layer.thickness);
-                    off += layer.thickness;
-                    let base = material_color(model, &layer.material);
-                    let color = layer_band_color(base, selected);
-                    self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
-                }
-            }
-            // Degenerate model with no resolvable system: draw a single band over
-            // the full thickness so the wall is still visible.
-            None => {
-                let base = neutral_band_color();
-                let color = layer_band_color(base, selected);
-                let (side0, side1) = layer_band_span(interior_sign, total, Length::ZERO, total);
-                self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
-            }
-        }
-
-        // The pick envelope spans the full wall thickness regardless of layering
-        // or which side is interior.
+        // The full-thickness span and envelope box, shared by Outline (its edges)
+        // and the pick volume below, so the box is built once per wall.
         let (env0, env1) = layer_band_span(interior_sign, total, Length::ZERO, total);
-        let solid = WallCuboid::new(
+        let envelope = WallCuboid::new(
             wall,
             0.0,
             wall.length.inches() as f32,
@@ -240,11 +238,68 @@ impl SceneBuilder {
             0.0,
             wall.height.inches() as f32,
         );
+        match wall_display {
+            // Render a true layered cross-section: one cuboid per (layer x wall
+            // segment), so every layer is cut by every opening. Layers run
+            // interior -> exterior; `off` accumulates each layer's through-wall
+            // offset from the interior face, and `interior_sign` decides which
+            // physical side that interior face sits on.
+            WallDisplay::Full => match model.system_for(wall) {
+                Some(system) => {
+                    let mut off = Length::ZERO;
+                    for layer in &system.layers {
+                        let (side0, side1) =
+                            layer_band_span(interior_sign, total, off, layer.thickness);
+                        off += layer.thickness;
+                        let base = material_color(model, &layer.material);
+                        let color = layer_band_color(base, selected);
+                        self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
+                    }
+                }
+                // Degenerate model with no resolvable system: draw a single band
+                // over the full thickness so the wall is still visible.
+                None => {
+                    let color = layer_band_color(neutral_band_color(), selected);
+                    self.push_wall_layer(wall, LayerBand::new(env0, env1, color));
+                }
+            },
+            // One monochrome full-thickness band: the wall reads as a solid volume
+            // without the per-layer colors. Openings still cut it (push_wall_layer
+            // does the 4-segment decomposition).
+            WallDisplay::Width => {
+                let color = layer_band_color(neutral_band_color(), selected);
+                self.push_wall_layer(wall, LayerBand::new(env0, env1, color));
+            }
+            // No fill triangles: collect the envelope's 12 edges for the painter
+            // overlay (and feed its corners into `points` so the projector still
+            // frames the scene when nothing fills it).
+            WallDisplay::Outline => self.push_wall_outline(&envelope, selected),
+        }
+
+        // The pick envelope spans the full wall thickness regardless of layering,
+        // mode, or which side is interior — so walls stay clickable in every mode.
         self.picks.push(PickSolid {
             click: ViewClick::Wall(wall_index),
             priority: 1,
-            corners: solid.corners,
+            corners: envelope.corners,
         });
+    }
+
+    /// Collect the 12 edges of the wall's full-thickness envelope for the
+    /// [`WallDisplay::Outline`] painter overlay. Produces no fill geometry, so the
+    /// corners are also fed into `points` to keep the orbit projector framed.
+    fn push_wall_outline(&mut self, envelope: &WallCuboid, selected: bool) {
+        if envelope.is_degenerate() {
+            return;
+        }
+        self.points.extend(envelope.corners);
+        for [a, b] in WallCuboid::EDGES {
+            self.outline_edges.push(OutlineEdge {
+                a: envelope.corners[a],
+                b: envelope.corners[b],
+                selected,
+            });
+        }
     }
 
     /// Extrude one layer band across the wall face, applying the 4-segment
@@ -380,6 +435,7 @@ impl SceneBuilder {
             transparent_index_count: total_index_count - self.opaque_index_count,
             points: self.points,
             picks: self.picks,
+            outline_edges: self.outline_edges,
         }
     }
 }
@@ -428,6 +484,23 @@ impl WallCuboid {
             CuboidFace::new([3, 0, 4, 7], -self.along),
         ]
     }
+
+    /// The 12 edges of the box as `corners` index pairs: bottom quad, top quad,
+    /// and the four verticals. Matches the corner winding in [`Self::new`].
+    const EDGES: [[usize; 2]; 12] = [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 0],
+        [4, 5],
+        [5, 6],
+        [6, 7],
+        [7, 4],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ];
 }
 
 #[derive(Clone, Copy)]

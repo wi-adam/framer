@@ -121,7 +121,7 @@ impl FramerApp {
                         model: &self.model,
                         selected_wall: self.selected_wall,
                         selection: &self.selected,
-                        show_grid: self.grid,
+                        layers: self.layers,
                         draw_tool: &draw_tool,
                         room_tool_active: self.room_tool_active,
                         active_wall_drag,
@@ -256,6 +256,7 @@ impl FramerApp {
                         selected_wall: self.selected_wall,
                         selection: &self.selected,
                         workspace_mode: self.workspace_mode,
+                        wall_display: self.layers.wall_display,
                         gpu_target_format: self.gpu_target_format,
                     },
                     &mut self.view_3d,
@@ -546,8 +547,15 @@ mod tests {
     fn orbit_projector_keeps_distance_stable_when_view_rotates() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let home =
@@ -563,8 +571,15 @@ mod tests {
     fn orbit_projector_applies_explicit_zoom_without_auto_fit_drift() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let base =
@@ -580,8 +595,15 @@ mod tests {
     fn orbit_projector_pans_rigidly_by_pan_offset() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let base =
@@ -1296,8 +1318,15 @@ mod tests {
     fn scene_3d_builds_depth_tested_wall_and_member_cuboids() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
         // The wall cross-section spans its full system thickness, centered on the
         // centerline so it reaches +/- total/2 on the side axis (no longer the
         // bare stud depth) regardless of which side topology marks as interior.
@@ -1333,8 +1362,15 @@ mod tests {
     fn scene_3d_contains_pickable_members_openings_and_walls() {
         let model = BuildingModel::demo_shell();
         let plan = framer_solver::generate_project_plan(&model).unwrap();
-        let plan_scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Plan).unwrap();
+        let plan_scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
 
         assert!(
             plan_scene
@@ -1355,9 +1391,15 @@ mod tests {
                 .any(|pick| matches!(&pick.click, ViewClick::Member { .. }))
         );
 
-        let design_scene =
-            Scene3d::from_project(&model, &plan, 0, &Selection::Wall, WorkspaceMode::Design)
-                .unwrap();
+        let design_scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Design,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
         assert!(
             design_scene
                 .picks
@@ -1375,6 +1417,123 @@ mod tests {
                 .picks
                 .iter()
                 .all(|pick| !matches!(&pick.click, ViewClick::Member { .. }))
+        );
+    }
+
+    #[test]
+    fn scene_3d_width_mode_collapses_layers_to_a_single_band() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let full = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Full,
+        )
+        .unwrap();
+        let width = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Width,
+        )
+        .unwrap();
+
+        // Width still fills the wall (one monochrome band per wall, opening-cut),
+        // so it has transparent geometry — but strictly less than the multi-layer
+        // Full cross-section. It draws no outline edges.
+        assert!(width.transparent_index_count > 0);
+        assert!(
+            width.transparent_index_count < full.transparent_index_count,
+            "one band per wall must be lighter than the full layered section"
+        );
+        assert!(width.outline_edges.is_empty());
+    }
+
+    #[test]
+    fn scene_3d_outline_mode_emits_edges_not_wall_bands() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let outline = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            crate::app::WallDisplay::Outline,
+        )
+        .unwrap();
+
+        // No wall fill bands (the transparent pass is empty); walls are carried by
+        // the envelope edges instead — 12 per wall — and their corners still feed
+        // the orbit projector so the view can frame an all-outline scene.
+        assert_eq!(outline.transparent_index_count, 0);
+        assert_eq!(outline.outline_edges.len(), model.walls.len() * 12);
+        assert!(!outline.points.is_empty());
+    }
+
+    #[test]
+    fn scene_3d_outline_highlights_only_the_selected_walls_edges() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        // Select wall index 1 (not the default 0) so the test can't pass by accident.
+        let selected_wall = 1;
+        let outline = Scene3d::from_project(
+            &model,
+            &plan,
+            selected_wall,
+            &Selection::Wall,
+            WorkspaceMode::Design,
+            crate::app::WallDisplay::Outline,
+        )
+        .unwrap();
+
+        // Exactly the selected wall's 12 envelope edges carry `selected` (the overlay
+        // paints those blue); every other wall's edges stay unselected.
+        let selected_edges = outline.outline_edges.iter().filter(|e| e.selected).count();
+        assert_eq!(selected_edges, 12);
+        assert_eq!(outline.outline_edges.len(), model.walls.len() * 12);
+    }
+
+    #[test]
+    fn scene_3d_width_band_is_cut_by_openings() {
+        // Width draws one neutral band per wall, but it must still be cut by openings.
+        // Build the demo (which has doors/windows) and the same model with openings
+        // stripped, both in Design workspace (no members, so only wall fill counts).
+        let with_openings = BuildingModel::demo_shell();
+        let mut without_openings = with_openings.clone();
+        for wall in &mut without_openings.walls {
+            wall.openings.clear();
+        }
+        let plan = framer_solver::generate_project_plan(&with_openings).unwrap();
+        let plan_plain = framer_solver::generate_project_plan(&without_openings).unwrap();
+
+        let build = |model, plan| {
+            Scene3d::from_project(
+                model,
+                plan,
+                0,
+                &Selection::Wall,
+                WorkspaceMode::Design,
+                crate::app::WallDisplay::Width,
+            )
+            .unwrap()
+            .transparent_index_count
+        };
+        let cut = build(&with_openings, &plan);
+        let uncut = build(&without_openings, &plan_plain);
+
+        // Cutting the band around each opening splits it into more segments, so the
+        // cut scene has strictly more triangles than the single uncut band per wall —
+        // proving openings are not ignored in Width mode.
+        assert!(uncut > 0);
+        assert!(
+            cut > uncut,
+            "openings should split the Width band into more segments ({cut} vs {uncut})"
         );
     }
 
