@@ -4,7 +4,7 @@
 //! dashed-line helper, and the per-wall elevation layout frame.
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
-use framer_core::Wall;
+use framer_core::{Opening, Wall};
 
 use super::camera_2d::View2dState;
 use super::theme;
@@ -313,4 +313,13 @@ impl WallElevationLayout {
             scale,
         }
     }
+}
+
+/// An opening's screen rect in elevation space (pixels-per-inch `sx`/`sy`).
+pub(super) fn opening_rect(drawing: Rect, sx: f32, sy: f32, opening: &Opening) -> Rect {
+    let x = drawing.left() + opening.left().inches() as f32 * sx;
+    let y = drawing.bottom() - opening.top().inches() as f32 * sy;
+    let width = (opening.width.inches() as f32 * sx).max(4.0);
+    let height = (opening.height.inches() as f32 * sy).max(4.0);
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
 }

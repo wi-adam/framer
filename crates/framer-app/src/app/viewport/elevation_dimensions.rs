@@ -9,7 +9,7 @@ use framer_core::{
 };
 
 use super::geom::distance_to_segment;
-use super::opening_rect;
+use super::view_common::opening_rect;
 use super::theme;
 
 // === extracted dimension items appended below; visibility adjusted in place ===
