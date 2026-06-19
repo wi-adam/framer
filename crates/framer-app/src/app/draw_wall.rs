@@ -15,6 +15,58 @@ pub(super) struct ResolvedPoint {
     pub(super) on_existing: bool,
 }
 
+/// What kind of geometry a resolved snap landed on. Drives the on-screen
+/// indicator and whether committing the point forms a wall join. (Slice 2 adds
+/// `Intersection` and `Alignment` once inference guides exist.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SnapKind {
+    Endpoint,
+    Midpoint,
+    OnWall,
+    Grid,
+    Free,
+}
+
+/// The outcome of resolving a raw cursor point: the committed point and what it
+/// snapped to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SnapResult {
+    pub(super) point: Point2,
+    pub(super) kind: SnapKind,
+}
+
+impl SnapResult {
+    /// Whether committing this point should record a wall join — true when it
+    /// landed on an existing wall's endpoint, midpoint, or interior.
+    pub(super) fn forms_join(&self) -> bool {
+        matches!(
+            self.kind,
+            SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall
+        )
+    }
+}
+
+/// Everything [`resolve_snap`] needs to turn a raw cursor point into a snapped
+/// one. Shared by the draw-wall tool and the wall-endpoint editor.
+pub(super) struct SnapContext<'a> {
+    pub(super) model: &'a BuildingModel,
+    /// Raw cursor position in model coordinates.
+    pub(super) raw: Point2,
+    /// Ortho reference: the fixed point the segment is drawn/edited relative to.
+    pub(super) anchor: Option<Point2>,
+    /// Walls that must not be snap targets (e.g. the wall being edited).
+    pub(super) exclude: &'a [ElementId],
+    /// Radius (model units) within which a fresh snap is *acquired*.
+    pub(super) tolerance: Length,
+    /// Larger radius (model units) a held snap must leave before it *releases*.
+    pub(super) release_tolerance: Length,
+    pub(super) grid_step: Option<Length>,
+    /// Alt held: skip all snapping and place freely (ortho + grid only).
+    pub(super) suspend: bool,
+    /// The snap held from the previous frame, for sticky hysteresis.
+    pub(super) previous: Option<SnapResult>,
+}
+
 /// Lock `raw_end` to an axis-aligned segment from `start` by keeping the
 /// dominant-axis delta and collapsing the other onto `start`. The result always
 /// shares either the x or y coordinate of `start` (a horizontal or vertical
@@ -43,10 +95,14 @@ pub(super) fn snap_to_endpoint(
     start: Option<Point2>,
     point: Point2,
     tolerance: Length,
+    exclude: &[ElementId],
 ) -> Option<Point2> {
     let tolerance_sq = squared(tolerance.ticks());
     let mut best: Option<(i64, Point2)> = None;
     for wall in &model.walls {
+        if exclude.contains(&wall.id) {
+            continue;
+        }
         for endpoint in [wall.start, wall.end] {
             if !keeps_ortho(start, endpoint) {
                 continue;
@@ -73,29 +129,89 @@ pub(super) fn resolve_draw_point(
     step: Option<Length>,
     tolerance: Length,
 ) -> ResolvedPoint {
-    // 1. Snap to an existing endpoint (forms a Corner join).
-    if let Some(endpoint) = snap_to_endpoint(model, start, raw, tolerance) {
-        return ResolvedPoint {
-            point: endpoint,
-            on_existing: true,
+    let result = resolve_snap(&SnapContext {
+        model,
+        raw,
+        anchor: start,
+        exclude: &[],
+        tolerance,
+        release_tolerance: tolerance,
+        grid_step: step,
+        suspend: false,
+        previous: None,
+    });
+    ResolvedPoint {
+        point: result.point,
+        on_existing: result.forms_join(),
+    }
+}
+
+/// Resolve a raw cursor point against the model, applying snapping in priority
+/// order (endpoint → midpoint → mid-span → ortho/grid fallback), with sticky
+/// hysteresis and an Alt-suspend escape hatch. Shared by drawing and editing.
+pub(super) fn resolve_snap(ctx: &SnapContext) -> SnapResult {
+    // Alt held: place freely, ignoring all geometry.
+    if ctx.suspend {
+        return free_result(ctx);
+    }
+
+    // Sticky: keep a genuine prior snap until the cursor leaves the release
+    // radius, so the snap doesn't flicker between nearby candidates.
+    if let Some(previous) = &ctx.previous
+        && is_sticky_kind(previous.kind)
+        && point_distance_sq(ctx.raw, previous.point) <= squared(ctx.release_tolerance.ticks())
+    {
+        return *previous;
+    }
+
+    if let Some(point) = snap_to_endpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
+    {
+        return SnapResult {
+            point,
+            kind: SnapKind::Endpoint,
         };
     }
-    // 2. Snap onto an existing wall's mid-span (forms a Tee join).
-    if let Some(projected) = snap_to_wall_line(model, start, raw, tolerance) {
-        return ResolvedPoint {
-            point: projected,
-            on_existing: true,
+    if let Some(point) = snap_to_midpoint(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
+    {
+        return SnapResult {
+            point,
+            kind: SnapKind::Midpoint,
+        };
+    }
+    if let Some(point) =
+        snap_to_wall_line(ctx.model, ctx.anchor, ctx.raw, ctx.tolerance, ctx.exclude)
+    {
+        return SnapResult {
+            point,
+            kind: SnapKind::OnWall,
         };
     }
 
-    let locked = match start {
-        Some(start) => ortho_lock(start, raw),
-        None => raw,
+    free_result(ctx)
+}
+
+/// Snap kinds that should be held across frames (genuine geometry locks, not the
+/// free/grid fallback).
+fn is_sticky_kind(kind: SnapKind) -> bool {
+    matches!(
+        kind,
+        SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall
+    )
+}
+
+/// The ortho-locked, grid-snapped fallback when nothing snappable is in range.
+fn free_result(ctx: &SnapContext) -> SnapResult {
+    let locked = match ctx.anchor {
+        Some(anchor) => ortho_lock(anchor, ctx.raw),
+        None => ctx.raw,
     };
-    ResolvedPoint {
-        point: snap_to_grid(locked, step),
-        on_existing: false,
-    }
+    let point = snap_to_grid(locked, ctx.grid_step);
+    let kind = if ctx.grid_step.is_some() {
+        SnapKind::Grid
+    } else {
+        SnapKind::Free
+    };
+    SnapResult { point, kind }
 }
 
 /// Whether `candidate` keeps the wall axis-aligned relative to `start` (shares an
@@ -115,11 +231,12 @@ pub(super) fn snap_to_wall_line(
     start: Option<Point2>,
     point: Point2,
     tolerance: Length,
+    exclude: &[ElementId],
 ) -> Option<Point2> {
     let tolerance_sq = squared(tolerance.ticks());
     let mut best: Option<(i64, Point2)> = None;
     for wall in &model.walls {
-        if wall.start == wall.end {
+        if wall.start == wall.end || exclude.contains(&wall.id) {
             continue;
         }
         let projected = project_onto_segment(point, wall.start, wall.end);
@@ -132,6 +249,42 @@ pub(super) fn snap_to_wall_line(
         }
     }
     best.map(|(_, projected)| projected)
+}
+
+/// The nearest existing wall midpoint within `tolerance` that keeps the wall
+/// axis-aligned relative to `start`. A midpoint lies on the wall interior, so a
+/// snap here forms a Tee just like a mid-span snap.
+pub(super) fn snap_to_midpoint(
+    model: &BuildingModel,
+    start: Option<Point2>,
+    point: Point2,
+    tolerance: Length,
+    exclude: &[ElementId],
+) -> Option<Point2> {
+    let tolerance_sq = squared(tolerance.ticks());
+    let mut best: Option<(i64, Point2)> = None;
+    for wall in &model.walls {
+        if wall.start == wall.end || exclude.contains(&wall.id) {
+            continue;
+        }
+        let mid = midpoint(wall.start, wall.end);
+        if !keeps_ortho(start, mid) {
+            continue;
+        }
+        let distance_sq = point_distance_sq(point, mid);
+        if distance_sq <= tolerance_sq && best.is_none_or(|(best_sq, _)| distance_sq < best_sq) {
+            best = Some((distance_sq, mid));
+        }
+    }
+    best.map(|(_, mid)| mid)
+}
+
+/// Midpoint of `a`–`b`, rounded to whole ticks.
+fn midpoint(a: Point2, b: Point2) -> Point2 {
+    Point2::new(
+        Length::from_ticks((a.x.ticks() + b.x.ticks()) / 2),
+        Length::from_ticks((a.y.ticks() + b.y.ticks()) / 2),
+    )
 }
 
 /// Closest point to `point` on the segment `a`–`b`, rounded to whole ticks.
@@ -285,7 +438,7 @@ mod tests {
             .walls
             .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
 
-        let got = snap_to_endpoint(&model, None, p(118.0, 0.0), Length::from_inches(6.0));
+        let got = snap_to_endpoint(&model, None, p(118.0, 0.0), Length::from_inches(6.0), &[]);
 
         assert_eq!(got, Some(p(120.0, 0.0)));
     }
@@ -298,7 +451,7 @@ mod tests {
             .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
 
         assert_eq!(
-            snap_to_endpoint(&model, None, p(60.0, 60.0), Length::from_inches(6.0)),
+            snap_to_endpoint(&model, None, p(60.0, 60.0), Length::from_inches(6.0), &[]),
             None
         );
     }
@@ -439,7 +592,7 @@ mod tests {
             .push(wall_from("wall-1", p(0.0, 0.0), p(0.0, 120.0)));
 
         // A cursor 3in off the vertical wall at y=60 snaps onto the wall line.
-        let got = snap_to_wall_line(&model, None, p(3.0, 60.0), Length::from_inches(6.0));
+        let got = snap_to_wall_line(&model, None, p(3.0, 60.0), Length::from_inches(6.0), &[]);
         assert_eq!(got, Some(p(0.0, 60.0)));
     }
 
@@ -452,12 +605,12 @@ mod tests {
 
         // Projects to the wall's endpoint (0,120) -> excluded (interior only).
         assert_eq!(
-            snap_to_wall_line(&model, None, p(3.0, 130.0), Length::from_inches(6.0)),
+            snap_to_wall_line(&model, None, p(3.0, 130.0), Length::from_inches(6.0), &[]),
             None
         );
         // Too far from the wall line.
         assert_eq!(
-            snap_to_wall_line(&model, None, p(60.0, 60.0), Length::from_inches(6.0)),
+            snap_to_wall_line(&model, None, p(60.0, 60.0), Length::from_inches(6.0), &[]),
             None
         );
     }
@@ -541,5 +694,173 @@ mod tests {
             touching,
             vec![ElementId::new("wall-1"), ElementId::new("wall-2")]
         );
+    }
+
+    fn ctx<'a>(model: &'a BuildingModel, raw: Point2) -> SnapContext<'a> {
+        SnapContext {
+            model,
+            raw,
+            anchor: None,
+            exclude: &[],
+            tolerance: Length::from_inches(6.0),
+            release_tolerance: Length::from_inches(10.0),
+            grid_step: None,
+            suspend: false,
+            previous: None,
+        }
+    }
+
+    #[test]
+    fn resolve_snap_snaps_to_endpoint() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        let result = resolve_snap(&ctx(&model, p(118.0, 1.0)));
+
+        assert_eq!(result.kind, SnapKind::Endpoint);
+        assert_eq!(result.point, p(120.0, 0.0));
+        assert!(result.forms_join());
+    }
+
+    #[test]
+    fn resolve_snap_projects_onto_wall_interior() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(0.0, 120.0)));
+
+        // (3,30) projects to (0,30): on the interior, not endpoint or midpoint.
+        let result = resolve_snap(&ctx(&model, p(3.0, 30.0)));
+
+        assert_eq!(result.kind, SnapKind::OnWall);
+        assert_eq!(result.point, p(0.0, 30.0));
+        assert!(result.forms_join());
+    }
+
+    #[test]
+    fn resolve_snap_snaps_to_midpoint() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        // Near the midpoint (60,0), far from both endpoints.
+        let result = resolve_snap(&ctx(&model, p(61.0, 2.0)));
+
+        assert_eq!(result.kind, SnapKind::Midpoint);
+        assert_eq!(result.point, p(60.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_snap_endpoint_beats_midpoint() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("short", p(0.0, 0.0), p(12.0, 0.0)));
+
+        // (10,0) is 2in from endpoint (12,0) and 4in from midpoint (6,0).
+        let result = resolve_snap(&ctx(&model, p(10.0, 0.0)));
+
+        assert_eq!(result.kind, SnapKind::Endpoint);
+        assert_eq!(result.point, p(12.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_snap_falls_back_to_ortho_grid_when_nothing_near() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        let mut context = ctx(&model, p(98.0, 7.0));
+        context.anchor = Some(p(0.0, 0.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
+
+        let result = resolve_snap(&context);
+
+        // x dominates → horizontal (y locks to anchor's 0); 98in grid-snaps to 96.
+        assert_eq!(result.point, p(96.0, 0.0));
+        assert_eq!(result.kind, SnapKind::Grid);
+    }
+
+    #[test]
+    fn resolve_snap_suspend_skips_all_snapping() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        let mut context = ctx(&model, p(118.0, 1.0));
+        context.suspend = true;
+
+        let result = resolve_snap(&context);
+
+        // Would snap to endpoint (120,0); suspended → raw passes through untouched.
+        assert_eq!(result.kind, SnapKind::Free);
+        assert_eq!(result.point, p(118.0, 1.0));
+        assert!(!result.forms_join());
+    }
+
+    #[test]
+    fn resolve_snap_excludes_named_walls() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        let exclude = [ElementId::new("wall-1")];
+        let mut context = ctx(&model, p(118.0, 1.0));
+        context.exclude = &exclude;
+
+        let result = resolve_snap(&context);
+
+        // The only wall is excluded → nothing to snap to.
+        assert_eq!(result.kind, SnapKind::Free);
+        assert_eq!(result.point, p(118.0, 1.0));
+    }
+
+    #[test]
+    fn resolve_snap_holds_previous_within_release_radius() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        // Last frame snapped to endpoint (120,0). Cursor at (112,3) is 8.5in away:
+        // outside the 6in acquire radius but inside the 10in release radius.
+        let mut context = ctx(&model, p(112.0, 3.0));
+        context.previous = Some(SnapResult {
+            point: p(120.0, 0.0),
+            kind: SnapKind::Endpoint,
+        });
+
+        let result = resolve_snap(&context);
+
+        // The held endpoint wins over the fresh on-wall snap a recompute would find.
+        assert_eq!(result.kind, SnapKind::Endpoint);
+        assert_eq!(result.point, p(120.0, 0.0));
+    }
+
+    #[test]
+    fn resolve_snap_releases_previous_beyond_release_radius() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("wall-1", p(0.0, 0.0), p(120.0, 0.0)));
+
+        // Cursor at (108,9) is 15in from the held endpoint: beyond the 10in release.
+        let mut context = ctx(&model, p(108.0, 9.0));
+        context.previous = Some(SnapResult {
+            point: p(120.0, 0.0),
+            kind: SnapKind::Endpoint,
+        });
+
+        let result = resolve_snap(&context);
+
+        // Released, and nothing fresh is within acquire range → free passthrough.
+        assert_eq!(result.kind, SnapKind::Free);
+        assert_eq!(result.point, p(108.0, 9.0));
     }
 }
