@@ -29,11 +29,12 @@ use framer_solver::{
 use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
-    OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
-    next_dimension_id, next_opening_id, next_room_id, next_wall_id,
+    OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
+    apply_opening_drag, endpoint_move_keeps_ortho, next_dimension_id, next_opening_id, next_room_id,
+    next_wall_id,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
-use viewport::{View2dState, View3dState};
+use viewport::{View2dState, View3dState, WallDragEvent};
 
 pub(crate) struct FramerApp {
     model: BuildingModel,
@@ -64,6 +65,8 @@ pub(crate) struct FramerApp {
     draw_wall_tool: DrawWallToolState,
     room_tool_active: bool,
     opening_drag: Option<OpeningDragState>,
+    /// In-progress drag of a wall endpoint handle in the plan view.
+    wall_drag: Option<WallDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     /// Whether the active adapter supports compute shaders (GPU path tracer);
     /// when false the Render view falls back to the CPU renderer.
@@ -255,6 +258,7 @@ impl Default for FramerApp {
             draw_wall_tool: DrawWallToolState::default(),
             room_tool_active: false,
             opening_drag: None,
+            wall_drag: None,
             gpu_target_format: None,
             gpu_compute_ok: false,
             render_smoke: None,
@@ -417,6 +421,7 @@ impl FramerApp {
         self.draw_wall_tool = DrawWallToolState::default();
         self.room_tool_active = false;
         self.opening_drag = None;
+        self.wall_drag = None;
     }
 
     fn new_project(&mut self) {
@@ -1044,6 +1049,68 @@ impl FramerApp {
         self.opening_drag = None;
         // Settle the drag's transaction: commit it as one undo step if the
         // opening actually moved, otherwise discard it.
+        self.settle_history(false);
+    }
+
+    fn handle_wall_drag_event(&mut self, event: WallDragEvent) {
+        match event {
+            WallDragEvent::Started { wall_index, handle } => {
+                self.begin_wall_drag(wall_index, handle)
+            }
+            WallDragEvent::Updated { point } => self.update_wall_drag(point),
+            WallDragEvent::Stopped => self.finish_wall_drag(),
+        }
+    }
+
+    fn begin_wall_drag(&mut self, wall_index: usize, handle: WallEditHandle) {
+        if self.model.walls.get(wall_index).is_none() {
+            return;
+        }
+        self.selected_wall = wall_index;
+        self.selected = Selection::Wall;
+        // One coalesced undo step for the whole gesture, captured after selecting
+        // the wall so undo restores it as selected.
+        self.history.begin(self.snapshot(), "Move wall");
+        self.wall_drag = Some(WallDragState { wall_index, handle });
+    }
+
+    fn update_wall_drag(&mut self, point: Point2) {
+        let Some(drag) = self.wall_drag else {
+            return;
+        };
+        let Some(wall) = self.model.walls.get(drag.wall_index) else {
+            self.wall_drag = None;
+            return;
+        };
+        let old_point = match drag.handle {
+            WallEditHandle::Start => wall.start,
+            WallEditHandle::End => wall.end,
+        };
+        if old_point == point {
+            return;
+        }
+        // Clamp a move that would skew a perpendicular neighbour off-axis (the
+        // model forbids non-orthogonal walls).
+        if !endpoint_move_keeps_ortho(&self.model, old_point, point) {
+            return;
+        }
+        let wall_id = wall.id.clone();
+        let moved = self
+            .model
+            .move_wall_endpoint(&wall_id, drag.handle.as_wall_end(), point);
+        if moved.is_empty() {
+            return;
+        }
+        // Keep joins consistent so the model stays valid (and the framing plan
+        // keeps generating) throughout the drag.
+        self.model.reconcile_joins();
+        self.selected_wall = drag.wall_index;
+        self.selected = Selection::Wall;
+        self.rebuild();
+    }
+
+    fn finish_wall_drag(&mut self) {
+        self.wall_drag = None;
         self.settle_history(false);
     }
 
