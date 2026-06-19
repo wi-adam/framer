@@ -2122,9 +2122,11 @@ fn system_layer_editor(
             }
 
             // Function. Switching to/from Framing keeps `framing` consistent so the
-            // model stays valid (framing.is_some() iff function == Framing). A second
-            // Framing layer is never offered when another layer already frames the
-            // wall, so the system keeps exactly one framing layer.
+            // model stays valid (framing.is_some() iff function == Framing). A Wall
+            // system must keep exactly one framing layer, so the picker never offers
+            // a SECOND Framing layer (`another_layer_is_framing`) and never lets the
+            // SOLE framing layer drop Framing (`is_only_framing`) — either would
+            // leave a Wall system with the wrong framing-layer count.
             let another_layer_is_framing = !is_framing && framing_count >= 1;
             changed |= property_row(ui, "Function", |ui| {
                 let before = layer.function;
@@ -2132,7 +2134,13 @@ fn system_layer_editor(
                     .selected_text(layer.function.label())
                     .show_ui(ui, |ui| {
                         for function in LayerFunction::ALL {
-                            if function == LayerFunction::Framing && another_layer_is_framing {
+                            let is_framing_option = function == LayerFunction::Framing;
+                            if is_framing_option && another_layer_is_framing {
+                                continue;
+                            }
+                            // The sole framing layer of a Wall system can only stay
+                            // Framing; non-Framing choices would zero out the count.
+                            if !is_framing_option && is_only_framing {
                                 continue;
                             }
                             ui.selectable_value(

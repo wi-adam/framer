@@ -19,14 +19,22 @@ use crate::app::Selection;
 
 // === extracted framing block appended below; visibility adjusted in place ===
 
+/// The construction-system context the elevation view needs to draw the bottom
+/// build-up swatch: the wall's resolved `system` (if any) and the project's
+/// `materials` (for per-layer colors/labels). Bundled to keep
+/// [`draw_wall_elevation`] within clippy's argument-count limit.
+pub(super) struct BuildUpContext<'a> {
+    pub system: Option<&'a ConstructionSystem>,
+    pub materials: &'a [Material],
+}
+
 pub(super) fn draw_wall_elevation(
     ui: &mut Ui,
     wall: &Wall,
     members: &[FrameMember],
     selected_member: Option<&str>,
     section_x: Option<Length>,
-    system: Option<&ConstructionSystem>,
-    materials: &[Material],
+    build_up: BuildUpContext<'_>,
     camera: &mut View2dState,
 ) -> Option<String> {
     let available = ui.available_size();
@@ -42,7 +50,7 @@ pub(super) fn draw_wall_elevation(
     // Reserve a band at the bottom for the build-up swatch (gap + bands + captions
     // + heading) so the wall plus swatch fit inside the original rect on square,
     // tall, or zoomed views instead of the swatch clipping past `rect.bottom()`.
-    if system.is_some() {
+    if build_up.system.is_some() {
         drawing.max.y -= SWATCH_RESERVE;
     }
     // Pan/zoom before laying out the wall. This view only click-selects members,
@@ -88,12 +96,12 @@ pub(super) fn draw_wall_elevation(
 
     // Build-up section swatch: a true-thickness layer strip below the dimension
     // text, anchored under the section line when a section cut is active.
-    if let Some(system) = system {
+    if let Some(system) = build_up.system {
         let swatch_left = section_x
             .map(|x| wall_rect.left() + x.inches() as f32 * scale)
             .unwrap_or(wall_rect.left());
         let anchor = Pos2::new(swatch_left, wall_rect.bottom() + 36.0);
-        draw_section_swatch(&painter, anchor, system, materials, scale);
+        draw_section_swatch(&painter, anchor, system, build_up.materials, scale);
     }
 
     reset_view_on_empty_double_click(&response, camera, over_element);

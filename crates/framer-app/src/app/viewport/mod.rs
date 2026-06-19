@@ -231,8 +231,10 @@ impl FramerApp {
                         &wall_plan.members,
                         selected_member,
                         section_x,
-                        system,
-                        &self.model.materials,
+                        BuildUpContext {
+                            system,
+                            materials: &self.model.materials,
+                        },
                         camera,
                     )
                     .map(|member_id| ViewClick::Member {
