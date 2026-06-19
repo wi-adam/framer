@@ -401,6 +401,29 @@ impl FramingBand {
     }
 }
 
+/// The per-wall framing facts a member generator needs, bundled so opening and
+/// cripple helpers take one `Copy` value rather than several parallel params:
+/// the framing `member` (studs/plates), its on-center `spacing`, and the
+/// through-wall `band` the members sit in. Built once in `generate_wall_plan`
+/// from the system's framing layer.
+#[derive(Clone, Copy)]
+struct WallFraming {
+    member: BoardProfile,
+    spacing: Length,
+    band: FramingBand,
+}
+
+impl WallFraming {
+    fn for_system(system: &ConstructionSystem) -> Result<Self, SolverError> {
+        let framing = wall_framing(system)?;
+        Ok(Self {
+            member: framing.member,
+            spacing: framing.spacing,
+            band: FramingBand::for_system(system)?,
+        })
+    }
+}
+
 pub fn generate_wall_plan(
     wall: &Wall,
     system: &ConstructionSystem,
@@ -409,10 +432,12 @@ pub fn generate_wall_plan(
 ) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
 
-    let framing = wall_framing(system)?;
+    // Bundle the per-wall framing facts (member, spacing, through-wall band)
+    // once; opening and cripple helpers take this rather than parallel params.
     // Members live inside the framing layer's through-wall band so studs render
     // in the framing layer rather than centered across the whole wall section.
-    let band = FramingBand::for_system(system)?;
+    let framing = WallFraming::for_system(system)?;
+    let band = framing.band;
     // The framing member is both the stud and the plate; spacing drives the
     // on-center layout. TODO: honor FramingPattern::Double/Staggered (extra
     // studs); every pattern is currently treated as Single.
@@ -530,10 +555,9 @@ pub fn generate_wall_plan(
             &mut diagnostics,
             wall,
             code,
-            wall_stud,
+            framing,
             &opening,
             top_plate_count,
-            band,
         );
     }
 
@@ -848,11 +872,12 @@ fn add_opening_members(
     diagnostics: &mut Vec<PlanDiagnostic>,
     wall: &Wall,
     code: &CodeProfile,
-    wall_stud: BoardProfile,
+    framing: WallFraming,
     opening: &Opening,
     top_plate_count: usize,
-    band: FramingBand,
 ) {
+    let wall_stud = framing.member;
+    let band = framing.band;
     let plate_thickness = code.plate_profile.thickness();
     let stud_base = plate_thickness;
     let stud_top = wall.height - plate_thickness * top_plate_count as i64;
@@ -976,19 +1001,15 @@ fn add_opening_members(
 
         add_cripples(
             members,
-            code,
-            wall_stud,
+            framing,
             opening,
             "lower",
             plate_thickness,
             opening.sill_height,
-            band,
         );
     }
 
-    add_cripples(
-        members, code, wall_stud, opening, "upper", header_top, stud_top, band,
-    );
+    add_cripples(members, framing, opening, "upper", header_top, stud_top);
 }
 
 struct OpeningSidePositions {
@@ -1014,20 +1035,21 @@ impl OpeningSidePositions {
 
 fn add_cripples(
     members: &mut Vec<FrameMember>,
-    code: &CodeProfile,
-    stud_profile: BoardProfile,
+    framing: WallFraming,
     opening: &Opening,
     label: &str,
     bottom: Length,
     top: Length,
-    band: FramingBand,
 ) {
     let cut_length = top - bottom;
     if cut_length <= Length::ZERO {
         return;
     }
 
-    for x in cripple_positions(opening.left(), opening.right(), code.default_stud_spacing) {
+    let stud_profile = framing.member;
+    // Cripples honor the construction system's on-center spacing, the same
+    // layout the common studs use, rather than the code-profile default.
+    for x in cripple_positions(opening.left(), opening.right(), framing.spacing) {
         members.push(frame_member(
             format!("{}-cripple-{}-{}", opening.id.0, label, x.ticks()),
             &opening.id,
@@ -1040,14 +1062,14 @@ fn add_cripples(
                 cut_length,
                 stud_profile.thickness(),
             ),
-            band,
+            framing.band,
             RuleProvenance::new(
                 "opening.cripples.on-center",
                 format!(
-                    "{} cripple studs are generated across {} at the default {} spacing where clear span allows.",
+                    "{} cripple studs are generated across {} at the system {} spacing where clear span allows.",
                     title_case(label),
                     opening.name,
-                    code.default_stud_spacing
+                    framing.spacing
                 ),
             ),
         ));
@@ -2259,6 +2281,87 @@ mod tests {
         assert!(svg.contains("data-join=\"join-front-right\""));
         assert!(svg.contains("data-wall-elevation=\"wall-right\""));
         assert!(csv.contains("corner post"));
+    }
+
+    /// A minimal single-framing-layer wall system using `member` at the given
+    /// on-center `spacing`. Lets tests vary the layout spacing independently of
+    /// the code-profile default.
+    fn framing_system_spaced(id: &str, member: BoardProfile, spacing: Length) -> ConstructionSystem {
+        let mut system = framing_system(id, member);
+        if let Some(layer) = system
+            .layers
+            .iter_mut()
+            .find(|layer| layer.function == LayerFunction::Framing)
+            && let Some(framing) = layer.framing.as_mut()
+        {
+            framing.spacing = spacing;
+        }
+        system
+    }
+
+    #[test]
+    fn opening_cripples_honor_system_spacing_not_code_default() {
+        // A wall system framed at 24" o.c. — distinct from the code profile's
+        // 16" default — must lay out its opening cripples at 24" o.c.
+        let code = CodeProfile::irc_2021_prescriptive();
+        assert_eq!(
+            code.default_stud_spacing,
+            Length::from_whole_inches(16),
+            "this test relies on the code default being 16in so a 24in system is distinguishable"
+        );
+
+        let system = framing_system_spaced(
+            "system-2x6-24oc",
+            BoardProfile::TwoBySix,
+            Length::from_whole_inches(24),
+        );
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(16.0), &code);
+        wall.system = system.id.clone();
+        // A wide window (10ft), centred in the 16ft wall so several cripples fit
+        // above and below it with room for end framing.
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(8.0),
+            Length::from_feet(10.0),
+            Length::from_inches(36.0),
+            Length::from_inches(36.0),
+        ));
+
+        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
+
+        // Collect the distinct cripple x-positions for the upper band and assert
+        // the on-center step is 24in (system spacing), not 16in (code default).
+        let mut upper_x: Vec<Length> = plan
+            .members
+            .iter()
+            .filter(|member| {
+                member.kind == MemberKind::CrippleStud && member.id.contains("-cripple-upper-")
+            })
+            .map(|member| member.x)
+            .collect();
+        upper_x.sort_unstable();
+        upper_x.dedup();
+
+        assert!(
+            upper_x.len() >= 2,
+            "a 10ft opening at 24in o.c. must yield multiple upper cripples, got {upper_x:?}"
+        );
+        for window in upper_x.windows(2) {
+            assert_eq!(
+                window[1] - window[0],
+                Length::from_whole_inches(24),
+                "cripples must step at the system 24in spacing, got {upper_x:?}"
+            );
+        }
+
+        // The first cripple sits one system-spacing in from the opening's left
+        // edge — confirming the layout starts from the opening, at 24in.
+        assert_eq!(
+            upper_x[0] - wall.openings[0].left(),
+            Length::from_whole_inches(24),
+            "first cripple should be 24in from the opening edge"
+        );
     }
 
     #[test]
