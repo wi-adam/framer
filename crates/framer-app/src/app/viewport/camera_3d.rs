@@ -9,7 +9,7 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use eframe::egui::Vec2;
 use framer_render::math::Vec3;
 
-use super::Point3;
+use super::geom::Point3;
 
 /// World-height (in framing radii) visible across a full-viewport span at zoom 1.
 /// Sets the pan rate so a full-viewport drag slides the view by ~one model height
