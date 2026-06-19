@@ -35,10 +35,16 @@ pub(super) fn draw_wall_elevation(
     let painter = ui.painter_at(rect);
 
     let margin = 52.0;
-    let drawing = Rect::from_min_max(
+    let mut drawing = Rect::from_min_max(
         rect.min + Vec2::splat(margin),
         rect.max - Vec2::new(margin, margin),
     );
+    // Reserve a band at the bottom for the build-up swatch (gap + bands + captions
+    // + heading) so the wall plus swatch fit inside the original rect on square,
+    // tall, or zoomed views instead of the swatch clipping past `rect.bottom()`.
+    if system.is_some() {
+        drawing.max.y -= SWATCH_RESERVE;
+    }
     // Pan/zoom before laying out the wall. This view only click-selects members,
     // so Space+drag panning is always permitted.
     apply_view_2d_input(ui, &response, drawing, camera, true);
@@ -176,6 +182,10 @@ pub(super) fn draw_section_line(painter: &egui::Painter, drawing: Rect, sx: f32,
 const SWATCH_HEIGHT: f32 = 48.0;
 /// Smallest drawn band width so a hairline layer stays visible.
 const SWATCH_MIN_BAND: f32 = 5.0;
+/// Vertical space reserved below the wall for the build-up swatch: the ~36 gap to
+/// the strip, the `SWATCH_HEIGHT` (48) bands, ~30 of stacked captions, and the
+/// heading above the strip. Subtracted from `drawing.max.y` when a swatch draws.
+const SWATCH_RESERVE: f32 = 120.0;
 
 /// Draw a true-thickness build-up strip for `system`: each layer is a horizontal
 /// band (interior on the left -> exterior on the right) whose pixel width is its
@@ -224,12 +234,12 @@ pub(super) fn draw_section_swatch(
         );
 
         // Stacked caption below the band: material name, thickness, optional R.
-        // Layer R mirrors the model's clear-wall sum: round(inches) * R/in.
+        // Layer R uses the model's exact per-tick math (no inch rounding) so it
+        // matches `ConstructionSystem::r_value_milli`.
         let name = material.map(|m| m.name.as_str()).unwrap_or("(missing)");
         let mut caption = format!("{name}\n{}", layer.thickness);
-        let r_per_inch = material.map(|m| m.r_per_inch_milli()).unwrap_or(0);
-        if r_per_inch > 0 {
-            let r_milli = layer.thickness.inches().round() as i64 * r_per_inch;
+        let r_milli = material.map(|m| m.r_value_milli(layer.thickness)).unwrap_or(0);
+        if r_milli > 0 {
             caption.push_str(&format!("  R{:.1}", r_milli as f32 / 1000.0));
         }
         painter.text(
