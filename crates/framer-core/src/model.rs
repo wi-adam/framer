@@ -503,6 +503,54 @@ impl BuildingModel {
         true
     }
 
+    /// Move the `which_end` endpoint of `wall` to `new_point`, dragging along every
+    /// other wall endpoint that coincides with the old point so a shared corner
+    /// stays connected ("move the joint"). Each moved wall's `length` is resynced
+    /// from its new placement. Returns the ids of all walls whose geometry changed
+    /// (empty when `wall` is unknown or the point is unchanged).
+    ///
+    /// This is the honest geometric primitive: it does not enforce the
+    /// axis-aligned invariant — the caller (the snap-driven editor) chooses a
+    /// `new_point` that keeps every affected wall orthogonal.
+    pub fn move_wall_endpoint(
+        &mut self,
+        wall: &ElementId,
+        which_end: WallEnd,
+        new_point: Point2,
+    ) -> Vec<ElementId> {
+        let Some(old_point) = self.walls.iter().find(|candidate| candidate.id == *wall).map(
+            |candidate| match which_end {
+                WallEnd::Start => candidate.start,
+                WallEnd::End => candidate.end,
+            },
+        ) else {
+            return Vec::new();
+        };
+        if old_point == new_point {
+            return Vec::new();
+        }
+
+        let mut affected = Vec::new();
+        for candidate in &mut self.walls {
+            let mut changed = false;
+            if candidate.start == old_point {
+                candidate.start = new_point;
+                changed = true;
+            }
+            if candidate.end == old_point {
+                candidate.end = new_point;
+                changed = true;
+            }
+            if changed {
+                if let Some(length) = candidate.placement_length() {
+                    candidate.length = length;
+                }
+                affected.push(candidate.id.clone());
+            }
+        }
+        affected
+    }
+
     /// Rebuild the wall-join set from current wall geometry, preserving the id and
     /// name of any join whose two walls still meet (across point moves and even
     /// kind changes). Run after a structural edit — drawing, deleting, or moving a
@@ -1798,6 +1846,13 @@ pub enum WallJoinKind {
     Cross,
 }
 
+/// Which endpoint of a wall an edit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallEnd {
+    Start,
+    End,
+}
+
 /// How a room is used. Drives labelling now and, later, room-type code rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoomUsage {
@@ -2541,6 +2596,58 @@ mod tests {
         assert_eq!(model.wall_joins[0].name, "Hand-named corner");
         assert_eq!(model.wall_joins[0].point, rp(12.0, 0.0));
         model.validate().unwrap();
+    }
+
+    #[test]
+    fn move_wall_endpoint_moves_free_end_and_resyncs_length() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+
+        let affected = model.move_wall_endpoint(&ElementId::new("a"), WallEnd::End, rp(8.0, 0.0));
+
+        assert_eq!(affected, vec![ElementId::new("a")]);
+        assert_eq!(model.walls[0].end, rp(8.0, 0.0));
+        assert_eq!(model.walls[0].length, Length::from_feet(8.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn move_wall_endpoint_drags_shared_node_along_collinear_run() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // A collinear run a—b sharing the node at (10,0); moving it stays ortho.
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(20.0, 0.0), &code));
+
+        let affected = model.move_wall_endpoint(&ElementId::new("a"), WallEnd::End, rp(12.0, 0.0));
+
+        assert_eq!(affected.len(), 2);
+        assert_eq!(model.walls[0].end, rp(12.0, 0.0));
+        assert_eq!(model.walls[1].start, rp(12.0, 0.0));
+        assert_eq!(model.walls[0].length, Length::from_feet(12.0));
+        assert_eq!(model.walls[1].length, Length::from_feet(8.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn move_wall_endpoint_unknown_wall_is_noop() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+
+        let affected = model.move_wall_endpoint(&ElementId::new("missing"), WallEnd::End, rp(8.0, 0.0));
+
+        assert!(affected.is_empty());
+        assert_eq!(model.walls[0].end, rp(10.0, 0.0));
     }
 
     #[test]
