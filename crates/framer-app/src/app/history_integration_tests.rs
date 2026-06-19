@@ -6,8 +6,10 @@
 //! no-op edits, re-solves on restore, and is cleared by load/reset.
 
 use eframe::egui;
-use framer_core::{Length, OpeningKind, Point2};
+use framer_core::{CodeProfile, Length, OpeningKind, Point2, Wall};
 
+use super::model_edit::WallEditHandle;
+use super::viewport::WallDragEvent;
 use super::{FramerApp, Selection};
 
 /// Feed a single key-press through a real egui frame so `handle_keyboard_shortcuts`
@@ -308,4 +310,116 @@ fn cmd_shift_z_redoes_via_keyboard() {
     );
     assert_eq!(app.model, edited, "Cmd/Ctrl+Shift+Z must redo, not undo");
     assert!(!app.history.can_redo());
+}
+
+/// Replace the app's model with a minimal L of two walls sharing a corner at the
+/// origin, so wall `a` has a *free* end at (10ft, 0) that can be dragged.
+fn install_corner_model(app: &mut FramerApp) {
+    let code = CodeProfile::irc_2021_prescriptive();
+    let pt = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
+    let wall = |id: &str, start, end| {
+        Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", start, end)
+    };
+    app.model.walls.clear();
+    app.model.wall_joins.clear();
+    app.model.rooms.clear();
+    app.model.walls.push(wall("a", pt(0.0, 0.0), pt(10.0, 0.0)));
+    app.model.walls.push(wall("b", pt(0.0, 0.0), pt(0.0, 8.0)));
+    app.model.reconcile_joins();
+    app.rebuild();
+}
+
+#[test]
+fn wall_endpoint_drag_extends_a_free_end_as_one_undo_step() {
+    let mut app = FramerApp::default();
+    install_corner_model(&mut app);
+    app.selected = Selection::Wall;
+    app.selected_wall = 0;
+    let original = app.model.clone();
+
+    // Drag wall a's free end from (10,0) out to (12,0): one coalesced gesture.
+    app.handle_wall_drag_event(WallDragEvent::Started {
+        wall_index: 0,
+        handle: WallEditHandle::End,
+    });
+    app.handle_wall_drag_event(WallDragEvent::Updated {
+        point: Point2::new(Length::from_feet(12.0), Length::ZERO),
+    });
+    app.handle_wall_drag_event(WallDragEvent::Stopped);
+
+    assert!(app.history.can_undo());
+    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(12.0), Length::ZERO));
+    assert_eq!(app.model.walls[0].length, Length::from_feet(12.0));
+    // The shared corner and its join are untouched.
+    assert_eq!(app.model.walls[1].start, Point2::new(Length::ZERO, Length::ZERO));
+    assert_eq!(app.model.wall_joins.len(), 1);
+
+    // The whole drag undoes in a single step.
+    app.undo();
+    assert_eq!(app.model, original);
+    assert!(!app.history.can_undo());
+}
+
+#[test]
+fn wall_endpoint_drag_drags_shared_node_along_a_collinear_run() {
+    let mut app = FramerApp::default();
+    let code = CodeProfile::irc_2021_prescriptive();
+    let pt = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
+    let wall = |id: &str, start, end| {
+        Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", start, end)
+    };
+    app.model.walls.clear();
+    app.model.wall_joins.clear();
+    app.model.rooms.clear();
+    app.model.walls.push(wall("a", pt(0.0, 0.0), pt(10.0, 0.0)));
+    app.model.walls.push(wall("b", pt(10.0, 0.0), pt(20.0, 0.0)));
+    app.model.reconcile_joins();
+    app.rebuild();
+    app.selected = Selection::Wall;
+    app.selected_wall = 0;
+
+    app.handle_wall_drag_event(WallDragEvent::Started {
+        wall_index: 0,
+        handle: WallEditHandle::End,
+    });
+    app.handle_wall_drag_event(WallDragEvent::Updated {
+        point: Point2::new(Length::from_feet(12.0), Length::ZERO),
+    });
+    app.handle_wall_drag_event(WallDragEvent::Stopped);
+
+    // The shared node moved on both walls (node-follow): a grew, b shrank.
+    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(12.0), Length::ZERO));
+    assert_eq!(app.model.walls[1].start, Point2::new(Length::from_feet(12.0), Length::ZERO));
+    assert_eq!(app.model.walls[0].length, Length::from_feet(12.0));
+    assert_eq!(app.model.walls[1].length, Length::from_feet(8.0));
+}
+
+#[test]
+fn whole_wall_translate_slides_perpendicular_and_stretches_neighbour() {
+    let mut app = FramerApp::default();
+    install_corner_model(&mut app);
+    app.selected = Selection::Wall;
+    app.selected_wall = 0;
+    let original = app.model.clone();
+
+    // Body-drag wall a (horizontal at y=0). The vertical component slides it up;
+    // any horizontal component is projected out (perpendicular-only translate).
+    app.handle_wall_drag_event(WallDragEvent::Started {
+        wall_index: 0,
+        handle: WallEditHandle::Body,
+    });
+    app.handle_wall_drag_event(WallDragEvent::Translated {
+        dx: Length::from_feet(5.0),
+        dy: Length::from_feet(2.0),
+    });
+    app.handle_wall_drag_event(WallDragEvent::Stopped);
+
+    // a slid up 2ft (x unchanged); b's shared corner followed up, shortening it.
+    assert_eq!(app.model.walls[0].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(10.0), Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[1].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[1].length, Length::from_feet(6.0));
+
+    app.undo();
+    assert_eq!(app.model, original);
 }

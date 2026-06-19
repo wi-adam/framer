@@ -19,18 +19,26 @@ use framer_render::math::Vec3;
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
-use super::draw_wall::resolve_draw_point;
+use super::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
 use super::labels::{join_kind_label, kind_label};
-use super::model_edit::{OpeningDragState, OpeningEditHandle};
+use super::model_edit::{OpeningDragState, OpeningEditHandle, WallEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
 
 /// Plan-view input for the draw-wall tool: whether it is active, the in-progress
-/// run's start point, and the active grid snap increment.
+/// run's start point, the active grid snap increment, and the snap held from the
+/// previous frame (for sticky hysteresis).
 pub(super) struct DrawWallPlanInput {
     pub(super) active: bool,
     pub(super) start: Option<Point2>,
     pub(super) snap_step: Option<Length>,
+    pub(super) previous_snap: Option<SnapResult>,
 }
+
+/// Screen-pixel radius within which the draw tool *acquires* a snap. Converted to
+/// model units per frame so the feel is constant across zoom levels.
+const SNAP_ACQUIRE_PX: f64 = 12.0;
+/// Screen-pixel radius a held snap must leave before it *releases* (hysteresis).
+const SNAP_RELEASE_PX: f64 = 20.0;
 
 /// Frames to stay in reduced-resolution "moving" mode after the last camera
 /// input, so a continuous orbit (which produces frequent tiny inputs) doesn't
@@ -541,12 +549,22 @@ impl FramerApp {
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
         self.cursor_model = None;
         let mut toolbar_anchor = None;
+        // The draw tool's resolved snap for this frame, written back into tool
+        // state so the next frame can apply sticky hysteresis.
+        let mut snap_out: Option<SnapResult> = None;
+        // The active wall-endpoint drag (state owned here) and the event the plan
+        // emits for it this frame.
+        let active_wall_drag = self
+            .wall_drag
+            .map(|drag| (drag.wall_index, drag.handle));
+        let mut wall_drag_out: Option<WallDragEvent> = None;
         let click = match self.viewport_mode {
             ViewportMode::Plan => {
                 let draw_tool = DrawWallPlanInput {
                     active: self.draw_wall_tool.active,
                     start: self.draw_wall_tool.start,
                     snap_step: self.snap_step,
+                    previous_snap: self.draw_wall_tool.previous_snap,
                 };
                 draw_project_plan(
                     ui,
@@ -559,6 +577,9 @@ impl FramerApp {
                     &mut self.plan_view,
                     &draw_tool,
                     self.room_tool_active,
+                    &mut snap_out,
+                    active_wall_drag,
+                    &mut wall_drag_out,
                 )
             }
             ViewportMode::Elevation => {
@@ -689,6 +710,10 @@ impl FramerApp {
                 None
             }
         };
+        self.draw_wall_tool.previous_snap = snap_out;
+        if let Some(event) = wall_drag_out {
+            self.handle_wall_drag_event(event);
+        }
 
         if let Some(click) = click {
             self.handle_view_click(click);
@@ -1268,24 +1293,117 @@ fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
     );
 }
 
-fn draw_selection_handle(painter: &egui::Painter, point: Pos2) {
-    let handle = Rect::from_center_size(point, Vec2::splat(8.0));
+/// A draggable square handle; grows and thickens its outline when hovered.
+fn draw_wall_handle(painter: &egui::Painter, point: Pos2, hovered: bool) {
+    let size = if hovered { 11.0 } else { 8.0 };
+    let handle = Rect::from_center_size(point, Vec2::splat(size));
     painter.rect_filled(handle, 1.5, theme::active_blue());
     painter.rect_stroke(
         handle,
         1.5,
-        Stroke::new(1.0, theme::sheet()),
+        Stroke::new(if hovered { 2.0 } else { 1.0 }, theme::sheet()),
         StrokeKind::Outside,
     );
 }
 
-fn draw_selected_wall_handles(painter: &egui::Painter, start: Pos2, end: Pos2) {
-    draw_selection_handle(painter, start);
-    draw_selection_handle(painter, end);
-    draw_selection_handle(
+fn draw_selected_wall_handles(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    hovered: Option<WallEditHandle>,
+) {
+    draw_wall_handle(painter, start, hovered == Some(WallEditHandle::Start));
+    draw_wall_handle(painter, end, hovered == Some(WallEditHandle::End));
+    // The midpoint handle grabs the whole wall (translate). It also lights up when
+    // the body anywhere is hovered.
+    draw_wall_handle(
         painter,
         Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0),
+        hovered == Some(WallEditHandle::Body),
     );
+}
+
+/// Hit-test the start/end handles of the selected wall (endpoints only), within a
+/// generous pixel radius. Returns the wall index and which handle.
+#[allow(clippy::too_many_arguments)]
+fn hit_selected_wall_handle(
+    position: Pos2,
+    model: &BuildingModel,
+    selected_wall: usize,
+    selection: &Selection,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) -> Option<(usize, WallEditHandle)> {
+    if !matches!(selection, Selection::Wall) {
+        return None;
+    }
+    let wall = model.walls.get(selected_wall)?;
+    const HIT_RADIUS: f32 = 11.0;
+    const BODY_HIT_RADIUS: f32 = 8.0;
+    let start = plan_point(wall.start, bounds, drawing, camera);
+    let end = plan_point(wall.end, bounds, drawing, camera);
+    let start_distance = position.distance(start);
+    let end_distance = position.distance(end);
+    // Endpoints win; otherwise grabbing the wall body translates it.
+    if start_distance <= HIT_RADIUS && start_distance <= end_distance {
+        Some((selected_wall, WallEditHandle::Start))
+    } else if end_distance <= HIT_RADIUS {
+        Some((selected_wall, WallEditHandle::End))
+    } else if distance_to_segment(position, start, end) <= BODY_HIT_RADIUS {
+        Some((selected_wall, WallEditHandle::Body))
+    } else {
+        None
+    }
+}
+
+/// Resolve a wall-endpoint drag to a snapped model point: ortho-locked to the
+/// wall's fixed far end, snapping to other walls' endpoints/midpoints/alignment
+/// (the moving node and its coincident neighbours are excluded).
+#[allow(clippy::too_many_arguments)]
+fn snapped_wall_endpoint(
+    model: &BuildingModel,
+    wall_index: usize,
+    handle: WallEditHandle,
+    cursor: Pos2,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+    scale: f32,
+    grid_step: Option<Length>,
+    suspend: bool,
+) -> Point2 {
+    let raw = plan_inverse_point(cursor, bounds, drawing, camera);
+    let Some(wall) = model.walls.get(wall_index) else {
+        return raw;
+    };
+    let (anchor, node) = match handle {
+        WallEditHandle::Start => (wall.end, wall.start),
+        WallEditHandle::End => (wall.start, wall.end),
+        // The body handle translates via incremental deltas, not snapped points.
+        WallEditHandle::Body => return raw,
+    };
+    // Exclude every wall touching the node — they all move together, so none is a
+    // valid snap target (and a coincident endpoint would otherwise freeze the drag).
+    let exclude: Vec<framer_core::ElementId> = model
+        .walls
+        .iter()
+        .filter(|candidate| candidate.start == node || candidate.end == node)
+        .map(|candidate| candidate.id.clone())
+        .collect();
+    let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+    resolve_snap(&SnapContext {
+        model,
+        raw,
+        anchor: Some(anchor),
+        exclude: &exclude,
+        tolerance: Length::from_inches(SNAP_ACQUIRE_PX * inv_scale),
+        release_tolerance: Length::from_inches(SNAP_RELEASE_PX * inv_scale),
+        grid_step,
+        suspend,
+        previous: None,
+    })
+    .point
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1300,6 +1418,9 @@ fn draw_project_plan(
     camera: &mut View2dState,
     draw_tool: &DrawWallPlanInput,
     room_tool_active: bool,
+    snap_out: &mut Option<SnapResult>,
+    active_wall_drag: Option<(usize, WallEditHandle)>,
+    wall_drag_out: &mut Option<WallDragEvent>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
@@ -1307,9 +1428,9 @@ fn draw_project_plan(
 
     draw_view_background(&painter, rect, theme::sheet());
     let drawing = viewport_drawing_rect(rect, 58.0);
-    // Pan/zoom the view before mapping any model point. The plan has no
-    // primary-drag interaction, so Space+drag panning is always permitted.
-    apply_view_2d_input(ui, &response, drawing, camera, true);
+    // Pan/zoom the view before mapping any model point. Space+primary-drag pans,
+    // except while a wall handle is being dragged (so the two don't fight).
+    apply_view_2d_input(ui, &response, drawing, camera, active_wall_drag.is_none());
     draw_drafting_rulers(&painter, rect, drawing);
     if show_grid {
         draw_drafting_grid(&painter, drawing);
@@ -1344,6 +1465,17 @@ fn draw_project_plan(
     let mut clicked_opening = None;
     let mut clicked_room = None;
     let mut over_element = false;
+
+    // Which selected-wall handle the cursor is over (for hover emphasis + cursor),
+    // only in selection mode.
+    let hovered_wall_handle = (!draw_tool.active && !room_tool_active)
+        .then(|| {
+            response.hover_pos().and_then(|hover| {
+                hit_selected_wall_handle(hover, model, selected_wall, selection, bounds, drawing, camera)
+            })
+        })
+        .flatten()
+        .map(|(_, handle)| handle);
 
     // Room fills + labels, drawn under the walls. Boundaries are derived from the
     // wall loop each frame (never stored); resolve them all in one graph pass.
@@ -1418,7 +1550,7 @@ fn draw_project_plan(
         };
         painter.line_segment([start, end], stroke);
         if selected {
-            draw_selected_wall_handles(&painter, start, end);
+            draw_selected_wall_handles(&painter, start, end, hovered_wall_handle);
         }
         if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
             clicked_wall = Some(ViewClick::Wall(index));
@@ -1485,6 +1617,73 @@ fn draw_project_plan(
     let scale = (drawing.width() / (bounds.max_x - bounds.min_x).max(1.0))
         .min(drawing.height() / (bounds.max_y - bounds.min_y).max(1.0))
         * camera.zoom;
+
+    // Wall-endpoint editing (selection mode only): drag the selected wall's
+    // start/end handles. The app owns the drag state and applies the events.
+    if !draw_tool.active && !room_tool_active {
+        if let Some((wall_index, handle)) = active_wall_drag {
+            if response.drag_stopped() {
+                *wall_drag_out = Some(WallDragEvent::Stopped);
+            } else if response.dragged_by(egui::PointerButton::Primary) {
+                if handle == WallEditHandle::Body {
+                    // Whole-wall translate: total screen delta from drag start →
+                    // model delta (y is flipped). The app accounts for what's been
+                    // applied so the wall tracks the cursor absolutely.
+                    if let Some(delta) = response.total_drag_delta() {
+                        let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+                        let dx = Length::from_inches(delta.x as f64 * inv_scale);
+                        let dy = Length::from_inches(-delta.y as f64 * inv_scale);
+                        *wall_drag_out = Some(WallDragEvent::Translated { dx, dy });
+                        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    }
+                } else if let Some(cursor) = response.interact_pointer_pos() {
+                    let suspend = ui.input(|input| input.modifiers.alt);
+                    let point = snapped_wall_endpoint(
+                        model,
+                        wall_index,
+                        handle,
+                        cursor,
+                        bounds,
+                        drawing,
+                        camera,
+                        scale,
+                        draw_tool.snap_step,
+                        suspend,
+                    );
+                    *wall_drag_out = Some(WallDragEvent::Updated { point });
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                }
+            }
+        } else if response.drag_started_by(egui::PointerButton::Primary)
+            && !ui.input(|input| input.key_down(egui::Key::Space))
+            && let Some(hit) = ui
+                .input(|input| input.pointer.press_origin())
+                .and_then(|origin| {
+                    hit_selected_wall_handle(
+                        origin,
+                        model,
+                        selected_wall,
+                        selection,
+                        bounds,
+                        drawing,
+                        camera,
+                    )
+                })
+        {
+            *wall_drag_out = Some(WallDragEvent::Started {
+                wall_index: hit.0,
+                handle: hit.1,
+            });
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        } else if let Some(handle) = hovered_wall_handle {
+            ui.ctx().set_cursor_icon(if handle == WallEditHandle::Body {
+                CursorIcon::Move
+            } else {
+                CursorIcon::Grab
+            });
+        }
+    }
+
     draw_scale_bar(&painter, drawing, scale);
     draw_view_title(&painter, drawing, "Whole-project plan");
     draw_plan_axis_indicator(&painter, drawing);
@@ -1495,12 +1694,12 @@ fn draw_project_plan(
         reset_view_on_empty_double_click(&response, camera, over_element);
     }
 
-    if draw_tool.active {
-        if let Some(click) = draw_wall_overlay(
-            &painter, &response, model, bounds, drawing, camera, scale, draw_tool,
-        ) {
-            return Some(click);
-        }
+    if draw_tool.active
+        && let Some(click) = draw_wall_overlay(
+            &painter, &response, model, bounds, drawing, camera, scale, draw_tool, snap_out,
+        )
+    {
+        return Some(click);
     }
 
     if room_tool_active && response.clicked() {
@@ -1550,6 +1749,7 @@ fn draw_wall_overlay(
     camera: &View2dState,
     scale: f32,
     draw_tool: &DrawWallPlanInput,
+    snap_out: &mut Option<SnapResult>,
 ) -> Option<ViewClick> {
     if response.secondary_clicked() {
         return Some(ViewClick::DrawWallCancel);
@@ -1563,10 +1763,27 @@ fn draw_wall_overlay(
     }
 
     let raw = plan_inverse_point(cursor, bounds, drawing, camera);
-    // Snap tolerance of ~12 screen px expressed in model inches, capped so that
-    // zooming far out can't make snapping reach across the whole model.
-    let tolerance = Length::from_inches(((12.0 / scale.max(0.0001)) as f64).min(24.0));
-    let resolved = resolve_draw_point(model, draw_tool.start, raw, draw_tool.snap_step, tolerance);
+    // Tolerances are a constant screen-pixel distance converted to model units, so
+    // the snap feels the same at every zoom. The release radius is larger than the
+    // acquire radius so a held snap stays put instead of flickering (hysteresis).
+    let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+    let tolerance = Length::from_inches(SNAP_ACQUIRE_PX * inv_scale);
+    let release_tolerance = Length::from_inches(SNAP_RELEASE_PX * inv_scale);
+    // Alt suspends snapping for precise free placement.
+    let suspend = response.ctx.input(|input| input.modifiers.alt);
+
+    let resolved = resolve_snap(&SnapContext {
+        model,
+        raw,
+        anchor: draw_tool.start,
+        exclude: &[],
+        tolerance,
+        release_tolerance,
+        grid_step: draw_tool.snap_step,
+        suspend,
+        previous: draw_tool.previous_snap,
+    });
+    *snap_out = Some(resolved);
     let candidate = plan_point(resolved.point, bounds, drawing, camera);
 
     if let Some(start) = draw_tool.start {
@@ -1577,7 +1794,7 @@ fn draw_wall_overlay(
         );
         painter.circle_filled(start_screen, 4.0, theme::active_blue());
 
-        // Ortho-locked, so exactly one axis differs; max gives the wall length.
+        // Walls stay ortho, so exactly one axis differs; max gives the length.
         let length = (resolved.point.x - start.x)
             .abs()
             .max((resolved.point.y - start.y).abs());
@@ -1596,15 +1813,150 @@ fn draw_wall_overlay(
         }
     }
 
-    // Candidate endpoint marker; a larger ring marks a snap onto existing geometry.
-    painter.circle_filled(candidate, 3.5, theme::active_blue());
-    if resolved.on_existing {
-        painter.circle_stroke(candidate, 8.0, Stroke::new(2.0, theme::active_blue()));
+    // Inference guides, drawn under the indicator so the marker stays legible.
+    let guide_stroke = Stroke::new(1.0, theme::active_blue_soft());
+    for guide in resolved.guides.iter().flatten() {
+        let (a, b) = match guide.axis {
+            GuideAxis::Vertical => {
+                let x = plan_point(Point2::new(guide.at, guide.source.y), bounds, drawing, camera).x;
+                (Pos2::new(x, drawing.top()), Pos2::new(x, drawing.bottom()))
+            }
+            GuideAxis::Horizontal => {
+                let y = plan_point(Point2::new(guide.source.x, guide.at), bounds, drawing, camera).y;
+                (Pos2::new(drawing.left(), y), Pos2::new(drawing.right(), y))
+            }
+        };
+        draw_dashed_line(painter, a, b, guide_stroke);
+        let source_screen = plan_point(guide.source, bounds, drawing, camera);
+        painter.circle_stroke(source_screen, 3.0, guide_stroke);
     }
+
+    draw_snap_indicator(painter, candidate, resolved.kind, suspend);
 
     response.clicked().then_some(ViewClick::DrawWallPoint {
         point: resolved.point,
     })
+}
+
+/// Draw a dashed line `a`→`b`. egui has no stable dashed primitive we rely on
+/// here, so we emit short segments with gaps.
+fn draw_dashed_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
+    const DASH: f32 = 6.0;
+    const GAP: f32 = 4.0;
+    let span = b - a;
+    let len = span.length();
+    if len < 1.0 {
+        return;
+    }
+    let dir = span / len;
+    let mut t = 0.0;
+    while t < len {
+        let start = a + dir * t;
+        let end = a + dir * (t + DASH).min(len);
+        painter.line_segment([start, end], stroke);
+        t += DASH + GAP;
+    }
+}
+
+/// Draw a snap marker whose glyph identifies *what* the cursor snapped to, so the
+/// user can tell an endpoint lock from a midpoint, mid-wall, or grid snap. When
+/// snapping is suspended (Alt), a hint is shown instead of a geometry glyph.
+fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspend: bool) {
+    let color = theme::active_blue();
+    let stroke = Stroke::new(2.0, color);
+
+    if suspend {
+        painter.circle_filled(at, 3.0, color);
+        painter.text(
+            at + Vec2::new(10.0, -10.0),
+            Align2::LEFT_CENTER,
+            "snap off",
+            FontId::proportional(11.0),
+            color,
+        );
+        return;
+    }
+
+    match kind {
+        SnapKind::Endpoint => {
+            // Filled square inside a ring.
+            painter.rect_filled(Rect::from_center_size(at, Vec2::splat(7.0)), 1.0, color);
+            painter.rect_stroke(
+                Rect::from_center_size(at, Vec2::splat(14.0)),
+                1.0,
+                stroke,
+                StrokeKind::Outside,
+            );
+        }
+        SnapKind::Midpoint => {
+            // Upward triangle outline.
+            let r = 6.0;
+            let top = Pos2::new(at.x, at.y - r);
+            let left = Pos2::new(at.x - r, at.y + r * 0.7);
+            let right = Pos2::new(at.x + r, at.y + r * 0.7);
+            painter.line_segment([top, left], stroke);
+            painter.line_segment([left, right], stroke);
+            painter.line_segment([right, top], stroke);
+        }
+        SnapKind::OnWall => {
+            // Diamond outline (lands on a wall's interior → Tee).
+            let r = 6.0;
+            let top = Pos2::new(at.x, at.y - r);
+            let right = Pos2::new(at.x + r, at.y);
+            let bottom = Pos2::new(at.x, at.y + r);
+            let left = Pos2::new(at.x - r, at.y);
+            painter.line_segment([top, right], stroke);
+            painter.line_segment([right, bottom], stroke);
+            painter.line_segment([bottom, left], stroke);
+            painter.line_segment([left, top], stroke);
+        }
+        SnapKind::Intersection => {
+            // Crossing of two guides — an X.
+            let r = 6.0;
+            painter.line_segment(
+                [Pos2::new(at.x - r, at.y - r), Pos2::new(at.x + r, at.y + r)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(at.x - r, at.y + r), Pos2::new(at.x + r, at.y - r)],
+                stroke,
+            );
+        }
+        SnapKind::Alignment => {
+            // Hollow circle; the dashed guide line conveys the alignment.
+            painter.circle_stroke(at, 4.5, stroke);
+        }
+        SnapKind::Grid => {
+            // Small plus.
+            let r = 5.0;
+            painter.line_segment([Pos2::new(at.x - r, at.y), Pos2::new(at.x + r, at.y)], stroke);
+            painter.line_segment([Pos2::new(at.x, at.y - r), Pos2::new(at.x, at.y + r)], stroke);
+        }
+        SnapKind::Free => {
+            painter.circle_filled(at, 3.5, color);
+        }
+    }
+
+    if let Some(label) = snap_kind_label(kind) {
+        painter.text(
+            at + Vec2::new(10.0, -10.0),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
+/// Short label for a snap kind, or `None` for kinds that need no annotation.
+fn snap_kind_label(kind: SnapKind) -> Option<&'static str> {
+    match kind {
+        SnapKind::Endpoint => Some("end"),
+        SnapKind::Midpoint => Some("mid"),
+        SnapKind::OnWall => Some("wall"),
+        SnapKind::Alignment => Some("align"),
+        SnapKind::Intersection | SnapKind::Grid | SnapKind::Free => None,
+    }
 }
 
 /// A drafting scale bar at the bottom-left of the plan, sized to a round number
@@ -3492,6 +3844,26 @@ enum OpeningDragEvent {
     Updated {
         delta_x: Length,
         delta_y: Length,
+    },
+    Stopped,
+}
+
+/// A plan-view wall-endpoint drag, mirroring [`OpeningDragEvent`]. `Updated`
+/// carries the already-snapped model point for the dragged endpoint.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WallDragEvent {
+    Started {
+        wall_index: usize,
+        handle: WallEditHandle,
+    },
+    /// An endpoint handle moved to a snapped model point.
+    Updated {
+        point: Point2,
+    },
+    /// The body handle translated the whole wall by an incremental model delta.
+    Translated {
+        dx: Length,
+        dy: Length,
     },
     Stopped,
 }

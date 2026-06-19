@@ -26,14 +26,16 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
-use draw_wall::joins_for_new_wall;
+use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
-    OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
-    next_dimension_id, next_opening_id, next_room_id, next_wall_id,
+    OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
+    apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
+    next_dimension_id, next_opening_id, next_room_id, next_wall_id, translate_keeps_ortho,
+    translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
-use viewport::{View2dState, View3dState};
+use viewport::{View2dState, View3dState, WallDragEvent};
 
 pub(crate) struct FramerApp {
     model: BuildingModel,
@@ -64,6 +66,8 @@ pub(crate) struct FramerApp {
     draw_wall_tool: DrawWallToolState,
     room_tool_active: bool,
     opening_drag: Option<OpeningDragState>,
+    /// In-progress drag of a wall endpoint handle in the plan view.
+    wall_drag: Option<WallDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
     /// Whether the active adapter supports compute shaders (GPU path tracer);
     /// when false the Render view falls back to the CPU renderer.
@@ -208,11 +212,13 @@ impl DimensionToolState {
 
 /// State for the interactive draw-wall tool. `start` holds the first committed
 /// endpoint while a wall (or polyline run) is being drawn; `None` means the next
-/// click begins a new segment.
+/// click begins a new segment. `previous_snap` carries the last frame's snap so
+/// the plan view can apply sticky hysteresis.
 #[derive(Debug, Clone, Default)]
 struct DrawWallToolState {
     active: bool,
     start: Option<Point2>,
+    previous_snap: Option<SnapResult>,
 }
 
 fn dimension_kind_name(kind: DimensionKind) -> &'static str {
@@ -253,6 +259,7 @@ impl Default for FramerApp {
             draw_wall_tool: DrawWallToolState::default(),
             room_tool_active: false,
             opening_drag: None,
+            wall_drag: None,
             gpu_target_format: None,
             gpu_compute_ok: false,
             render_smoke: None,
@@ -415,6 +422,7 @@ impl FramerApp {
         self.draw_wall_tool = DrawWallToolState::default();
         self.room_tool_active = false;
         self.opening_drag = None;
+        self.wall_drag = None;
     }
 
     fn new_project(&mut self) {
@@ -635,6 +643,7 @@ impl FramerApp {
         self.draw_wall_tool = DrawWallToolState {
             active: activate,
             start: None,
+            previous_snap: None,
         };
         if activate {
             if !self.workspace_mode.allows_design_edits() {
@@ -659,6 +668,9 @@ impl FramerApp {
         if !self.draw_wall_tool.active {
             return;
         }
+        // Drop the held snap so the committed point's stale guides don't carry
+        // into the next segment's first frame.
+        self.draw_wall_tool.previous_snap = None;
         match self.draw_wall_tool.start {
             None => self.draw_wall_tool.start = Some(point),
             Some(start) => {
@@ -1041,6 +1053,146 @@ impl FramerApp {
         self.opening_drag = None;
         // Settle the drag's transaction: commit it as one undo step if the
         // opening actually moved, otherwise discard it.
+        self.settle_history(false);
+    }
+
+    fn handle_wall_drag_event(&mut self, event: WallDragEvent) {
+        match event {
+            WallDragEvent::Started { wall_index, handle } => {
+                self.begin_wall_drag(wall_index, handle)
+            }
+            WallDragEvent::Updated { point } => self.update_wall_drag(point),
+            WallDragEvent::Translated { dx, dy } => self.translate_wall_drag(dx, dy),
+            WallDragEvent::Stopped => self.finish_wall_drag(),
+        }
+    }
+
+    fn begin_wall_drag(&mut self, wall_index: usize, handle: WallEditHandle) {
+        if self.model.walls.get(wall_index).is_none() {
+            return;
+        }
+        self.selected_wall = wall_index;
+        self.selected = Selection::Wall;
+        // One coalesced undo step for the whole gesture, captured after selecting
+        // the wall so undo restores it as selected.
+        self.history.begin(self.snapshot(), "Move wall");
+        self.wall_drag = Some(WallDragState {
+            wall_index,
+            handle,
+            applied: (Length::ZERO, Length::ZERO),
+        });
+    }
+
+    fn update_wall_drag(&mut self, point: Point2) {
+        let Some(drag) = self.wall_drag else {
+            return;
+        };
+        let Some(which_end) = drag.handle.as_wall_end() else {
+            return; // body translations arrive via translate_wall_drag
+        };
+        let Some(wall) = self.model.walls.get(drag.wall_index) else {
+            self.wall_drag = None;
+            return;
+        };
+        let old_point = match which_end {
+            framer_core::WallEnd::Start => wall.start,
+            framer_core::WallEnd::End => wall.end,
+        };
+        if old_point == point {
+            return;
+        }
+        // Clamp a move that would skew a perpendicular neighbour off-axis (the
+        // model forbids non-orthogonal walls).
+        if !endpoint_move_keeps_ortho(&self.model, old_point, point) {
+            return;
+        }
+        // Clamp a move that would collapse an affected wall to zero length (which
+        // would fail validation and drop the framing plan).
+        if !endpoint_move_keeps_positive_length(&self.model, old_point, point) {
+            return;
+        }
+        // Clamp a move that a driving dimension would fight back on the next solve
+        // (it rewrites the wall's length/end, which would tear the moved corner).
+        if self.nodes_touch_driving_dimension(&[old_point]) {
+            return;
+        }
+        let wall_id = wall.id.clone();
+        let moved = self.model.move_wall_endpoint(&wall_id, which_end, point);
+        if moved.is_empty() {
+            return;
+        }
+        self.settle_wall_geometry(drag.wall_index);
+    }
+
+    /// Translate the whole dragged wall to track the cursor. `total` is the model
+    /// delta from drag start; it is projected onto the wall's perpendicular (so it
+    /// slides sideways — the ortho-safe reposition) and applied as the increment
+    /// since the last accepted frame, clamped if it would skew or collapse a
+    /// neighbour. The accepted total is recorded so a clamped frame is retried
+    /// (not lost) on the next.
+    fn translate_wall_drag(&mut self, total_dx: Length, total_dy: Length) {
+        let Some(drag) = self.wall_drag else {
+            return;
+        };
+        let Some(wall) = self.model.walls.get(drag.wall_index) else {
+            self.wall_drag = None;
+            return;
+        };
+        // Perpendicular projection: a horizontal wall slides in y, a vertical in x.
+        let target = if wall.start.y == wall.end.y {
+            (Length::ZERO, total_dy)
+        } else {
+            (total_dx, Length::ZERO)
+        };
+        let inc_x = target.0 - drag.applied.0;
+        let inc_y = target.1 - drag.applied.1;
+        if inc_x == Length::ZERO && inc_y == Length::ZERO {
+            return;
+        }
+        let wall_id = wall.id.clone();
+        let (start, end) = (wall.start, wall.end);
+        if !translate_keeps_ortho(&self.model, &wall_id, start, end, inc_x, inc_y)
+            || !translate_keeps_positive_length(&self.model, &wall_id, start, end, inc_x, inc_y)
+            || self.nodes_touch_driving_dimension(&[start, end])
+        {
+            return; // clamp this frame; `applied` unchanged so the next frame retries
+        }
+        let moved = self.model.translate_wall(&wall_id, inc_x, inc_y);
+        if moved.is_empty() {
+            return;
+        }
+        if let Some(state) = self.wall_drag.as_mut() {
+            state.applied = target;
+        }
+        self.settle_wall_geometry(drag.wall_index);
+    }
+
+    /// Whether any wall touching one of `nodes` carries a driving dimension. Such
+    /// a wall's length/end is rewritten by the next solve, so a geometry drag that
+    /// moves its endpoint would be undone (and could tear a corner) — we clamp it.
+    fn nodes_touch_driving_dimension(&self, nodes: &[Point2]) -> bool {
+        self.model.walls.iter().any(|wall| {
+            nodes
+                .iter()
+                .any(|node| wall.start == *node || wall.end == *node)
+                && wall
+                    .dimensions
+                    .iter()
+                    .any(|dimension| dimension.kind == DimensionKind::Driving)
+        })
+    }
+
+    /// Shared tail of a wall-geometry edit frame: keep joins consistent (so the
+    /// model stays valid and the plan keeps generating) and re-solve.
+    fn settle_wall_geometry(&mut self, wall_index: usize) {
+        self.model.reconcile_joins();
+        self.selected_wall = wall_index;
+        self.selected = Selection::Wall;
+        self.rebuild();
+    }
+
+    fn finish_wall_drag(&mut self) {
+        self.wall_drag = None;
         self.settle_history(false);
     }
 

@@ -1,4 +1,4 @@
-use framer_core::{BuildingModel, CodeProfile, Length, Opening, Point2, Wall};
+use framer_core::{BuildingModel, CodeProfile, Length, Opening, Point2, Wall, WallEnd};
 
 const OPENING_MIN_SIZE: Length = Length::from_whole_inches(12);
 
@@ -124,6 +124,137 @@ pub(super) fn maybe_snap(value: Length, step: Option<Length>) -> Length {
         }
         _ => value,
     }
+}
+
+/// Which draggable handle on a selected wall is being manipulated in the plan:
+/// an endpoint (extend / move the corner) or the body (translate the whole wall).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WallEditHandle {
+    Start,
+    End,
+    Body,
+}
+
+impl WallEditHandle {
+    /// The wall endpoint this handle moves, or `None` for the body (whole-wall)
+    /// handle.
+    pub(super) fn as_wall_end(self) -> Option<WallEnd> {
+        match self {
+            Self::Start => Some(WallEnd::Start),
+            Self::End => Some(WallEnd::End),
+            Self::Body => None,
+        }
+    }
+}
+
+/// In-progress drag of a wall handle in the plan view. The whole gesture is one
+/// coalesced undo step (mirrors [`OpeningDragState`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WallDragState {
+    pub(super) wall_index: usize,
+    pub(super) handle: WallEditHandle,
+    /// Body translate only: the total perpendicular model delta applied so far
+    /// (from drag start), so the wall tracks the cursor absolutely and recovers
+    /// after a clamped frame instead of lagging behind.
+    pub(super) applied: (Length, Length),
+}
+
+/// Whether moving every wall endpoint currently at `old_point` to `new_point`
+/// keeps each affected wall axis-aligned. The plan editor uses this to clamp a
+/// drag that would skew a perpendicular neighbour off-axis (the model forbids
+/// non-orthogonal walls; such a corner is repositioned by moving a whole wall).
+pub(super) fn endpoint_move_keeps_ortho(
+    model: &BuildingModel,
+    old_point: Point2,
+    new_point: Point2,
+) -> bool {
+    model.walls.iter().all(|wall| {
+        let other = if wall.start == old_point {
+            wall.end
+        } else if wall.end == old_point {
+            wall.start
+        } else {
+            return true;
+        };
+        // A degenerate wall whose both ends sit on the node imposes no constraint.
+        other == old_point || new_point.x == other.x || new_point.y == other.y
+    })
+}
+
+/// Whether moving every endpoint at `old_point` to `new_point` keeps each
+/// affected wall non-degenerate — i.e. its moved end never lands on its fixed
+/// end (which would collapse it to zero length and fail `validate`).
+pub(super) fn endpoint_move_keeps_positive_length(
+    model: &BuildingModel,
+    old_point: Point2,
+    new_point: Point2,
+) -> bool {
+    model.walls.iter().all(|wall| {
+        let other = if wall.start == old_point {
+            wall.end
+        } else if wall.end == old_point {
+            wall.start
+        } else {
+            return true;
+        };
+        other != new_point
+    })
+}
+
+/// Whether translating wall `moving` by `(dx, dy)` keeps every *other* wall
+/// axis-aligned. A neighbour skews only if exactly one of its ends rides along
+/// (an end coincident with one of the moving wall's ends), so its moved end no
+/// longer shares an axis with its fixed end.
+pub(super) fn translate_keeps_ortho(
+    model: &BuildingModel,
+    moving: &framer_core::ElementId,
+    start: Point2,
+    end: Point2,
+    dx: Length,
+    dy: Length,
+) -> bool {
+    let rides = |point: Point2| point == start || point == end;
+    model.walls.iter().all(|wall| {
+        if wall.id == *moving {
+            return true;
+        }
+        match (rides(wall.start), rides(wall.end)) {
+            // Untouched, or both ends ride (translates rigidly): stays aligned.
+            (false, false) | (true, true) => true,
+            (true, false) => {
+                let moved = Point2::new(wall.start.x + dx, wall.start.y + dy);
+                moved.x == wall.end.x || moved.y == wall.end.y
+            }
+            (false, true) => {
+                let moved = Point2::new(wall.end.x + dx, wall.end.y + dy);
+                wall.start.x == moved.x || wall.start.y == moved.y
+            }
+        }
+    })
+}
+
+/// Whether translating wall `moving` by `(dx, dy)` keeps every riding neighbour
+/// non-degenerate — its moved end must not land on its fixed end. The moving
+/// wall itself translates rigidly, so its length is unchanged.
+pub(super) fn translate_keeps_positive_length(
+    model: &BuildingModel,
+    moving: &framer_core::ElementId,
+    start: Point2,
+    end: Point2,
+    dx: Length,
+    dy: Length,
+) -> bool {
+    let rides = |point: Point2| point == start || point == end;
+    model.walls.iter().all(|wall| {
+        if wall.id == *moving {
+            return true;
+        }
+        match (rides(wall.start), rides(wall.end)) {
+            (true, false) => Point2::new(wall.start.x + dx, wall.start.y + dy) != wall.end,
+            (false, true) => Point2::new(wall.end.x + dx, wall.end.y + dy) != wall.start,
+            (false, false) | (true, true) => true,
+        }
+    })
 }
 
 pub(super) fn set_wall_length_keep_direction(wall: &mut Wall, length: Length) {
@@ -563,6 +694,112 @@ mod tests {
 
         assert!(model.walls.iter().all(|wall| wall.id.0 != id));
         assert_eq!(id, format!("wall-{index}"));
+    }
+
+    fn ftp(x: f64, y: f64) -> Point2 {
+        Point2::new(Length::from_feet(x), Length::from_feet(y))
+    }
+
+    fn placed(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", start, end)
+    }
+
+    #[test]
+    fn endpoint_move_clamps_perpendicular_neighbour_at_a_corner() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        // L-corner at (10,0): horizontal `a` meets vertical `b`.
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(10.0, 0.0), ftp(10.0, 8.0), &code));
+        let node = ftp(10.0, 0.0);
+
+        // Moving in X keeps `a` horizontal but skews `b`; moving in Y skews `a`.
+        assert!(!endpoint_move_keeps_ortho(&model, node, ftp(12.0, 0.0)));
+        assert!(!endpoint_move_keeps_ortho(&model, node, ftp(10.0, 3.0)));
+    }
+
+    #[test]
+    fn endpoint_move_allows_collinear_and_free_ends() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        // Collinear run a—b sharing the node at (10,0).
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(10.0, 0.0), ftp(20.0, 0.0), &code));
+        let node = ftp(10.0, 0.0);
+
+        // Sliding the node along the shared row keeps both horizontal.
+        assert!(endpoint_move_keeps_ortho(&model, node, ftp(12.0, 0.0)));
+        // Moving it off-row would skew both.
+        assert!(!endpoint_move_keeps_ortho(&model, node, ftp(12.0, 4.0)));
+    }
+
+    #[test]
+    fn translate_keeps_ortho_allows_perpendicular_clamps_along_axis() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        let a = framer_core::ElementId::new("a");
+
+        // Sliding horizontal `a` perpendicular (in Y) keeps vertical `b` ortho.
+        assert!(translate_keeps_ortho(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(2.0),
+        ));
+        // Sliding `a` along its own axis (in X) would skew `b`.
+        assert!(!translate_keeps_ortho(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::from_feet(2.0),
+            Length::ZERO,
+        ));
+    }
+
+    #[test]
+    fn endpoint_move_rejects_collapsing_a_wall_onto_its_fixed_end() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+
+        // Dragging the end (10,0) back onto the fixed start (0,0) would collapse it.
+        assert!(!endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(0.0, 0.0)));
+        // A normal extend keeps positive length.
+        assert!(endpoint_move_keeps_positive_length(&model, ftp(10.0, 0.0), ftp(8.0, 0.0)));
+    }
+
+    #[test]
+    fn translate_rejects_collapsing_a_neighbour() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        // `a` horizontal at y=0; `b` vertical from the shared corner up to (0,8).
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        let a = framer_core::ElementId::new("a");
+
+        // Sliding `a` up by 8ft drives `b`'s bottom onto its top (0,8) → collapse.
+        assert!(!translate_keeps_positive_length(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(8.0),
+        ));
+        // A smaller slide keeps `b` non-degenerate.
+        assert!(translate_keeps_positive_length(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(2.0),
+        ));
     }
 
     #[test]
