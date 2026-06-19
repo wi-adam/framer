@@ -13,5 +13,9 @@ framer-core.workspace = true
 framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true
 
+# Default (no) features: the headless UI tests drive the app through the
+# AccessKit tree only — no wgpu rendering or image snapshots — which keeps the
+# dev-build lean and the harness deterministic across platforms.
 [dev-dependencies]
+egui_kittest = "0.34"
 pollster.workspace = true

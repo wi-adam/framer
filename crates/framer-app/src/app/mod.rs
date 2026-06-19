@@ -10,6 +10,8 @@ mod project_io;
 mod render;
 mod render_job;
 mod theme;
+#[cfg(test)]
+mod ui_harness_tests;
 mod viewport;
 
 use std::collections::HashMap;
@@ -1438,6 +1440,18 @@ impl eframe::App for FramerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_root(ui);
+    }
+}
+
+impl FramerApp {
+    /// Render one full UI frame into a central, margin-less [`egui::Ui`].
+    ///
+    /// This is the body of [`eframe::App::ui`], factored out so the headless
+    /// `egui_kittest` UI harness (see `ui_harness_tests`) can drive the exact
+    /// same panel layout without an [`eframe::Frame`], which can't be
+    /// constructed outside the eframe runtime.
+    pub(crate) fn ui_root(&mut self, ui: &mut egui::Ui) {
         let t = design::active();
         Panel::top("app-header")
             .frame(
