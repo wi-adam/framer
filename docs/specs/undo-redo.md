@@ -1,7 +1,10 @@
-# Undo / Redo Infrastructure — Design
+# Undo / Redo Infrastructure
 
-Status: accepted (2026-06-17)
-Branch: `feat/undo-redo` (proposed)
+> **Feature spec** — durable intent, requirements, and locked decisions for this feature.
+> Kept current as the feature evolves; point-in-time task breakdowns live in
+> [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
+>
+> **Status:** Implemented · **Linked goal:** —
 
 ## Goal
 

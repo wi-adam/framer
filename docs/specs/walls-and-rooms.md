@@ -1,8 +1,10 @@
-# Walls & Rooms: Floor-Plan Authoring Design
+# Walls & Rooms (Floor-Plan Authoring)
 
-Date: 2026-06-18
-Status: Approved design, pre-implementation
-Branch: `feat/walls-and-rooms`
+> **Feature spec** — durable intent, requirements, and locked decisions for this feature.
+> Kept current as the feature evolves; point-in-time task breakdowns live in
+> [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
+>
+> **Status:** Implemented · **Linked goal:** G-007 (Multi-Wall Model)
 
 ## Summary
 

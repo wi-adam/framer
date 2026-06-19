@@ -1,7 +1,10 @@
-# Framer Design System & Mockup Reskin
+# Design System
 
-Date: 2026-06-15
-Status: Approved design, implementation in progress.
+> **Feature spec** — durable intent, requirements, and locked decisions for this feature.
+> Kept current as the feature evolves; point-in-time task breakdowns live in
+> [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
+>
+> **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX)
 
 ## Goal
 

@@ -263,7 +263,10 @@ Goal: make Framer useful to early open source users.
 ## Goal Backlog
 
 Use these IDs when creating `/goal` work. Keep work scoped to one goal unless the
-dependency is unavoidable.
+dependency is unavoidable. A goal's durable intent is captured as a feature spec
+under [specs/](specs/) (which links back to its goal ID); see
+[spec-driven-development.md](spec-driven-development.md) for how specs, plans, and
+goals relate.
 
 - **G-001 Project Files:** add a schema-versioned, text-first project format,
   save/load UI, round-trip tests, and deterministic serialization.

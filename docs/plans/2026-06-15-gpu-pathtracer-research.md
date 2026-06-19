@@ -3,9 +3,9 @@
 > Version-correct reference for building the WGSL compute path tracer that mirrors
 > the tested CPU renderer in `framer-render`. Distilled from a research pass and
 > validated against the existing wgpu-29 code already in
-> `crates/framer-app/src/app/viewport.rs`. See the design + plan:
-> [render-view-mode-design.md](2026-06-15-render-view-mode-design.md),
-> [render-view-mode.md](2026-06-15-render-view-mode.md).
+> `crates/framer-app/src/app/viewport.rs`. See the spec + plan:
+> [render-view spec](../specs/render-view.md),
+> [render-view-mode plan](2026-06-15-render-view-mode.md).
 
 **Targets:** wgpu **29.0.3** / naga 29, eframe/egui **0.34.2**, embedded via
 `egui_wgpu::CallbackTrait`. The CPU renderer is the source of truth; the WGSL

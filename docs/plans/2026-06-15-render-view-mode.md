@@ -14,7 +14,7 @@ compute path tracer mirrors `framer-render`'s math, fed by the same `Scene`.
 compute + blit), `image` 0.25 (PNG, CLI only), optional `rayon` (parallel CPU
 render). Zero math deps — formulas owned to mirror WGSL.
 
-See `docs/plans/2026-06-15-render-view-mode-design.md` for the full design.
+See the [render-view spec](../specs/render-view.md) for the full design.
 
 Conventions: tests inline `#[cfg(test)] mod tests`; `cargo test --workspace`;
 `cargo fmt --all -- --check`; commit after every green task.

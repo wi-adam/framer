@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, egui (immediate-mode UI), fixed-point `Length`/`Point2` (i64 ticks @ 1/128").
 
-Design: `docs/plans/2026-06-18-wall-editing-snapping-design.md`.
+Spec: [`docs/specs/wall-editing-and-snapping.md`](../specs/wall-editing-and-snapping.md).
 
 ---
 
