@@ -2,7 +2,9 @@
 //! mesh, and edge/label drawing, ending in the `draw_view_cube` entry point.
 
 use eframe::egui::epaint::Vertex;
-use eframe::egui::{self, Align2, Color32, FontId, Mesh, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Mesh, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
+};
 use eframe::{egui_wgpu, wgpu};
 
 use super::camera_3d::{View3dState, ViewCubeAction, ViewCubeOrientation};

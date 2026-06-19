@@ -2,7 +2,9 @@
 //! rectangles, draws opening guides + the optional section line, and click-selects
 //! members. Reuses the shared `WallElevationLayout` coordinate frame.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+};
 use framer_core::{Length, Wall};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation};
 
@@ -104,7 +106,13 @@ pub(super) fn member_rect(drawing: Rect, sx: f32, sy: f32, member: &FrameMember)
     }
 }
 
-pub(super) fn draw_opening_guides(painter: &egui::Painter, drawing: Rect, sx: f32, sy: f32, wall: &Wall) {
+pub(super) fn draw_opening_guides(
+    painter: &egui::Painter,
+    drawing: Rect,
+    sx: f32,
+    sy: f32,
+    wall: &Wall,
+) {
     for opening in &wall.openings {
         draw_opening_guide(
             painter,

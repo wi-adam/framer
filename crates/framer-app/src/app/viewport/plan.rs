@@ -244,7 +244,15 @@ pub(super) fn draw_project_plan(
     let hovered_wall_handle = (!draw_tool.active && !room_tool_active)
         .then(|| {
             response.hover_pos().and_then(|hover| {
-                hit_selected_wall_handle(hover, model, selected_wall, selection, bounds, drawing, camera)
+                hit_selected_wall_handle(
+                    hover,
+                    model,
+                    selected_wall,
+                    selection,
+                    bounds,
+                    drawing,
+                    camera,
+                )
             })
         })
         .flatten()
@@ -591,11 +599,23 @@ fn draw_wall_overlay(
     for guide in resolved.guides.iter().flatten() {
         let (a, b) = match guide.axis {
             GuideAxis::Vertical => {
-                let x = plan_point(Point2::new(guide.at, guide.source.y), bounds, drawing, camera).x;
+                let x = plan_point(
+                    Point2::new(guide.at, guide.source.y),
+                    bounds,
+                    drawing,
+                    camera,
+                )
+                .x;
                 (Pos2::new(x, drawing.top()), Pos2::new(x, drawing.bottom()))
             }
             GuideAxis::Horizontal => {
-                let y = plan_point(Point2::new(guide.source.x, guide.at), bounds, drawing, camera).y;
+                let y = plan_point(
+                    Point2::new(guide.source.x, guide.at),
+                    bounds,
+                    drawing,
+                    camera,
+                )
+                .y;
                 (Pos2::new(drawing.left(), y), Pos2::new(drawing.right(), y))
             }
         };
@@ -682,8 +702,14 @@ fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspen
         SnapKind::Grid => {
             // Small plus.
             let r = 5.0;
-            painter.line_segment([Pos2::new(at.x - r, at.y), Pos2::new(at.x + r, at.y)], stroke);
-            painter.line_segment([Pos2::new(at.x, at.y - r), Pos2::new(at.x, at.y + r)], stroke);
+            painter.line_segment(
+                [Pos2::new(at.x - r, at.y), Pos2::new(at.x + r, at.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(at.x, at.y - r), Pos2::new(at.x, at.y + r)],
+                stroke,
+            );
         }
         SnapKind::Free => {
             painter.circle_filled(at, 3.5, color);

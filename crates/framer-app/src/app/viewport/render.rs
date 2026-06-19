@@ -25,7 +25,7 @@ const MOTION_COOLDOWN_FRAMES: u32 = 6;
 const MOTION_RESOLUTION_SCALE: f32 = 0.5;
 
 impl FramerApp {
-// === method body appended below; super:: paths rewritten ===
+    // === method body appended below; super:: paths rewritten ===
     /// Draws the path-traced Render view. Geometry, materials, and lighting come
     /// from `framer-render`; the heavy work runs on a background thread
     /// ([`super::render_job`]) and refines progressively while the camera is still.

@@ -9,8 +9,8 @@ use framer_core::{
 };
 
 use super::geom::distance_to_segment;
-use super::view_common::opening_rect;
 use super::theme;
+use super::view_common::opening_rect;
 
 // === extracted dimension items appended below; visibility adjusted in place ===
 
@@ -178,7 +178,12 @@ pub(super) fn draw_wall_dimension_annotations(
     clicked
 }
 
-pub(super) fn draw_dimension_tick(painter: &egui::Painter, point: Pos2, axis: DimensionAxis, color: Color32) {
+pub(super) fn draw_dimension_tick(
+    painter: &egui::Painter,
+    point: Pos2,
+    axis: DimensionAxis,
+    color: Color32,
+) {
     let tick = match axis {
         DimensionAxis::Horizontal => [point + Vec2::new(-4.0, 4.0), point + Vec2::new(4.0, -4.0)],
         DimensionAxis::Vertical => [point + Vec2::new(-4.0, -4.0), point + Vec2::new(4.0, 4.0)],
@@ -193,7 +198,12 @@ pub(super) fn dimension_label_position(start: Pos2, end: Pos2, axis: DimensionAx
     }
 }
 
-pub(super) fn dimension_label_rect(start: Pos2, end: Pos2, axis: DimensionAxis, label: &str) -> Rect {
+pub(super) fn dimension_label_rect(
+    start: Pos2,
+    end: Pos2,
+    axis: DimensionAxis,
+    label: &str,
+) -> Rect {
     let center = dimension_label_position(start, end, axis);
     let width = (label.chars().count() as f32 * 6.5 + 12.0).clamp(34.0, 86.0);
     Rect::from_center_size(center, Vec2::new(width, 18.0))
@@ -237,7 +247,10 @@ pub(super) fn draw_dimension_line_with_label_gap(
     }
 }
 
-pub(super) fn dimension_display_value(wall: &Wall, dimension: &framer_core::DimensionConstraint) -> String {
+pub(super) fn dimension_display_value(
+    wall: &Wall,
+    dimension: &framer_core::DimensionConstraint,
+) -> String {
     let measured = wall.dimension_measurement(dimension);
     match dimension.kind {
         DimensionKind::Driving => dimension.value.or(measured).map_or_else(

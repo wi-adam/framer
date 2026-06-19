@@ -105,9 +105,7 @@ impl FramerApp {
         let mut snap_out: Option<SnapResult> = None;
         // The active wall-endpoint drag (state owned here) and the event the plan
         // emits for it this frame.
-        let active_wall_drag = self
-            .wall_drag
-            .map(|drag| (drag.wall_index, drag.handle));
+        let active_wall_drag = self.wall_drag.map(|drag| (drag.wall_index, drag.handle));
         let mut wall_drag_out: Option<WallDragEvent> = None;
         let click = match self.viewport_mode {
             ViewportMode::Plan => {
