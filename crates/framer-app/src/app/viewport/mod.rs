@@ -224,12 +224,15 @@ impl FramerApp {
                     } else {
                         None
                     };
+                    let system = self.model.system_for(wall);
                     draw_wall_elevation(
                         ui,
                         wall,
                         &wall_plan.members,
                         selected_member,
                         section_x,
+                        system,
+                        &self.model.materials,
                         camera,
                     )
                     .map(|member_id| ViewClick::Member {
