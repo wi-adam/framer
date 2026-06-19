@@ -1,6 +1,6 @@
 {
   "format": "framer.project",
-  "schema_version": 6,
+  "schema_version": 7,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -19,6 +19,235 @@
       "plate_profile": "TwoByFour",
       "header_profile": "TwoByTen"
     },
+    "materials": [
+      {
+        "id": "mat-drywall",
+        "name": "5/8\" Gypsum",
+        "appearance": {
+          "SolidColor": [
+            228,
+            226,
+            220
+          ]
+        },
+        "tags": [
+          "finish"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 900
+          }
+        }
+      },
+      {
+        "id": "mat-fiber-cement",
+        "name": "Fiber-cement lap",
+        "appearance": {
+          "SolidColor": [
+            183,
+            185,
+            190
+          ]
+        },
+        "tags": [
+          "cladding"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 150
+          }
+        }
+      },
+      {
+        "id": "mat-mineral-wool",
+        "name": "Mineral wool",
+        "appearance": {
+          "SolidColor": [
+            176,
+            188,
+            170
+          ]
+        },
+        "tags": [
+          "insulation"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 4200
+          }
+        }
+      },
+      {
+        "id": "mat-plywood",
+        "name": "1/2\" Plywood",
+        "appearance": {
+          "SolidColor": [
+            200,
+            172,
+            128
+          ]
+        },
+        "tags": [
+          "sheathing"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 1250
+          }
+        }
+      },
+      {
+        "id": "mat-polyiso",
+        "name": "2\" Polyiso",
+        "appearance": {
+          "SolidColor": [
+            240,
+            222,
+            128
+          ]
+        },
+        "tags": [
+          "insulation"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 6000
+          }
+        }
+      },
+      {
+        "id": "mat-rainscreen",
+        "name": "Rain-screen battens",
+        "appearance": {
+          "SolidColor": [
+            150,
+            110,
+            76
+          ]
+        },
+        "tags": [
+          "furring"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 0
+          }
+        }
+      },
+      {
+        "id": "mat-spf",
+        "name": "SPF framing",
+        "appearance": {
+          "SolidColor": [
+            205,
+            170,
+            120
+          ]
+        },
+        "tags": [
+          "framing"
+        ],
+        "properties": {
+          "r_per_inch_milli": {
+            "Int": 1250
+          }
+        }
+      }
+    ],
+    "systems": [
+      {
+        "id": "system-wall-exterior-1",
+        "name": "Exterior wall",
+        "kind": "Wall",
+        "layers": [
+          {
+            "function": "InteriorFinish",
+            "material": "mat-drywall",
+            "thickness": {
+              "ticks": 10
+            }
+          },
+          {
+            "function": "Framing",
+            "material": "mat-spf",
+            "thickness": {
+              "ticks": 64
+            },
+            "framing": {
+              "member": "TwoByFour",
+              "spacing": {
+                "ticks": 256
+              },
+              "pattern": "Single",
+              "cavity_material": "mat-mineral-wool"
+            }
+          },
+          {
+            "function": "Sheathing",
+            "material": "mat-plywood",
+            "thickness": {
+              "ticks": 8
+            }
+          },
+          {
+            "function": "ContinuousInsulation",
+            "material": "mat-polyiso",
+            "thickness": {
+              "ticks": 32
+            }
+          },
+          {
+            "function": "AirGap",
+            "material": "mat-rainscreen",
+            "thickness": {
+              "ticks": 12
+            }
+          },
+          {
+            "function": "Cladding",
+            "material": "mat-fiber-cement",
+            "thickness": {
+              "ticks": 5
+            }
+          }
+        ]
+      },
+      {
+        "id": "system-wall-interior-1",
+        "name": "Interior partition",
+        "kind": "Wall",
+        "layers": [
+          {
+            "function": "InteriorFinish",
+            "material": "mat-drywall",
+            "thickness": {
+              "ticks": 10
+            }
+          },
+          {
+            "function": "Framing",
+            "material": "mat-spf",
+            "thickness": {
+              "ticks": 64
+            },
+            "framing": {
+              "member": "TwoByFour",
+              "spacing": {
+                "ticks": 256
+              },
+              "pattern": "Single"
+            }
+          },
+          {
+            "function": "InteriorFinish",
+            "material": "mat-drywall",
+            "thickness": {
+              "ticks": 10
+            }
+          }
+        ]
+      }
+    ],
     "levels": [
       {
         "id": "level-1",
@@ -55,14 +284,7 @@
         "height": {
           "ticks": 1536
         },
-        "stud_spacing": {
-          "ticks": 256
-        },
-        "assembly": {
-          "exposure": "Exterior",
-          "stud": "TwoByFour",
-          "sheathing": "Osb716"
-        },
+        "system": "system-wall-exterior-1",
         "openings": [
           {
             "id": "opening-back-left-window",
@@ -126,14 +348,7 @@
         "height": {
           "ticks": 1536
         },
-        "stud_spacing": {
-          "ticks": 256
-        },
-        "assembly": {
-          "exposure": "Exterior",
-          "stud": "TwoByFour",
-          "sheathing": "Osb716"
-        },
+        "system": "system-wall-exterior-1",
         "openings": [
           {
             "id": "opening-front-door",
@@ -197,14 +412,7 @@
         "height": {
           "ticks": 1536
         },
-        "stud_spacing": {
-          "ticks": 256
-        },
-        "assembly": {
-          "exposure": "Exterior",
-          "stud": "TwoByFour",
-          "sheathing": "Osb716"
-        },
+        "system": "system-wall-exterior-1",
         "openings": [
           {
             "id": "opening-left-service-door",
@@ -251,14 +459,7 @@
         "height": {
           "ticks": 1536
         },
-        "stud_spacing": {
-          "ticks": 256
-        },
-        "assembly": {
-          "exposure": "Exterior",
-          "stud": "TwoByFour",
-          "sheathing": "Osb716"
-        },
+        "system": "system-wall-exterior-1",
         "openings": [
           {
             "id": "opening-right-window",

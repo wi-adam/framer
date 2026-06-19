@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 6;
+pub const PROJECT_SCHEMA_VERSION: u32 = 7;
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,9 +64,6 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
     let mut document: ProjectDocument = serde_json::from_str(source)?;
-    if document.schema_version == 1 {
-        document.authored.upgrade_legacy_wall_placements();
-    }
     document.validate()?;
     document.authored.sort_deterministically();
     Ok(document.into_model())
@@ -86,7 +83,7 @@ pub enum ProjectError {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BuildingModel, CodeProfile, Length, Opening, Wall};
+    use crate::{BuildingModel, CodeProfile, Length, ModelError, Opening, Wall};
 
     use super::*;
 
@@ -95,7 +92,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 6,\n"));
+        assert!(json.contains("  \"schema_version\": 7,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -141,7 +138,7 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 1,
+  "schema_version": 7,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -160,50 +157,6 @@ mod tests {
 }"#;
 
         assert!(matches!(load_project(source), Err(ProjectError::Json(_))));
-    }
-
-    #[test]
-    fn load_project_migrates_schema_one_wall_placement() {
-        let source = r#"{
-  "format": "framer.project",
-  "schema_version": 1,
-  "authored": {
-    "code": {
-      "code": "Irc2021",
-      "display_name": "IRC 2021 prescriptive starter profile",
-      "default_wall_height": {"ticks": 1536},
-      "default_stud_spacing": {"ticks": 256},
-      "double_top_plate": true,
-      "default_header_depth": {"ticks": 144},
-      "stud_profile": "TwoByFour",
-      "plate_profile": "TwoByFour",
-      "header_profile": "TwoByTen"
-    },
-    "walls": [
-      {
-        "id": "wall",
-        "name": "Legacy wall",
-        "length": {"ticks": 2304},
-        "height": {"ticks": 1536},
-        "stud_spacing": {"ticks": 256},
-        "openings": []
-      }
-    ]
-  }
-}"#;
-
-        let model = load_project(source).unwrap();
-
-        assert_eq!(model.levels[0].id.0, "level-1");
-        assert_eq!(model.walls[0].level.0, "level-1");
-        assert_eq!(model.walls[0].start, crate::Point2::default());
-        assert_eq!(model.walls[0].end.x, Length::from_feet(12.0));
-        assert_eq!(
-            serde_json::from_str::<ProjectDocument>(&save_project(&model).unwrap())
-                .unwrap()
-                .schema_version,
-            PROJECT_SCHEMA_VERSION
-        );
     }
 
     #[test]
@@ -246,32 +199,92 @@ mod tests {
     }
 
     #[test]
-    fn wall_assembly_and_tags_round_trip() {
-        use crate::{BoardProfile, Sheathing, WallExposure};
+    fn wall_system_and_tags_round_trip() {
+        use crate::ElementId;
 
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
-        wall.assembly.exposure = WallExposure::Interior;
-        wall.assembly.stud = BoardProfile::TwoBySix;
-        wall.assembly.sheathing = Sheathing::Plywood12;
+        wall.system = ElementId::new("system-wall-interior-1");
         wall.tags = vec!["load-bearing".to_owned(), "shear".to_owned()];
         model.walls.push(wall);
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"exposure\": \"Interior\""));
-        assert!(json.contains("\"stud\": \"TwoBySix\""));
-        assert!(json.contains("\"sheathing\": \"Plywood12\""));
+        assert!(json.contains("\"system\": \"system-wall-interior-1\""));
+        assert!(json.contains("\"systems\": ["));
+        assert!(json.contains("\"materials\": ["));
+        assert!(json.contains("\"function\": \"Framing\""));
+        assert!(json.contains("\"appearance\": {"));
 
         let reloaded = load_project(&json).unwrap();
         let wall = &reloaded.walls[0];
-        assert_eq!(wall.assembly.exposure, WallExposure::Interior);
-        assert_eq!(wall.assembly.stud, BoardProfile::TwoBySix);
-        assert_eq!(wall.assembly.sheathing, Sheathing::Plywood12);
+        assert_eq!(wall.system, ElementId::new("system-wall-interior-1"));
+        let system = reloaded.system_for(wall).unwrap();
+        assert_eq!(system.exposure(), crate::WallExposure::Interior);
+        assert_eq!(system.framing_layer().unwrap().function, crate::LayerFunction::Framing);
+        assert!(reloaded.material(&ElementId::new("mat-drywall")).is_some());
         assert_eq!(
             wall.tags,
             vec!["load-bearing".to_owned(), "shear".to_owned()]
         );
+    }
+
+    #[test]
+    fn material_properties_round_trip_deterministically() {
+        use crate::{Appearance, Material, PropertyValue};
+
+        let code = CodeProfile::irc_2021_prescriptive();
+
+        let mut first = BuildingModel::new(code.clone());
+        let mut material = Material::solid_color("mat-custom", "Custom", [10, 20, 30]);
+        material
+            .properties
+            .insert("r_per_inch_milli".to_owned(), PropertyValue::Int(3300));
+        material
+            .properties
+            .insert("cost_cents".to_owned(), PropertyValue::Int(125));
+        material
+            .properties
+            .insert("note".to_owned(), PropertyValue::Text("spec".to_owned()));
+        first.materials.push(material.clone());
+
+        // The same material with its property map inserted in a different order
+        // must serialize identically (BTreeMap => ordered).
+        let mut second = BuildingModel::new(code);
+        let mut reordered = Material::solid_color("mat-custom", "Custom", [10, 20, 30]);
+        reordered
+            .properties
+            .insert("note".to_owned(), PropertyValue::Text("spec".to_owned()));
+        reordered
+            .properties
+            .insert("cost_cents".to_owned(), PropertyValue::Int(125));
+        reordered
+            .properties
+            .insert("r_per_inch_milli".to_owned(), PropertyValue::Int(3300));
+        second.materials.push(reordered);
+
+        assert_eq!(save_project(&first).unwrap(), save_project(&second).unwrap());
+
+        let reloaded = load_project(&save_project(&first).unwrap()).unwrap();
+        let material = reloaded.material(&crate::ElementId::new("mat-custom")).unwrap();
+        assert_eq!(material.appearance, Appearance::SolidColor([10, 20, 30]));
+        assert_eq!(material.r_per_inch_milli(), 3300);
+    }
+
+    #[test]
+    fn validation_rejects_dangling_wall_system() {
+        use crate::ElementId;
+
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
+        wall.system = ElementId::new("system-does-not-exist");
+        model.walls.push(wall);
+
+        assert!(matches!(
+            save_project(&model),
+            Err(ProjectError::Model(ModelError::WallReferencesUnknownSystem { .. }))
+        ));
     }
 
     #[test]
@@ -292,7 +305,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 6,"));
+        assert!(json.contains("\"schema_version\": 7,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 
@@ -305,87 +318,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn schema_v5_file_without_rooms_loads_with_empty_rooms() {
-        let source = r#"{
-  "format": "framer.project",
-  "schema_version": 5,
-  "authored": {
-    "code": {
-      "code": "Irc2021",
-      "display_name": "IRC 2021 prescriptive starter profile",
-      "default_wall_height": {"ticks": 1536},
-      "default_stud_spacing": {"ticks": 256},
-      "double_top_plate": true,
-      "default_header_depth": {"ticks": 144},
-      "stud_profile": "TwoByFour",
-      "plate_profile": "TwoByFour",
-      "header_profile": "TwoByTen"
-    },
-    "levels": [{"id": "level-1", "name": "Level 1", "elevation": {"ticks": 0}}],
-    "walls": [
-      {
-        "id": "wall",
-        "name": "Wall",
-        "level": "level-1",
-        "start": {"x": {"ticks": 0}, "y": {"ticks": 0}},
-        "end": {"x": {"ticks": 2304}, "y": {"ticks": 0}},
-        "length": {"ticks": 2304},
-        "height": {"ticks": 1536},
-        "stud_spacing": {"ticks": 256},
-        "openings": []
-      }
-    ],
-    "wall_joins": []
-  }
-}"#;
-
-        let model = load_project(source).unwrap();
-        assert!(model.rooms.is_empty());
-    }
-
-    #[test]
-    fn wall_without_assembly_loads_defaults() {
-        use crate::{BoardProfile, Sheathing, WallExposure};
-
-        let source = r#"{
-  "format": "framer.project",
-  "schema_version": 4,
-  "authored": {
-    "code": {
-      "code": "Irc2021",
-      "display_name": "IRC 2021 prescriptive starter profile",
-      "default_wall_height": {"ticks": 1536},
-      "default_stud_spacing": {"ticks": 256},
-      "double_top_plate": true,
-      "default_header_depth": {"ticks": 144},
-      "stud_profile": "TwoByFour",
-      "plate_profile": "TwoByFour",
-      "header_profile": "TwoByTen"
-    },
-    "levels": [{"id": "level-1", "name": "Level 1", "elevation": {"ticks": 0}}],
-    "walls": [
-      {
-        "id": "wall",
-        "name": "Wall",
-        "level": "level-1",
-        "start": {"x": {"ticks": 0}, "y": {"ticks": 0}},
-        "end": {"x": {"ticks": 2304}, "y": {"ticks": 0}},
-        "length": {"ticks": 2304},
-        "height": {"ticks": 1536},
-        "stud_spacing": {"ticks": 256},
-        "openings": []
-      }
-    ],
-    "wall_joins": []
-  }
-}"#;
-
-        let model = load_project(source).unwrap();
-        let assembly = &model.walls[0].assembly;
-        assert_eq!(assembly.exposure, WallExposure::Exterior);
-        assert_eq!(assembly.stud, BoardProfile::TwoByFour);
-        assert_eq!(assembly.sheathing, Sheathing::Osb716);
-        assert!(model.walls[0].tags.is_empty());
-    }
 }

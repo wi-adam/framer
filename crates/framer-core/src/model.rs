@@ -30,6 +30,10 @@ impl ElementId {
 #[serde(deny_unknown_fields)]
 pub struct BuildingModel {
     pub code: CodeProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materials: Vec<Material>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub systems: Vec<ConstructionSystem>,
     #[serde(default = "default_levels")]
     pub levels: Vec<Level>,
     pub walls: Vec<Wall>,
@@ -41,8 +45,11 @@ pub struct BuildingModel {
 
 impl BuildingModel {
     pub fn new(code: CodeProfile) -> Self {
+        let (materials, systems) = Self::starter_library();
         Self {
             code,
+            materials,
+            systems,
             levels: default_levels(),
             walls: Vec::new(),
             wall_joins: Vec::new(),
@@ -79,8 +86,11 @@ impl BuildingModel {
             ),
         ];
 
+        let (materials, systems) = Self::starter_library();
         Self {
             code,
+            materials,
+            systems,
             levels: default_levels(),
             walls: vec![wall],
             wall_joins: Vec::new(),
@@ -168,8 +178,11 @@ impl BuildingModel {
             Length::from_inches(80.0),
         ));
 
+        let (materials, systems) = Self::starter_library();
         Self {
             code,
+            materials,
+            systems,
             levels: default_levels(),
             walls: vec![front, right, back, left],
             wall_joins: vec![
@@ -352,8 +365,11 @@ impl BuildingModel {
             ),
         ];
 
+        let (materials, systems) = Self::starter_library();
         Self {
             code,
+            materials,
+            systems,
             levels: default_levels(),
             walls,
             wall_joins,
@@ -375,6 +391,19 @@ impl BuildingModel {
             return Err(ModelError::MissingLevel);
         }
 
+        let mut material_lookup = BTreeMap::new();
+        for material in &self.materials {
+            validate_element_id(&material.id)?;
+            insert_unique_id(&mut ids, &material.id)?;
+            material_lookup.insert(material.id.clone(), material);
+        }
+
+        let mut system_lookup = BTreeMap::new();
+        for system in &self.systems {
+            system.validate(&material_lookup, &mut ids)?;
+            system_lookup.insert(system.id.clone(), system);
+        }
+
         let mut wall_lookup = BTreeMap::new();
         for wall in &self.walls {
             wall.validate()?;
@@ -384,6 +413,21 @@ impl BuildingModel {
                     wall: wall.id.clone(),
                     level: wall.level.clone(),
                 });
+            }
+            match system_lookup.get(&wall.system) {
+                Some(system) if system.kind == SystemKind::Wall => {}
+                Some(_) => {
+                    return Err(ModelError::WallSystemWrongKind {
+                        wall: wall.id.clone(),
+                        system: wall.system.clone(),
+                    });
+                }
+                None => {
+                    return Err(ModelError::WallReferencesUnknownSystem {
+                        wall: wall.id.clone(),
+                        system: wall.system.clone(),
+                    });
+                }
             }
             wall_lookup.insert(wall.id.clone(), wall);
             for opening in &wall.openings {
@@ -449,6 +493,10 @@ impl BuildingModel {
     }
 
     pub fn sort_deterministically(&mut self) {
+        self.materials.sort_by(|left, right| left.id.cmp(&right.id));
+        // Systems sort by id; layer ORDER is semantic (interior -> exterior) and
+        // must never be reordered.
+        self.systems.sort_by(|left, right| left.id.cmp(&right.id));
         self.levels.sort_by(|left, right| left.id.cmp(&right.id));
         self.walls.sort_by(|left, right| left.id.cmp(&right.id));
         for wall in &mut self.walls {
@@ -464,20 +512,123 @@ impl BuildingModel {
         self
     }
 
-    pub fn upgrade_legacy_wall_placements(&mut self) {
-        if self.levels.is_empty() {
-            self.levels = default_levels();
-        }
+    /// Resolve a wall's construction system from the project library. Later
+    /// widened to search external/shared libraries via `MaterialSource`.
+    pub fn system_for(&self, wall: &Wall) -> Option<&ConstructionSystem> {
+        self.systems.iter().find(|system| system.id == wall.system)
+    }
 
-        for wall in &mut self.walls {
-            if wall.level.0.is_empty() {
-                wall.level = ElementId::new("level-1");
-            }
+    /// Resolve a material by id from the project library.
+    pub fn material(&self, id: &ElementId) -> Option<&Material> {
+        self.materials.iter().find(|material| material.id == *id)
+    }
 
-            if wall.start == wall.end {
-                wall.end = Point2::new(wall.start.x + wall.length, wall.start.y);
-            }
-        }
+    /// The seeded material catalog and construction systems for a new project.
+    /// Deterministic (id-sorted on output); shared by `new`, the `demo_*`
+    /// constructors, and the app's `new_project`.
+    pub fn starter_library() -> (Vec<Material>, Vec<ConstructionSystem>) {
+        let materials = vec![
+            Material::solid_color("mat-drywall", "5/8\" Gypsum", [228, 226, 220])
+                .with_tags(["finish"])
+                .with_r_per_inch_milli(900),
+            Material::solid_color("mat-spf", "SPF framing", [205, 170, 120])
+                .with_tags(["framing"])
+                .with_r_per_inch_milli(1250),
+            Material::solid_color("mat-mineral-wool", "Mineral wool", [176, 188, 170])
+                .with_tags(["insulation"])
+                .with_r_per_inch_milli(4200),
+            Material::solid_color("mat-plywood", "1/2\" Plywood", [200, 172, 128])
+                .with_tags(["sheathing"])
+                .with_r_per_inch_milli(1250),
+            Material::solid_color("mat-polyiso", "2\" Polyiso", [240, 222, 128])
+                .with_tags(["insulation"])
+                .with_r_per_inch_milli(6000),
+            Material::solid_color("mat-rainscreen", "Rain-screen battens", [150, 110, 76])
+                .with_tags(["furring"])
+                .with_r_per_inch_milli(0),
+            Material::solid_color("mat-fiber-cement", "Fiber-cement lap", [183, 185, 190])
+                .with_tags(["cladding"])
+                .with_r_per_inch_milli(150),
+        ];
+
+        let exterior = ConstructionSystem {
+            id: ElementId::new("system-wall-exterior-1"),
+            name: "Exterior wall".to_owned(),
+            kind: SystemKind::Wall,
+            layers: vec![
+                ConstructionLayer::new(
+                    LayerFunction::InteriorFinish,
+                    "mat-drywall",
+                    Length::from_inches(0.625),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-spf",
+                    Length::from_whole_inches(4),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByFour,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: FramingPattern::Single,
+                    cavity_material: Some(ElementId::new("mat-mineral-wool")),
+                }),
+                ConstructionLayer::new(
+                    LayerFunction::Sheathing,
+                    "mat-plywood",
+                    Length::from_inches(0.5),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::ContinuousInsulation,
+                    "mat-polyiso",
+                    Length::from_whole_inches(2),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::AirGap,
+                    "mat-rainscreen",
+                    Length::from_inches(0.75),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::Cladding,
+                    "mat-fiber-cement",
+                    Length::from_inches(0.3125),
+                ),
+            ],
+        };
+
+        let interior = ConstructionSystem {
+            id: ElementId::new("system-wall-interior-1"),
+            name: "Interior partition".to_owned(),
+            kind: SystemKind::Wall,
+            layers: vec![
+                ConstructionLayer::new(
+                    LayerFunction::InteriorFinish,
+                    "mat-drywall",
+                    Length::from_inches(0.625),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-spf",
+                    Length::from_whole_inches(4),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByFour,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: FramingPattern::Single,
+                    cavity_material: None,
+                }),
+                ConstructionLayer::new(
+                    LayerFunction::InteriorFinish,
+                    "mat-drywall",
+                    Length::from_inches(0.625),
+                ),
+            ],
+        };
+
+        let mut materials = materials;
+        materials.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut systems = vec![exterior, interior];
+        systems.sort_by(|left, right| left.id.cmp(&right.id));
+        (materials, systems)
     }
 
     pub fn apply_driving_dimensions(&mut self) -> bool {
@@ -893,55 +1044,392 @@ impl Sheathing {
     }
 }
 
-/// Per-wall construction assembly: exposure, framing member size, and sheathing.
-/// Studs and plates follow `stud`; the header profile remains a code-profile
-/// default until span lookups exist.
+/// The structural class of a construction system. A closed enum: the app reasons
+/// about each kind (only `Wall` is wired now; `Floor`/`Roof` extend later).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SystemKind {
+    Wall,
+    Floor,
+    Roof,
+}
+
+impl SystemKind {
+    pub const ALL: [Self; 3] = [Self::Wall, Self::Floor, Self::Roof];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Wall => "Wall",
+            Self::Floor => "Floor",
+            Self::Roof => "Roof",
+        }
+    }
+}
+
+/// The structural role a layer plays in an assembly. A closed enum (the app's BOM
+/// and rendering reason about each role); material substance stays open data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LayerFunction {
+    InteriorFinish,
+    Framing,
+    ContinuousInsulation,
+    Sheathing,
+    WeatherBarrier,
+    AirGap,
+    Cladding,
+    Masonry,
+    Structure,
+    Other,
+}
+
+impl LayerFunction {
+    pub const ALL: [Self; 10] = [
+        Self::InteriorFinish,
+        Self::Framing,
+        Self::ContinuousInsulation,
+        Self::Sheathing,
+        Self::WeatherBarrier,
+        Self::AirGap,
+        Self::Cladding,
+        Self::Masonry,
+        Self::Structure,
+        Self::Other,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InteriorFinish => "Interior finish",
+            Self::Framing => "Framing",
+            Self::ContinuousInsulation => "Continuous insulation",
+            Self::Sheathing => "Sheathing",
+            Self::WeatherBarrier => "Weather barrier",
+            Self::AirGap => "Air gap",
+            Self::Cladding => "Cladding",
+            Self::Masonry => "Masonry",
+            Self::Structure => "Structure",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// How the framing members in a framing layer are laid out across the cavity.
+/// `Staggered`/`Double` are authored now but generation is deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub enum FramingPattern {
+    #[default]
+    Single,
+    Staggered,
+    Double,
+}
+
+impl FramingPattern {
+    pub const ALL: [Self; 3] = [Self::Single, Self::Staggered, Self::Double];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single",
+            Self::Staggered => "Staggered",
+            Self::Double => "Double",
+        }
+    }
+}
+
+/// The framing detail of a `Framing` layer: member size, spacing, pattern, and an
+/// optional between-studs cavity material (adds no extra through-wall depth).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WallAssembly {
+pub struct FramingSpec {
+    pub member: BoardProfile,
+    pub spacing: Length,
     #[serde(default)]
-    pub exposure: WallExposure,
-    #[serde(default = "default_assembly_stud")]
-    pub stud: BoardProfile,
-    #[serde(default)]
-    pub sheathing: Sheathing,
+    pub pattern: FramingPattern,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cavity_material: Option<ElementId>,
 }
 
-fn default_assembly_stud() -> BoardProfile {
-    BoardProfile::TwoByFour
+/// One material layer of a construction system. `framing` is present iff
+/// `function == Framing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstructionLayer {
+    pub function: LayerFunction,
+    pub material: ElementId,
+    pub thickness: Length,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framing: Option<FramingSpec>,
 }
 
-impl Default for WallAssembly {
-    fn default() -> Self {
+impl ConstructionLayer {
+    pub fn new(
+        function: LayerFunction,
+        material: impl Into<String>,
+        thickness: Length,
+    ) -> Self {
         Self {
-            exposure: WallExposure::Exterior,
-            stud: default_assembly_stud(),
-            sheathing: Sheathing::Osb716,
+            function,
+            material: ElementId::new(material),
+            thickness,
+            framing: None,
+        }
+    }
+
+    pub fn with_framing(mut self, framing: FramingSpec) -> Self {
+        self.framing = Some(framing);
+        self
+    }
+}
+
+/// A named, reusable construction system: an ordered stack of material layers
+/// across an element's thickness. Applied to elements by reference. Layer order
+/// is SEMANTIC (interior -> exterior) and is never sorted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstructionSystem {
+    pub id: ElementId,
+    pub name: String,
+    pub kind: SystemKind,
+    pub layers: Vec<ConstructionLayer>,
+}
+
+impl ConstructionSystem {
+    /// The single `Framing` layer, if any.
+    pub fn framing_layer(&self) -> Option<&ConstructionLayer> {
+        self.layers
+            .iter()
+            .find(|layer| layer.function == LayerFunction::Framing)
+    }
+
+    /// Total through-wall thickness: the sum of every layer's thickness. Cavity
+    /// insulation (inside the framing band) contributes no extra depth.
+    pub fn total_thickness(&self) -> Length {
+        self.layers
+            .iter()
+            .fold(Length::ZERO, |total, layer| total + layer.thickness)
+    }
+
+    /// Derived exposure: `Exterior` if any layer is an outboard envelope role
+    /// (weather barrier, cladding, masonry, continuous insulation), else
+    /// `Interior`.
+    pub fn exposure(&self) -> WallExposure {
+        let exterior = self.layers.iter().any(|layer| {
+            matches!(
+                layer.function,
+                LayerFunction::WeatherBarrier
+                    | LayerFunction::Cladding
+                    | LayerFunction::Masonry
+                    | LayerFunction::ContinuousInsulation
+            )
+        });
+        if exterior {
+            WallExposure::Exterior
+        } else {
+            WallExposure::Interior
+        }
+    }
+
+    /// Clear-wall R-value in milli-R (R × 1000), integer math: the sum over layers
+    /// of `round(thickness_in_inches) * material.r_per_inch_milli`. The framing
+    /// layer additionally contributes its cavity material's R over the framing
+    /// depth. This is a clear-wall approximation — it ignores the framing-factor
+    /// (parallel-path) derate, which is deferred.
+    pub fn r_value_milli(&self, materials: &[Material]) -> i64 {
+        let lookup = |id: &ElementId| materials.iter().find(|material| material.id == *id);
+        let mut total = 0i64;
+        for layer in &self.layers {
+            let inches = layer.thickness.inches().round() as i64;
+            if let Some(material) = lookup(&layer.material) {
+                total += inches * material.r_per_inch_milli();
+            }
+            if let Some(framing) = &layer.framing
+                && let Some(cavity) = &framing.cavity_material
+                && let Some(material) = lookup(cavity)
+            {
+                total += inches * material.r_per_inch_milli();
+            }
+        }
+        total
+    }
+
+    fn validate(
+        &self,
+        materials: &BTreeMap<ElementId, &Material>,
+        ids: &mut BTreeSet<ElementId>,
+    ) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        insert_unique_id(ids, &self.id)?;
+
+        if self.layers.is_empty() {
+            return Err(ModelError::SystemHasNoLayers {
+                system: self.id.clone(),
+            });
+        }
+
+        let mut framing_layers = 0;
+        for layer in &self.layers {
+            if layer.thickness <= Length::ZERO {
+                return Err(ModelError::InvalidLayerThickness {
+                    system: self.id.clone(),
+                });
+            }
+
+            let is_framing = layer.function == LayerFunction::Framing;
+            if is_framing != layer.framing.is_some() {
+                return Err(ModelError::LayerFramingMismatch {
+                    system: self.id.clone(),
+                });
+            }
+
+            if !materials.contains_key(&layer.material) {
+                return Err(ModelError::LayerReferencesUnknownMaterial {
+                    system: self.id.clone(),
+                    material: layer.material.clone(),
+                });
+            }
+
+            if let Some(framing) = &layer.framing {
+                framing_layers += 1;
+                if framing.spacing <= Length::ZERO {
+                    return Err(ModelError::InvalidFramingSpacing {
+                        system: self.id.clone(),
+                    });
+                }
+                if let Some(cavity) = &framing.cavity_material
+                    && !materials.contains_key(cavity)
+                {
+                    return Err(ModelError::LayerReferencesUnknownMaterial {
+                        system: self.id.clone(),
+                        material: cavity.clone(),
+                    });
+                }
+            }
+        }
+
+        if self.kind == SystemKind::Wall && framing_layers != 1 {
+            return Err(ModelError::WallSystemFramingLayerCount {
+                system: self.id.clone(),
+                found: framing_layers,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Where a material is defined. `Project` materials are embedded in the model;
+/// `External` references a shared/imported library (resolver widens later).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum MaterialSource {
+    #[default]
+    Project,
+    External {
+        reference: String,
+    },
+}
+
+impl MaterialSource {
+    pub fn is_project(&self) -> bool {
+        matches!(self, Self::Project)
+    }
+}
+
+/// A typed property value for the extensible material property map. Float-free
+/// and `Eq` so the model stays deterministic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum PropertyValue {
+    Int(i64),
+    Length(Length),
+    Text(String),
+    Flag(bool),
+}
+
+/// Authored finish for a material. Starts as a flat color; the enum is the seam
+/// for richer, possibly geometry-affecting finishes, lowered into framer-render's
+/// path-tracer material later.
+///
+/// GROWTH PATH (not built now):
+///   - `Textured { color, texture_ref, scale }`
+///   - `LappedSiding { color, reveal: Length }` — parametric, may affect geometry
+///   - `Masonry { unit, coursing, color }` — depth-mapped brick/block
+///   - `DepthMapped { color, height_ref, scale }`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Appearance {
+    SolidColor([u8; 3]),
+}
+
+impl Appearance {
+    /// A representative color for this appearance.
+    pub fn color(&self) -> [u8; 3] {
+        match self {
+            Self::SolidColor(color) => *color,
         }
     }
 }
 
-impl WallAssembly {
-    /// An assembly seeded from a code profile (stud size from the code default).
-    pub fn from_code(code: &CodeProfile) -> Self {
+/// An open, extensible material definition referenced by stable id. Substance,
+/// properties, and appearance are open data so external/shared libraries plug in
+/// via the same reference + resolver without schema churn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Material {
+    pub id: ElementId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "MaterialSource::is_project")]
+    pub source: MaterialSource,
+    pub appearance: Appearance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, PropertyValue>,
+}
+
+impl Material {
+    /// A project material with a solid-color appearance and no extra properties.
+    pub fn solid_color(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        color: [u8; 3],
+    ) -> Self {
         Self {
-            stud: code.stud_profile,
-            ..Self::default()
+            id: ElementId::new(id),
+            name: name.into(),
+            source: MaterialSource::Project,
+            appearance: Appearance::SolidColor(color),
+            tags: Vec::new(),
+            properties: BTreeMap::new(),
         }
     }
 
-    pub fn stud_profile(&self) -> BoardProfile {
-        self.stud
+    pub fn with_tags<I, S>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
     }
 
-    /// Plates follow the stud profile (a 2x6 wall uses 2x6 plates).
-    pub fn plate_profile(&self) -> BoardProfile {
-        self.stud
+    pub fn with_r_per_inch_milli(mut self, r_per_inch_milli: i64) -> Self {
+        self.properties.insert(
+            "r_per_inch_milli".to_owned(),
+            PropertyValue::Int(r_per_inch_milli),
+        );
+        self
     }
 
-    /// Human-readable wall-type label, e.g. `Exterior - 2x6`.
-    pub fn display(&self) -> String {
-        format!("{} - {}", self.exposure.label(), self.stud.label())
+    /// The representative color from this material's appearance.
+    pub fn color(&self) -> [u8; 3] {
+        self.appearance.color()
+    }
+
+    /// The well-known `r_per_inch_milli` property (R × 1000 per inch), or 0 when
+    /// absent or not an integer.
+    pub fn r_per_inch_milli(&self) -> i64 {
+        match self.properties.get("r_per_inch_milli") {
+            Some(PropertyValue::Int(value)) => *value,
+            _ => 0,
+        }
     }
 }
 
@@ -958,9 +1446,7 @@ pub struct Wall {
     pub end: Point2,
     pub length: Length,
     pub height: Length,
-    pub stud_spacing: Length,
-    #[serde(default)]
-    pub assembly: WallAssembly,
+    pub system: ElementId,
     pub openings: Vec<Opening>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionConstraint>,
@@ -983,8 +1469,7 @@ impl Wall {
             end: Point2::new(length, Length::ZERO),
             length,
             height: code.default_wall_height,
-            stud_spacing: code.default_stud_spacing,
-            assembly: WallAssembly::from_code(code),
+            system: ElementId::new("system-wall-exterior-1"),
             openings: Vec::new(),
             dimensions: Vec::new(),
             tags: Vec::new(),
@@ -1004,6 +1489,7 @@ impl Wall {
     pub fn validate(&self) -> Result<(), ModelError> {
         validate_element_id(&self.id)?;
         validate_element_id(&self.level)?;
+        validate_element_id(&self.system)?;
 
         if self.length <= Length::ZERO {
             return Err(ModelError::InvalidWallLength {
@@ -1013,12 +1499,6 @@ impl Wall {
 
         if self.height <= Length::ZERO {
             return Err(ModelError::InvalidWallHeight {
-                wall: self.id.clone(),
-            });
-        }
-
-        if self.stud_spacing <= Length::ZERO {
-            return Err(ModelError::InvalidStudSpacing {
                 wall: self.id.clone(),
             });
         }
@@ -2082,8 +2562,6 @@ pub enum ModelError {
     InvalidWallLength { wall: ElementId },
     #[error("wall {wall:?} must have a positive height")]
     InvalidWallHeight { wall: ElementId },
-    #[error("wall {wall:?} must have a positive stud spacing")]
-    InvalidStudSpacing { wall: ElementId },
     #[error("wall {wall:?} must be an axis-aligned segment with distinct endpoints")]
     InvalidWallPlacement { wall: ElementId },
     #[error("wall {wall:?} length must match its authored segment placement")]
@@ -2130,6 +2608,27 @@ pub enum ModelError {
     JoinPointDoesNotConnectWalls { join: ElementId },
     #[error("room {room:?} references unknown level {level:?}")]
     RoomReferencesUnknownLevel { room: ElementId, level: ElementId },
+    #[error("construction system {system:?} must have at least one layer")]
+    SystemHasNoLayers { system: ElementId },
+    #[error("construction system {system:?} has a layer with non-positive thickness")]
+    InvalidLayerThickness { system: ElementId },
+    #[error(
+        "construction system {system:?} has a layer whose framing spec presence does not match its Framing function"
+    )]
+    LayerFramingMismatch { system: ElementId },
+    #[error("construction system {system:?} has a framing layer with non-positive spacing")]
+    InvalidFramingSpacing { system: ElementId },
+    #[error("construction system {system:?} references unknown material {material:?}")]
+    LayerReferencesUnknownMaterial {
+        system: ElementId,
+        material: ElementId,
+    },
+    #[error("wall construction system {system:?} must have exactly one framing layer, found {found}")]
+    WallSystemFramingLayerCount { system: ElementId, found: usize },
+    #[error("wall {wall:?} references unknown construction system {system:?}")]
+    WallReferencesUnknownSystem { wall: ElementId, system: ElementId },
+    #[error("wall {wall:?} references construction system {system:?} which is not a Wall system")]
+    WallSystemWrongKind { wall: ElementId, system: ElementId },
 }
 
 fn default_levels() -> Vec<Level> {

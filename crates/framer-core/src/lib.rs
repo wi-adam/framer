@@ -6,10 +6,12 @@ mod units;
 
 pub use constraints::{ConstraintSystem, ConstraintVariable, LinearConstraint, LinearExpression};
 pub use model::{
-    BoardProfile, BuildingModel, CodeProfile, DimensionAnchor, DimensionAxis, DimensionConstraint,
-    DimensionDirection, DimensionHorizontalReference, DimensionKind, DimensionVerticalReference,
-    ElementId, Level, ModelError, Opening, OpeningKind, PrescriptiveCode, Room, RoomUsage,
-    Sheathing, Wall, WallAssembly, WallEnd, WallExposure, WallJoin, WallJoinKind,
+    Appearance, BoardProfile, BuildingModel, CodeProfile, ConstructionLayer, ConstructionSystem,
+    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
+    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
+    FramingPattern, FramingSpec, LayerFunction, Level, Material, MaterialSource, ModelError, Opening,
+    OpeningKind, PrescriptiveCode, PropertyValue, Room, RoomUsage, Sheathing, SystemKind, Wall,
+    WallEnd, WallExposure, WallJoin, WallJoinKind,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,
