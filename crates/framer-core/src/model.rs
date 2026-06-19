@@ -502,6 +502,176 @@ impl BuildingModel {
             .retain(|join| join.first_wall != *wall && join.second_wall != *wall);
         true
     }
+
+    /// Rebuild the wall-join set from current wall geometry, preserving the id and
+    /// name of any join whose two walls still meet (across point moves and even
+    /// kind changes). Run after a structural edit — drawing, deleting, or moving a
+    /// wall — so joins stay consistent with the walls without churning ids.
+    pub fn reconcile_joins(&mut self) {
+        let desired = derive_wall_joins(&self.walls);
+        let mut rebuilt: Vec<WallJoin> = Vec::with_capacity(desired.len());
+        let mut taken = vec![false; self.wall_joins.len()];
+
+        for join in &desired {
+            // Reuse the existing join between the same unordered wall pair, if any.
+            let matched = self
+                .wall_joins
+                .iter()
+                .enumerate()
+                .find(|(index, existing)| !taken[*index] && same_wall_pair(existing, join))
+                .map(|(index, _)| index);
+
+            let (id, name) = match matched {
+                Some(index) => {
+                    taken[index] = true;
+                    (
+                        self.wall_joins[index].id.0.clone(),
+                        self.wall_joins[index].name.clone(),
+                    )
+                }
+                None => (
+                    next_reconciled_join_id(&self.wall_joins, &rebuilt),
+                    default_join_name(join),
+                ),
+            };
+
+            rebuilt.push(WallJoin::new(
+                id,
+                name,
+                join.kind,
+                join.first.0.clone(),
+                join.second.0.clone(),
+                join.point,
+            ));
+        }
+
+        self.wall_joins = rebuilt;
+    }
+}
+
+/// A join the geometry implies, before an id/name is assigned.
+struct DesiredJoin {
+    kind: WallJoinKind,
+    /// For a `Tee` this is the through wall; for `Cross` the stable-ordered first.
+    first: ElementId,
+    second: ElementId,
+    point: Point2,
+}
+
+/// Every join implied by the walls' current geometry: a `Corner` where two walls
+/// share an endpoint, a `Tee` where one wall's endpoint lands on another's
+/// interior, a `Cross` where two walls cross interior-to-interior.
+fn derive_wall_joins(walls: &[Wall]) -> Vec<DesiredJoin> {
+    let mut joins = Vec::new();
+    for i in 0..walls.len() {
+        for j in (i + 1)..walls.len() {
+            if walls[i].start == walls[i].end || walls[j].start == walls[j].end {
+                continue;
+            }
+            if let Some(join) = relate_walls(&walls[i], &walls[j]) {
+                joins.push(join);
+            }
+        }
+    }
+    joins
+}
+
+/// The single join relationship (if any) between two distinct walls, in priority
+/// order: shared endpoint → `Corner`; endpoint-on-interior → `Tee` (through wall
+/// first); interior crossing → `Cross`.
+fn relate_walls(a: &Wall, b: &Wall) -> Option<DesiredJoin> {
+    for point in [a.start, a.end] {
+        if b.has_endpoint(point) {
+            return Some(DesiredJoin {
+                kind: WallJoinKind::Corner,
+                first: a.id.clone(),
+                second: b.id.clone(),
+                point,
+            });
+        }
+    }
+    for point in [a.start, a.end] {
+        if b.point_on_interior(point) {
+            return Some(DesiredJoin {
+                kind: WallJoinKind::Tee,
+                first: b.id.clone(),
+                second: a.id.clone(),
+                point,
+            });
+        }
+    }
+    for point in [b.start, b.end] {
+        if a.point_on_interior(point) {
+            return Some(DesiredJoin {
+                kind: WallJoinKind::Tee,
+                first: a.id.clone(),
+                second: b.id.clone(),
+                point,
+            });
+        }
+    }
+    if let Some(point) = ortho_crossing(a, b)
+        && a.point_on_interior(point)
+        && b.point_on_interior(point)
+    {
+        return Some(DesiredJoin {
+            kind: WallJoinKind::Cross,
+            first: a.id.clone(),
+            second: b.id.clone(),
+            point,
+        });
+    }
+    None
+}
+
+/// The crossing point of one horizontal and one vertical axis-aligned wall, or
+/// `None` when the walls are parallel (so cannot cross at a single point).
+fn ortho_crossing(a: &Wall, b: &Wall) -> Option<Point2> {
+    let a_horizontal = a.start.y == a.end.y;
+    let a_vertical = a.start.x == a.end.x;
+    let b_horizontal = b.start.y == b.end.y;
+    let b_vertical = b.start.x == b.end.x;
+    if a_horizontal && b_vertical {
+        Some(Point2::new(b.start.x, a.start.y))
+    } else if a_vertical && b_horizontal {
+        Some(Point2::new(a.start.x, b.start.y))
+    } else {
+        None
+    }
+}
+
+/// Whether an existing join connects the same unordered pair of walls as `desired`.
+fn same_wall_pair(existing: &WallJoin, desired: &DesiredJoin) -> bool {
+    (existing.first_wall == desired.first && existing.second_wall == desired.second)
+        || (existing.first_wall == desired.second && existing.second_wall == desired.first)
+}
+
+/// Default name for a freshly-derived join, mirroring the draw tool's style.
+fn default_join_name(join: &DesiredJoin) -> String {
+    let kind = match join.kind {
+        WallJoinKind::Corner => "corner",
+        WallJoinKind::EndToEnd => "end-to-end",
+        WallJoinKind::Tee => "tee",
+        WallJoinKind::Cross => "cross",
+    };
+    format!("{} \u{2013} {} {}", join.first.0, join.second.0, kind)
+}
+
+/// The next free `join-N` id, unique against the kept joins and any already
+/// staged in this reconcile pass.
+fn next_reconciled_join_id(existing: &[WallJoin], staged: &[WallJoin]) -> String {
+    let mut index = existing.len() + staged.len() + 1;
+    loop {
+        let id = format!("join-{index}");
+        let collides = existing
+            .iter()
+            .chain(staged)
+            .any(|join| join.id.0 == id);
+        if !collides {
+            return id;
+        }
+        index += 1;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2254,6 +2424,122 @@ mod tests {
             Point2::new(Length::from_feet(10.0), Length::from_feet(4.0)),
         ));
 
+        model.validate().unwrap();
+    }
+
+    fn rp(x: f64, y: f64) -> Point2 {
+        Point2::new(Length::from_feet(x), Length::from_feet(y))
+    }
+
+    #[test]
+    fn reconcile_creates_corner_for_shared_endpoint() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+
+        model.reconcile_joins();
+
+        assert_eq!(model.wall_joins.len(), 1);
+        assert_eq!(model.wall_joins[0].kind, WallJoinKind::Corner);
+        assert_eq!(model.wall_joins[0].point, rp(10.0, 0.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn reconcile_creates_tee_with_through_then_partition() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("through", rp(0.0, 0.0), rp(20.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("partition", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+
+        model.reconcile_joins();
+
+        assert_eq!(model.wall_joins.len(), 1);
+        let join = &model.wall_joins[0];
+        assert_eq!(join.kind, WallJoinKind::Tee);
+        assert_eq!(join.first_wall, ElementId::new("through"));
+        assert_eq!(join.second_wall, ElementId::new("partition"));
+        assert_eq!(join.point, rp(10.0, 0.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn reconcile_detects_cross() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("horizontal", rp(0.0, 4.0), rp(20.0, 4.0), &code));
+        model
+            .walls
+            .push(placed_wall("vertical", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+
+        model.reconcile_joins();
+
+        assert_eq!(model.wall_joins.len(), 1);
+        assert_eq!(model.wall_joins[0].kind, WallJoinKind::Cross);
+        assert_eq!(model.wall_joins[0].point, rp(10.0, 4.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn reconcile_drops_stale_join_when_walls_separate() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+        model.reconcile_joins();
+        assert_eq!(model.wall_joins.len(), 1);
+
+        // Pull wall b's lower endpoint away so the two walls no longer meet.
+        let b = model.walls.iter_mut().find(|w| w.id.0 == "b").unwrap();
+        *b = placed_wall("b", rp(15.0, 4.0), rp(15.0, 8.0), &code);
+        model.reconcile_joins();
+
+        assert!(model.wall_joins.is_empty());
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn reconcile_preserves_join_id_across_point_move() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+        model.wall_joins.push(WallJoin::corner(
+            "join-keep",
+            "Hand-named corner",
+            "a",
+            "b",
+            rp(10.0, 0.0),
+        ));
+
+        // Move the shared corner of both walls to a new point.
+        model.walls[0] = placed_wall("a", rp(0.0, 0.0), rp(12.0, 0.0), &code);
+        model.walls[1] = placed_wall("b", rp(12.0, 0.0), rp(12.0, 8.0), &code);
+        model.reconcile_joins();
+
+        assert_eq!(model.wall_joins.len(), 1);
+        assert_eq!(model.wall_joins[0].id, ElementId::new("join-keep"));
+        assert_eq!(model.wall_joins[0].name, "Hand-named corner");
+        assert_eq!(model.wall_joins[0].point, rp(12.0, 0.0));
         model.validate().unwrap();
     }
 
