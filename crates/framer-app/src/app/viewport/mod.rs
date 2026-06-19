@@ -581,8 +581,10 @@ mod tests {
 
         let base =
             OrbitProjector::from_points(&scene.points, drawing, View3dState::default()).unwrap();
-        let mut panned_view = View3dState::default();
-        panned_view.pan = Vec3::new(0.3, -0.15, 0.05);
+        let panned_view = View3dState {
+            pan: Vec3::new(0.3, -0.15, 0.05),
+            ..Default::default()
+        };
         let panned = OrbitProjector::from_points(&scene.points, drawing, panned_view).unwrap();
 
         // Pan is a uniform world translation of the pivot, so in the orthographic
@@ -649,8 +651,10 @@ mod tests {
     fn telephoto_zoom_reduces_the_pan_rate() {
         let mut wide = View3dState::default();
         wide.pan(Vec2::new(0.0, 30.0), 600.0);
-        let mut tele = View3dState::default();
-        tele.zoom = 2.0;
+        let mut tele = View3dState {
+            zoom: 2.0,
+            ..Default::default()
+        };
         tele.pan(Vec2::new(0.0, 30.0), 600.0);
         assert!(wide.pan.length() > 0.0);
         assert!(
@@ -708,9 +712,11 @@ mod tests {
         // Clicking a view-cube face re-frames the model, so any accumulated pan or
         // dolly is cleared — otherwise the snapped view could stay panned off the
         // model or dollied inside it.
-        let mut v = View3dState::default();
-        v.pan = Vec3::new(2.0, -1.0, 0.5);
-        v.dolly = 0.4;
+        let mut v = View3dState {
+            pan: Vec3::new(2.0, -1.0, 0.5),
+            dolly: 0.4,
+            ..Default::default()
+        };
         v.snap_to(ViewCubeAction::FRONT);
         assert_eq!(v.pan, Vec3::ZERO, "face snap must recenter the pan");
         assert!(

@@ -483,15 +483,15 @@ pub(super) fn draw_project_plan(
         return Some(click);
     }
 
-    if room_tool_active && response.clicked() {
-        if let Some(cursor) = response
+    if room_tool_active
+        && response.clicked()
+        && let Some(cursor) = response
             .interact_pointer_pos()
             .filter(|c| drawing.contains(*c))
-        {
-            return Some(ViewClick::PlaceRoom {
-                point: plan_inverse_point(cursor, bounds, drawing, camera),
-            });
-        }
+    {
+        return Some(ViewClick::PlaceRoom {
+            point: plan_inverse_point(cursor, bounds, drawing, camera),
+        });
     }
 
     clicked_opening.or(clicked_wall).or(clicked_room)
