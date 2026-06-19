@@ -19,18 +19,26 @@ use framer_render::math::Vec3;
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 use wgpu::util::DeviceExt as _;
 
-use super::draw_wall::resolve_draw_point;
+use super::draw_wall::{SnapContext, SnapKind, SnapResult, resolve_snap};
 use super::labels::{join_kind_label, kind_label};
 use super::model_edit::{OpeningDragState, OpeningEditHandle};
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
 
 /// Plan-view input for the draw-wall tool: whether it is active, the in-progress
-/// run's start point, and the active grid snap increment.
+/// run's start point, the active grid snap increment, and the snap held from the
+/// previous frame (for sticky hysteresis).
 pub(super) struct DrawWallPlanInput {
     pub(super) active: bool,
     pub(super) start: Option<Point2>,
     pub(super) snap_step: Option<Length>,
+    pub(super) previous_snap: Option<SnapResult>,
 }
+
+/// Screen-pixel radius within which the draw tool *acquires* a snap. Converted to
+/// model units per frame so the feel is constant across zoom levels.
+const SNAP_ACQUIRE_PX: f64 = 12.0;
+/// Screen-pixel radius a held snap must leave before it *releases* (hysteresis).
+const SNAP_RELEASE_PX: f64 = 20.0;
 
 /// Frames to stay in reduced-resolution "moving" mode after the last camera
 /// input, so a continuous orbit (which produces frequent tiny inputs) doesn't
@@ -541,12 +549,16 @@ impl FramerApp {
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
         self.cursor_model = None;
         let mut toolbar_anchor = None;
+        // The draw tool's resolved snap for this frame, written back into tool
+        // state so the next frame can apply sticky hysteresis.
+        let mut snap_out: Option<SnapResult> = None;
         let click = match self.viewport_mode {
             ViewportMode::Plan => {
                 let draw_tool = DrawWallPlanInput {
                     active: self.draw_wall_tool.active,
                     start: self.draw_wall_tool.start,
                     snap_step: self.snap_step,
+                    previous_snap: self.draw_wall_tool.previous_snap,
                 };
                 draw_project_plan(
                     ui,
@@ -559,6 +571,7 @@ impl FramerApp {
                     &mut self.plan_view,
                     &draw_tool,
                     self.room_tool_active,
+                    &mut snap_out,
                 )
             }
             ViewportMode::Elevation => {
@@ -689,6 +702,7 @@ impl FramerApp {
                 None
             }
         };
+        self.draw_wall_tool.previous_snap = snap_out;
 
         if let Some(click) = click {
             self.handle_view_click(click);
@@ -1300,6 +1314,7 @@ fn draw_project_plan(
     camera: &mut View2dState,
     draw_tool: &DrawWallPlanInput,
     room_tool_active: bool,
+    snap_out: &mut Option<SnapResult>,
 ) -> Option<ViewClick> {
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
@@ -1495,12 +1510,12 @@ fn draw_project_plan(
         reset_view_on_empty_double_click(&response, camera, over_element);
     }
 
-    if draw_tool.active {
-        if let Some(click) = draw_wall_overlay(
-            &painter, &response, model, bounds, drawing, camera, scale, draw_tool,
-        ) {
-            return Some(click);
-        }
+    if draw_tool.active
+        && let Some(click) = draw_wall_overlay(
+            &painter, &response, model, bounds, drawing, camera, scale, draw_tool, snap_out,
+        )
+    {
+        return Some(click);
     }
 
     if room_tool_active && response.clicked() {
@@ -1550,6 +1565,7 @@ fn draw_wall_overlay(
     camera: &View2dState,
     scale: f32,
     draw_tool: &DrawWallPlanInput,
+    snap_out: &mut Option<SnapResult>,
 ) -> Option<ViewClick> {
     if response.secondary_clicked() {
         return Some(ViewClick::DrawWallCancel);
@@ -1563,10 +1579,27 @@ fn draw_wall_overlay(
     }
 
     let raw = plan_inverse_point(cursor, bounds, drawing, camera);
-    // Snap tolerance of ~12 screen px expressed in model inches, capped so that
-    // zooming far out can't make snapping reach across the whole model.
-    let tolerance = Length::from_inches(((12.0 / scale.max(0.0001)) as f64).min(24.0));
-    let resolved = resolve_draw_point(model, draw_tool.start, raw, draw_tool.snap_step, tolerance);
+    // Tolerances are a constant screen-pixel distance converted to model units, so
+    // the snap feels the same at every zoom. The release radius is larger than the
+    // acquire radius so a held snap stays put instead of flickering (hysteresis).
+    let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+    let tolerance = Length::from_inches(SNAP_ACQUIRE_PX * inv_scale);
+    let release_tolerance = Length::from_inches(SNAP_RELEASE_PX * inv_scale);
+    // Alt suspends snapping for precise free placement.
+    let suspend = response.ctx.input(|input| input.modifiers.alt);
+
+    let resolved = resolve_snap(&SnapContext {
+        model,
+        raw,
+        anchor: draw_tool.start,
+        exclude: &[],
+        tolerance,
+        release_tolerance,
+        grid_step: draw_tool.snap_step,
+        suspend,
+        previous: draw_tool.previous_snap,
+    });
+    *snap_out = Some(resolved);
     let candidate = plan_point(resolved.point, bounds, drawing, camera);
 
     if let Some(start) = draw_tool.start {
@@ -1577,7 +1610,7 @@ fn draw_wall_overlay(
         );
         painter.circle_filled(start_screen, 4.0, theme::active_blue());
 
-        // Ortho-locked, so exactly one axis differs; max gives the wall length.
+        // Walls stay ortho, so exactly one axis differs; max gives the length.
         let length = (resolved.point.x - start.x)
             .abs()
             .max((resolved.point.y - start.y).abs());
@@ -1596,15 +1629,95 @@ fn draw_wall_overlay(
         }
     }
 
-    // Candidate endpoint marker; a larger ring marks a snap onto existing geometry.
-    painter.circle_filled(candidate, 3.5, theme::active_blue());
-    if resolved.on_existing {
-        painter.circle_stroke(candidate, 8.0, Stroke::new(2.0, theme::active_blue()));
-    }
+    draw_snap_indicator(painter, candidate, resolved.kind, suspend);
 
     response.clicked().then_some(ViewClick::DrawWallPoint {
         point: resolved.point,
     })
+}
+
+/// Draw a snap marker whose glyph identifies *what* the cursor snapped to, so the
+/// user can tell an endpoint lock from a midpoint, mid-wall, or grid snap. When
+/// snapping is suspended (Alt), a hint is shown instead of a geometry glyph.
+fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspend: bool) {
+    let color = theme::active_blue();
+    let stroke = Stroke::new(2.0, color);
+
+    if suspend {
+        painter.circle_filled(at, 3.0, color);
+        painter.text(
+            at + Vec2::new(10.0, -10.0),
+            Align2::LEFT_CENTER,
+            "snap off",
+            FontId::proportional(11.0),
+            color,
+        );
+        return;
+    }
+
+    match kind {
+        SnapKind::Endpoint => {
+            // Filled square inside a ring.
+            painter.rect_filled(Rect::from_center_size(at, Vec2::splat(7.0)), 1.0, color);
+            painter.rect_stroke(
+                Rect::from_center_size(at, Vec2::splat(14.0)),
+                1.0,
+                stroke,
+                StrokeKind::Outside,
+            );
+        }
+        SnapKind::Midpoint => {
+            // Upward triangle outline.
+            let r = 6.0;
+            let top = Pos2::new(at.x, at.y - r);
+            let left = Pos2::new(at.x - r, at.y + r * 0.7);
+            let right = Pos2::new(at.x + r, at.y + r * 0.7);
+            painter.line_segment([top, left], stroke);
+            painter.line_segment([left, right], stroke);
+            painter.line_segment([right, top], stroke);
+        }
+        SnapKind::OnWall => {
+            // Diamond outline (lands on a wall's interior → Tee).
+            let r = 6.0;
+            let top = Pos2::new(at.x, at.y - r);
+            let right = Pos2::new(at.x + r, at.y);
+            let bottom = Pos2::new(at.x, at.y + r);
+            let left = Pos2::new(at.x - r, at.y);
+            painter.line_segment([top, right], stroke);
+            painter.line_segment([right, bottom], stroke);
+            painter.line_segment([bottom, left], stroke);
+            painter.line_segment([left, top], stroke);
+        }
+        SnapKind::Grid => {
+            // Small plus.
+            let r = 5.0;
+            painter.line_segment([Pos2::new(at.x - r, at.y), Pos2::new(at.x + r, at.y)], stroke);
+            painter.line_segment([Pos2::new(at.x, at.y - r), Pos2::new(at.x, at.y + r)], stroke);
+        }
+        SnapKind::Free => {
+            painter.circle_filled(at, 3.5, color);
+        }
+    }
+
+    if let Some(label) = snap_kind_label(kind) {
+        painter.text(
+            at + Vec2::new(10.0, -10.0),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
+/// Short label for a snap kind, or `None` for kinds that need no annotation.
+fn snap_kind_label(kind: SnapKind) -> Option<&'static str> {
+    match kind {
+        SnapKind::Endpoint => Some("end"),
+        SnapKind::Midpoint => Some("mid"),
+        SnapKind::OnWall => Some("wall"),
+        SnapKind::Grid | SnapKind::Free => None,
+    }
 }
 
 /// A drafting scale bar at the bottom-left of the plan, sized to a round number

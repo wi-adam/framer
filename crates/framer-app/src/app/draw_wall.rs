@@ -6,15 +6,6 @@ use framer_core::{BuildingModel, ElementId, Length, Point2, Wall, WallJoin, Wall
 
 use super::model_edit::maybe_snap;
 
-/// A draw point resolved from a raw cursor position, ready to commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ResolvedPoint {
-    pub(super) point: Point2,
-    /// True when the point snapped onto an existing wall endpoint, meaning a
-    /// join should be recorded at this location.
-    pub(super) on_existing: bool,
-}
-
 /// What kind of geometry a resolved snap landed on. Drives the on-screen
 /// indicator and whether committing the point forms a wall join. (Slice 2 adds
 /// `Intersection` and `Alignment` once inference guides exist.)
@@ -33,17 +24,6 @@ pub(super) enum SnapKind {
 pub(super) struct SnapResult {
     pub(super) point: Point2,
     pub(super) kind: SnapKind,
-}
-
-impl SnapResult {
-    /// Whether committing this point should record a wall join — true when it
-    /// landed on an existing wall's endpoint, midpoint, or interior.
-    pub(super) fn forms_join(&self) -> bool {
-        matches!(
-            self.kind,
-            SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall
-        )
-    }
 }
 
 /// Everything [`resolve_snap`] needs to turn a raw cursor point into a snapped
@@ -115,35 +95,6 @@ pub(super) fn snap_to_endpoint(
         }
     }
     best.map(|(_, endpoint)| endpoint)
-}
-
-/// Resolve a raw cursor point into the point we would commit. Snapping to an
-/// existing wall endpoint wins, because that is what forms joins — but only when
-/// the result keeps the wall axis-aligned relative to `start`. Otherwise the
-/// point is ortho-locked to `start` (for the second point onward) and
-/// grid-snapped.
-pub(super) fn resolve_draw_point(
-    model: &BuildingModel,
-    start: Option<Point2>,
-    raw: Point2,
-    step: Option<Length>,
-    tolerance: Length,
-) -> ResolvedPoint {
-    let result = resolve_snap(&SnapContext {
-        model,
-        raw,
-        anchor: start,
-        exclude: &[],
-        tolerance,
-        release_tolerance: tolerance,
-        grid_step: step,
-        suspend: false,
-        previous: None,
-    });
-    ResolvedPoint {
-        point: result.point,
-        on_existing: result.forms_join(),
-    }
 }
 
 /// Resolve a raw cursor point against the model, applying snapping in priority
@@ -459,32 +410,28 @@ mod tests {
     #[test]
     fn resolve_first_point_grid_snaps() {
         let model = empty_model();
-        let resolved = resolve_draw_point(
-            &model,
-            None,
-            p(14.0, 21.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(6.0),
-        );
+        let mut context = ctx(&model, p(14.0, 21.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
 
-        assert_eq!(resolved.point, p(12.0, 24.0));
-        assert!(!resolved.on_existing);
+        let result = resolve_snap(&context);
+
+        assert_eq!(result.point, p(12.0, 24.0));
+        assert!(!forms_join(result));
     }
 
     #[test]
     fn resolve_second_point_ortho_locks_and_grid_snaps() {
         let model = empty_model();
-        let resolved = resolve_draw_point(
-            &model,
-            Some(p(0.0, 0.0)),
-            p(98.0, 7.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(2.0),
-        );
+        let mut context = ctx(&model, p(98.0, 7.0));
+        context.anchor = Some(p(0.0, 0.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
+        context.tolerance = Length::from_inches(2.0);
 
-        // X dominates -> horizontal; 98 in snaps to 96; y locks to the start's 0.
-        assert_eq!(resolved.point, p(96.0, 0.0));
-        assert!(!resolved.on_existing);
+        let result = resolve_snap(&context);
+
+        // X dominates -> horizontal; 98in grid-snaps to 96; y locks to anchor's 0.
+        assert_eq!(result.point, p(96.0, 0.0));
+        assert!(!forms_join(result));
     }
 
     #[test]
@@ -496,38 +443,34 @@ mod tests {
 
         // Drawing from (120,0); the far endpoint (0,0) is aligned (shares y) and
         // close to the cursor, so it snaps and flags a join site.
-        let resolved = resolve_draw_point(
-            &model,
-            Some(p(120.0, 0.0)),
-            p(2.0, 1.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(6.0),
-        );
+        let mut context = ctx(&model, p(2.0, 1.0));
+        context.anchor = Some(p(120.0, 0.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
 
-        assert_eq!(resolved.point, p(0.0, 0.0));
-        assert!(resolved.on_existing);
+        let result = resolve_snap(&context);
+
+        assert_eq!(result.point, p(0.0, 0.0));
+        assert!(forms_join(result));
     }
 
     #[test]
     fn resolve_rejects_diagonal_existing_endpoint() {
         let mut model = empty_model();
-        // An existing endpoint at (120,120) that is diagonal to the start point.
+        // An existing endpoint at (120,120) that is diagonal to the anchor point.
         model
             .walls
             .push(wall_from("wall-1", p(120.0, 120.0), p(120.0, 200.0)));
 
-        let resolved = resolve_draw_point(
-            &model,
-            Some(p(0.0, 0.0)),
-            p(118.0, 119.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(6.0),
-        );
+        let mut context = ctx(&model, p(118.0, 119.0));
+        context.anchor = Some(p(0.0, 0.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
+
+        let result = resolve_snap(&context);
 
         // The diagonal endpoint would make a non-ortho wall, so it is rejected
         // and we fall back to ortho + grid (Y dominates -> vertical at x=0).
-        assert!(!resolved.on_existing);
-        assert_eq!(resolved.point, p(0.0, 120.0));
+        assert!(!forms_join(result));
+        assert_eq!(result.point, p(0.0, 120.0));
     }
 
     #[test]
@@ -643,39 +586,37 @@ mod tests {
 
         // Drawing up from (120,96) toward the through wall; the cursor just shy of
         // it snaps onto the wall's interior at (120,0), keeping the wall vertical.
-        let resolved = resolve_draw_point(
-            &model,
-            Some(p(120.0, 96.0)),
-            p(120.0, 3.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(6.0),
-        );
+        // (120,0) is also the through wall's midpoint, so it resolves as a midpoint
+        // snap — which is still on the interior and forms a Tee.
+        let mut context = ctx(&model, p(120.0, 3.0));
+        context.anchor = Some(p(120.0, 96.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
 
-        assert_eq!(resolved.point, p(120.0, 0.0));
-        assert!(resolved.on_existing, "a mid-span snap flags a join site");
+        let result = resolve_snap(&context);
+
+        assert_eq!(result.point, p(120.0, 0.0));
+        assert!(forms_join(result), "a mid-span snap flags a join site");
     }
 
     #[test]
     fn resolve_prefers_farther_ortho_wall_over_nearer_diagonal_one() {
         // A parallel wall whose nearest interior projection would be diagonal to
-        // the start must not block snapping to a perpendicular wall that is ortho.
+        // the anchor must not block snapping to a perpendicular wall that is ortho.
         let mut model = empty_model();
         // Perpendicular through wall the partition should Tee into.
         model
             .walls
             .push(wall_from("perp", p(120.0, 0.0), p(120.0, 240.0)));
 
-        // Start at (0,60) drawing right; cursor near the perpendicular wall.
-        let resolved = resolve_draw_point(
-            &model,
-            Some(p(0.0, 60.0)),
-            p(118.0, 60.0),
-            Some(Length::from_whole_inches(6)),
-            Length::from_inches(6.0),
-        );
+        // Anchored at (0,60) drawing right; cursor near the perpendicular wall.
+        let mut context = ctx(&model, p(118.0, 60.0));
+        context.anchor = Some(p(0.0, 60.0));
+        context.grid_step = Some(Length::from_whole_inches(6));
 
-        assert_eq!(resolved.point, p(120.0, 60.0));
-        assert!(resolved.on_existing);
+        let result = resolve_snap(&context);
+
+        assert_eq!(result.point, p(120.0, 60.0));
+        assert!(forms_join(result));
     }
 
     #[test]
@@ -694,6 +635,15 @@ mod tests {
             touching,
             vec![ElementId::new("wall-1"), ElementId::new("wall-2")]
         );
+    }
+
+    /// A snap that lands on existing wall geometry (endpoint, midpoint, or
+    /// interior) — the kinds that would record a join when committed.
+    fn forms_join(result: SnapResult) -> bool {
+        matches!(
+            result.kind,
+            SnapKind::Endpoint | SnapKind::Midpoint | SnapKind::OnWall
+        )
     }
 
     fn ctx<'a>(model: &'a BuildingModel, raw: Point2) -> SnapContext<'a> {
@@ -721,7 +671,7 @@ mod tests {
 
         assert_eq!(result.kind, SnapKind::Endpoint);
         assert_eq!(result.point, p(120.0, 0.0));
-        assert!(result.forms_join());
+        assert!(forms_join(result));
     }
 
     #[test]
@@ -736,7 +686,7 @@ mod tests {
 
         assert_eq!(result.kind, SnapKind::OnWall);
         assert_eq!(result.point, p(0.0, 30.0));
-        assert!(result.forms_join());
+        assert!(forms_join(result));
     }
 
     #[test]
@@ -800,7 +750,7 @@ mod tests {
         // Would snap to endpoint (120,0); suspended → raw passes through untouched.
         assert_eq!(result.kind, SnapKind::Free);
         assert_eq!(result.point, p(118.0, 1.0));
-        assert!(!result.forms_join());
+        assert!(!forms_join(result));
     }
 
     #[test]

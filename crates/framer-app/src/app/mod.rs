@@ -26,7 +26,7 @@ use framer_solver::{
     FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
 };
 
-use draw_wall::joins_for_new_wall;
+use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, apply_opening_drag,
@@ -208,11 +208,13 @@ impl DimensionToolState {
 
 /// State for the interactive draw-wall tool. `start` holds the first committed
 /// endpoint while a wall (or polyline run) is being drawn; `None` means the next
-/// click begins a new segment.
+/// click begins a new segment. `previous_snap` carries the last frame's snap so
+/// the plan view can apply sticky hysteresis.
 #[derive(Debug, Clone, Default)]
 struct DrawWallToolState {
     active: bool,
     start: Option<Point2>,
+    previous_snap: Option<SnapResult>,
 }
 
 fn dimension_kind_name(kind: DimensionKind) -> &'static str {
@@ -635,6 +637,7 @@ impl FramerApp {
         self.draw_wall_tool = DrawWallToolState {
             active: activate,
             start: None,
+            previous_snap: None,
         };
         if activate {
             if !self.workspace_mode.allows_design_edits() {
