@@ -31,7 +31,7 @@ use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, next_dimension_id, next_opening_id, next_room_id,
-    next_wall_id,
+    next_wall_id, translate_keeps_ortho,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
@@ -1058,6 +1058,7 @@ impl FramerApp {
                 self.begin_wall_drag(wall_index, handle)
             }
             WallDragEvent::Updated { point } => self.update_wall_drag(point),
+            WallDragEvent::Translated { dx, dy } => self.translate_wall_drag(dx, dy),
             WallDragEvent::Stopped => self.finish_wall_drag(),
         }
     }
@@ -1078,13 +1079,16 @@ impl FramerApp {
         let Some(drag) = self.wall_drag else {
             return;
         };
+        let Some(which_end) = drag.handle.as_wall_end() else {
+            return; // body translations arrive via translate_wall_drag
+        };
         let Some(wall) = self.model.walls.get(drag.wall_index) else {
             self.wall_drag = None;
             return;
         };
-        let old_point = match drag.handle {
-            WallEditHandle::Start => wall.start,
-            WallEditHandle::End => wall.end,
+        let old_point = match which_end {
+            framer_core::WallEnd::Start => wall.start,
+            framer_core::WallEnd::End => wall.end,
         };
         if old_point == point {
             return;
@@ -1094,17 +1098,75 @@ impl FramerApp {
         if !endpoint_move_keeps_ortho(&self.model, old_point, point) {
             return;
         }
+        // Clamp a move that a driving dimension would fight back on the next solve
+        // (it rewrites the wall's length/end, which would tear the moved corner).
+        if self.nodes_touch_driving_dimension(&[old_point]) {
+            return;
+        }
         let wall_id = wall.id.clone();
-        let moved = self
-            .model
-            .move_wall_endpoint(&wall_id, drag.handle.as_wall_end(), point);
+        let moved = self.model.move_wall_endpoint(&wall_id, which_end, point);
         if moved.is_empty() {
             return;
         }
-        // Keep joins consistent so the model stays valid (and the framing plan
-        // keeps generating) throughout the drag.
+        self.settle_wall_geometry(drag.wall_index);
+    }
+
+    /// Translate the whole dragged wall by an incremental delta, projecting onto
+    /// the wall's perpendicular so it slides sideways (the ortho-safe reposition),
+    /// and clamping any residual that would skew a neighbour.
+    fn translate_wall_drag(&mut self, dx: Length, dy: Length) {
+        let Some(drag) = self.wall_drag else {
+            return;
+        };
+        let Some(wall) = self.model.walls.get(drag.wall_index) else {
+            self.wall_drag = None;
+            return;
+        };
+        // Project onto the wall's perpendicular axis: a horizontal wall slides in
+        // y, a vertical wall in x.
+        let (dx, dy) = if wall.start.y == wall.end.y {
+            (Length::ZERO, dy)
+        } else {
+            (dx, Length::ZERO)
+        };
+        if dx == Length::ZERO && dy == Length::ZERO {
+            return;
+        }
+        let wall_id = wall.id.clone();
+        let (start, end) = (wall.start, wall.end);
+        if !translate_keeps_ortho(&self.model, &wall_id, start, end, dx, dy) {
+            return;
+        }
+        if self.nodes_touch_driving_dimension(&[start, end]) {
+            return;
+        }
+        let moved = self.model.translate_wall(&wall_id, dx, dy);
+        if moved.is_empty() {
+            return;
+        }
+        self.settle_wall_geometry(drag.wall_index);
+    }
+
+    /// Whether any wall touching one of `nodes` carries a driving dimension. Such
+    /// a wall's length/end is rewritten by the next solve, so a geometry drag that
+    /// moves its endpoint would be undone (and could tear a corner) — we clamp it.
+    fn nodes_touch_driving_dimension(&self, nodes: &[Point2]) -> bool {
+        self.model.walls.iter().any(|wall| {
+            nodes
+                .iter()
+                .any(|node| wall.start == *node || wall.end == *node)
+                && wall
+                    .dimensions
+                    .iter()
+                    .any(|dimension| dimension.kind == DimensionKind::Driving)
+        })
+    }
+
+    /// Shared tail of a wall-geometry edit frame: keep joins consistent (so the
+    /// model stays valid and the plan keeps generating) and re-solve.
+    fn settle_wall_geometry(&mut self, wall_index: usize) {
         self.model.reconcile_joins();
-        self.selected_wall = drag.wall_index;
+        self.selected_wall = wall_index;
         self.selected = Selection::Wall;
         self.rebuild();
     }

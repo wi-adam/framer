@@ -1293,10 +1293,6 @@ fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
     );
 }
 
-fn draw_selection_handle(painter: &egui::Painter, point: Pos2) {
-    draw_wall_handle(painter, point, false);
-}
-
 /// A draggable square handle; grows and thickens its outline when hovered.
 fn draw_wall_handle(painter: &egui::Painter, point: Pos2, hovered: bool) {
     let size = if hovered { 11.0 } else { 8.0 };
@@ -1318,11 +1314,12 @@ fn draw_selected_wall_handles(
 ) {
     draw_wall_handle(painter, start, hovered == Some(WallEditHandle::Start));
     draw_wall_handle(painter, end, hovered == Some(WallEditHandle::End));
-    // The midpoint handle is decorative for now; the body-move gesture (Slice 4)
-    // will make it draggable.
-    draw_selection_handle(
+    // The midpoint handle grabs the whole wall (translate). It also lights up when
+    // the body anywhere is hovered.
+    draw_wall_handle(
         painter,
         Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0),
+        hovered == Some(WallEditHandle::Body),
     );
 }
 
@@ -1343,14 +1340,18 @@ fn hit_selected_wall_handle(
     }
     let wall = model.walls.get(selected_wall)?;
     const HIT_RADIUS: f32 = 11.0;
+    const BODY_HIT_RADIUS: f32 = 8.0;
     let start = plan_point(wall.start, bounds, drawing, camera);
     let end = plan_point(wall.end, bounds, drawing, camera);
     let start_distance = position.distance(start);
     let end_distance = position.distance(end);
+    // Endpoints win; otherwise grabbing the wall body translates it.
     if start_distance <= HIT_RADIUS && start_distance <= end_distance {
         Some((selected_wall, WallEditHandle::Start))
     } else if end_distance <= HIT_RADIUS {
         Some((selected_wall, WallEditHandle::End))
+    } else if distance_to_segment(position, start, end) <= BODY_HIT_RADIUS {
+        Some((selected_wall, WallEditHandle::Body))
     } else {
         None
     }
@@ -1379,6 +1380,8 @@ fn snapped_wall_endpoint(
     let (anchor, node) = match handle {
         WallEditHandle::Start => (wall.end, wall.start),
         WallEditHandle::End => (wall.start, wall.end),
+        // The body handle translates via incremental deltas, not snapped points.
+        WallEditHandle::Body => return raw,
     };
     // Exclude every wall touching the node — they all move together, so none is a
     // valid snap target (and a coincident endpoint would otherwise freeze the drag).
@@ -1621,24 +1624,33 @@ fn draw_project_plan(
         if let Some((wall_index, handle)) = active_wall_drag {
             if response.drag_stopped() {
                 *wall_drag_out = Some(WallDragEvent::Stopped);
-            } else if response.dragged_by(egui::PointerButton::Primary)
-                && let Some(cursor) = response.interact_pointer_pos()
-            {
-                let suspend = ui.input(|input| input.modifiers.alt);
-                let point = snapped_wall_endpoint(
-                    model,
-                    wall_index,
-                    handle,
-                    cursor,
-                    bounds,
-                    drawing,
-                    camera,
-                    scale,
-                    draw_tool.snap_step,
-                    suspend,
-                );
-                *wall_drag_out = Some(WallDragEvent::Updated { point });
-                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            } else if response.dragged_by(egui::PointerButton::Primary) {
+                if handle == WallEditHandle::Body {
+                    // Whole-wall translate: incremental screen delta → model delta
+                    // (y is flipped in the plan).
+                    let delta = response.drag_delta();
+                    let inv_scale = (1.0 / scale.max(0.0001)) as f64;
+                    let dx = Length::from_inches(delta.x as f64 * inv_scale);
+                    let dy = Length::from_inches(-delta.y as f64 * inv_scale);
+                    *wall_drag_out = Some(WallDragEvent::Translated { dx, dy });
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                } else if let Some(cursor) = response.interact_pointer_pos() {
+                    let suspend = ui.input(|input| input.modifiers.alt);
+                    let point = snapped_wall_endpoint(
+                        model,
+                        wall_index,
+                        handle,
+                        cursor,
+                        bounds,
+                        drawing,
+                        camera,
+                        scale,
+                        draw_tool.snap_step,
+                        suspend,
+                    );
+                    *wall_drag_out = Some(WallDragEvent::Updated { point });
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                }
             }
         } else if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(hit) = ui
@@ -1660,8 +1672,12 @@ fn draw_project_plan(
                 handle: hit.1,
             });
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        } else if hovered_wall_handle.is_some() {
-            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+        } else if let Some(handle) = hovered_wall_handle {
+            ui.ctx().set_cursor_icon(if handle == WallEditHandle::Body {
+                CursorIcon::Move
+            } else {
+                CursorIcon::Grab
+            });
         }
     }
 
@@ -3837,8 +3853,14 @@ pub(super) enum WallDragEvent {
         wall_index: usize,
         handle: WallEditHandle,
     },
+    /// An endpoint handle moved to a snapped model point.
     Updated {
         point: Point2,
+    },
+    /// The body handle translated the whole wall by an incremental model delta.
+    Translated {
+        dx: Length,
+        dy: Length,
     },
     Stopped,
 }

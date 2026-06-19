@@ -530,6 +530,44 @@ impl BuildingModel {
             return Vec::new();
         }
 
+        self.move_coincident_endpoints(old_point, new_point)
+    }
+
+    /// Translate a whole wall by `(dx, dy)`, dragging every wall endpoint that
+    /// coincides with either of its ends so neighbours stretch to follow ("move
+    /// the joint"). Returns the ids of all walls whose geometry changed.
+    ///
+    /// Like [`move_wall_endpoint`](Self::move_wall_endpoint) this is the honest
+    /// primitive — the caller keeps the result orthogonal.
+    pub fn translate_wall(&mut self, wall: &ElementId, dx: Length, dy: Length) -> Vec<ElementId> {
+        let Some((start, end)) = self
+            .walls
+            .iter()
+            .find(|candidate| candidate.id == *wall)
+            .map(|candidate| (candidate.start, candidate.end))
+        else {
+            return Vec::new();
+        };
+        if dx == Length::ZERO && dy == Length::ZERO {
+            return Vec::new();
+        }
+
+        let mut affected = self.move_coincident_endpoints(start, Point2::new(start.x + dx, start.y + dy));
+        let new_end = Point2::new(end.x + dx, end.y + dy);
+        for id in self.move_coincident_endpoints(end, new_end) {
+            if !affected.contains(&id) {
+                affected.push(id);
+            }
+        }
+        affected
+    }
+
+    /// Move every wall endpoint at `old_point` to `new_point`, re-syncing each
+    /// moved wall's length. Shared by endpoint and whole-wall moves.
+    fn move_coincident_endpoints(&mut self, old_point: Point2, new_point: Point2) -> Vec<ElementId> {
+        if old_point == new_point {
+            return Vec::new();
+        }
         let mut affected = Vec::new();
         for candidate in &mut self.walls {
             let mut changed = false;
@@ -2633,6 +2671,29 @@ mod tests {
         assert_eq!(model.walls[1].start, rp(12.0, 0.0));
         assert_eq!(model.walls[0].length, Length::from_feet(12.0));
         assert_eq!(model.walls[1].length, Length::from_feet(8.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn translate_wall_moves_both_ends_and_stretches_neighbour() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // L-corner at (0,0): horizontal `a` and vertical `b`.
+        model.walls.push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model.walls.push(placed_wall("b", rp(0.0, 0.0), rp(0.0, 8.0), &code));
+
+        // Slide `a` up by 2ft (perpendicular to itself).
+        let affected = model.translate_wall(&ElementId::new("a"), Length::ZERO, Length::from_feet(2.0));
+
+        assert_eq!(affected.len(), 2);
+        assert_eq!(model.walls[0].start, rp(0.0, 2.0));
+        assert_eq!(model.walls[0].end, rp(10.0, 2.0));
+        assert_eq!(model.walls[0].length, Length::from_feet(10.0));
+        // `b` follows the shared corner up, shortening but staying vertical.
+        assert_eq!(model.walls[1].start, rp(0.0, 2.0));
+        assert_eq!(model.walls[1].end, rp(0.0, 8.0));
+        assert_eq!(model.walls[1].length, Length::from_feet(6.0));
+        model.reconcile_joins();
         model.validate().unwrap();
     }
 

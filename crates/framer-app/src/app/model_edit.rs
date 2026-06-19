@@ -126,18 +126,23 @@ pub(super) fn maybe_snap(value: Length, step: Option<Length>) -> Length {
     }
 }
 
-/// Which draggable handle on a selected wall is being manipulated in the plan.
+/// Which draggable handle on a selected wall is being manipulated in the plan:
+/// an endpoint (extend / move the corner) or the body (translate the whole wall).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WallEditHandle {
     Start,
     End,
+    Body,
 }
 
 impl WallEditHandle {
-    pub(super) fn as_wall_end(self) -> WallEnd {
+    /// The wall endpoint this handle moves, or `None` for the body (whole-wall)
+    /// handle.
+    pub(super) fn as_wall_end(self) -> Option<WallEnd> {
         match self {
-            Self::Start => WallEnd::Start,
-            Self::End => WallEnd::End,
+            Self::Start => Some(WallEnd::Start),
+            Self::End => Some(WallEnd::End),
+            Self::Body => None,
         }
     }
 }
@@ -169,6 +174,38 @@ pub(super) fn endpoint_move_keeps_ortho(
         };
         // A degenerate wall whose both ends sit on the node imposes no constraint.
         other == old_point || new_point.x == other.x || new_point.y == other.y
+    })
+}
+
+/// Whether translating wall `moving` by `(dx, dy)` keeps every *other* wall
+/// axis-aligned. A neighbour skews only if exactly one of its ends rides along
+/// (an end coincident with one of the moving wall's ends), so its moved end no
+/// longer shares an axis with its fixed end.
+pub(super) fn translate_keeps_ortho(
+    model: &BuildingModel,
+    moving: &framer_core::ElementId,
+    start: Point2,
+    end: Point2,
+    dx: Length,
+    dy: Length,
+) -> bool {
+    let rides = |point: Point2| point == start || point == end;
+    model.walls.iter().all(|wall| {
+        if wall.id == *moving {
+            return true;
+        }
+        match (rides(wall.start), rides(wall.end)) {
+            // Untouched, or both ends ride (translates rigidly): stays aligned.
+            (false, false) | (true, true) => true,
+            (true, false) => {
+                let moved = Point2::new(wall.start.x + dx, wall.start.y + dy);
+                moved.x == wall.end.x || moved.y == wall.end.y
+            }
+            (false, true) => {
+                let moved = Point2::new(wall.end.x + dx, wall.end.y + dy);
+                wall.start.x == moved.x || wall.start.y == moved.y
+            }
+        }
     })
 }
 
@@ -646,6 +683,34 @@ mod tests {
         assert!(endpoint_move_keeps_ortho(&model, node, ftp(12.0, 0.0)));
         // Moving it off-row would skew both.
         assert!(!endpoint_move_keeps_ortho(&model, node, ftp(12.0, 4.0)));
+    }
+
+    #[test]
+    fn translate_keeps_ortho_allows_perpendicular_clamps_along_axis() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = framer_core::BuildingModel::new(code.clone());
+        model.walls.push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
+        model.walls.push(placed("b", ftp(0.0, 0.0), ftp(0.0, 8.0), &code));
+        let a = framer_core::ElementId::new("a");
+
+        // Sliding horizontal `a` perpendicular (in Y) keeps vertical `b` ortho.
+        assert!(translate_keeps_ortho(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::ZERO,
+            Length::from_feet(2.0),
+        ));
+        // Sliding `a` along its own axis (in X) would skew `b`.
+        assert!(!translate_keeps_ortho(
+            &model,
+            &a,
+            ftp(0.0, 0.0),
+            ftp(10.0, 0.0),
+            Length::from_feet(2.0),
+            Length::ZERO,
+        ));
     }
 
     #[test]

@@ -393,3 +393,33 @@ fn wall_endpoint_drag_drags_shared_node_along_a_collinear_run() {
     assert_eq!(app.model.walls[0].length, Length::from_feet(12.0));
     assert_eq!(app.model.walls[1].length, Length::from_feet(8.0));
 }
+
+#[test]
+fn whole_wall_translate_slides_perpendicular_and_stretches_neighbour() {
+    let mut app = FramerApp::default();
+    install_corner_model(&mut app);
+    app.selected = Selection::Wall;
+    app.selected_wall = 0;
+    let original = app.model.clone();
+
+    // Body-drag wall a (horizontal at y=0). The vertical component slides it up;
+    // any horizontal component is projected out (perpendicular-only translate).
+    app.handle_wall_drag_event(WallDragEvent::Started {
+        wall_index: 0,
+        handle: WallEditHandle::Body,
+    });
+    app.handle_wall_drag_event(WallDragEvent::Translated {
+        dx: Length::from_feet(5.0),
+        dy: Length::from_feet(2.0),
+    });
+    app.handle_wall_drag_event(WallDragEvent::Stopped);
+
+    // a slid up 2ft (x unchanged); b's shared corner followed up, shortening it.
+    assert_eq!(app.model.walls[0].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[0].end, Point2::new(Length::from_feet(10.0), Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[1].start, Point2::new(Length::ZERO, Length::from_feet(2.0)));
+    assert_eq!(app.model.walls[1].length, Length::from_feet(6.0));
+
+    app.undo();
+    assert_eq!(app.model, original);
+}
