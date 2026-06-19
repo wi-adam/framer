@@ -494,6 +494,10 @@ mod tests {
             (front.start.y + front.end.y).inches() / 2.0,
         );
         let toward_interior = p(mid.x.inches(), mid.y.inches() + 6.0);
-        assert!(faces.iter().any(|face| point_in_polygon(toward_interior, face)));
+        assert!(
+            faces
+                .iter()
+                .any(|face| point_in_polygon(toward_interior, face))
+        );
     }
 }

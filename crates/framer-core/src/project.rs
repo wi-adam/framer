@@ -283,7 +283,10 @@ mod tests {
         assert_eq!(wall.system, ElementId::new("system-wall-interior-1"));
         let system = reloaded.system_for(wall).unwrap();
         assert_eq!(system.exposure(), crate::WallExposure::Interior);
-        assert_eq!(system.framing_layer().unwrap().function, crate::LayerFunction::Framing);
+        assert_eq!(
+            system.framing_layer().unwrap().function,
+            crate::LayerFunction::Framing
+        );
         assert!(reloaded.material(&ElementId::new("mat-drywall")).is_some());
         assert_eq!(
             wall.tags,
@@ -325,10 +328,15 @@ mod tests {
             .insert("r_per_inch_milli".to_owned(), PropertyValue::Int(3300));
         second.materials.push(reordered);
 
-        assert_eq!(save_project(&first).unwrap(), save_project(&second).unwrap());
+        assert_eq!(
+            save_project(&first).unwrap(),
+            save_project(&second).unwrap()
+        );
 
         let reloaded = load_project(&save_project(&first).unwrap()).unwrap();
-        let material = reloaded.material(&crate::ElementId::new("mat-custom")).unwrap();
+        let material = reloaded
+            .material(&crate::ElementId::new("mat-custom"))
+            .unwrap();
         assert_eq!(material.appearance, Appearance::SolidColor([10, 20, 30]));
         assert_eq!(material.r_per_inch_milli(), 3300);
     }
@@ -345,7 +353,9 @@ mod tests {
 
         assert!(matches!(
             save_project(&model),
-            Err(ProjectError::Model(ModelError::WallReferencesUnknownSystem { .. }))
+            Err(ProjectError::Model(
+                ModelError::WallReferencesUnknownSystem { .. }
+            ))
         ));
     }
 
@@ -379,5 +389,4 @@ mod tests {
             Point2::new(Length::from_feet(6.0), Length::from_feet(6.0))
         );
     }
-
 }

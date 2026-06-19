@@ -246,7 +246,9 @@ pub(super) fn draw_section_swatch(
         // matches `ConstructionSystem::r_value_milli`.
         let name = material.map(|m| m.name.as_str()).unwrap_or("(missing)");
         let mut caption = format!("{name}\n{}", layer.thickness);
-        let r_milli = material.map(|m| m.r_value_milli(layer.thickness)).unwrap_or(0);
+        let r_milli = material
+            .map(|m| m.r_value_milli(layer.thickness))
+            .unwrap_or(0);
         if r_milli > 0 {
             caption.push_str(&format!("  R{:.1}", r_milli as f32 / 1000.0));
         }

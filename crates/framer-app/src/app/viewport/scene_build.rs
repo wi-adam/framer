@@ -567,11 +567,7 @@ fn wall_total_thickness(model: &BuildingModel, wall: &Wall, fallback: Length) ->
 /// The fill color for a layer band: the resolved material color, brightened a
 /// touch when the wall is selected.
 fn layer_band_color(base: Color32, selected: bool) -> Color32 {
-    if selected {
-        brighten(base, 24)
-    } else {
-        base
-    }
+    if selected { brighten(base, 24) } else { base }
 }
 
 /// Resolve a layer material's color, falling back to a neutral tone when the

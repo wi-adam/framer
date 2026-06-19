@@ -1121,7 +1121,9 @@ impl LayerFunction {
 
 /// How the framing members in a framing layer are laid out across the cavity.
 /// `Staggered`/`Double` are authored now but generation is deferred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum FramingPattern {
     #[default]
     Single,
@@ -1167,11 +1169,7 @@ pub struct ConstructionLayer {
 }
 
 impl ConstructionLayer {
-    pub fn new(
-        function: LayerFunction,
-        material: impl Into<String>,
-        thickness: Length,
-    ) -> Self {
+    pub fn new(function: LayerFunction, material: impl Into<String>, thickness: Length) -> Self {
         Self {
             function,
             material: ElementId::new(material),
@@ -1394,11 +1392,7 @@ pub struct Material {
 
 impl Material {
     /// A project material with a solid-color appearance and no extra properties.
-    pub fn solid_color(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        color: [u8; 3],
-    ) -> Self {
+    pub fn solid_color(id: impl Into<String>, name: impl Into<String>, color: [u8; 3]) -> Self {
         Self {
             id: ElementId::new(id),
             name: name.into(),
@@ -2638,7 +2632,9 @@ pub enum ModelError {
         system: ElementId,
         material: ElementId,
     },
-    #[error("wall construction system {system:?} must have exactly one framing layer, found {found}")]
+    #[error(
+        "wall construction system {system:?} must have exactly one framing layer, found {found}"
+    )]
     WallSystemFramingLayerCount { system: ElementId, found: usize },
     #[error("wall {wall:?} references unknown construction system {system:?}")]
     WallReferencesUnknownSystem { wall: ElementId, system: ElementId },

@@ -551,7 +551,14 @@ pub(super) fn draw_project_plan(
             // Widen the gap to the wall's full thickness: a white band quad cuts
             // through the layered fill, then a thin line marks the opening run.
             draw_opening_gap(
-                &painter, model, wall, left_model, right_model, bounds, drawing, camera,
+                &painter,
+                model,
+                wall,
+                left_model,
+                right_model,
+                bounds,
+                drawing,
+                camera,
             );
             painter.line_segment(
                 [left, right],

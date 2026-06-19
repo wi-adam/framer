@@ -6,8 +6,8 @@ use eframe::egui::{
 };
 use framer_core::{
     DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
-    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind, Wall,
-    WallJoin, WallJoinKind,
+    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind,
+    Wall, WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -657,7 +657,13 @@ impl FramerApp {
             .model
             .materials
             .iter()
-            .map(|material| (material.id.0.clone(), material.name.clone(), material.color()))
+            .map(|material| {
+                (
+                    material.id.0.clone(),
+                    material.name.clone(),
+                    material.color(),
+                )
+            })
             .collect();
 
         egui::CollapsingHeader::new("Library")
@@ -1300,9 +1306,7 @@ impl FramerApp {
                 }
             }
             Selection::Material(id) => {
-                if let Some(material) =
-                    self.model.materials.iter_mut().find(|m| m.id.0 == id)
-                {
+                if let Some(material) = self.model.materials.iter_mut().find(|m| m.id.0 == id) {
                     inspector_object_id(ui, &material.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut material.name);
@@ -2143,11 +2147,7 @@ fn system_layer_editor(
                             if !is_framing_option && is_only_framing {
                                 continue;
                             }
-                            ui.selectable_value(
-                                &mut layer.function,
-                                function,
-                                function.label(),
-                            );
+                            ui.selectable_value(&mut layer.function, function, function.label());
                         }
                     });
                 if layer.function != before {
@@ -2198,11 +2198,7 @@ fn system_layer_editor(
                         .selected_text(framing.pattern.label())
                         .show_ui(ui, |ui| {
                             for pattern in FramingPattern::ALL {
-                                ui.selectable_value(
-                                    &mut framing.pattern,
-                                    pattern,
-                                    pattern.label(),
-                                );
+                                ui.selectable_value(&mut framing.pattern, pattern, pattern.label());
                             }
                         });
                     framing.pattern != before
@@ -2284,7 +2280,11 @@ fn material_properties_editor(ui: &mut Ui, material: &mut framer_core::Material)
             _ => 0,
         };
         let response = property_row(ui, label, |ui| {
-            ui.add(egui::DragValue::new(&mut value).speed(1.0).range(0..=i64::MAX))
+            ui.add(
+                egui::DragValue::new(&mut value)
+                    .speed(1.0)
+                    .range(0..=i64::MAX),
+            )
         });
         if response.changed() {
             material
@@ -2301,7 +2301,11 @@ fn material_summary(ui: &mut Ui, material: &framer_core::Material) {
     ui.horizontal(|ui| {
         let [r, g, b] = material.color();
         color_swatch(ui, Color32::from_rgb(r, g, b));
-        ui.label(RichText::new(&material.name).strong().color(theme::text_primary()));
+        ui.label(
+            RichText::new(&material.name)
+                .strong()
+                .color(theme::text_primary()),
+        );
     });
     egui::Grid::new("material-summary")
         .num_columns(2)
@@ -2314,12 +2318,7 @@ fn material_summary(ui: &mut Ui, material: &framer_core::Material) {
         });
 }
 
-fn wall_summary(
-    ui: &mut Ui,
-    wall: &Wall,
-    level_options: &[(String, String)],
-    system_name: &str,
-) {
+fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)], system_name: &str) {
     ui.label(&wall.id.0);
     egui::Grid::new("wall-summary")
         .num_columns(2)

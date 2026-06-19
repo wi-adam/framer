@@ -588,8 +588,12 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
                 wall: wall.id.clone(),
                 system: wall.system.clone(),
             })?;
-        plan.wall_plans
-            .push(generate_wall_plan(wall, system, &model.materials, &model.code)?);
+        plan.wall_plans.push(generate_wall_plan(
+            wall,
+            system,
+            &model.materials,
+            &model.code,
+        )?);
     }
 
     add_join_members(&mut plan, model)?;
@@ -679,7 +683,10 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 wall: wall.id.clone(),
                 system: wall.system.clone(),
             })?;
-        Ok((wall_framing(system)?.member, FramingBand::for_system(system)?))
+        Ok((
+            wall_framing(system)?.member,
+            FramingBand::for_system(system)?,
+        ))
     };
 
     for join in &model.wall_joins {
@@ -1796,17 +1803,19 @@ mod tests {
             id: ElementId::new(id),
             name: id.to_owned(),
             kind: framer_core::SystemKind::Wall,
-            layers: vec![framer_core::ConstructionLayer::new(
-                framer_core::LayerFunction::Framing,
-                "mat-spf",
-                member.nominal_depth(),
-            )
-            .with_framing(FramingSpec {
-                member,
-                spacing: Length::from_whole_inches(16),
-                pattern: framer_core::FramingPattern::Single,
-                cavity_material: None,
-            })],
+            layers: vec![
+                framer_core::ConstructionLayer::new(
+                    framer_core::LayerFunction::Framing,
+                    "mat-spf",
+                    member.nominal_depth(),
+                )
+                .with_framing(FramingSpec {
+                    member,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: framer_core::FramingPattern::Single,
+                    cavity_material: None,
+                }),
+            ],
         }
     }
 
@@ -2060,7 +2069,10 @@ mod tests {
             .iter()
             .take_while(|layer| layer.function != LayerFunction::Framing)
             .fold(Length::ZERO, |total, layer| total + layer.thickness);
-        assert!(expected_offset > Length::ZERO, "exterior system has interior layers");
+        assert!(
+            expected_offset > Length::ZERO,
+            "exterior system has interior layers"
+        );
         assert_eq!(
             expected_depth,
             framing.framing.as_ref().unwrap().member.nominal_depth()
@@ -2211,14 +2223,19 @@ mod tests {
     fn project_round_trip_regenerates_same_wall_plan() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let original = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let original =
+            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         let serialized = save_project(&model).unwrap();
         let loaded = load_project(&serialized).unwrap();
         let loaded_system = loaded.system_for(&loaded.walls[0]).unwrap();
-        let regenerated =
-            generate_wall_plan(&loaded.walls[0], loaded_system, &loaded.materials, &loaded.code)
-                .unwrap();
+        let regenerated = generate_wall_plan(
+            &loaded.walls[0],
+            loaded_system,
+            &loaded.materials,
+            &loaded.code,
+        )
+        .unwrap();
 
         assert_eq!(loaded, model);
         assert_eq!(regenerated, original);
@@ -2286,7 +2303,11 @@ mod tests {
     /// A minimal single-framing-layer wall system using `member` at the given
     /// on-center `spacing`. Lets tests vary the layout spacing independently of
     /// the code-profile default.
-    fn framing_system_spaced(id: &str, member: BoardProfile, spacing: Length) -> ConstructionSystem {
+    fn framing_system_spaced(
+        id: &str,
+        member: BoardProfile,
+        spacing: Length,
+    ) -> ConstructionSystem {
         let mut system = framing_system(id, member);
         if let Some(layer) = system
             .layers
@@ -2395,7 +2416,8 @@ mod tests {
     fn generated_members_include_source_and_rule_provenance() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let plan =
+            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         let header = plan
             .members
@@ -2413,7 +2435,8 @@ mod tests {
     fn garage_door_reports_unsupported_starter_assumption() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan = generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let plan =
+            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
 
         assert!(plan.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Unsupported
@@ -2494,12 +2517,18 @@ mod tests {
 
         // The rain-screen air gap is skipped entirely.
         assert!(
-            !plan.layers.iter().any(|layer| layer.material.0 == "mat-rainscreen"),
+            !plan
+                .layers
+                .iter()
+                .any(|layer| layer.material.0 == "mat-rainscreen"),
             "air-gap layers must not appear in the takeoff"
         );
 
         // Material names are resolved from the library.
-        assert_eq!(find_layer(&plan.layers, "mat-drywall").material_name, "5/8\" Gypsum");
+        assert_eq!(
+            find_layer(&plan.layers, "mat-drywall").material_name,
+            "5/8\" Gypsum"
+        );
     }
 
     #[test]
@@ -2530,7 +2559,10 @@ mod tests {
         assert_eq!(cavity.area_sq_in, 0);
         assert_eq!(cavity.volume_bd_in, net_area * 4);
         assert!(
-            !plan.layers.iter().any(|layer| layer.material.0 == "mat-spf"),
+            !plan
+                .layers
+                .iter()
+                .any(|layer| layer.material.0 == "mat-spf"),
             "framing lumber is counted in the member BOM, not the layer takeoff"
         );
     }
