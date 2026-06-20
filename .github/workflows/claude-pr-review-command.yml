@@ -1,0 +1,75 @@
+name: Claude PR Review (on demand)
+
+# Escape hatch for the CI-gated automatic review in ci.yml: comment "@claude review"
+# on a pull request to force a full /pr-review regardless of CI status. Useful when
+# you want feedback before the build/tests finish, or on a PR that can't go green yet.
+#
+# claude-code-action enforces that only users with WRITE access can trigger it, so
+# this can't be abused to burn tokens. issue_comment runs from the default branch
+# (main) with full context, and a comment on a PR carries PR context (isPR), so the
+# review runs in agent mode with inline comments + a verdict exactly like the
+# automatic review. We check out main (trusted) — not the PR head — so this stays on
+# trusted code and always uses the in-repo .claude review assets from main; the PR's
+# changes are read via `gh pr diff`.
+on:
+  issue_comment:
+    types: [created]
+
+# Least-privilege default; the job opts into more.
+permissions:
+  contents: read
+
+jobs:
+  on-demand-review:
+    name: on-demand-review
+    # Only top-level comments on a PR (not plain issues) that contain "@claude review".
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '@claude review') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    env:
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      # Default checkout = main (issue_comment runs on the default branch), which
+      # carries the current .claude/ review assets. The PR's diff is fetched via gh.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run framer PR review (on demand — bypasses the CI gate)
+        id: review
+        uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The PR number comes from the comment's issue number (a PR comment).
+          prompt: "/pr-review ${{ github.event.issue.number }} --comment"
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --model "claude-opus-4-8"
+
+      - name: Upload review trace to R2 (private)
+        if: ${{ always() && env.R2_BUCKET != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # R2 rejects the aws CLI v2 default integrity checksums; only send when required.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          REPO: ${{ github.event.repository.name }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          if [ -z "$EXEC_FILE" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "No execution file; nothing to upload."
+            exit 0
+          fi
+          key="${REPO}/pr-${PR}/ondemand-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
+          aws s3 cp "$EXEC_FILE" "s3://${R2_BUCKET}/${key}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json
+          echo "Uploaded trace -> r2://${R2_BUCKET}/${key}"
