@@ -1,31 +1,34 @@
 name: Claude Code Review
 
-# Automated PR code review, driven by the claude-code plugin marketplace's
-# multi-agent /code-review command. Uses the plain `pull_request` trigger — the
-# recommended pattern for PUBLIC repos — NOT pull_request_target, which would run
-# with base-repo secrets and invite pwn-request mistakes on untrusted PR code.
+# Two complementary automated reviews on pull requests, both driven by
+# claude-code-action. The plain `pull_request` trigger is the recommended pattern
+# for PUBLIC repos — NOT pull_request_target, which would run with base-repo
+# secrets and risk pwn-requests on untrusted PR code.
+#
+#   general-review — the upstream code-review plugin: bugs + CLAUDE.md compliance.
+#   spec-review    — framer-native: consistency with docs/specs, the .framer
+#                    contract, and the architecture invariants. Lives in-repo at
+#                    .claude/commands/spec-review.md + .claude/agents/.
+#
+# Cost knob: both run on every event below. The commands self-skip once they've
+# already reviewed a PR, so re-pushes (synchronize) are cheap. To cut cost
+# further, drop `synchronize` here, or trigger spec-review on opened/ready only.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# Least-privilege default for the workflow; the job below opts into more.
+# Least-privilege default for the workflow; each job opts into more.
 permissions:
   contents: read
 
 jobs:
-  claude-review:
-    name: claude-review
+  general-review:
+    name: general-review
     runs-on: ubuntu-latest
-    # Fork guard: a fork-originated `pull_request` run is issued a read-only
-    # GITHUB_TOKEN with NO access to repo secrets, so CLAUDE_CODE_OAUTH_TOKEN
-    # would be empty and the action could not authenticate. Skip those rather
-    # than fail on every external contributor's PR. Same-repo (branch) PRs are
-    # still reviewed. To review fork PRs too, migrate auth to Workload Identity
-    # Federation (vars.*, no stored secret) — see the action's claude-wif.yml.
+    # Fork guard: fork-originated runs get a read-only token with NO secrets, so
+    # CLAUDE_CODE_OAUTH_TOKEN would be empty. Skip them rather than fail on every
+    # external PR. Same-repo (branch) PRs are still reviewed.
     if: github.event.pull_request.head.repo.full_name == github.repository
-    # Review-only scope: it reads code and posts PR comments. It does not push
-    # branches (contents stays read) and id-token is only needed for OIDC/WIF,
-    # which this OAuth-token setup does not use.
     permissions:
       contents: read
       pull-requests: write
@@ -33,24 +36,43 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
-          # Action authenticates itself and revokes its token in a post-step;
-          # required by zizmor (artipacked).
           persist-credentials: false
-
-      - name: Run Claude code review
+      - name: Run general code review
         uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Install the official claude-code plugin marketplace, then the
-          # code-review plugin (newline-separated inputs).
           plugin_marketplaces: |
             https://github.com/anthropics/claude-code.git
           plugins: |
             code-review@claude-code-plugins
-          # A non-empty `prompt:` selects automation mode (no @claude needed).
-          # --comment is REQUIRED: without it the command prints the review to
-          # the terminal and posts nothing. The PR URL is resolved by the
-          # command's gh CLI. The plugin's command declares its own allowed-tools
-          # (inline-comment MCP + read-only gh pr commands), so no --allowedTools
-          # is needed and the Bash tool stays disabled.
           prompt: "/code-review:code-review ${{ github.event.pull_request.html_url }} --comment"
+          # In automation mode the action only installs the inline-comment MCP
+          # server when an mcp__github_inline_comment__* tool appears in
+          # claude_args allowedTools — so without this the plugin's inline
+          # comments would not post, even though its command also declares them.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+  spec-review:
+    name: spec-review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run framer spec-consistency review
+        uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # No plugins: this review is framer-native. The /spec-review project
+          # command (.claude/commands/spec-review.md) and its
+          # spec-consistency-reviewer subagent (.claude/agents/) are loaded from
+          # the checked-out repo — the action loads project settings by default.
+          prompt: "/spec-review ${{ github.event.pull_request.html_url }} --comment"
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
