@@ -1165,7 +1165,7 @@ fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImp
             )));
         }
         let size = usize::try_from(file.size()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-        let mut data = Vec::with_capacity(size);
+        let mut data = Vec::with_capacity(size.min(bytes.len()));
         file.read_to_end(&mut data).map_err(package_zip_io_error)?;
         if data.len() != size {
             return Err(LibraryImportError::InvalidPackageZip(format!(
@@ -1552,12 +1552,33 @@ mod tests {
         let root = temp_path("cas");
         let store = ContentAddressedAssetStore::new(&root);
         let bytes = b"asset-bytes";
+        let missing_hash = asset_content_hash(b"missing-asset");
 
         let hash = store.put(bytes).unwrap();
 
         assert_eq!(hash, asset_content_hash(bytes));
         assert!(store.contains(&hash).unwrap());
         assert_eq!(store.get(&hash).unwrap(), Some(bytes.to_vec()));
+        assert!(store.get(&missing_hash).unwrap().is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_addressed_asset_store_rejects_tampered_cached_bytes() {
+        let root = temp_path("cas-tampered");
+        let store = ContentAddressedAssetStore::new(&root);
+        let hash = store.put(b"asset-bytes").unwrap();
+        fs::write(
+            store.root().join(asset_file_name(&hash).unwrap()),
+            b"tampered-bytes",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.get(&hash),
+            Err(LibraryImportError::AssetHashMismatch { expected, .. }) if expected == hash
+        ));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1639,6 +1660,18 @@ mod tests {
     fn project_package_rejects_stored_size_mismatch() {
         let mut package = test_zip_entries(&[("project.framer", b"{}")]);
         set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 20, 1);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_forged_large_stored_size_without_large_allocation() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 20, u32::MAX);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 24, u32::MAX);
 
         assert!(matches!(
             load_project_package(&package),
