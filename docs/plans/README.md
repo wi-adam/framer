@@ -14,3 +14,4 @@ New plan? Copy [`../templates/plan-template.md`](../templates/plan-template.md).
 | [2026-06-15 — GPU path-tracer research](2026-06-15-gpu-pathtracer-research.md) | [Render View Mode](../specs/render-view.md) (research reference) |
 | [2026-06-18 — Wall editing & snapping](2026-06-18-wall-editing-snapping.md) | [Wall Editing & Snapping](../specs/wall-editing-and-snapping.md) |
 | [2026-06-18 — Viewport module refactor](2026-06-18-viewport-module-refactor.md) | — (internal refactor; see [code-map.md](../code-map.md#srcappviewport--the-viewports-layered-modules)) |
+| [2026-06-19 — Libraries](2026-06-19-libraries.md) | [Libraries](../specs/libraries.md) |

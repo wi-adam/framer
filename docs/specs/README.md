@@ -10,6 +10,7 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | Spec | Linked goal | Status |
 | --- | --- | --- |
 | [Construction Systems & Material Library](construction-systems.md) | G-008 / G-001 | Implemented (v7) |
+| [Libraries (Reusable, Distributable Content)](libraries.md) | G-013 | Proposed |
 | [Walls & Rooms (Floor-Plan Authoring)](walls-and-rooms.md) | G-007 | Implemented |
 | [Wall Editing & Snapping](wall-editing-and-snapping.md) | G-003 | Implemented |
 | [2D View Camera (Pan / Zoom)](2d-view-camera.md) | G-003 | Implemented |
