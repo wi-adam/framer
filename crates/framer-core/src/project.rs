@@ -193,11 +193,25 @@ mod tests {
             coordinate: "framer-lib://acme/second".to_owned(),
             version: "1.0.0".to_owned(),
         };
+        let material_source = Provenance {
+            library_uid: first_stamp.uid.clone(),
+            version_id: first_stamp.version_id.clone(),
+            source_id: ElementId::new("mat-library-cedar"),
+            content_hash: first_stamp.content_hash.clone(),
+        };
+        let system_source = Provenance {
+            source_id: ElementId::new("system-library-wall"),
+            ..material_source.clone()
+        };
 
         let mut first = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
         first.libraries = vec![second_stamp.clone(), first_stamp.clone()];
+        first.materials[0].source = MaterialSource::Library(material_source.clone());
+        first.systems[0].source = Some(system_source.clone());
         let mut second = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
         second.libraries = vec![first_stamp, second_stamp];
+        second.materials[0].source = MaterialSource::Library(material_source);
+        second.systems[0].source = Some(system_source);
 
         let saved = save_project(&first).unwrap();
 
