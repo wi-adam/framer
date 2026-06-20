@@ -35,6 +35,11 @@ jobs:
       # repo-scoped GitHub App token via OIDC to perform GitHub API calls
       # (posting review comments). Without it the action fails at auth.
       id-token: write
+    # R2_BUCKET is a secret that doubles as the on/off switch for private trace
+    # upload; hoisted to job env because a secret can't be read directly in a step
+    # `if:` condition. Unset secret → empty → the upload step skips (dormant).
+    env:
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -84,10 +89,11 @@ jobs:
         # Sends the full Claude execution transcript (the action's execution_file
         # output) to a private Cloudflare R2 bucket via its S3-compatible API, so
         # runs can be debugged WITHOUT exposing traces in the public Actions log
-        # (show_full_output stays off). Dormant until the R2_BUCKET repo VARIABLE is
-        # set; `always()` so a failed or errored review's trace is captured too. The
-        # aws CLI is preinstalled on ubuntu runners.
-        if: ${{ always() && vars.R2_BUCKET != '' }}
+        # (show_full_output stays off). Dormant until the R2_BUCKET secret is set
+        # (read from job env above); `always()` so a failed or errored review's trace
+        # is captured too. The aws CLI is preinstalled on ubuntu runners. The repo
+        # name is part of the key prefix so several repos can share one bucket.
+        if: ${{ always() && env.R2_BUCKET != '' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -96,7 +102,7 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          REPO: ${{ github.event.repository.name }}
           EXEC_FILE: ${{ steps.review.outputs.execution_file }}
           PR: ${{ github.event.pull_request.number }}
         run: |
@@ -104,7 +110,7 @@ jobs:
             echo "No execution file (review skipped); nothing to upload."
             exit 0
           fi
-          key="pr-${PR}/run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
+          key="${REPO}/pr-${PR}/run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
           aws s3 cp "$EXEC_FILE" "s3://${R2_BUCKET}/${key}" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --content-type application/json
