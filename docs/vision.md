@@ -292,6 +292,10 @@ goals relate.
 - **G-012 Agent Editing Contract:** document how agents should inspect and edit
   `.framer` projects, including stable IDs, authored-vs-generated data,
   provenance, and validation commands.
+- **G-013 Libraries:** a unified, distributable library system for reusable content
+  (wall systems and materials now; textures/depth maps, furnishings, and MEP
+  objects later) — vendor-on-use with provenance so projects stay self-contained
+  and deterministic. See [specs/libraries.md](specs/libraries.md).
 
 ## Definition Of Done
 
