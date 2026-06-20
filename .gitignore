@@ -1,2 +1,5 @@
 /target/
 .DS_Store
+
+# Claude Code local worktrees (transient, embedded git repos — never commit).
+.claude/worktrees/
