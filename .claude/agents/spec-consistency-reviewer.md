@@ -109,5 +109,8 @@ don't read everything.
      update the three fixtures + project-files.md").
    - a **confidence**: high / medium. Only `high` findings should become posted
      comments.
+   - a **severity**: `blocking` for an invariant violation, a missing required spec
+     for a product-visible/schema change, or a schema-artifact gap (these must be
+     fixed); `advisory` for spec-hygiene or traceability nits.
 4. If the change is fully consistent with the specs and invariants, say so plainly —
    a clean result is a valid and valuable outcome. Do not invent findings.

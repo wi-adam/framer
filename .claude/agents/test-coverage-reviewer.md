@@ -46,5 +46,7 @@ effectively missing coverage — flag it.
 
 **For each finding return:** the untested behavior (file:line of the change), which
 test surface should cover it (e.g. a `framer-solver` unit test, a round-trip
-fixture), why it matters, a concrete suggestion, and a confidence (high/medium).
-Only `high` findings become posted comments. If coverage is adequate, say so.
+fixture), why it matters, a concrete suggestion, a confidence (high/medium), and a
+**severity** — `blocking` for new or changed behavior left untested under the gates,
+or `advisory` for a test-quality improvement on already-covered behavior. Only
+`high`-confidence findings become posted comments. If coverage is adequate, say so.

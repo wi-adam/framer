@@ -36,6 +36,12 @@ code only.
   `pub` surface wider than needed; taking `&Vec`/`&String` instead of `&[..]`/`&str`;
   returning owned where a borrow suffices; an enum match that will silently absorb
   future variants (missing the intended explicit arms).
+- **Type design — make invalid states unrepresentable:** a raw `i64`/`u32`/`bool`/
+  `String` where a newtype or enum would encode the invariant (e.g. a bare integer
+  for a tick length or an id; a `bool` flag pair that allows nonsensical
+  combinations; stringly-typed state). Prefer encoding the rule in the type over
+  validating it at every call site. Flag a new public type that lets a caller
+  construct an invalid value the rest of the code then has to defend against.
 - **Crate-boundary hygiene:** logic that belongs in a UI-free crate placed in
   `framer-app` (or vice-versa) — note it (the spec reviewer owns the hard UI-free
   invariant; you flag softer layering smells).
@@ -46,5 +52,8 @@ subjective naming, micro-optimizations with no real cost, or anything clippy/rus
 already enforce. When unsure, drop it.
 
 **For each finding return:** file:line, the concern, why it matters here (the
-concrete cost or risk), a concrete fix, and a confidence (high/medium). Only `high`
+concrete cost or risk), a concrete fix, a confidence (high/medium), and a
+**severity** — `blocking` for a real safety/soundness defect (a panic on a runtime
+path, unsound `unsafe`, a swallowed error), or `advisory` for idiom, API shape,
+type-design, or perf polish that doesn't cause a defect. Only `high`-confidence
 findings become posted comments. If the change is clean, say so plainly.

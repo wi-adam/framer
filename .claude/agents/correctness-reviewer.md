@@ -29,8 +29,10 @@ comment on style, naming, or quality (other reviewers cover those).
 - **Tick / unit arithmetic:** lengths are integer ticks (16 = 1 inch). Flag
   integer overflow/truncation, lost precision, sign mistakes, or float creeping
   into model math where ticks are required.
-- **Error handling defects:** a swallowed `Result`/`?` that should propagate, an
-  error mapped to a wrong/empty value, a `match` missing a real case.
+- **Silent failures & error-handling defects:** a swallowed `Result`, an ignored
+  `?`/`let _ =` on a fallible call that should propagate or surface, an error mapped
+  to a wrong/empty value, an inappropriate fallback that hides the failure, or a
+  `match` missing a real case. An error that vanishes without surfacing is a defect.
 - **State/iteration bugs:** mutating while iterating, stale cache after a model
   edit, incorrect regeneration of derived data, nondeterministic ordering feeding
   canonical output.
@@ -46,5 +48,8 @@ Do NOT flag: style, naming, perf, missing tests, "could be cleaner," or anything
 cannot confirm. False positives waste the author's time — when unsure, drop it.
 
 **For each finding return:** file:line, a one-line description, why it is a real bug
-(the concrete failure case), a concrete fix, and a confidence (high/medium). Only
-`high` findings should become posted comments. If the diff is correct, say so.
+(the concrete failure case), a concrete fix, a confidence (high/medium), and a
+**severity** — `blocking` for a real defect that must be fixed (crash, wrong
+result, swallowed error), or `advisory` for a genuinely cosmetic concern. Correctness
+findings are almost always `blocking`. Only `high`-confidence findings should become
+posted comments. If the diff is correct, say so.
