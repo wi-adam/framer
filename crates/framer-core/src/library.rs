@@ -247,6 +247,7 @@ mod tests {
                 id: ElementId::new("system-round-trip"),
                 name: "Round-trip system".to_owned(),
                 kind: SystemKind::Floor,
+                source: None,
                 layers: vec![ConstructionLayer::new(
                     LayerFunction::InteriorFinish,
                     "mat-round-trip",

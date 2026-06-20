@@ -9,20 +9,21 @@ actual files, types, and functions. When the two disagree, the code wins — fix
 
 ## Workspace at a glance
 
-Four crates in a strict dependency order (UI depends on logic, never the reverse):
+Five crates in a strict dependency order (UI depends on logic, never the reverse):
 
 ```
-framer-core   ─┬─→ framer-solver ─┐
-               ├─→ framer-render ─┼─→ framer-app
-               └──────────────────┘
+framer-core   ─┬─→ framer-solver  ─┐
+               ├─→ framer-render  ─┼─→ framer-app
+               └─→ framer-library ─┘
 ```
 
 | Crate | Responsibility | Depends on | UI? |
 | --- | --- | --- | --- |
 | [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, code profiles, validation, room topology, `.framer` serialization. | — | No |
+| [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap pipeline for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
-| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, 2D/3D viewports, real-time GPU path-traced Render view. | core, solver, render | Yes |
+| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
 
 **The load-bearing invariant:** `framer-core`, `framer-solver`, and `framer-render` carry
 **no UI dependency**. They must stay testable, scriptable, and exportable without the app.
@@ -48,23 +49,27 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 ### Key types (file: `src/model.rs` unless noted)
 
 - **`BuildingModel`** — root authored container:
-  `code: CodeProfile`, `materials: Vec<Material>`, `systems: Vec<ConstructionSystem>`,
+  `code: CodeProfile`, `libraries: Vec<LibraryStamp>`, `materials: Vec<Material>`,
+  `systems: Vec<ConstructionSystem>`,
   `levels`, `walls`, `wall_joins`, `rooms`. This is the only thing persisted.
 - **`Wall`** — `id, name, level, start, end, length, height, system: ElementId, openings,
   dimensions, tags`. A wall references a construction system **by id** (it does not embed its
   assembly). `Wall::new` defaults `system` to `"system-wall-exterior-1"`.
-- **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof}, layers:
-  Vec<ConstructionLayer>`. Layers are ordered **interior → exterior** and are *never sorted*
-  (order is semantic). Helpers: `framing_layer()`, `total_thickness()`, `exposure()`,
-  `r_value_milli(materials)`. Only `Wall` systems are wired today.
+- **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof},
+  source: Option<Provenance>, layers: Vec<ConstructionLayer>`. Layers are ordered
+  **interior → exterior** and are *never sorted* (order is semantic). Helpers:
+  `framing_layer()`, `total_thickness()`, `exposure()`, `r_value_milli(materials)`. Only
+  `Wall` systems are wired today.
 - **`ConstructionLayer`** — `function: LayerFunction, material: ElementId, thickness,
   framing: Option<FramingSpec>`. `framing` is present **iff** `function == Framing`.
 - **`FramingSpec`** — `member: BoardProfile, spacing, pattern: FramingPattern,
   cavity_material: Option<ElementId>` (cavity insulation adds no through-wall depth).
-- **`Material`** — `id, name, source: MaterialSource {Project|External}, appearance:
+- **`Material`** — `id, name, source: MaterialSource {Project|Library(Provenance)}, appearance:
   Appearance, tags, properties: BTreeMap<String, PropertyValue>`. Open/extensible: substance
   lives in `properties` (e.g. `"r_per_inch_milli": Int`), not in the enum. `PropertyValue`
   is float-free (`Int|Length|Text|Flag`) so the model stays `Eq` + deterministic.
+- **`LibraryStamp`** / **`Provenance`** — descriptive library metadata for vendored
+  definitions. It is never used to resolve walls/materials/systems at load or solve time.
 - **`Opening`** (`OpeningKind`: Door/Window/GarageDoor/Skylight/Stair…), **`WallJoin`**
   (`WallJoinKind`: Corner/EndToEnd/Tee/Cross), **`Room`** (`RoomUsage`), **`Level`**,
   **`DimensionConstraint`** (+ anchor/axis/kind enums) — the rest of the authored model.
@@ -89,10 +94,10 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framer` serialization (`src/project.rs`)
 
-- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 7`**.
-- The model is **v7-only**: `load_project` peeks a `SchemaHeader` first and returns
-  `ProjectError::UnsupportedSchemaVersion` for any non-v7 file (no in-place migration of
-  pre-v7 shapes). `#[serde(deny_unknown_fields)]` rejects unknown keys.
+- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 8`**.
+- The model is **v8-only**: `load_project` peeks a `SchemaHeader` first and returns
+  `ProjectError::UnsupportedSchemaVersion` for any non-v8 file. `#[serde(deny_unknown_fields)]`
+  rejects unknown keys.
 - Canonical output: `to_canonical_json()` re-stamps the version, calls
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a
   trailing newline. Same model → byte-identical JSON regardless of in-memory order.
@@ -113,6 +118,29 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib);
   `BuildingModel::new` and the demo constructors vendor those definitions into each
   self-contained project model.
+
+---
+
+## framer-library — reusable content resolution + vendoring
+
+Headless, IO-capable support crate for the [Libraries spec](specs/libraries.md). It depends on
+`framer-core` only among workspace crates; core stays IO-free.
+
+| File | Contains |
+| --- | --- |
+| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, and import functions. |
+
+Key entry points:
+
+- `starter_library()` — load the checked-in starter `.framerlib` and compute its canonical
+  library-version hash.
+- `load_verified_library(&LibraryBytes)` — parse a `.framerlib`, compute the canonical
+  `blake3` hash, and fail closed if an expected hash is present and does not match.
+- `import_material` / `import_system` / `import_item` — stage an atomic vendor-on-use import
+  into a `BuildingModel`, mint project-local ids, copy referenced material closure, stamp
+  `LibraryStamp` + per-item `Provenance`, validate the staged model, then commit it.
+- `LocalSearchPathResolver` — resolves built-in, local path, and installed-library locators.
+  Remote locators are represented but intentionally unsupported until the remote/cache phase.
 
 ---
 
@@ -267,6 +295,7 @@ the real symbols:
 | --- | --- | --- |
 | **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render/3D handling in `framer-render/src/build.rs` + `viewport/scene_build.rs`; inspector in `framer-app` `panels.rs`. |
 | **New construction layer function / material** | `LayerFunction` / `Material` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material in `framer-render/src/build.rs`. |
+| **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import UI in `framer-app/src/app/panels.rs`; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
 | **New solver rule / member** | `MemberKind` + rule in `framer-solver/src/lib.rs` | attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
 | **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |

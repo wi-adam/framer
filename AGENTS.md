@@ -10,12 +10,13 @@ path-traced rendering. Product source of truth: [docs/vision.md](docs/vision.md)
 
 ## Repo map
 
-Rust workspace, four crates (strict dependency order — UI depends on logic, never
+Rust workspace, five crates (strict dependency order — UI depends on logic, never
 the reverse):
 
 | Crate | Responsibility |
 | --- | --- |
 | [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, code profiles, room topology, validation, `.framer` serialization. **No UI.** |
+| [`crates/framer-library`](crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap for reusable `.framerlib` content. **No UI.** |
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
 | [`crates/framer-app`](crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`). |
@@ -41,7 +42,7 @@ Docs index:
 3. **Determinism.** Same model + code profile → byte-identical `.framer` and
    identical framing/render. Lengths are integer **ticks** (16 = 1 inch), no floats
    in the model; `.framer` is ID-sorted + canonical; the renderer is seeded (PCG).
-4. **`.framer` is schema v7 and v7-only.** Bumping the schema means updating
+4. **`.framer` is schema v8 and v8-only.** Bumping the schema means updating
    `PROJECT_SCHEMA_VERSION`, the three `examples/projects/*.framer`, the round-trip
    tests, and [project-files.md](docs/project-files.md).
 5. **CPU render is the reference;** the app's WGSL compute shader mirrors it. Change

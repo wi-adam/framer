@@ -7,8 +7,8 @@ use eframe::egui::{
 };
 use framer_core::{
     DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
-    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, Opening, OpeningKind,
-    Wall, WallJoin, WallJoinKind,
+    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, MaterialSource, Opening,
+    OpeningKind, Provenance, Wall, WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -645,7 +645,7 @@ impl FramerApp {
         // Authoring buttons (add system/material) are only offered when design
         // edits are allowed; selecting library rows stays allowed in Plan mode.
         let can_edit = self.workspace_mode.allows_design_edits();
-        let systems: Vec<(String, String, &'static str)> = self
+        let systems: Vec<(String, String, &'static str, bool)> = self
             .model
             .systems
             .iter()
@@ -654,10 +654,11 @@ impl FramerApp {
                     system.id.0.clone(),
                     system.name.clone(),
                     system.kind.label(),
+                    system.source.is_some(),
                 )
             })
             .collect();
-        let materials: Vec<(String, String, [u8; 3])> = self
+        let materials: Vec<(String, String, [u8; 3], bool)> = self
             .model
             .materials
             .iter()
@@ -666,19 +667,67 @@ impl FramerApp {
                     material.id.0.clone(),
                     material.name.clone(),
                     material.color(),
+                    matches!(&material.source, MaterialSource::Library(_)),
                 )
             })
             .collect();
+        let starter = can_edit
+            .then(framer_library::starter_library)
+            .and_then(Result::ok);
+        let starter_systems = starter
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .library
+                    .systems
+                    .iter()
+                    .map(|system| {
+                        (
+                            system.id.0.clone(),
+                            system.name.clone(),
+                            system.kind.label(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let starter_materials = starter
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .library
+                    .materials
+                    .iter()
+                    .map(|material| {
+                        (
+                            material.id.0.clone(),
+                            material.name.clone(),
+                            material.color(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut insert_system: Option<String> = None;
+        let mut insert_material: Option<String> = None;
 
         egui::CollapsingHeader::new("Library")
             .default_open(false)
             .show(ui, |ui| {
                 ui.strong("Systems");
-                for (id, name, kind) in &systems {
+                for (id, name, kind, from_library) in &systems {
                     let selected = matches!(&self.selected, Selection::System(s) if s == id);
                     if ui
-                        .selectable_label(selected, format!("{name} ({kind})"))
-                        .clicked()
+                        .horizontal(|ui| {
+                            let clicked = ui
+                                .selectable_label(selected, format!("{name} ({kind})"))
+                                .clicked();
+                            if *from_library {
+                                library_badge(ui);
+                            }
+                            clicked
+                        })
+                        .inner
                     {
                         self.selected = Selection::System(id.clone());
                     }
@@ -696,13 +745,17 @@ impl FramerApp {
 
                 ui.separator();
                 ui.strong("Materials");
-                for (id, name, color) in &materials {
+                for (id, name, color, from_library) in &materials {
                     let selected = matches!(&self.selected, Selection::Material(m) if m == id);
                     let [r, g, b] = *color;
                     if ui
                         .horizontal(|ui| {
                             color_swatch(ui, Color32::from_rgb(r, g, b));
-                            ui.selectable_label(selected, name).clicked()
+                            let clicked = ui.selectable_label(selected, name).clicked();
+                            if *from_library {
+                                library_badge(ui);
+                            }
+                            clicked
                         })
                         .inner
                     {
@@ -712,7 +765,116 @@ impl FramerApp {
                 if can_edit && ui.button("+ Material").clicked() {
                     self.add_material();
                 }
+
+                if can_edit && (!starter_systems.is_empty() || !starter_materials.is_empty()) {
+                    ui.separator();
+                    ui.strong("Starter");
+                    for (id, name, kind) in &starter_systems {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{name} ({kind})"));
+                            if ui.button("Insert").clicked() {
+                                insert_system = Some(id.clone());
+                            }
+                        });
+                    }
+                    for (id, name, color) in &starter_materials {
+                        let [r, g, b] = *color;
+                        ui.horizontal(|ui| {
+                            color_swatch(ui, Color32::from_rgb(r, g, b));
+                            ui.label(name);
+                            if ui.button("Insert").clicked() {
+                                insert_material = Some(id.clone());
+                            }
+                        });
+                    }
+                }
             });
+
+        if let Some(id) = insert_system {
+            self.insert_starter_system(id);
+        }
+        if let Some(id) = insert_material {
+            self.insert_starter_material(id);
+        }
+    }
+
+    fn insert_starter_system(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library import failed: {error}"));
+                return;
+            }
+        };
+
+        let mut result = None;
+        self.edit("Insert library system", |app| {
+            let imported = framer_library::import_system(
+                &mut app.model,
+                &loaded.library,
+                &loaded.content_hash,
+                &ElementId::new(&id),
+            );
+            if let Ok(imported) = &imported
+                && let Some(system) = &imported.system
+            {
+                app.selected = Selection::System(system.0.clone());
+            }
+            result = Some(imported);
+        });
+        self.file_status = Some(match result.expect("import closure should run") {
+            Ok(imported) => {
+                let id = imported
+                    .system
+                    .map(|id| id.0)
+                    .unwrap_or_else(|| "system".to_owned());
+                format!("Inserted {id} from starter library")
+            }
+            Err(error) => format!("Library import failed: {error}"),
+        });
+    }
+
+    fn insert_starter_material(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library import failed: {error}"));
+                return;
+            }
+        };
+
+        let mut result = None;
+        self.edit("Insert library material", |app| {
+            let imported = framer_library::import_material(
+                &mut app.model,
+                &loaded.library,
+                &loaded.content_hash,
+                &ElementId::new(&id),
+            );
+            if let Ok(imported) = &imported
+                && let Some(material) = imported.materials.first()
+            {
+                app.selected = Selection::Material(material.0.clone());
+            }
+            result = Some(imported);
+        });
+        self.file_status = Some(match result.expect("import closure should run") {
+            Ok(imported) => {
+                let id = imported
+                    .materials
+                    .first()
+                    .map(|id| id.0.clone())
+                    .unwrap_or_else(|| "material".to_owned());
+                format!("Inserted {id} from starter library")
+            }
+            Err(error) => format!("Library import failed: {error}"),
+        });
     }
 
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
@@ -2054,6 +2216,24 @@ fn color_swatch(ui: &mut Ui, color: Color32) {
         .rect_stroke(rect, 2.0, theme::soft_stroke(), egui::StrokeKind::Inside);
 }
 
+fn library_badge(ui: &mut Ui) {
+    ui.label(
+        RichText::new("Library")
+            .size(11.0)
+            .strong()
+            .color(theme::active_blue()),
+    );
+}
+
+fn provenance_label(source: &Provenance) -> String {
+    let hash = source
+        .content_hash
+        .strip_prefix("blake3:")
+        .unwrap_or(&source.content_hash);
+    let short_hash = hash.get(..8).unwrap_or(hash);
+    format!("{} ({short_hash})", source.source_id.0)
+}
+
 /// Look up a material's swatch color by id, falling back to a neutral tone.
 fn material_color(material_colors: &[(String, [u8; 3])], id: &str) -> Color32 {
     material_colors
@@ -2301,6 +2481,9 @@ fn system_summary(
             if let Some(milli) = r_value_milli {
                 summary_row(ui, "R-value", format_r_value(milli));
             }
+            if let Some(source) = &system.source {
+                summary_row(ui, "Source", provenance_label(source));
+            }
         });
 }
 
@@ -2364,6 +2547,9 @@ fn material_summary(ui: &mut Ui, material: &framer_core::Material) {
             summary_row(ui, "R / inch", format_r_value(material.r_per_inch_milli()));
             if !material.tags.is_empty() {
                 summary_row(ui, "Tags", material.tags.join(", "));
+            }
+            if let MaterialSource::Library(source) = &material.source {
+                summary_row(ui, "Source", provenance_label(source));
             }
         });
 }
@@ -3511,6 +3697,41 @@ mod tests {
             !should_capture_edit_base(true, true, true, true),
             "transaction already open: keep the original base"
         );
+    }
+
+    #[test]
+    fn inserting_starter_system_vendors_provenance_and_selects_it() {
+        let mut app = FramerApp::default();
+        let system_count = app.model.systems.len();
+        let material_count = app.model.materials.len();
+
+        app.insert_starter_system("system-wall-exterior-1".to_owned());
+
+        assert_eq!(app.model.libraries.len(), 1);
+        assert!(app.model.systems.len() > system_count);
+        assert!(app.model.materials.len() > material_count);
+        let Selection::System(system_id) = &app.selected else {
+            panic!("imported system should be selected");
+        };
+        let system = app
+            .model
+            .systems
+            .iter()
+            .find(|system| system.id.0 == *system_id)
+            .expect("selected imported system should exist");
+        let source = system
+            .source
+            .as_ref()
+            .expect("system should have provenance");
+        assert_eq!(source.source_id, ElementId::new("system-wall-exterior-1"));
+        assert!(source.content_hash.starts_with("blake3:"));
+        assert!(
+            app.model
+                .materials
+                .iter()
+                .any(|material| matches!(&material.source, MaterialSource::Library(_)))
+        );
+        app.model.validate().unwrap();
     }
 
     #[derive(Debug, Clone, Copy)]

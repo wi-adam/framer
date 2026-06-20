@@ -1060,6 +1060,7 @@ impl FramerApp {
                 id: ElementId::new(id.clone()),
                 name,
                 kind: SystemKind::Wall,
+                source: None,
                 layers,
             });
             app.selected = Selection::System(id);
