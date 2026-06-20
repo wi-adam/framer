@@ -1688,6 +1688,20 @@ mod tests {
     }
 
     #[test]
+    fn project_package_rejects_tampered_asset_bytes_on_load() {
+        let (model, assets) = textured_project();
+        let hash = assets.keys().next().unwrap().clone();
+        let asset_path = asset_package_path(&hash).unwrap();
+        let mut entries = package_entries(&model, &assets);
+        entries.insert(asset_path, b"different-bytes".to_vec());
+
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::AssetHashMismatch { expected, .. }) if expected == hash
+        ));
+    }
+
+    #[test]
     fn project_package_rejects_invalid_manifest_format() {
         let (model, assets) = textured_project();
         let mut entries = package_entries(&model, &assets);
