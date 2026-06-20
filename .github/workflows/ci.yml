@@ -161,3 +161,116 @@ jobs:
         run: pipx run zizmor==1.25.2 --persona=regular .github/workflows/
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Framer's spec-aware PR review, GATED on the rest of CI passing so we never
+  # spend (expensive) review tokens on a PR that fails lint/build/tests. It lives
+  # here rather than a standalone workflow so `needs:` can depend on those jobs
+  # natively: when any fails, the Claude step is skipped (zero tokens) while this
+  # job still reports a clean result. The review itself (the /pr-review command +
+  # its four reviewer subagents) lives in-repo under .claude/. To review a PR on
+  # demand regardless of CI, comment "@claude review" (claude-pr-review-command.yml).
+  pr-review:
+    name: pr-review
+    needs: [lint, test, gpu, docs]
+    # always() so the job runs — and the required `pr-review` check reports — even
+    # when a dependency failed; the gate step below decides whether to actually
+    # review. Scoped to same-repo PRs (fork runs get no secrets; push/dispatch
+    # aren't PRs and skip here).
+    if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      # Required even with the OAuth token: the action mints its short-lived GitHub
+      # App token via OIDC for GitHub API calls (posting comments / the verdict).
+      id-token: write
+    # R2_BUCKET (a secret) doubles as the on/off switch for private trace upload;
+    # in job env because a secret can't be read directly in a step `if:`.
+    env:
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - name: Gate on CI result
+        id: gate
+        # Spend review tokens only if every gating check passed. needs.*.result is
+        # success | failure | cancelled | skipped. If not all green, skip the review
+        # steps — this job still succeeds, and the failed checks are what block the
+        # merge.
+        env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          GPU: ${{ needs.gpu.result }}
+          DOCS: ${{ needs.docs.result }}
+        run: |
+          if [ "$LINT" = success ] && [ "$TEST" = success ] && [ "$GPU" = success ] && [ "$DOCS" = success ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "All gating checks passed — running the review."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "CI not green (lint=$LINT test=$TEST gpu=$GPU docs=$DOCS) — skipping the review to save tokens; the failed check(s) block the merge."
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: steps.gate.outputs.run == 'true'
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run framer PR review
+        if: steps.gate.outputs.run == 'true'
+        id: review
+        uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: "/pr-review ${{ github.event.pull_request.html_url }} --comment"
+          # The inline-comment MCP server installs only when its tool is in
+          # claude_args; gh pr review submits the verdict; opus runs the four-subagent
+          # fan-out reliably (the sonnet default under-executed it and no-op'd).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --model "claude-opus-4-8"
+
+      - name: Gate merge on Claude's review verdict
+        # request-changes → red `pr-review` check (blocks merge). Only when we
+        # actually reviewed; if the review was skipped (CI not green) this is skipped
+        # and the failed CI checks are the blockers. PR number via env (zizmor-safe).
+        if: ${{ always() && steps.gate.outputs.run == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          state=$(gh pr view "$PR" --json reviews \
+            --jq '[.reviews[] | select(.author.login | ascii_downcase | startswith("claude"))] | last | .state // ""')
+          echo "Latest claude[bot] review state: ${state:-<none>}"
+          if [ "$state" = "CHANGES_REQUESTED" ]; then
+            echo "::error::Claude requested changes on this PR — resolve the [blocking] items, then push to re-review."
+            exit 1
+          fi
+          echo "No blocking verdict; merge gate passes."
+
+      - name: Upload review trace to R2 (private)
+        # Sends the full execution transcript to a private R2 bucket (S3-compatible)
+        # so runs are debuggable without exposing traces in the public log. Dormant
+        # until the R2_BUCKET secret is set. See claude-pr-review-command.yml for the
+        # same step.
+        if: ${{ always() && steps.gate.outputs.run == 'true' && env.R2_BUCKET != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # R2 rejects the aws CLI v2 default integrity checksums; only send when required.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          REPO: ${{ github.event.repository.name }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$EXEC_FILE" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "No execution file; nothing to upload."
+            exit 0
+          fi
+          key="${REPO}/pr-${PR}/run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
+          aws s3 cp "$EXEC_FILE" "s3://${R2_BUCKET}/${key}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json
+          echo "Uploaded trace -> r2://${R2_BUCKET}/${key}"

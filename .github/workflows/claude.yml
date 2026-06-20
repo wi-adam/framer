@@ -22,11 +22,28 @@ permissions:
 jobs:
   claude:
     name: claude
+    # Two gates, matching the on-demand review (claude-pr-review-command.yml):
+    #   1. the body/title must contain "@claude" (but not "@claude review", which the
+    #      structured review handles — avoids a double response); and
+    #   2. an author_association pre-filter (OWNER/MEMBER/COLLABORATOR) so a privileged
+    #      runner doesn't start for an outside actor. The action's own write-access
+    #      check is still the authoritative gate. (author_association is coarse: it is
+    #      the content author's association — for `issues: assigned` that's the issue
+    #      author, not the assigner — but the action's actor write-check covers that.)
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment'
+        && contains(github.event.comment.body, '@claude')
+        && !contains(github.event.comment.body, '@claude review')
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment'
+        && contains(github.event.comment.body, '@claude')
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review'
+        && contains(github.event.review.body, '@claude')
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association)) ||
+      (github.event_name == 'issues'
+        && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))
+        && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
     # Scoped to exactly what the responder needs:
     #   contents: write       — push a fix branch when asked to make a change
