@@ -25,7 +25,7 @@ env:
   # Marketing name (macOS .app + archive filenames) vs. the Cargo bin name.
   APP_NAME: Framer
   BIN_NAME: framer-app
-  BUNDLE_ID: windustries.framer.app
+  BUNDLE_ID: industries.winstanley.framer
 
 jobs:
   build:
