@@ -1,6 +1,6 @@
 ---
 name: framer-commit
-description: Validate and commit changes in the Framer Rust workspace. Use when the user asks to commit, run famer-commit/framer-commit, clean up a dirty Framer worktree, or prepare a Framer commit; enforce formatting/lint, clippy, and tests before committing.
+description: Validate and commit changes in the Framer Rust workspace. Use when the user asks to commit, run framer-commit, clean up a dirty Framer worktree, or prepare a Framer commit; enforce formatting/lint, strict clippy, locked all-feature tests, and relevant docs/GPU gates before committing.
 ---
 
 # Framer Commit
@@ -26,8 +26,10 @@ Use this skill to turn a Framer worktree into a scoped, validated commit. The co
 
 3. Run required gates before committing:
    - `cargo fmt --all -- --check`
-   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-   - `cargo test --workspace`
+   - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+   - `cargo test --workspace --all-features --locked`
+   - `python3 scripts/check-markdown-links.py` when docs changed.
+   - `cargo test -p framer-app --test gpu_parity --locked -- --nocapture` when render, material, shader, GPU parity, or scene-building logic changed.
    - `git diff --check`
 
 4. If a gate fails:
@@ -47,6 +49,6 @@ Use this skill to turn a Framer worktree into a scoped, validated commit. The co
 
 ## Framer Defaults
 
-The Framer checkout is a Rust Cargo workspace. In the absence of a repo-specific lint wrapper, treat `cargo fmt --all -- --check`, strict workspace clippy, and workspace tests as the pre-commit standard.
+The Framer checkout is a Rust Cargo workspace. In the absence of a repo-specific lint wrapper, treat `cargo fmt --all -- --check`, strict locked workspace clippy, locked all-feature workspace tests, and `git diff --check` as the pre-commit standard.
 
 If future repo files add a Justfile, Makefile, CI config, or documented lint command, inspect it and prefer the repo-owned lint command when it clearly supersedes the default while still keeping clippy as a hard gate.

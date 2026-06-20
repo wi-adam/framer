@@ -100,7 +100,8 @@ Definition of Done: [docs/vision.md](docs/vision.md#definition-of-done).
 
 ## Tool notes
 
-- **Codex** reads this `AGENTS.md` natively; there is a commit skill at
-  `.codex/skills/framer-commit` that runs the gates above.
+- **Codex** reads this `AGENTS.md` natively; use `.codex/skills/framer-development`
+  for substantial feature work / PR readiness and `.codex/skills/framer-commit`
+  for scoped validation and commits.
 - **Claude Code** loads [CLAUDE.md](CLAUDE.md) (a thin pointer here) and has an app
   build/install skill at `.claude/skills/install-app` for GUI/visual verification.
