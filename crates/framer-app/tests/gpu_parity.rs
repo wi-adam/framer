@@ -291,11 +291,9 @@ fn accumulate_on_gpu(
 
 #[test]
 fn wgsl_pathtracer_matches_cpu_reference() {
-    use framer_render::math::Vec3;
     use framer_render::scenes::{
         REFERENCE_HEIGHT as H, REFERENCE_SEED as SEED, REFERENCE_WIDTH as W, reference_scene,
     };
-    use framer_render::{render, tonemap_accum};
 
     let Some((device, queue)) = device_queue() else {
         eprintln!("no GPU adapter available; skipping wgsl_pathtracer_matches_cpu_reference");
@@ -303,8 +301,153 @@ fn wgsl_pathtracer_matches_cpu_reference() {
     };
 
     let scene = reference_scene();
-    let accum_bytes = (W * H) as u64 * 16;
-    let accum_buf = accumulate_on_gpu(&device, &queue, &scene, W, H, PARITY_SPP, SEED, 1);
+    assert_gpu_kernel_matches_cpu(
+        &device,
+        &queue,
+        &scene,
+        KernelParityCase {
+            width: W,
+            height: H,
+            spp: PARITY_SPP,
+            seed: SEED,
+            label: "kernel",
+        },
+    );
+}
+
+#[test]
+fn wgsl_pathtracer_matches_cpu_asset_materials() {
+    use framer_render::camera::Camera;
+    use framer_render::geom::Triangle;
+    use framer_render::material::{Material, Texture};
+    use framer_render::math::Vec3;
+    use framer_render::scene::{DirectionalSun, Scene, Sky};
+
+    fn panel(tris: &mut Vec<Triangle>, x0: f32, x1: f32, z0: f32, z1: f32, mat: u32) {
+        // Two triangles in the y=0 plane with normals facing +Y, toward the camera.
+        tris.push(Triangle::new(
+            Vec3::new(x0, 0.0, z0),
+            Vec3::new(x1, 0.0, z1),
+            Vec3::new(x1, 0.0, z0),
+            mat,
+        ));
+        tris.push(Triangle::new(
+            Vec3::new(x0, 0.0, z0),
+            Vec3::new(x0, 0.0, z1),
+            Vec3::new(x1, 0.0, z1),
+            mat,
+        ));
+    }
+
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no GPU adapter available; skipping wgsl_pathtracer_matches_cpu_asset_materials");
+        return;
+    };
+
+    let mut tris = Vec::new();
+    panel(&mut tris, -1.6, -0.15, 0.0, 2.2, 0);
+    panel(&mut tris, 0.15, 1.6, 0.0, 2.2, 1);
+
+    let textures = vec![
+        Texture::new(
+            2,
+            2,
+            vec![
+                Vec3::new(0.95, 0.10, 0.08),
+                Vec3::new(0.08, 0.75, 0.18),
+                Vec3::new(0.10, 0.22, 0.95),
+                Vec3::new(0.95, 0.82, 0.12),
+            ],
+        ),
+        Texture::new(
+            2,
+            2,
+            vec![
+                Vec3::splat(0.05),
+                Vec3::splat(0.95),
+                Vec3::splat(0.35),
+                Vec3::splat(0.70),
+            ],
+        ),
+    ];
+    let materials = vec![
+        Material::TexturedDiffuse {
+            fallback: Vec3::new(0.4, 0.0, 0.4),
+            texture: 0,
+            scale: 0.85,
+        },
+        Material::DepthMappedDiffuse {
+            albedo: Vec3::new(0.85, 0.65, 0.42),
+            height: 1,
+            scale: 0.9,
+        },
+    ];
+    let camera = Camera::orbit(
+        Vec3::new(0.0, 0.0, 1.1),
+        2.0,
+        0.0,
+        0.0,
+        1.0,
+        64.0 / 48.0,
+        48.0,
+        1.0,
+    );
+    let scene = Scene::with_textures(
+        tris,
+        materials,
+        textures,
+        DirectionalSun {
+            dir: Vec3::new(0.05, 1.0, 0.25).normalize(),
+            irradiance: Vec3::splat(3.0),
+            angular_radius: 0.0,
+        },
+        Sky::uniform(Vec3::ZERO),
+        camera,
+        1.0,
+    );
+    assert_gpu_kernel_matches_cpu(
+        &device,
+        &queue,
+        &scene,
+        KernelParityCase {
+            width: 64,
+            height: 48,
+            spp: PARITY_SPP,
+            seed: 0xA55E_7A55,
+            label: "asset material kernel",
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+struct KernelParityCase {
+    width: u32,
+    height: u32,
+    spp: u32,
+    seed: u64,
+    label: &'static str,
+}
+
+fn assert_gpu_kernel_matches_cpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &framer_render::scene::Scene,
+    case: KernelParityCase,
+) {
+    use framer_render::math::Vec3;
+    use framer_render::{render, tonemap_accum};
+
+    let accum_bytes = (case.width * case.height) as u64 * 16;
+    let accum_buf = accumulate_on_gpu(
+        device,
+        queue,
+        scene,
+        case.width,
+        case.height,
+        case.spp,
+        case.seed,
+        1,
+    );
 
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("accum_staging"),
@@ -317,27 +460,27 @@ fn wgsl_pathtracer_matches_cpu_reference() {
     });
     encoder.copy_buffer_to_buffer(&accum_buf, 0, &staging, 0, accum_bytes);
     queue.submit(Some(encoder.finish()));
-    let bytes = read_back(&device, &staging);
+    let bytes = read_back(device, &staging);
     let sums: &[f32] = bytemuck::cast_slice(&bytes);
 
     // Tone-map the GPU running-sum exactly as the CPU does, then compare bytes.
-    let accum: Vec<Vec3> = (0..(W * H) as usize)
+    let accum: Vec<Vec3> = (0..(case.width * case.height) as usize)
         .map(|i| Vec3::new(sums[i * 4], sums[i * 4 + 1], sums[i * 4 + 2]))
         .collect();
-    // Every pixel must have accumulated exactly PARITY_SPP samples.
-    for i in 0..(W * H) as usize {
+    // Every pixel must have accumulated exactly `spp` samples.
+    for i in 0..(case.width * case.height) as usize {
         assert_eq!(
             sums[i * 4 + 3],
-            PARITY_SPP as f32,
+            case.spp as f32,
             "pixel {i} sample count wrong"
         );
     }
-    let gpu_rgba = tonemap_accum(&accum, PARITY_SPP, scene.exposure);
-    let cpu_rgba = render(&scene, W, H, PARITY_SPP, SEED);
+    let gpu_rgba = tonemap_accum(&accum, case.spp, scene.exposure);
+    let cpu_rgba = render(scene, case.width, case.height, case.spp, case.seed);
     assert_eq!(gpu_rgba.len(), cpu_rgba.len());
 
     let (mae, max) = image_error(&gpu_rgba, &cpu_rgba);
-    eprintln!("GPU↔CPU kernel parity: MAE={mae:.3}, max={max}");
+    eprintln!("GPU↔CPU {}: MAE={mae:.3}, max={max}", case.label);
     // MAE is the real correctness gate — a genuine math/traversal bug would push
     // it into the tens, but the bit-exact RNG + mirrored math keep it ~0.03. The
     // max bound guards against a single blown pixel (NaN, wrong branch) with
