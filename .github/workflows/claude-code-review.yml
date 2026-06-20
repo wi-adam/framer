@@ -79,3 +79,33 @@ jobs:
             exit 1
           fi
           echo "No blocking verdict; merge gate passes."
+
+      - name: Upload review trace to R2 (private)
+        # Sends the full Claude execution transcript (the action's execution_file
+        # output) to a private Cloudflare R2 bucket via its S3-compatible API, so
+        # runs can be debugged WITHOUT exposing traces in the public Actions log
+        # (show_full_output stays off). Dormant until the R2_BUCKET repo VARIABLE is
+        # set; `always()` so a failed or errored review's trace is captured too. The
+        # aws CLI is preinstalled on ubuntu runners.
+        if: ${{ always() && vars.R2_BUCKET != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # R2 rejects the aws CLI v2 default integrity checksums; only send when required.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$EXEC_FILE" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "No execution file (review skipped); nothing to upload."
+            exit 0
+          fi
+          key="pr-${PR}/run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
+          aws s3 cp "$EXEC_FILE" "s3://${R2_BUCKET}/${key}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json
+          echo "Uploaded trace -> r2://${R2_BUCKET}/${key}"
