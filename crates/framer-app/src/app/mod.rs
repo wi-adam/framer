@@ -25,7 +25,8 @@ use framer_core::{
     load_project as load_project_document, save_project as save_project_document,
 };
 use framer_solver::{
-    FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
+    DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
+    export_project_svg, generate_project_plan,
 };
 
 use draw_wall::{SnapResult, joins_for_new_wall};
@@ -44,6 +45,8 @@ pub(crate) struct FramerApp {
     selected_wall: usize,
     selected: Selection,
     project_plan: Option<ProjectFramePlan>,
+    library_issues: Vec<framer_library::LibraryIssue>,
+    library_issue_error: Option<String>,
     error: Option<String>,
     project_path: String,
     file_status: Option<String>,
@@ -300,6 +303,8 @@ impl Default for FramerApp {
             selected_wall: 0,
             selected: Selection::Wall,
             project_plan: None,
+            library_issues: Vec::new(),
+            library_issue_error: None,
             error: None,
             project_path: DEFAULT_PROJECT_PATH.to_owned(),
             file_status: None,
@@ -377,8 +382,24 @@ impl FramerApp {
 
         self.model.apply_driving_dimensions();
 
+        match collect_library_lifecycle_issues(&self.model) {
+            Ok(issues) => {
+                self.library_issues = issues;
+                self.library_issue_error = None;
+            }
+            Err(error) => {
+                self.library_issues.clear();
+                self.library_issue_error = Some(error);
+            }
+        }
+
         match generate_project_plan(&self.model) {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                append_library_diagnostics(
+                    &mut plan,
+                    &self.library_issues,
+                    self.library_issue_error.as_deref(),
+                );
                 self.project_plan = Some(plan);
                 self.error = None;
             }
@@ -1713,6 +1734,67 @@ impl FramerApp {
     }
 }
 
+fn collect_library_lifecycle_issues(
+    model: &BuildingModel,
+) -> Result<Vec<framer_library::LibraryIssue>, String> {
+    let current_libraries = framer_library::starter_library_ref()
+        .ok()
+        .map(|loaded| std::slice::from_ref(&loaded.library))
+        .unwrap_or_default();
+    framer_library::library_lifecycle_issues(model, current_libraries)
+        .map_err(|error| error.to_string())
+}
+
+fn append_library_diagnostics(
+    plan: &mut ProjectFramePlan,
+    issues: &[framer_library::LibraryIssue],
+    check_error: Option<&str>,
+) {
+    if let Some(error) = check_error {
+        plan.diagnostics.push(PlanDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: "library.lifecycle.check-failed".to_owned(),
+            source: None,
+            message: format!("Library lifecycle status could not be checked: {error}."),
+        });
+        return;
+    }
+
+    for issue in issues {
+        let item_kind = match &issue.item {
+            framer_library::LibraryItem::Material(_) => "material",
+            framer_library::LibraryItem::System(_) => "system",
+        };
+        let code = match issue.kind {
+            framer_library::LibraryIssueKind::Diverged => "library.item.diverged",
+            framer_library::LibraryIssueKind::OutOfDate => "library.item.out-of-date",
+            framer_library::LibraryIssueKind::SourceMissing => "library.item.source-missing",
+        };
+        let message = match issue.kind {
+            framer_library::LibraryIssueKind::Diverged => format!(
+                "Library {item_kind} '{}' has local edits; detach it to keep those edits or re-sync it to overwrite them from the source library.",
+                issue.item_id().0
+            ),
+            framer_library::LibraryIssueKind::OutOfDate => format!(
+                "Library {item_kind} '{}' is out of date with source item '{}'.",
+                issue.item_id().0,
+                issue.source_id.0
+            ),
+            framer_library::LibraryIssueKind::SourceMissing => format!(
+                "Library {item_kind} '{}' references source item '{}' which is not present in the available library.",
+                issue.item_id().0,
+                issue.source_id.0
+            ),
+        };
+        plan.diagnostics.push(PlanDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: code.to_owned(),
+            source: Some(issue.item_id().clone()),
+            message,
+        });
+    }
+}
+
 impl eframe::App for FramerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keyboard_shortcuts(ctx);
@@ -1893,6 +1975,84 @@ mod tests {
 
         assert_eq!(app.model.walls.len(), 1);
         assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn library_diagnostics_cover_lifecycle_kinds_and_check_failure() {
+        let issues = vec![
+            framer_library::LibraryIssue {
+                item: framer_library::LibraryItem::Material(ElementId::new("local-material")),
+                source_id: ElementId::new("source-material"),
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                kind: framer_library::LibraryIssueKind::OutOfDate,
+                expected_hash: "blake3:expected-material".to_owned(),
+                actual_hash: Some("blake3:actual-material".to_owned()),
+            },
+            framer_library::LibraryIssue {
+                item: framer_library::LibraryItem::System(ElementId::new("local-system")),
+                source_id: ElementId::new("source-system"),
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                kind: framer_library::LibraryIssueKind::SourceMissing,
+                expected_hash: "blake3:expected-system".to_owned(),
+                actual_hash: None,
+            },
+        ];
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+
+        append_library_diagnostics(&mut plan, &issues, None);
+
+        assert_eq!(plan.diagnostics.len(), 2);
+        assert_eq!(
+            plan.diagnostics[0].code,
+            "library.item.out-of-date".to_owned()
+        );
+        assert_eq!(plan.diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            plan.diagnostics[0].source,
+            Some(ElementId::new("local-material"))
+        );
+        assert!(plan.diagnostics[0].message.contains("source-material"));
+        assert_eq!(
+            plan.diagnostics[1].code,
+            "library.item.source-missing".to_owned()
+        );
+        assert_eq!(plan.diagnostics[1].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            plan.diagnostics[1].source,
+            Some(ElementId::new("local-system"))
+        );
+        assert!(plan.diagnostics[1].message.contains("source-system"));
+
+        let mut failed_plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+        append_library_diagnostics(&mut failed_plan, &issues, Some("resolver failed"));
+
+        assert_eq!(failed_plan.diagnostics.len(), 1);
+        assert_eq!(
+            failed_plan.diagnostics[0].code,
+            "library.lifecycle.check-failed".to_owned()
+        );
+        assert_eq!(
+            failed_plan.diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
+        assert_eq!(failed_plan.diagnostics[0].source, None);
+        assert!(
+            failed_plan.diagnostics[0]
+                .message
+                .contains("resolver failed")
+        );
     }
 
     #[test]

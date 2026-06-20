@@ -109,10 +109,47 @@ slices are sketched and will get their own task detail when scheduled.
     [`install-app`](../../.claude/skills/install-app) skill.
   - Commit: `feat(app): insert-from-library with provenance badge`
 
-### Slices 2–5 — sketch (task detail when scheduled)
+### Slice 2 — Update lifecycle: diagnostics, re-sync, detach
 
-- **Slice 2:** re-sync / detach / divergence actions; surface stale/divergent as diagnostics on
-  the existing channel.
+- **Task 2.1** — Add pure lifecycle inspection in `framer-library`: compute vendored item
+  hashes in source/library-local id space, detect **diverged**, **out-of-date**, and
+  **source-missing** states, and keep missing libraries non-fatal.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: `cargo test -p framer-library --locked` — freshly imported systems/materials have
+    no false divergence despite project-local id remap; local edits emit divergence; changed
+    source library content emits out-of-date.
+  - Commit: `feat(library): detect vendored content lifecycle state`
+- **Task 2.2** — Add transactional detach/re-sync APIs in `framer-library`: detach clears
+  selected item provenance and prunes unused stamps; re-sync overwrites the selected vendored
+  material/system from an available library while preserving project-local ids and validating
+  before commit.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: `cargo test -p framer-library --locked` — material re-sync updates provenance to the
+    current library version; system re-sync refreshes the referenced material closure and keeps
+    local ids stable.
+  - Commit: `feat(library): re-sync and detach vendored definitions`
+- **Task 2.3** — Surface lifecycle issues on the existing diagnostics channel without making
+  project open/load/solve depend on library I/O. The app appends derived `library.item.*`
+  diagnostics after solver plan generation for libraries it can currently resolve.
+  - Files: `crates/framer-app/src/app/mod.rs`.
+  - Verify: `cargo test -p framer-app --locked imported_material -- --nocapture` — local edits to
+    an imported material emit `library.item.diverged`.
+  - Commit: `feat(app): surface library lifecycle diagnostics`
+- **Task 2.4** — Add selected-item lifecycle controls in the inspector: source/status display,
+  **Re-sync** when the source library is available, and **Detach** for library-backed materials
+  and systems. Route both through `edit()` so undo stays one labelled step.
+  - Files: `crates/framer-app/src/app/panels.rs`.
+  - Verify: `cargo test -p framer-app --locked imported_material -- --nocapture` — detach clears
+    provenance and diagnostics; re-sync restores source content.
+  - Commit: `feat(app): add library re-sync and detach controls`
+- **Task 2.5** — Refresh durable docs for the implemented lifecycle behavior.
+  - Files: `docs/specs/libraries.md`, `docs/plans/2026-06-19-libraries.md`,
+    `docs/code-map.md`, `docs/project-files.md`.
+  - Verify: `python3 scripts/check-markdown-links.py`.
+  - Commit: `docs(libraries): document update lifecycle`
+
+### Slices 3–5 — sketch (task detail when scheduled)
+
 - **Slice 3 (v8 → v9):** `AssetRef` + `Appearance::Textured`/`DepthMapped`; disposable
   content-addressed asset store; deterministic `.framerpkg`; texture/depth sampling wired into
   `framer-render` (CPU reference first), keeping `tests/gpu_parity.rs` green.

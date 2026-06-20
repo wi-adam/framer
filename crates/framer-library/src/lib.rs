@@ -97,6 +97,32 @@ pub struct ImportResult {
     pub system: Option<ElementId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryIssueKind {
+    Diverged,
+    OutOfDate,
+    SourceMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryIssue {
+    pub item: LibraryItem,
+    pub source_id: ElementId,
+    pub library_uid: String,
+    pub version_id: String,
+    pub kind: LibraryIssueKind,
+    pub expected_hash: String,
+    pub actual_hash: Option<String>,
+}
+
+impl LibraryIssue {
+    pub fn item_id(&self) -> &ElementId {
+        match &self.item {
+            LibraryItem::Material(id) | LibraryItem::System(id) => id,
+        }
+    }
+}
+
 pub fn load_verified_library(bytes: &LibraryBytes) -> Result<LoadedLibrary, LibraryImportError> {
     let library = load_library(&bytes.source)?;
     let content_hash = library_content_hash(&library)?;
@@ -137,6 +163,28 @@ pub fn import_item(
     }
 }
 
+pub fn detach_item(
+    project: &mut BuildingModel,
+    item: LibraryItem,
+) -> Result<bool, LibraryImportError> {
+    match item {
+        LibraryItem::Material(id) => detach_material(project, &id),
+        LibraryItem::System(id) => detach_system(project, &id),
+    }
+}
+
+pub fn resync_item(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    item: LibraryItem,
+) -> Result<ImportResult, LibraryImportError> {
+    match item {
+        LibraryItem::Material(id) => resync_material(project, library, library_content_hash, &id),
+        LibraryItem::System(id) => resync_system(project, library, library_content_hash, &id),
+    }
+}
+
 pub fn import_material(
     project: &mut BuildingModel,
     library: &Library,
@@ -160,6 +208,75 @@ pub fn import_material(
         materials: vec![remapped],
         system: None,
     })
+}
+
+pub fn resync_material(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    project_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let mut staged = project.clone();
+    let material_index = staged
+        .materials
+        .iter()
+        .position(|material| material.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectMaterialNotFound {
+            id: project_id.clone(),
+        })?;
+    let source = match &staged.materials[material_index].source {
+        MaterialSource::Library(source) => source.clone(),
+        MaterialSource::Project => {
+            return Err(LibraryImportError::ItemHasNoLibrarySource {
+                id: project_id.clone(),
+            });
+        }
+    };
+    ensure_library_matches(&source, library)?;
+
+    let source_material = library_material(library, &source.source_id)?.clone();
+    let local_id = staged.materials[material_index].id.clone();
+    staged.materials[material_index] =
+        vendor_material(library, &source_material, local_id.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: vec![local_id],
+        system: None,
+    })
+}
+
+pub fn detach_material(
+    project: &mut BuildingModel,
+    project_id: &ElementId,
+) -> Result<bool, LibraryImportError> {
+    let mut staged = project.clone();
+    let material_index = staged
+        .materials
+        .iter()
+        .position(|material| material.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectMaterialNotFound {
+            id: project_id.clone(),
+        })?;
+
+    if matches!(
+        staged.materials[material_index].source,
+        MaterialSource::Project
+    ) {
+        return Ok(false);
+    }
+
+    staged.materials[material_index].source = MaterialSource::Project;
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+    Ok(true)
 }
 
 pub fn import_system(
@@ -222,6 +339,189 @@ pub fn import_system(
     })
 }
 
+pub fn resync_system(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    project_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let source_system = library_system_for_project(project, library, project_id)?.clone();
+    let source = project_system_source(project, project_id)?.clone();
+    ensure_library_matches(&source, library)?;
+
+    let material_lookup = library
+        .materials
+        .iter()
+        .map(|material| (material.id.clone(), material))
+        .collect::<BTreeMap<_, _>>();
+    let referenced_materials = referenced_system_materials(&source_system);
+    let prefix = library_id_prefix(library);
+
+    let mut staged = project.clone();
+    let system_index = staged
+        .systems
+        .iter()
+        .position(|system| system.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectSystemNotFound {
+            id: project_id.clone(),
+        })?;
+    let current_system = staged.systems[system_index].clone();
+    let mut used = collect_project_ids(&staged);
+    let mut material_remap = preferred_material_remap(&staged, &current_system, &source);
+
+    let mut imported_materials = Vec::new();
+    for source_material_id in referenced_materials {
+        let source_material = material_lookup.get(&source_material_id).ok_or_else(|| {
+            LibraryImportError::MissingReferencedMaterial {
+                system: source_system.id.clone(),
+                material: source_material_id.clone(),
+            }
+        })?;
+        let local_id = material_remap
+            .entry(source_material.id.clone())
+            .or_insert_with(|| mint_project_id(&prefix, &source_material.id, &mut used))
+            .clone();
+        let material = vendor_material(library, source_material, local_id.clone())?;
+        if let Some(material_index) = staged
+            .materials
+            .iter()
+            .position(|candidate| candidate.id == local_id)
+        {
+            staged.materials[material_index] = material;
+        } else {
+            staged.materials.push(material);
+        }
+        imported_materials.push(local_id);
+    }
+
+    staged.systems[system_index] = vendor_system(
+        library,
+        &source_system,
+        current_system.id.clone(),
+        &material_remap,
+    )?;
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: imported_materials,
+        system: Some(project_id.clone()),
+    })
+}
+
+pub fn detach_system(
+    project: &mut BuildingModel,
+    project_id: &ElementId,
+) -> Result<bool, LibraryImportError> {
+    let mut staged = project.clone();
+    let system_index = staged
+        .systems
+        .iter()
+        .position(|system| system.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectSystemNotFound {
+            id: project_id.clone(),
+        })?;
+
+    if staged.systems[system_index].source.is_none() {
+        return Ok(false);
+    }
+
+    staged.systems[system_index].source = None;
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+    Ok(true)
+}
+
+pub fn library_lifecycle_issues(
+    project: &BuildingModel,
+    current_libraries: &[Library],
+) -> Result<Vec<LibraryIssue>, LibraryImportError> {
+    let mut issues = Vec::new();
+    let current_by_uid = current_libraries
+        .iter()
+        .map(|library| (library.uid.as_str(), library))
+        .collect::<BTreeMap<_, _>>();
+
+    for material in &project.materials {
+        let MaterialSource::Library(source) = &material.source else {
+            continue;
+        };
+        let current_hash = vendored_material_content_hash(material, source)?;
+        if current_hash != source.content_hash {
+            issues.push(library_issue(
+                LibraryIssueKind::Diverged,
+                LibraryItem::Material(material.id.clone()),
+                source,
+                Some(current_hash),
+            ));
+        }
+        if let Some(library) = current_by_uid.get(source.library_uid.as_str()) {
+            match find_library_material(library, &source.source_id) {
+                Some(source_material) => {
+                    let library_hash = material_content_hash(source_material)?;
+                    if library_hash != source.content_hash {
+                        issues.push(library_issue(
+                            LibraryIssueKind::OutOfDate,
+                            LibraryItem::Material(material.id.clone()),
+                            source,
+                            Some(library_hash),
+                        ));
+                    }
+                }
+                None => issues.push(library_issue(
+                    LibraryIssueKind::SourceMissing,
+                    LibraryItem::Material(material.id.clone()),
+                    source,
+                    None,
+                )),
+            }
+        }
+    }
+
+    for system in &project.systems {
+        let Some(source) = &system.source else {
+            continue;
+        };
+        let current_hash = vendored_system_content_hash(project, system, source)?;
+        if current_hash != source.content_hash {
+            issues.push(library_issue(
+                LibraryIssueKind::Diverged,
+                LibraryItem::System(system.id.clone()),
+                source,
+                Some(current_hash),
+            ));
+        }
+        if let Some(library) = current_by_uid.get(source.library_uid.as_str()) {
+            match find_library_system(library, &source.source_id) {
+                Some(source_system) => {
+                    let library_hash = system_content_hash(source_system)?;
+                    if library_hash != source.content_hash {
+                        issues.push(library_issue(
+                            LibraryIssueKind::OutOfDate,
+                            LibraryItem::System(system.id.clone()),
+                            source,
+                            Some(library_hash),
+                        ));
+                    }
+                }
+                None => issues.push(library_issue(
+                    LibraryIssueKind::SourceMissing,
+                    LibraryItem::System(system.id.clone()),
+                    source,
+                    None,
+                )),
+            }
+        }
+    }
+
+    Ok(issues)
+}
+
 pub fn library_content_hash(library: &Library) -> Result<String, LibraryImportError> {
     Ok(hash_bytes(save_library(library)?.as_bytes()))
 }
@@ -238,17 +538,23 @@ pub fn system_content_hash(system: &ConstructionSystem) -> Result<String, Librar
     hash_json(&system)
 }
 
-pub fn starter_library() -> Result<LoadedLibrary, LibraryImportError> {
+pub fn starter_library_ref() -> Result<&'static LoadedLibrary, LibraryImportError> {
     if let Some(library) = STARTER_LIBRARY.get() {
-        return Ok(library.clone());
+        return Ok(library);
     }
 
     let loaded = load_verified_library(&LibraryBytes {
         source: STARTER_LIBRARY_SOURCE.to_owned(),
         expected_hash: None,
     })?;
-    let _ = STARTER_LIBRARY.set(loaded.clone());
-    Ok(loaded)
+    let _ = STARTER_LIBRARY.set(loaded);
+    Ok(STARTER_LIBRARY
+        .get()
+        .expect("starter library should be initialized"))
+}
+
+pub fn starter_library() -> Result<LoadedLibrary, LibraryImportError> {
+    starter_library_ref().cloned()
 }
 
 fn vendor_material(
@@ -295,12 +601,88 @@ fn vendor_system(
     Ok(system)
 }
 
+fn library_issue(
+    kind: LibraryIssueKind,
+    item: LibraryItem,
+    source: &Provenance,
+    actual_hash: Option<String>,
+) -> LibraryIssue {
+    LibraryIssue {
+        item,
+        source_id: source.source_id.clone(),
+        library_uid: source.library_uid.clone(),
+        version_id: source.version_id.clone(),
+        kind,
+        expected_hash: source.content_hash.clone(),
+        actual_hash,
+    }
+}
+
+fn vendored_material_content_hash(
+    material: &Material,
+    source: &Provenance,
+) -> Result<String, LibraryImportError> {
+    let mut material = material.clone();
+    material.id = source.source_id.clone();
+    material.source = MaterialSource::Project;
+    hash_json(&material)
+}
+
+fn vendored_system_content_hash(
+    project: &BuildingModel,
+    system: &ConstructionSystem,
+    source: &Provenance,
+) -> Result<String, LibraryImportError> {
+    let mut system = system.clone();
+    let material_sources = project
+        .materials
+        .iter()
+        .filter_map(|material| match &material.source {
+            MaterialSource::Library(material_source)
+                if material_source.library_uid == source.library_uid =>
+            {
+                Some((material.id.clone(), material_source.source_id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    system.id = source.source_id.clone();
+    system.source = None;
+    for layer in &mut system.layers {
+        if let Some(source_id) = material_sources.get(&layer.material) {
+            layer.material = source_id.clone();
+        }
+        if let Some(framing) = &mut layer.framing
+            && let Some(cavity) = &mut framing.cavity_material
+            && let Some(source_id) = material_sources.get(cavity)
+        {
+            *cavity = source_id.clone();
+        }
+    }
+    hash_json(&system)
+}
+
 fn provenance(library: &Library, source_id: &ElementId, content_hash: String) -> Provenance {
     Provenance {
         library_uid: library.uid.clone(),
         version_id: library.version_id.clone(),
         source_id: source_id.clone(),
         content_hash,
+    }
+}
+
+fn ensure_library_matches(
+    source: &Provenance,
+    library: &Library,
+) -> Result<(), LibraryImportError> {
+    if source.library_uid == library.uid {
+        Ok(())
+    } else {
+        Err(LibraryImportError::LibraryUidMismatch {
+            expected: source.library_uid.clone(),
+            actual: library.uid.clone(),
+        })
     }
 }
 
@@ -321,30 +703,139 @@ fn ensure_library_stamp(project: &mut BuildingModel, library: &Library, content_
     });
 }
 
-fn library_material<'a>(
-    library: &'a Library,
-    source_id: &ElementId,
-) -> Result<&'a Material, LibraryImportError> {
+fn prune_unused_library_stamps(project: &mut BuildingModel) {
+    let used = project
+        .materials
+        .iter()
+        .filter_map(|material| match &material.source {
+            MaterialSource::Library(source) => {
+                Some((source.library_uid.clone(), source.version_id.clone()))
+            }
+            MaterialSource::Project => None,
+        })
+        .chain(project.systems.iter().filter_map(|system| {
+            system
+                .source
+                .as_ref()
+                .map(|source| (source.library_uid.clone(), source.version_id.clone()))
+        }))
+        .collect::<BTreeSet<_>>();
+    project
+        .libraries
+        .retain(|stamp| used.contains(&(stamp.uid.clone(), stamp.version_id.clone())));
+}
+
+fn find_library_material<'a>(library: &'a Library, source_id: &ElementId) -> Option<&'a Material> {
     library
         .materials
         .iter()
         .find(|material| material.id == *source_id)
-        .ok_or_else(|| LibraryImportError::MaterialNotFound {
-            id: source_id.clone(),
-        })
+}
+
+fn find_library_system<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Option<&'a ConstructionSystem> {
+    library
+        .systems
+        .iter()
+        .find(|system| system.id == *source_id)
+}
+
+fn library_material<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Result<&'a Material, LibraryImportError> {
+    find_library_material(library, source_id).ok_or_else(|| LibraryImportError::MaterialNotFound {
+        id: source_id.clone(),
+    })
 }
 
 fn library_system<'a>(
     library: &'a Library,
     source_id: &ElementId,
 ) -> Result<&'a ConstructionSystem, LibraryImportError> {
-    library
+    find_library_system(library, source_id).ok_or_else(|| LibraryImportError::SystemNotFound {
+        id: source_id.clone(),
+    })
+}
+
+fn project_system_source<'a>(
+    project: &'a BuildingModel,
+    project_id: &ElementId,
+) -> Result<&'a Provenance, LibraryImportError> {
+    let system = project
         .systems
         .iter()
-        .find(|system| system.id == *source_id)
-        .ok_or_else(|| LibraryImportError::SystemNotFound {
-            id: source_id.clone(),
+        .find(|system| system.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectSystemNotFound {
+            id: project_id.clone(),
+        })?;
+    system
+        .source
+        .as_ref()
+        .ok_or_else(|| LibraryImportError::ItemHasNoLibrarySource {
+            id: project_id.clone(),
         })
+}
+
+fn library_system_for_project<'a>(
+    project: &BuildingModel,
+    library: &'a Library,
+    project_id: &ElementId,
+) -> Result<&'a ConstructionSystem, LibraryImportError> {
+    let source = project_system_source(project, project_id)?;
+    ensure_library_matches(source, library)?;
+    library_system(library, &source.source_id)
+}
+
+fn referenced_system_materials(system: &ConstructionSystem) -> BTreeSet<ElementId> {
+    let mut referenced = BTreeSet::new();
+    for layer in &system.layers {
+        referenced.insert(layer.material.clone());
+        if let Some(framing) = &layer.framing
+            && let Some(cavity) = &framing.cavity_material
+        {
+            referenced.insert(cavity.clone());
+        }
+    }
+    referenced
+}
+
+fn preferred_material_remap(
+    project: &BuildingModel,
+    current_system: &ConstructionSystem,
+    system_source: &Provenance,
+) -> BTreeMap<ElementId, ElementId> {
+    let materials_by_id = project
+        .materials
+        .iter()
+        .map(|material| (material.id.clone(), material))
+        .collect::<BTreeMap<_, _>>();
+    let mut remap = BTreeMap::new();
+
+    for local_id in referenced_system_materials(current_system) {
+        if let Some(material) = materials_by_id.get(&local_id)
+            && let MaterialSource::Library(material_source) = &material.source
+            && material_source.library_uid == system_source.library_uid
+        {
+            remap
+                .entry(material_source.source_id.clone())
+                .or_insert(local_id);
+        }
+    }
+
+    for material in &project.materials {
+        if let MaterialSource::Library(material_source) = &material.source
+            && material_source.library_uid == system_source.library_uid
+        {
+            remap
+                .entry(material_source.source_id.clone())
+                .or_insert_with(|| material.id.clone());
+        }
+    }
+
+    remap
 }
 
 fn hash_json<T: serde::Serialize>(value: &T) -> Result<String, LibraryImportError> {
@@ -460,6 +951,14 @@ pub enum LibraryImportError {
     RemoteUnsupported,
     #[error("failed to read library file {path:?}")]
     Io { path: PathBuf, source: io::Error },
+    #[error("project material {id:?} was not found")]
+    ProjectMaterialNotFound { id: ElementId },
+    #[error("project system {id:?} was not found")]
+    ProjectSystemNotFound { id: ElementId },
+    #[error("project item {id:?} is not library-backed")]
+    ItemHasNoLibrarySource { id: ElementId },
+    #[error("library uid mismatch: item references {expected:?}, got {actual:?}")]
+    LibraryUidMismatch { expected: String, actual: String },
 }
 
 #[cfg(test)]
@@ -657,6 +1156,315 @@ mod tests {
         );
         assert_eq!(project.libraries.len(), 1);
         project.validate().unwrap();
+    }
+
+    #[test]
+    fn newly_imported_items_have_no_lifecycle_issues() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+
+        assert_eq!(library_lifecycle_issues(&project, &[library]).unwrap(), []);
+    }
+
+    #[test]
+    fn local_material_edits_emit_divergence_until_detached() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported =
+            import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
+        let local_id = imported.materials[0].clone();
+        let material = project
+            .materials
+            .iter_mut()
+            .find(|material| material.id == local_id)
+            .unwrap();
+        material.name = "Locally edited cedar".to_owned();
+
+        let issues = library_lifecycle_issues(&project, &[]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::Diverged);
+        assert_eq!(issues[0].item, LibraryItem::Material(local_id.clone()));
+
+        assert!(detach_material(&mut project, &local_id).unwrap());
+        assert!(library_lifecycle_issues(&project, &[]).unwrap().is_empty());
+        assert!(project.libraries.is_empty());
+        assert!(!detach_material(&mut project, &local_id).unwrap());
+    }
+
+    #[test]
+    fn local_system_edits_emit_divergence_after_clean_import() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported.system.unwrap();
+
+        assert!(
+            library_lifecycle_issues(&project, std::slice::from_ref(&library))
+                .unwrap()
+                .is_empty()
+        );
+
+        let system = project
+            .systems
+            .iter_mut()
+            .find(|system| system.id == local_system_id)
+            .unwrap();
+        system.layers[1].framing.as_mut().unwrap().cavity_material = None;
+
+        let issues = library_lifecycle_issues(&project, &[]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::Diverged);
+        assert_eq!(issues[0].item, LibraryItem::System(local_system_id));
+    }
+
+    #[test]
+    fn missing_source_items_emit_source_missing_for_materials_and_systems() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+
+        let mut material_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_material = import_material(
+            &mut material_project,
+            &library,
+            &hash,
+            &ElementId::new("mat-cedar"),
+        )
+        .unwrap();
+        let local_material_id = imported_material.materials[0].clone();
+        let mut material_missing = library.clone();
+        material_missing
+            .materials
+            .retain(|material| material.id != ElementId::new("mat-cedar"));
+
+        let material_issues =
+            library_lifecycle_issues(&material_project, &[material_missing]).unwrap();
+        assert_eq!(material_issues.len(), 1);
+        assert_eq!(material_issues[0].kind, LibraryIssueKind::SourceMissing);
+        assert_eq!(
+            material_issues[0].item,
+            LibraryItem::Material(local_material_id)
+        );
+
+        let mut system_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_system = import_system(
+            &mut system_project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported_system.system.unwrap();
+        let mut system_missing = library;
+        system_missing
+            .systems
+            .retain(|system| system.id != ElementId::new("system-rainscreen"));
+
+        let system_issues = library_lifecycle_issues(&system_project, &[system_missing]).unwrap();
+        assert_eq!(system_issues.len(), 1);
+        assert_eq!(system_issues[0].kind, LibraryIssueKind::SourceMissing);
+        assert_eq!(system_issues[0].item, LibraryItem::System(local_system_id));
+    }
+
+    #[test]
+    fn updated_library_content_emits_out_of_date_and_resync_updates_material() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported =
+            import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
+        let local_id = imported.materials[0].clone();
+
+        let mut updated = library.clone();
+        updated.version_id = "019e9150-0000-7000-8000-000000000099".to_owned();
+        updated.version = "1.1.0".to_owned();
+        updated.materials[0].name = "Updated cedar".to_owned();
+        let updated_hash = library_content_hash(&updated).unwrap();
+
+        let issues = library_lifecycle_issues(&project, &[updated.clone()]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::OutOfDate);
+        assert_eq!(issues[0].item, LibraryItem::Material(local_id.clone()));
+
+        resync_material(&mut project, &updated, &updated_hash, &local_id).unwrap();
+        let material = project.material(&local_id).unwrap();
+        assert_eq!(material.name, "Updated cedar");
+        let MaterialSource::Library(source) = &material.source else {
+            panic!("re-synced material should stay library-backed");
+        };
+        assert_eq!(source.version_id, updated.version_id);
+        assert_eq!(project.libraries.len(), 1);
+        assert_eq!(project.libraries[0].version_id, updated.version_id);
+        assert!(
+            library_lifecycle_issues(&project, &[updated])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resync_system_preserves_project_ids_and_updates_material_closure() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported.system.unwrap();
+        let local_material_ids = imported.materials;
+
+        let mut updated = library.clone();
+        updated.version_id = "019e9150-0000-7000-8000-000000000100".to_owned();
+        updated.version = "1.1.0".to_owned();
+        updated.systems[0].name = "Updated rainscreen wall".to_owned();
+        updated.materials[0].name = "Updated cedar".to_owned();
+        let updated_hash = library_content_hash(&updated).unwrap();
+
+        let issues = library_lifecycle_issues(&project, &[updated.clone()]).unwrap();
+        assert!(
+            issues.iter().any(|issue| {
+                issue.kind == LibraryIssueKind::OutOfDate
+                    && issue.item == LibraryItem::System(local_system_id.clone())
+            }),
+            "changed source system should be reported out of date"
+        );
+
+        resync_system(&mut project, &updated, &updated_hash, &local_system_id).unwrap();
+
+        let system = project
+            .systems
+            .iter()
+            .find(|system| system.id == local_system_id)
+            .unwrap();
+        assert_eq!(system.name, "Updated rainscreen wall");
+        assert_eq!(
+            system.layers[0].material,
+            ElementId::new("acme-walls-mat-cedar")
+        );
+        assert_eq!(
+            system.layers[1].framing.as_ref().unwrap().cavity_material,
+            Some(ElementId::new("acme-walls-mat-mineral-wool"))
+        );
+        assert_eq!(
+            system.source.as_ref().unwrap().version_id,
+            updated.version_id
+        );
+        for local_material_id in local_material_ids {
+            let material = project.material(&local_material_id).unwrap();
+            let MaterialSource::Library(source) = &material.source else {
+                panic!("closure material should stay library-backed");
+            };
+            assert_eq!(source.version_id, updated.version_id);
+        }
+        assert_eq!(
+            project
+                .material(&ElementId::new("acme-walls-mat-cedar"))
+                .unwrap()
+                .name,
+            "Updated cedar"
+        );
+        assert!(
+            library_lifecycle_issues(&project, &[updated])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn detach_system_clears_source_and_reports_false_when_already_detached() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported.system.unwrap();
+
+        for material_id in imported.materials {
+            assert!(detach_material(&mut project, &material_id).unwrap());
+        }
+        assert_eq!(project.libraries.len(), 1);
+
+        assert!(detach_system(&mut project, &local_system_id).unwrap());
+        assert!(
+            project
+                .systems
+                .iter()
+                .find(|system| system.id == local_system_id)
+                .unwrap()
+                .source
+                .is_none()
+        );
+        assert!(project.libraries.is_empty());
+        assert!(
+            library_lifecycle_issues(&project, &[library])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!detach_system(&mut project, &local_system_id).unwrap());
+    }
+
+    #[test]
+    fn resync_rejects_mismatched_library_uid() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_material =
+            import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
+        let imported_system = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+
+        let mut impostor = library.clone();
+        impostor.uid = "22222222-2222-4222-8222-222222222222".to_owned();
+        let impostor_hash = library_content_hash(&impostor).unwrap();
+
+        assert!(matches!(
+            resync_material(
+                &mut project,
+                &impostor,
+                &impostor_hash,
+                &imported_material.materials[0],
+            ),
+            Err(LibraryImportError::LibraryUidMismatch { .. })
+        ));
+        assert!(matches!(
+            resync_system(
+                &mut project,
+                &impostor,
+                &impostor_hash,
+                imported_system.system.as_ref().unwrap(),
+            ),
+            Err(LibraryImportError::LibraryUidMismatch { .. })
+        ));
     }
 
     #[test]

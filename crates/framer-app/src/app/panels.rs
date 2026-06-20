@@ -877,6 +877,61 @@ impl FramerApp {
         });
     }
 
+    fn resync_library_item(&mut self, item: framer_library::LibraryItem) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library re-sync failed: {error}"));
+                return;
+            }
+        };
+
+        let mut result = None;
+        self.edit("Re-sync library item", |app| {
+            result = Some(framer_library::resync_item(
+                &mut app.model,
+                &loaded.library,
+                &loaded.content_hash,
+                item.clone(),
+            ));
+        });
+        self.file_status = Some(match result.expect("re-sync closure should run") {
+            Ok(_) => format!(
+                "Re-synced library {} {}",
+                library_item_kind_label(&item),
+                library_item_id(&item).0
+            ),
+            Err(error) => format!("Library re-sync failed: {error}"),
+        });
+    }
+
+    fn detach_library_item(&mut self, item: framer_library::LibraryItem) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+
+        let mut result = None;
+        self.edit("Detach library item", |app| {
+            result = Some(framer_library::detach_item(&mut app.model, item.clone()));
+        });
+        self.file_status = Some(match result.expect("detach closure should run") {
+            Ok(true) => format!(
+                "Detached library {} {}",
+                library_item_kind_label(&item),
+                library_item_id(&item).0
+            ),
+            Ok(false) => format!(
+                "Library {} {} was already detached",
+                library_item_kind_label(&item),
+                library_item_id(&item).0
+            ),
+            Err(error) => format!("Library detach failed: {error}"),
+        });
+    }
+
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let mut changed = false;
         // A Remove click sets this; executed through edit() after the model
@@ -892,6 +947,9 @@ impl FramerApp {
         let mut deferred_remove_layer: Option<(String, usize)> = None;
         //   - jump the selection to a construction system (Wall "Edit system").
         let mut deferred_select_system: Option<String> = None;
+        //   - library lifecycle actions for the selected system/material.
+        let mut deferred_resync_library: Option<framer_library::LibraryItem> = None;
+        let mut deferred_detach_library: Option<framer_library::LibraryItem> = None;
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
@@ -978,6 +1036,8 @@ impl FramerApp {
         } else {
             false
         };
+        let selected_library_status =
+            selected_library_status(&self.model, &selection, &self.library_issues);
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
@@ -1415,6 +1475,17 @@ impl FramerApp {
                             });
                         }
 
+                        if let Some(status) = selected_library_status.as_ref() {
+                            widgets::section(ui, "system-library-source", "Library", true, |ui| {
+                                library_lifecycle_controls(
+                                    ui,
+                                    status,
+                                    &mut deferred_resync_library,
+                                    &mut deferred_detach_library,
+                                );
+                            });
+                        }
+
                         widgets::section(ui, "system-layers", "Layers", true, |ui| {
                             let layer_count = system.layers.len();
                             // Wall systems require exactly one positive-thickness
@@ -1476,6 +1547,22 @@ impl FramerApp {
                     inspector_object_id(ui, &material.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut material.name);
+                        if let Some(status) = selected_library_status.as_ref() {
+                            widgets::section(
+                                ui,
+                                "material-library-source",
+                                "Library",
+                                true,
+                                |ui| {
+                                    library_lifecycle_controls(
+                                        ui,
+                                        status,
+                                        &mut deferred_resync_library,
+                                        &mut deferred_detach_library,
+                                    );
+                                },
+                            );
+                        }
                         changed |= material_appearance_editor(ui, material);
                         widgets::section(ui, "material-props", "Properties", true, |ui| {
                             changed |= material_properties_editor(ui, material);
@@ -1532,6 +1619,12 @@ impl FramerApp {
         }
         if let Some((system_id, index)) = deferred_remove_layer {
             self.remove_layer(&system_id, index);
+        }
+        if let Some(item) = deferred_resync_library {
+            self.resync_library_item(item);
+        }
+        if let Some(item) = deferred_detach_library {
+            self.detach_library_item(item);
         }
         if let Some(system_id) = deferred_select_system {
             self.selected = Selection::System(system_id);
@@ -2232,6 +2325,144 @@ fn provenance_label(source: &Provenance) -> String {
         .unwrap_or(&source.content_hash);
     let short_hash = hash.get(..8).unwrap_or(hash);
     format!("{} ({short_hash})", source.source_id.0)
+}
+
+#[derive(Debug, Clone)]
+struct LibrarySelectionStatus {
+    item: framer_library::LibraryItem,
+    source: Provenance,
+    issues: Vec<framer_library::LibraryIssueKind>,
+    source_available: bool,
+}
+
+fn selected_library_status(
+    model: &framer_core::BuildingModel,
+    selection: &Selection,
+    library_issues: &[framer_library::LibraryIssue],
+) -> Option<LibrarySelectionStatus> {
+    let (item, source) = match selection {
+        Selection::System(id) => {
+            let system = model.systems.iter().find(|system| system.id.0 == *id)?;
+            let source = system.source.clone()?;
+            (
+                framer_library::LibraryItem::System(system.id.clone()),
+                source,
+            )
+        }
+        Selection::Material(id) => {
+            let material = model
+                .materials
+                .iter()
+                .find(|material| material.id.0 == *id)?;
+            let MaterialSource::Library(source) = material.source.clone() else {
+                return None;
+            };
+            (
+                framer_library::LibraryItem::Material(material.id.clone()),
+                source,
+            )
+        }
+        _ => return None,
+    };
+
+    let loaded = framer_library::starter_library_ref().ok();
+    let issues = library_issues
+        .iter()
+        .filter(|issue| issue.item == item)
+        .map(|issue| issue.kind)
+        .collect::<Vec<_>>();
+    let source_available = loaded.as_ref().is_some_and(|loaded| {
+        loaded.library.uid == source.library_uid
+            && library_contains_source(&loaded.library, &item, &source.source_id)
+    });
+
+    Some(LibrarySelectionStatus {
+        item,
+        source,
+        issues,
+        source_available,
+    })
+}
+
+fn library_contains_source(
+    library: &framer_core::Library,
+    item: &framer_library::LibraryItem,
+    source_id: &ElementId,
+) -> bool {
+    match item {
+        framer_library::LibraryItem::Material(_) => library
+            .materials
+            .iter()
+            .any(|material| material.id == *source_id),
+        framer_library::LibraryItem::System(_) => {
+            library.systems.iter().any(|system| system.id == *source_id)
+        }
+    }
+}
+
+fn library_lifecycle_controls(
+    ui: &mut Ui,
+    status: &LibrarySelectionStatus,
+    deferred_resync: &mut Option<framer_library::LibraryItem>,
+    deferred_detach: &mut Option<framer_library::LibraryItem>,
+) {
+    summary_row(ui, "Source", provenance_label(&status.source));
+    summary_row(ui, "Status", library_status_label(status));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(status.source_available, egui::Button::new("Re-sync"))
+            .on_hover_text("Replace the vendored copy from the current source library")
+            .clicked()
+        {
+            *deferred_resync = Some(status.item.clone());
+        }
+        if ui
+            .button("Detach")
+            .on_hover_text("Keep this definition as project-owned content")
+            .clicked()
+        {
+            *deferred_detach = Some(status.item.clone());
+        }
+    });
+}
+
+fn library_status_label(status: &LibrarySelectionStatus) -> &'static str {
+    let diverged = status
+        .issues
+        .contains(&framer_library::LibraryIssueKind::Diverged);
+    let out_of_date = status
+        .issues
+        .contains(&framer_library::LibraryIssueKind::OutOfDate);
+    let source_missing = status
+        .issues
+        .contains(&framer_library::LibraryIssueKind::SourceMissing);
+
+    if source_missing {
+        "Source missing"
+    } else if diverged && out_of_date {
+        "Modified, update available"
+    } else if diverged {
+        "Modified"
+    } else if out_of_date {
+        "Update available"
+    } else if !status.source_available {
+        "Source unavailable"
+    } else {
+        "Current"
+    }
+}
+
+fn library_item_id(item: &framer_library::LibraryItem) -> &ElementId {
+    match item {
+        framer_library::LibraryItem::Material(id) | framer_library::LibraryItem::System(id) => id,
+    }
+}
+
+fn library_item_kind_label(item: &framer_library::LibraryItem) -> &'static str {
+    match item {
+        framer_library::LibraryItem::Material(_) => "material",
+        framer_library::LibraryItem::System(_) => "system",
+    }
 }
 
 /// Look up a material's swatch color by id, falling back to a neutral tone.
@@ -3699,6 +3930,70 @@ mod tests {
         );
     }
 
+    fn library_status(
+        issues: Vec<framer_library::LibraryIssueKind>,
+        source_available: bool,
+    ) -> LibrarySelectionStatus {
+        LibrarySelectionStatus {
+            item: framer_library::LibraryItem::Material(ElementId::new("local-material")),
+            source: Provenance {
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                source_id: ElementId::new("source-material"),
+                content_hash: "blake3:abc123".to_owned(),
+            },
+            issues,
+            source_available,
+        }
+    }
+
+    #[test]
+    fn library_status_label_covers_states_and_precedence() {
+        let cases = vec![
+            (
+                vec![framer_library::LibraryIssueKind::SourceMissing],
+                true,
+                "Source missing",
+            ),
+            (
+                vec![
+                    framer_library::LibraryIssueKind::Diverged,
+                    framer_library::LibraryIssueKind::OutOfDate,
+                    framer_library::LibraryIssueKind::SourceMissing,
+                ],
+                false,
+                "Source missing",
+            ),
+            (
+                vec![
+                    framer_library::LibraryIssueKind::Diverged,
+                    framer_library::LibraryIssueKind::OutOfDate,
+                ],
+                true,
+                "Modified, update available",
+            ),
+            (
+                vec![framer_library::LibraryIssueKind::Diverged],
+                true,
+                "Modified",
+            ),
+            (
+                vec![framer_library::LibraryIssueKind::OutOfDate],
+                true,
+                "Update available",
+            ),
+            (Vec::new(), false, "Source unavailable"),
+            (Vec::new(), true, "Current"),
+        ];
+
+        for (issues, source_available, expected) in cases {
+            assert_eq!(
+                library_status_label(&library_status(issues, source_available)),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn inserting_starter_system_vendors_provenance_and_selects_it() {
         let mut app = FramerApp::default();
@@ -3758,6 +4053,106 @@ mod tests {
         assert_eq!(source.source_id, ElementId::new("mat-fiber-cement"));
         assert!(source.content_hash.starts_with("blake3:"));
         app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn editing_imported_material_surfaces_divergence_diagnostic() {
+        let mut app = FramerApp::default();
+        app.insert_starter_material("mat-fiber-cement".to_owned());
+        let Selection::Material(material_id) = app.selected.clone() else {
+            panic!("imported material should be selected");
+        };
+        app.model
+            .materials
+            .iter_mut()
+            .find(|material| material.id.0 == material_id)
+            .unwrap()
+            .name = "Local fiber cement".to_owned();
+
+        app.rebuild();
+
+        let diagnostics = &app.project_plan.as_ref().unwrap().diagnostics;
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "library.item.diverged"
+                && diagnostic.source == Some(ElementId::new(material_id.clone()))
+        }));
+    }
+
+    #[test]
+    fn detaching_imported_material_clears_provenance_and_diagnostics() {
+        let mut app = FramerApp::default();
+        app.insert_starter_material("mat-fiber-cement".to_owned());
+        let Selection::Material(material_id) = app.selected.clone() else {
+            panic!("imported material should be selected");
+        };
+        app.model
+            .materials
+            .iter_mut()
+            .find(|material| material.id.0 == material_id)
+            .unwrap()
+            .name = "Local fiber cement".to_owned();
+
+        app.detach_library_item(framer_library::LibraryItem::Material(ElementId::new(
+            material_id.clone(),
+        )));
+
+        let material = app
+            .model
+            .materials
+            .iter()
+            .find(|material| material.id.0 == material_id)
+            .unwrap();
+        assert!(matches!(material.source, MaterialSource::Project));
+        assert!(app.model.libraries.is_empty());
+        let diagnostics = &app.project_plan.as_ref().unwrap().diagnostics;
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "library.item.diverged")
+        );
+    }
+
+    #[test]
+    fn resyncing_imported_material_restores_source_content() {
+        let mut app = FramerApp::default();
+        app.insert_starter_material("mat-fiber-cement".to_owned());
+        let Selection::Material(material_id) = app.selected.clone() else {
+            panic!("imported material should be selected");
+        };
+        app.model
+            .materials
+            .iter_mut()
+            .find(|material| material.id.0 == material_id)
+            .unwrap()
+            .name = "Local fiber cement".to_owned();
+
+        app.resync_library_item(framer_library::LibraryItem::Material(ElementId::new(
+            material_id.clone(),
+        )));
+
+        let starter = framer_library::starter_library().unwrap();
+        let source_name = starter
+            .library
+            .materials
+            .iter()
+            .find(|material| material.id == ElementId::new("mat-fiber-cement"))
+            .unwrap()
+            .name
+            .clone();
+        let material = app
+            .model
+            .materials
+            .iter()
+            .find(|material| material.id.0 == material_id)
+            .unwrap();
+        assert_eq!(material.name, source_name);
+        assert!(matches!(&material.source, MaterialSource::Library(_)));
+        let diagnostics = &app.project_plan.as_ref().unwrap().diagnostics;
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "library.item.diverged")
+        );
     }
 
     #[derive(Debug, Clone, Copy)]
