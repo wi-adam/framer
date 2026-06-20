@@ -1,5 +1,10 @@
 name: Claude Code
 
+# @claude mention responder. Fires when someone types "@claude" in an issue, a
+# PR/issue comment, or a PR review. claude-code-action enforces its own gate so
+# only users with WRITE access to the repo can actually trigger it — the job
+# `if:` below is defense-in-depth so the job (and its minted GitHub App token)
+# only spins up when "@claude" is actually present, instead of on every comment.
 on:
   issue_comment:
     types: [created]
@@ -10,41 +15,51 @@ on:
   pull_request_review:
     types: [submitted]
 
+# Least-privilege default for the workflow; the job below opts into more.
+permissions:
+  contents: read
+
 jobs:
   claude:
+    name: claude
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    # Scoped to exactly what the responder needs:
+    #   contents: write       — push a fix branch when asked to make a change
+    #                           (Claude returns a PR-creation link; it never
+    #                           force-pushes, merges, or edits CI — the GitHub
+    #                           App has no workflow-write scope).
+    #   pull-requests: write  — comment on / update PRs.
+    #   issues: write         — comment on issues it was mentioned in.
+    #   id-token: write       — mint the short-lived, repo-scoped GitHub App
+    #                           token; required for the DEFAULT auth path, not
+    #                           only Workload Identity Federation.
+    #   actions: read         — read CI run results on PRs to inform its answer.
     permissions:
-      contents: read
-      pull-requests: read
-      issues: read
+      contents: write
+      pull-requests: write
+      issues: write
       id-token: write
-      actions: read # Required for Claude to read CI results on PRs
+      actions: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
+          # The action authenticates itself and revokes its minted GitHub App
+          # token in a post-step, so it never needs the checkout's stored
+          # credentials. Required by zizmor (artipacked).
+          persist-credentials: false
 
       - name: Run Claude Code
-        id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1.0.152
         with:
+          # Pro/Max subscription token, already stored as a repo secret. No
+          # ANTHROPIC_API_KEY exists in this repo, so OAuth is the only path.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
-          # This is an optional setting that allows Claude to read CI results on PRs
-          additional_permissions: |
-            actions: read
-
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
-          # prompt: 'Update the pull request description to include a summary of changes.'
-
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # claude_args: '--allowed-tools Bash(gh pr *)'
-
+          # No `prompt:` — leaving it empty selects interactive tag mode, where
+          # the @claude comment itself supplies the instructions. The Bash tool
+          # stays disabled by default; opt in via claude_args only if needed.
