@@ -1413,6 +1413,41 @@ mod tests {
         (model, assets)
     }
 
+    fn package_entries(
+        model: &BuildingModel,
+        assets: &BTreeMap<String, Vec<u8>>,
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "project.framer".to_owned(),
+            save_project(model).unwrap().into_bytes(),
+        );
+        entries.insert(
+            "manifest.json".to_owned(),
+            manifest_bytes(&package_manifest(assets).unwrap()),
+        );
+        for (hash, bytes) in assets {
+            entries.insert(asset_package_path(hash).unwrap(), bytes.clone());
+        }
+        entries
+    }
+
+    fn manifest_bytes(manifest: &PackageManifest) -> Vec<u8> {
+        (serde_json::to_string_pretty(manifest).unwrap() + "\n").into_bytes()
+    }
+
+    fn test_zip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .last_modified_time(DateTime::default());
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn starter_library_hash_is_golden() {
         let loaded = starter_library().unwrap();
@@ -1479,17 +1514,98 @@ mod tests {
 
     #[test]
     fn project_package_rejects_unsafe_zip_entry_names() {
-        let options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Stored)
-            .last_modified_time(DateTime::default());
-        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-        zip.start_file("../project.framer", options).unwrap();
-        zip.write_all(b"{}").unwrap();
-        let package = zip.finish().unwrap().into_inner();
+        let mut entries = BTreeMap::new();
+        entries.insert("../project.framer".to_owned(), b"{}".to_vec());
+        let package = test_zip(&entries);
 
         assert!(matches!(
             load_project_package(&package),
             Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_zip_bytes() {
+        assert!(matches!(
+            load_project_package(b"not a zip"),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_required_entries() {
+        let (model, assets) = textured_project();
+
+        let mut missing_project = package_entries(&model, &assets);
+        missing_project.remove("project.framer");
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_project)),
+            Err(LibraryImportError::PackageProjectMissing)
+        ));
+
+        let mut missing_manifest = package_entries(&model, &assets);
+        missing_manifest.remove("manifest.json");
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_manifest)),
+            Err(LibraryImportError::PackageManifestMissing)
+        ));
+
+        let mut missing_asset = package_entries(&model, &assets);
+        let asset_path = missing_asset
+            .keys()
+            .find(|path| path.starts_with("assets/"))
+            .unwrap()
+            .clone();
+        missing_asset.remove(&asset_path);
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_asset)),
+            Err(LibraryImportError::PackageAssetMissing { path }) if path == asset_path
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_header() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+        let mut manifest = package_manifest(&assets).unwrap();
+
+        manifest.format = "wrong.package".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageFormat { found }) if found == "wrong.package"
+        ));
+
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.schema_version = PACKAGE_SCHEMA_VERSION + 1;
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::UnsupportedPackageSchemaVersion { found, supported })
+                if found == PACKAGE_SCHEMA_VERSION + 1 && supported == PACKAGE_SCHEMA_VERSION
+        ));
+
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.project = "other.framer".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageProjectPath { path }) if path == "other.framer"
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_asset_path() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.assets[0].path = "assets/not-the-content-hash".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageAssetPath { path, .. })
+                if path == "assets/not-the-content-hash"
         ));
     }
 

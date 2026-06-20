@@ -114,8 +114,8 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        BuildingModel, CodeProfile, ElementId, Length, LibraryStamp, MaterialSource, ModelError,
-        Opening, Provenance, Wall,
+        Appearance, AssetRef, BuildingModel, CodeProfile, ElementId, Length, LibraryStamp,
+        Material, MaterialSource, ModelError, Opening, Provenance, TextureRole, Wall,
     };
 
     use super::*;
@@ -417,8 +417,6 @@ mod tests {
 
     #[test]
     fn asset_backed_material_appearances_round_trip_and_validate() {
-        use crate::{Appearance, AssetRef, Material, TextureRole};
-
         let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
         let texture = AssetRef::new(
             "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -465,21 +463,83 @@ mod tests {
 
     #[test]
     fn asset_backed_material_rejects_invalid_hash() {
-        use crate::{Appearance, AssetRef, Material, TextureRole};
-
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
-        let mut material = Material::solid_color("mat-bad-asset", "Bad asset", [10, 20, 30]);
-        material.appearance = Appearance::Textured {
+        let model = project_with_asset_appearance(Appearance::Textured {
             color: [10, 20, 30],
             texture: AssetRef::new("blake3:ABC", "image/png", TextureRole::Texture),
             scale: Length::from_whole_inches(12),
-        };
-        model.materials.push(material);
+        });
 
         assert!(matches!(
             save_project(&model),
             Err(ProjectError::Model(ModelError::InvalidAssetHash { .. }))
         ));
+    }
+
+    #[test]
+    fn asset_backed_material_rejects_role_mismatch() {
+        let model = project_with_asset_appearance(Appearance::DepthMapped {
+            color: [10, 20, 30],
+            height: AssetRef::new(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "image/png",
+                TextureRole::Texture,
+            ),
+            scale: Length::from_whole_inches(12),
+        });
+
+        assert!(matches!(
+            save_project(&model),
+            Err(ProjectError::Model(ModelError::AssetRoleMismatch {
+                expected: TextureRole::Height,
+                found: TextureRole::Texture,
+            }))
+        ));
+    }
+
+    #[test]
+    fn asset_backed_material_rejects_empty_media_type() {
+        let model = project_with_asset_appearance(Appearance::Textured {
+            color: [10, 20, 30],
+            texture: AssetRef::new(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "   ",
+                TextureRole::Texture,
+            ),
+            scale: Length::from_whole_inches(12),
+        });
+
+        assert!(matches!(
+            save_project(&model),
+            Err(ProjectError::Model(
+                ModelError::InvalidAssetMediaType { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn asset_backed_material_rejects_non_positive_scale() {
+        let model = project_with_asset_appearance(Appearance::Textured {
+            color: [10, 20, 30],
+            texture: AssetRef::new(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "image/png",
+                TextureRole::Texture,
+            ),
+            scale: Length::ZERO,
+        });
+
+        assert!(matches!(
+            save_project(&model),
+            Err(ProjectError::Model(ModelError::InvalidAssetScale))
+        ));
+    }
+
+    fn project_with_asset_appearance(appearance: Appearance) -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut material = Material::solid_color("mat-asset", "Asset material", [10, 20, 30]);
+        material.appearance = appearance;
+        model.materials.push(material);
+        model
     }
 
     #[test]

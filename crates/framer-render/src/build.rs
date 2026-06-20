@@ -791,6 +791,41 @@ mod tests {
     }
 
     #[test]
+    fn asset_backed_materials_without_resolved_assets_lower_to_fallback_diffuse() {
+        let model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let assets = RenderAssets::new();
+        let mut palette = PaletteBuilder::new(&model, &assets);
+        let hash = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let textured = render_material_for_appearance(
+            &Appearance::Textured {
+                color: [20, 30, 40],
+                texture: AssetRef::new(hash, "image/png", TextureRole::Texture),
+                scale: Length::from_whole_inches(12),
+            },
+            &mut palette,
+        );
+        let depth_mapped = render_material_for_appearance(
+            &Appearance::DepthMapped {
+                color: [50, 60, 70],
+                height: AssetRef::new(hash, "image/png", TextureRole::Height),
+                scale: Length::from_whole_inches(12),
+            },
+            &mut palette,
+        );
+
+        assert!(matches!(
+            textured,
+            Material::Diffuse { albedo } if (albedo - color_to_linear([20, 30, 40])).length() < 1.0e-6
+        ));
+        assert!(matches!(
+            depth_mapped,
+            Material::Diffuse { albedo } if (albedo - color_to_linear([50, 60, 70])).length() < 1.0e-6
+        ));
+        assert!(palette.textures.is_empty());
+    }
+
+    #[test]
     fn window_opening_becomes_glass() {
         let window = Opening::window(
             "w1",

@@ -263,4 +263,130 @@ mod tests {
             Material::Diffuse { albedo: Vec3::ONE }
         );
     }
+
+    #[test]
+    fn textured_material_samples_resolved_texture() {
+        let scene = Scene::with_textures(
+            Vec::new(),
+            vec![Material::TexturedDiffuse {
+                fallback: Vec3::new(0.1, 0.2, 0.3),
+                texture: 0,
+                scale: 1.0,
+            }],
+            vec![Texture::new(
+                2,
+                2,
+                vec![
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    Vec3::new(1.0, 1.0, 0.0),
+                ],
+            )],
+            DirectionalSun::DARK,
+            test_sky(),
+            Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0, 1.0),
+            1.0,
+        );
+        let hit = Hit {
+            t: 1.0,
+            u: 0.0,
+            v: 0.0,
+            point: Vec3::new(0.75, 0.0, 0.75),
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            geom_normal: Vec3::new(0.0, 0.0, 1.0),
+            front_face: true,
+            material: 0,
+        };
+
+        assert_eq!(
+            scene.material(&hit),
+            Material::Diffuse {
+                albedo: Vec3::new(1.0, 1.0, 0.0)
+            }
+        );
+    }
+
+    #[test]
+    fn depth_mapped_material_modulates_albedo_by_height_luminance() {
+        let base = Vec3::new(0.8, 0.6, 0.4);
+        let scene = Scene::with_textures(
+            Vec::new(),
+            vec![Material::DepthMappedDiffuse {
+                albedo: base,
+                height: 0,
+                scale: 1.0,
+            }],
+            vec![Texture::new(1, 1, vec![Vec3::splat(0.5)])],
+            DirectionalSun::DARK,
+            test_sky(),
+            Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0, 1.0),
+            1.0,
+        );
+        let hit = Hit {
+            t: 1.0,
+            u: 0.0,
+            v: 0.0,
+            point: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            geom_normal: Vec3::new(0.0, 0.0, 1.0),
+            front_face: true,
+            material: 0,
+        };
+        let expected = base * (0.65 + 0.35 * 0.5);
+
+        assert!(matches!(
+            scene.material(&hit),
+            Material::Diffuse { albedo } if (albedo - expected).length() < 1.0e-6
+        ));
+    }
+
+    #[test]
+    fn missing_texture_indices_use_material_fallbacks() {
+        let textured_fallback = Vec3::new(0.1, 0.2, 0.3);
+        let depth_fallback = Vec3::new(0.4, 0.5, 0.6);
+        let scene = Scene::with_textures(
+            Vec::new(),
+            vec![
+                Material::TexturedDiffuse {
+                    fallback: textured_fallback,
+                    texture: 99,
+                    scale: 1.0,
+                },
+                Material::DepthMappedDiffuse {
+                    albedo: depth_fallback,
+                    height: 99,
+                    scale: 1.0,
+                },
+            ],
+            Vec::new(),
+            DirectionalSun::DARK,
+            test_sky(),
+            Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0, 1.0),
+            1.0,
+        );
+        let hit = |material| Hit {
+            t: 1.0,
+            u: 0.0,
+            v: 0.0,
+            point: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            geom_normal: Vec3::new(0.0, 0.0, 1.0),
+            front_face: true,
+            material,
+        };
+
+        assert_eq!(
+            scene.material(&hit(0)),
+            Material::Diffuse {
+                albedo: textured_fallback
+            }
+        );
+        assert_eq!(
+            scene.material(&hit(1)),
+            Material::Diffuse {
+                albedo: depth_fallback
+            }
+        );
+    }
 }
