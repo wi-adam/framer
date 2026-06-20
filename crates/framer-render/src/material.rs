@@ -97,7 +97,7 @@ impl Texture {
     }
 }
 
-fn srgb_to_linear(value: u8) -> f32 {
+pub(crate) fn srgb_to_linear(value: u8) -> f32 {
     let c = value as f32 / 255.0;
     if c <= 0.04045 {
         c / 12.92
@@ -303,6 +303,19 @@ mod tests {
             assert!((s.throughput - albedo).length() < 1e-5);
             assert!(s.pdf > 0.0);
         }
+    }
+
+    #[test]
+    fn texture_repeat_nearest_wraps_negative_and_overflow_uvs() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        let green = Vec3::new(0.0, 1.0, 0.0);
+        let blue = Vec3::new(0.0, 0.0, 1.0);
+        let yellow = Vec3::new(1.0, 1.0, 0.0);
+        let texture = Texture::new(2, 2, vec![red, green, blue, yellow]);
+
+        assert_eq!(texture.sample_repeat_nearest(-0.25, 0.25), green);
+        assert_eq!(texture.sample_repeat_nearest(1.25, 1.75), blue);
+        assert_eq!(texture.sample_repeat_nearest(-0.25, -0.25), yellow);
     }
 
     #[test]

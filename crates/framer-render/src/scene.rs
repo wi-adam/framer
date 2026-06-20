@@ -310,6 +310,7 @@ mod tests {
     #[test]
     fn depth_mapped_material_modulates_albedo_by_height_luminance() {
         let base = Vec3::new(0.8, 0.6, 0.4);
+        let height = Vec3::new(0.25, 0.5, 1.0);
         let scene = Scene::with_textures(
             Vec::new(),
             vec![Material::DepthMappedDiffuse {
@@ -317,7 +318,7 @@ mod tests {
                 height: 0,
                 scale: 1.0,
             }],
-            vec![Texture::new(1, 1, vec![Vec3::splat(0.5)])],
+            vec![Texture::new(1, 1, vec![height])],
             DirectionalSun::DARK,
             test_sky(),
             Camera::orbit(Vec3::ZERO, 2.0, 0.0, 0.5, 1.0, 1.0, 40.0, 1.0),
@@ -333,7 +334,7 @@ mod tests {
             front_face: true,
             material: 0,
         };
-        let expected = base * (0.65 + 0.35 * 0.5);
+        let expected = base * (0.65 + 0.35 * height.luminance());
 
         assert!(matches!(
             scene.material(&hit),

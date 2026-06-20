@@ -17,6 +17,7 @@ pub use model::{
     FramingPattern, FramingSpec, LayerFunction, Level, LibraryStamp, Material, MaterialSource,
     ModelError, Opening, OpeningKind, PrescriptiveCode, PropertyValue, Provenance, Room, RoomUsage,
     Sheathing, SystemKind, TextureRole, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind,
+    is_blake3_hash,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,

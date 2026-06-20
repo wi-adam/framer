@@ -2698,7 +2698,7 @@ fn validate_asset_scale(scale: Length) -> Result<(), ModelError> {
     }
 }
 
-fn is_blake3_hash(hash: &str) -> bool {
+pub fn is_blake3_hash(hash: &str) -> bool {
     let Some(hex) = hash.strip_prefix("blake3:") else {
         return false;
     };

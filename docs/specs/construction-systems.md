@@ -5,7 +5,7 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented · **Linked goal:** G-008 (Code Profile Data) /
-> G-001 (Project Files) · **Last reviewed:** 2026-06-19
+> G-001 (Project Files) · **Last reviewed:** 2026-06-20
 
 > Authored retroactively from the shipped v7 implementation (PR #16) to capture the durable
 > intent of an already-built feature. It is the worked example for the spec template.
@@ -36,7 +36,9 @@ the layer stack is authored intent; the framing members and BOM are derived from
 - A **wall system has exactly one framing layer.** Validation rejects zero or multiple.
 - **Materials are open/extensible.** Substance lives in a typed property map
   (`r_per_inch_milli`, cost, …), not in the enum, so external/shared libraries plug in via the
-  same reference shape without schema churn. Appearance starts as a solid color.
+  same reference shape without schema churn. Appearance can be `SolidColor`, `Textured`
+  (fallback color + texture `AssetRef` + scale), or `DepthMapped` (fallback color + height-map
+  `AssetRef` + scale).
 - **Derived, not stored:** total through-wall thickness, exposure (exterior vs interior), and
   clear-wall R-value are computed from the layer stack; cavity insulation adds no extra depth.
 - **Solver output:** the framing plan uses the wall system's framing layer to size studs,
@@ -74,7 +76,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
   Option<FramingSpec> }`; `FramingSpec { member: BoardProfile, spacing, pattern,
   cavity_material: Option<ElementId> }`.
 - `Material { id, name, source: MaterialSource, appearance: Appearance, tags, properties }`;
-  `PropertyValue`, `Appearance::SolidColor`.
+  `PropertyValue`, `Appearance::{SolidColor, Textured, DepthMapped}`.
 - `Wall.system: ElementId`; `BuildingModel::system_for(wall)`, `material(&id)`.
 - Serialization: schema **v9** in [`project.rs`](../../crates/framer-core/src/project.rs)
   (`systems`/`materials` are top-level authored keys; v9-only — older files are rejected). The
@@ -95,7 +97,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 
 - Floor and roof systems (`SystemKind::Floor`/`Roof` exist but only `Wall` is wired).
 - `Staggered`/`Double` framing-pattern *generation* (authored but not yet generated).
-- Framing-factor (parallel-path) R-value derate; richer `Appearance` (textures, lapped siding,
-  masonry coursing) — the enum is the seam for these.
+- Framing-factor (parallel-path) R-value derate; richer `Appearance` beyond texture/depth-map
+  assets (lapped siding, masonry coursing) — the enum is the seam for these.
 - External/shared material library *resolution* (`MaterialSource::External` is representable;
   the resolver widens later).

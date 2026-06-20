@@ -8,8 +8,8 @@ use std::{
 
 use framer_core::{
     Appearance, BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp,
-    Material, MaterialSource, ModelError, ProjectError, Provenance, load_library, load_project,
-    save_library, save_project,
+    Material, MaterialSource, ModelError, ProjectError, Provenance, is_blake3_hash, load_library,
+    load_project, save_library, save_project,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1093,23 +1093,11 @@ fn validate_asset_hash(hash: &str) -> Result<(), LibraryImportError> {
     }
 }
 
-fn is_blake3_hash(hash: &str) -> bool {
-    let Some(hex) = hash.strip_prefix("blake3:") else {
-        return false;
-    };
-    hex.len() == 64
-        && hex
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-}
-
 fn asset_file_name(hash: &str) -> Result<String, LibraryImportError> {
-    let Some(hex) = hash.strip_prefix("blake3:") else {
-        return Err(LibraryImportError::InvalidAssetHash {
-            hash: hash.to_owned(),
-        });
-    };
     validate_asset_hash(hash)?;
+    let hex = hash
+        .strip_prefix("blake3:")
+        .expect("validated asset hash must carry the blake3 prefix");
     Ok(format!("blake3-{hex}"))
 }
 
@@ -1533,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn project_package_rejects_missing_required_entries() {
+    fn project_package_rejects_missing_project_entry() {
         let (model, assets) = textured_project();
 
         let mut missing_project = package_entries(&model, &assets);
@@ -1542,6 +1530,11 @@ mod tests {
             load_project_package(&test_zip(&missing_project)),
             Err(LibraryImportError::PackageProjectMissing)
         ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_manifest_entry() {
+        let (model, assets) = textured_project();
 
         let mut missing_manifest = package_entries(&model, &assets);
         missing_manifest.remove("manifest.json");
@@ -1549,6 +1542,11 @@ mod tests {
             load_project_package(&test_zip(&missing_manifest)),
             Err(LibraryImportError::PackageManifestMissing)
         ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_asset_entry() {
+        let (model, assets) = textured_project();
 
         let mut missing_asset = package_entries(&model, &assets);
         let asset_path = missing_asset
@@ -1564,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn project_package_rejects_invalid_manifest_header() {
+    fn project_package_rejects_invalid_manifest_format() {
         let (model, assets) = textured_project();
         let mut entries = package_entries(&model, &assets);
         let mut manifest = package_manifest(&assets).unwrap();
@@ -1575,6 +1573,12 @@ mod tests {
             load_project_package(&test_zip(&entries)),
             Err(LibraryImportError::InvalidPackageFormat { found }) if found == "wrong.package"
         ));
+    }
+
+    #[test]
+    fn project_package_rejects_unsupported_manifest_schema_version() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
 
         let mut manifest = package_manifest(&assets).unwrap();
         manifest.schema_version = PACKAGE_SCHEMA_VERSION + 1;
@@ -1584,6 +1588,12 @@ mod tests {
             Err(LibraryImportError::UnsupportedPackageSchemaVersion { found, supported })
                 if found == PACKAGE_SCHEMA_VERSION + 1 && supported == PACKAGE_SCHEMA_VERSION
         ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_project_path() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
 
         let mut manifest = package_manifest(&assets).unwrap();
         manifest.project = "other.framer".to_owned();

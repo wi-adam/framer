@@ -16,7 +16,7 @@ use framer_core::{
 use crate::aabb::Aabb;
 use crate::camera::Camera;
 use crate::geom::Triangle;
-use crate::material::{Material, Texture};
+use crate::material::{Material, Texture, srgb_to_linear};
 use crate::math::Vec3;
 use crate::scene::{DirectionalSun, Scene, Sky};
 
@@ -243,15 +243,6 @@ fn color_to_linear(color: [u8; 3]) -> Vec3 {
         srgb_to_linear(color[1]),
         srgb_to_linear(color[2]),
     )
-}
-
-fn srgb_to_linear(value: u8) -> f32 {
-    let c = value as f32 / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 fn geometry_from_model(
