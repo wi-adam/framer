@@ -17,13 +17,13 @@ scripts/install-app.sh --no-launch  # install without opening
 scripts/install-app.sh --restore    # put back the pre-dev binary (from .orig.bak)
 ```
 
-Then in computer-use: `request_access(["Framer"])` (bundle id `dev.framer.app`),
-`open_application("dev.framer.app")`, and `screenshot`.
+Then in computer-use: `request_access(["Framer"])` (bundle id `industries.winstanley.framer`),
+`open_application("industries.winstanley.framer")`, and `screenshot`.
 
 ## Gotchas (learned the hard way)
 
 - **Two instances confusion.** If a `cargo run` build *and* the installed bundle
-  are both running, they share bundle id `dev.framer.app` and the compositor
+  are both running, they share bundle id `industries.winstanley.framer` and the compositor
   shows whichever is frontmost — usually the installed one. Kill stray
   `target/debug/framer-app` processes (`pkill -f target/debug/framer-app`) and
   drive only the installed bundle.

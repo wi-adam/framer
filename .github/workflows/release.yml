@@ -1,0 +1,206 @@
+name: Release
+
+# Build cross-platform artifacts, generate SLSA build-provenance attestations
+# (signed via Sigstore — free for public repos), publish checksums, and create
+# a GitHub Release. Triggered by pushing a v* tag. A manual workflow_dispatch
+# only builds the matrix (a dry run that the binaries still compile + package on
+# every OS); it does NOT attest or publish — that's gated on a tag ref.
+#
+# No OS code-signing yet (no Apple/Windows certs). The macOS .app is ad-hoc
+# signed only, so users get a Gatekeeper prompt; integrity is instead provable
+# via `gh attestation verify <file> --repo ${{ github.repository }}` and the
+# SHA256SUMS file. Add Developer ID / Authenticode signing later.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Read-only by default. The publish job opts into exactly the writes it needs.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Marketing name (macOS .app + archive filenames) vs. the Cargo bin name.
+  APP_NAME: Framer
+  BIN_NAME: framer-app
+  BUNDLE_ID: industries.winstanley.framer
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: macos-universal
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: windows-latest
+            artifact: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b1b44fef029483cc79808c5eb89461241fd8f32f # 1.93.0
+        with:
+          toolchain: "1.93.0"
+      # No build cache here on purpose. Releases are infrequent, so the build-time
+      # saving isn't worth any risk of a poisoned cache being baked into the
+      # published, attested binaries — a clean build from source every time. (This
+      # is also zizmor's recommended posture for a publishing workflow.)
+
+      - name: Install Linux build deps (eframe / winit / wgpu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev+${GITHUB_SHA::8}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $APP_NAME $version on ${{ matrix.os }}"
+
+      # macOS: build both arches, lipo into a universal2 binary, wrap in a .app,
+      # ad-hoc sign, and zip with ditto (preserves bundle metadata + symlinks).
+      - name: Build + package macOS (universal)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked -p "$BIN_NAME" --target aarch64-apple-darwin
+          cargo build --release --locked -p "$BIN_NAME" --target x86_64-apple-darwin
+
+          app="$APP_NAME.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/$APP_NAME" \
+            "target/aarch64-apple-darwin/release/$BIN_NAME" \
+            "target/x86_64-apple-darwin/release/$BIN_NAME"
+          lipo -info "$app/Contents/MacOS/$APP_NAME"
+
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>__APP_NAME__</string>
+            <key>CFBundleIdentifier</key><string>__BUNDLE_ID__</string>
+            <key>CFBundleName</key><string>__APP_NAME__</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+            <key>CFBundleVersion</key><string>__VERSION__</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          sed -i '' \
+            -e "s/__APP_NAME__/$APP_NAME/g" \
+            -e "s/__BUNDLE_ID__/$BUNDLE_ID/g" \
+            -e "s/__VERSION__/$VERSION/g" \
+            "$app/Contents/Info.plist"
+
+          # Ad-hoc signature (not a Developer ID — not notarized).
+          codesign --force --deep --sign - "$app"
+
+          mkdir -p dist
+          ditto -c -k --keepParent "$app" \
+            "dist/${APP_NAME}-${VERSION}-macos-universal.zip"
+
+      - name: Build + package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p "$BIN_NAME"
+          mkdir -p "stage" "dist"
+          cp "target/release/$BIN_NAME" "stage/$APP_NAME"
+          cp README.md stage/ 2>/dev/null || true
+          cp LICENSE* stage/ 2>/dev/null || true
+          tar -C stage -czf "dist/${APP_NAME}-${VERSION}-linux-x86_64.tar.gz" .
+
+      - name: Build + package Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p "$BIN_NAME"
+          mkdir -p "stage" "dist"
+          cp "target/release/${BIN_NAME}.exe" "stage/${APP_NAME}.exe"
+          cp README.md stage/ 2>/dev/null || true
+          cp LICENSE* stage/ 2>/dev/null || true
+          7z a "dist/${APP_NAME}-${VERSION}-windows-x86_64.zip" ./stage/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: attest + publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish for real tags. workflow_dispatch stops after the build matrix.
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write # create the GitHub Release and upload assets
+      id-token: write # OIDC token Sigstore uses to sign the provenance
+      attestations: write # record the build-provenance attestations
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          sha256sum -- * | tee SHA256SUMS
+
+      # Binds each archive's digest to this workflow/commit via signed SLSA
+      # provenance (Sigstore). Verify with:
+      #   gh attestation verify <file> --repo ${{ github.repository }}
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            dist/*.zip dist/*.tar.gz dist/SHA256SUMS
