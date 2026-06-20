@@ -25,7 +25,8 @@ for the single-wall example.
 
 > For the in-memory types behind this format, see
 > [code-map.md](code-map.md#framer-core--the-domain-model). The serialization code
-> is `crates/framer-core/src/project.rs`.
+> is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
+> format is implemented in `crates/framer-core/src/library.rs`.
 
 ## V7 Shape
 
@@ -79,6 +80,42 @@ Example:
 ```
 
 `3072` ticks is a 16 foot wall.
+
+## Library Files
+
+Framer library files are UTF-8 JSON documents with the `.framerlib` extension.
+They are versioned separately from project files and describe reusable content
+that can be copied into a self-contained `.framer` project.
+
+The initial format is schema 1:
+
+```json
+{
+  "format": "framer.library",
+  "schema_version": 1,
+  "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
+  "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
+  "version": "0.1.0",
+  "coordinate": "framer-lib://framer/starter",
+  "materials": [],
+  "systems": []
+}
+```
+
+- `format` must be `framer.library`.
+- `schema_version` must be `1` for the current library loader.
+- `uid` is the stable library identity; `version_id` identifies this published
+  content version; `coordinate` is only a resolvable hint.
+- `materials` and `systems` use the same typed definitions as project files.
+- A library validates internally before save/load succeeds: IDs must be valid and
+  unique, and every construction-system material reference must resolve to a
+  material in the same file.
+
+The checked-in starter catalog is
+[`../libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
+New projects and demos load that document and embed its material/system
+definitions into the authored project model. Opening an existing `.framer` project
+does not read any `.framerlib`; projects remain self-contained.
 
 ## Authored Model
 

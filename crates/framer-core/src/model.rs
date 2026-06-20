@@ -535,108 +535,8 @@ impl BuildingModel {
     /// Deterministic (id-sorted on output); shared by `new`, the `demo_*`
     /// constructors, and the app's `new_project`.
     pub fn starter_library() -> (Vec<Material>, Vec<ConstructionSystem>) {
-        let materials = vec![
-            Material::solid_color("mat-drywall", "5/8\" Gypsum", [228, 226, 220])
-                .with_tags(["finish"])
-                .with_r_per_inch_milli(900),
-            Material::solid_color("mat-spf", "SPF framing", [205, 170, 120])
-                .with_tags(["framing"])
-                .with_r_per_inch_milli(1250),
-            Material::solid_color("mat-mineral-wool", "Mineral wool", [176, 188, 170])
-                .with_tags(["insulation"])
-                .with_r_per_inch_milli(4200),
-            Material::solid_color("mat-plywood", "1/2\" Plywood", [200, 172, 128])
-                .with_tags(["sheathing"])
-                .with_r_per_inch_milli(1250),
-            Material::solid_color("mat-polyiso", "2\" Polyiso", [240, 222, 128])
-                .with_tags(["insulation"])
-                .with_r_per_inch_milli(6000),
-            Material::solid_color("mat-rainscreen", "Rain-screen battens", [150, 110, 76])
-                .with_tags(["furring"])
-                .with_r_per_inch_milli(0),
-            Material::solid_color("mat-fiber-cement", "Fiber-cement lap", [183, 185, 190])
-                .with_tags(["cladding"])
-                .with_r_per_inch_milli(150),
-        ];
-
-        let exterior = ConstructionSystem {
-            id: ElementId::new("system-wall-exterior-1"),
-            name: "Exterior wall".to_owned(),
-            kind: SystemKind::Wall,
-            layers: vec![
-                ConstructionLayer::new(
-                    LayerFunction::InteriorFinish,
-                    "mat-drywall",
-                    Length::from_inches(0.625),
-                ),
-                ConstructionLayer::new(
-                    LayerFunction::Framing,
-                    "mat-spf",
-                    Length::from_whole_inches(4),
-                )
-                .with_framing(FramingSpec {
-                    member: BoardProfile::TwoByFour,
-                    spacing: Length::from_whole_inches(16),
-                    pattern: FramingPattern::Single,
-                    cavity_material: Some(ElementId::new("mat-mineral-wool")),
-                }),
-                ConstructionLayer::new(
-                    LayerFunction::Sheathing,
-                    "mat-plywood",
-                    Length::from_inches(0.5),
-                ),
-                ConstructionLayer::new(
-                    LayerFunction::ContinuousInsulation,
-                    "mat-polyiso",
-                    Length::from_whole_inches(2),
-                ),
-                ConstructionLayer::new(
-                    LayerFunction::AirGap,
-                    "mat-rainscreen",
-                    Length::from_inches(0.75),
-                ),
-                ConstructionLayer::new(
-                    LayerFunction::Cladding,
-                    "mat-fiber-cement",
-                    Length::from_inches(0.3125),
-                ),
-            ],
-        };
-
-        let interior = ConstructionSystem {
-            id: ElementId::new("system-wall-interior-1"),
-            name: "Interior partition".to_owned(),
-            kind: SystemKind::Wall,
-            layers: vec![
-                ConstructionLayer::new(
-                    LayerFunction::InteriorFinish,
-                    "mat-drywall",
-                    Length::from_inches(0.625),
-                ),
-                ConstructionLayer::new(
-                    LayerFunction::Framing,
-                    "mat-spf",
-                    Length::from_whole_inches(4),
-                )
-                .with_framing(FramingSpec {
-                    member: BoardProfile::TwoByFour,
-                    spacing: Length::from_whole_inches(16),
-                    pattern: FramingPattern::Single,
-                    cavity_material: None,
-                }),
-                ConstructionLayer::new(
-                    LayerFunction::InteriorFinish,
-                    "mat-drywall",
-                    Length::from_inches(0.625),
-                ),
-            ],
-        };
-
-        let mut materials = materials;
-        materials.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut systems = vec![exterior, interior];
-        systems.sort_by(|left, right| left.id.cmp(&right.id));
-        (materials, systems)
+        let library = crate::library::starter_library();
+        (library.materials, library.systems)
     }
 
     pub fn apply_driving_dimensions(&mut self) -> bool {
@@ -1255,7 +1155,7 @@ impl ConstructionSystem {
         total
     }
 
-    fn validate(
+    pub(crate) fn validate(
         &self,
         materials: &BTreeMap<ElementId, &Material>,
         ids: &mut BTreeSet<ElementId>,
@@ -2650,7 +2550,7 @@ fn default_level_id() -> ElementId {
     ElementId::new("level-1")
 }
 
-fn validate_element_id(id: &ElementId) -> Result<(), ModelError> {
+pub(crate) fn validate_element_id(id: &ElementId) -> Result<(), ModelError> {
     if id.is_valid() {
         Ok(())
     } else {
@@ -2658,7 +2558,10 @@ fn validate_element_id(id: &ElementId) -> Result<(), ModelError> {
     }
 }
 
-fn insert_unique_id(ids: &mut BTreeSet<ElementId>, id: &ElementId) -> Result<(), ModelError> {
+pub(crate) fn insert_unique_id(
+    ids: &mut BTreeSet<ElementId>,
+    id: &ElementId,
+) -> Result<(), ModelError> {
     if ids.insert(id.clone()) {
         Ok(())
     } else {

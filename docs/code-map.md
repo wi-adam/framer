@@ -40,6 +40,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | `src/lib.rs` | Module wiring + the crate's public API (the `pub use` re-export list *is* the public surface). |
 | `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~3.8k lines.) |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
+| `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2`. The basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer (`ConstraintSystem`) for driving dimensions / overconstraint checks. |
@@ -76,9 +77,11 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 - `BuildingModel::new(code)` / `demo_wall()` / `demo_shell()` / `demo_two_bedroom()` —
   construct models; `new`/demos seed the starter material + system library
-  (`BuildingModel::starter_library()`).
+  (`BuildingModel::starter_library()`), sourced from
+  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
 - `BuildingModel::validate()` — full model validation (called before every save).
 - `load_project(&str) -> BuildingModel` / `save_project(&BuildingModel) -> String` (`project.rs`).
+- `load_library(&str) -> Library` / `save_library(&Library) -> String` (`library.rs`).
 - `room_boundaries(model)` / `room_boundary(model, seed)` (`topology.rs`).
 - Mutation helpers on `BuildingModel`: `move_wall_endpoint`, `translate_wall`, `remove_wall`,
   `reconcile_joins` (re-derive joins after geometry edits), `system_for(wall)`,
@@ -94,6 +97,22 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a
   trailing newline. Same model → byte-identical JSON regardless of in-memory order.
 - Format + agent editing contract: [project-files.md](project-files.md).
+
+### `.framerlib` serialization (`src/library.rs`)
+
+- Constants: `LIBRARY_FORMAT = "framer.library"`, **`LIBRARY_SCHEMA_VERSION = 1`**.
+- A library document is a headless, versioned catalog of typed definitions:
+  `uid`, `version_id`, `version`, `coordinate`, `materials`, and `systems`.
+- `load_library` peeks a header first, rejects non-library formats or unsupported
+  schemas explicitly, then validates that every material/system id is valid and every
+  construction layer or cavity material reference resolves inside the library.
+- Canonical output mirrors project files: re-stamp the schema version, sort
+  materials/systems by id, pretty-print, and append a trailing newline. Layer order
+  remains semantic and is never sorted.
+- The built-in starter catalog lives at
+  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib);
+  `BuildingModel::new` and the demo constructors vendor those definitions into each
+  self-contained project model.
 
 ---
 
