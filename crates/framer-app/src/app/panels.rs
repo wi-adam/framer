@@ -3930,6 +3930,70 @@ mod tests {
         );
     }
 
+    fn library_status(
+        issues: Vec<framer_library::LibraryIssueKind>,
+        source_available: bool,
+    ) -> LibrarySelectionStatus {
+        LibrarySelectionStatus {
+            item: framer_library::LibraryItem::Material(ElementId::new("local-material")),
+            source: Provenance {
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                source_id: ElementId::new("source-material"),
+                content_hash: "blake3:abc123".to_owned(),
+            },
+            issues,
+            source_available,
+        }
+    }
+
+    #[test]
+    fn library_status_label_covers_states_and_precedence() {
+        let cases = vec![
+            (
+                vec![framer_library::LibraryIssueKind::SourceMissing],
+                true,
+                "Source missing",
+            ),
+            (
+                vec![
+                    framer_library::LibraryIssueKind::Diverged,
+                    framer_library::LibraryIssueKind::OutOfDate,
+                    framer_library::LibraryIssueKind::SourceMissing,
+                ],
+                false,
+                "Source missing",
+            ),
+            (
+                vec![
+                    framer_library::LibraryIssueKind::Diverged,
+                    framer_library::LibraryIssueKind::OutOfDate,
+                ],
+                true,
+                "Modified, update available",
+            ),
+            (
+                vec![framer_library::LibraryIssueKind::Diverged],
+                true,
+                "Modified",
+            ),
+            (
+                vec![framer_library::LibraryIssueKind::OutOfDate],
+                true,
+                "Update available",
+            ),
+            (Vec::new(), false, "Source unavailable"),
+            (Vec::new(), true, "Current"),
+        ];
+
+        for (issues, source_available, expected) in cases {
+            assert_eq!(
+                library_status_label(&library_status(issues, source_available)),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn inserting_starter_system_vendors_provenance_and_selects_it() {
         let mut app = FramerApp::default();

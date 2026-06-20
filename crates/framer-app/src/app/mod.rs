@@ -382,15 +382,14 @@ impl FramerApp {
 
         self.model.apply_driving_dimensions();
 
-        let library_issue_result = collect_library_lifecycle_issues(&self.model);
-        match &library_issue_result {
+        match collect_library_lifecycle_issues(&self.model) {
             Ok(issues) => {
-                self.library_issues = issues.clone();
+                self.library_issues = issues;
                 self.library_issue_error = None;
             }
             Err(error) => {
                 self.library_issues.clear();
-                self.library_issue_error = Some(error.clone());
+                self.library_issue_error = Some(error);
             }
         }
 
@@ -1976,6 +1975,84 @@ mod tests {
 
         assert_eq!(app.model.walls.len(), 1);
         assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn library_diagnostics_cover_lifecycle_kinds_and_check_failure() {
+        let issues = vec![
+            framer_library::LibraryIssue {
+                item: framer_library::LibraryItem::Material(ElementId::new("local-material")),
+                source_id: ElementId::new("source-material"),
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                kind: framer_library::LibraryIssueKind::OutOfDate,
+                expected_hash: "blake3:expected-material".to_owned(),
+                actual_hash: Some("blake3:actual-material".to_owned()),
+            },
+            framer_library::LibraryIssue {
+                item: framer_library::LibraryItem::System(ElementId::new("local-system")),
+                source_id: ElementId::new("source-system"),
+                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+                version_id: "2026.06".to_owned(),
+                kind: framer_library::LibraryIssueKind::SourceMissing,
+                expected_hash: "blake3:expected-system".to_owned(),
+                actual_hash: None,
+            },
+        ];
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+
+        append_library_diagnostics(&mut plan, &issues, None);
+
+        assert_eq!(plan.diagnostics.len(), 2);
+        assert_eq!(
+            plan.diagnostics[0].code,
+            "library.item.out-of-date".to_owned()
+        );
+        assert_eq!(plan.diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            plan.diagnostics[0].source,
+            Some(ElementId::new("local-material"))
+        );
+        assert!(plan.diagnostics[0].message.contains("source-material"));
+        assert_eq!(
+            plan.diagnostics[1].code,
+            "library.item.source-missing".to_owned()
+        );
+        assert_eq!(plan.diagnostics[1].severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            plan.diagnostics[1].source,
+            Some(ElementId::new("local-system"))
+        );
+        assert!(plan.diagnostics[1].message.contains("source-system"));
+
+        let mut failed_plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+        append_library_diagnostics(&mut failed_plan, &issues, Some("resolver failed"));
+
+        assert_eq!(failed_plan.diagnostics.len(), 1);
+        assert_eq!(
+            failed_plan.diagnostics[0].code,
+            "library.lifecycle.check-failed".to_owned()
+        );
+        assert_eq!(
+            failed_plan.diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
+        assert_eq!(failed_plan.diagnostics[0].source, None);
+        assert!(
+            failed_plan.diagnostics[0]
+                .message
+                .contains("resolver failed")
+        );
     }
 
     #[test]
