@@ -14,7 +14,7 @@
 #   scripts/install-app.sh --no-launch  # install but don't open the app
 #
 # Notes:
-#   - Overwrites the binary in ~/Applications/Framer.app (bundle id dev.framer.app).
+#   - Overwrites the binary in ~/Applications/Framer.app (bundle id windustries.framer.app).
 #     The first run on this machine backs up any pre-existing binary to
 #     Framer.orig.bak; restore with: scripts/install-app.sh --restore
 #   - Ad-hoc signature only — fine for local dev, not for distribution.
@@ -48,7 +48,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$HOME/Applications/Framer.app"
 EXE="$APP/Contents/MacOS/Framer"
 BACKUP="$EXE.orig.bak"
-BUNDLE_ID="dev.framer.app"
+BUNDLE_ID="windustries.framer.app"
 
 lsregister() {
   local lsr=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
