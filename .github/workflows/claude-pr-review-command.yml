@@ -22,8 +22,16 @@ permissions:
 jobs:
   on-demand-review:
     name: on-demand-review
-    # Only top-level comments on a PR (not plain issues) that contain "@claude review".
-    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '@claude review') }}
+    # Only top-level PR comments containing "@claude review", AND only from repo
+    # collaborators (OWNER/MEMBER/COLLABORATOR) — a cheap pre-filter so a privileged
+    # runner doesn't even start for an outside commenter. The action's own
+    # write-access check remains the authoritative gate behind this (author_association
+    # is a coarse proxy: a COLLABORATOR may be read-only, and the action will still
+    # reject them before any review runs).
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude review') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: read
