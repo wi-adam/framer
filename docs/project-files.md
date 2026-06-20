@@ -5,7 +5,7 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v8 format stores only the canonical intent model. Generated framing plans,
+The v9 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 file.
@@ -28,12 +28,12 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V8 Shape
+## V9 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 8,
+  "schema_version": 9,
   "authored": {
     "code": {},
     "libraries": [],
@@ -48,7 +48,7 @@ for the single-wall example.
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `8` when saving from the current app.
+- `schema_version` must be `9` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `cache`, `exports`, or presentation data to project files.
@@ -56,10 +56,10 @@ for the single-wall example.
   `wall_joins` defaults to an empty list; `levels` defaults to a single
   `level-1`.
 
-### Schema versioning is v8-only
+### Schema versioning is v9-only
 
-The current build is **v8-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `8` with an explicit
+The current build is **v9-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `9` with an explicit
 `unsupported Framer project schema version N` error — older files are *not*
 migrated in place. Convert old files with an older Framer build, or re-author
 them.
@@ -118,9 +118,23 @@ New projects and demos load that document and embed its material/system
 definitions into the authored project model. Opening an existing `.framer` project
 does not read any `.framerlib`; projects remain self-contained.
 
+## Project Packages
+
+Portable project packages use the `.framerpkg` extension. A package is a
+deterministic ZIP with stored entries, sorted paths, and zeroed timestamps:
+
+- `project.framer`: the canonical v9 project JSON.
+- `manifest.json`: `{ "format": "framer.package", "schema_version": 1, ... }`.
+- `assets/blake3-<hex>`: optional content-addressed binary assets referenced by
+  material appearances.
+
+The bare `.framer` file remains the primary, inspectable project format. Asset
+bytes are disposable caches: if a texture/depth asset is missing, rendering falls
+back to the material's authored color and the project still opens.
+
 ## Authored Model
 
-The v8 authored model holds:
+The v9 authored model holds:
 
 - `code`: the prescriptive code profile (starter framing defaults).
 - `libraries`: optional descriptive stamps for library versions that supplied
@@ -176,7 +190,9 @@ Each material in `materials` stores:
 - `name`: a human-readable name.
 - `source`: `Project` (default, omitted) or `Library(Provenance)` for vendored
   definitions copied from a `.framerlib`.
-- `appearance`: an authored finish, currently `{ "SolidColor": [r, g, b] }`.
+- `appearance`: an authored finish. `SolidColor` stores only a fallback color;
+  `Textured` and `DepthMapped` store the same color plus an `AssetRef` and
+  scale. Asset bytes are never embedded in `.framer`.
 - `tags`: optional free-form string list, omitted when empty.
 - `properties`: an extensible, **float-free** map of typed values
   (`Int` / `Length` / `Text` / `Flag`). Substance lives here rather than in the
@@ -191,6 +207,27 @@ Each material in `materials` stores:
   "properties": { "r_per_inch_milli": { "Int": 900 } }
 }
 ```
+
+Asset-backed appearances use content hashes:
+
+```json
+{
+  "appearance": {
+    "Textured": {
+      "color": [170, 110, 70],
+      "texture": {
+        "hash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "media_type": "image/png",
+        "role": "Texture"
+      },
+      "scale": { "ticks": 384 }
+    }
+  }
+}
+```
+
+`DepthMapped` uses the same shape with `height` and `role: "Height"`. `scale` is
+a positive `Length` in ticks.
 
 Each system in `systems` stores:
 
@@ -449,7 +486,7 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`8`). The build is v8-only; do not
+3. Preserve `format` and `schema_version` (`9`). The build is v9-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,

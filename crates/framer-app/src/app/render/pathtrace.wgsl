@@ -32,6 +32,21 @@ struct Material {
     kind: u32,
     tint: vec3<f32>,
     param: f32,
+    texture: u32,
+    height: u32,
+    scale: f32,
+    pad_tex: u32,
+};
+
+struct Texture {
+    offset: u32,
+    width: u32,
+    height: u32,
+    pad0: u32,
+};
+
+struct Texel {
+    color: vec4<f32>,
 };
 
 struct Uniforms {
@@ -71,6 +86,8 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read> nodes: array<BvhNode>;
 @group(0) @binding(2) var<storage, read> tri_indices: array<u32>;
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
+@group(0) @binding(4) var<storage, read> textures: array<Texture>;
+@group(0) @binding(5) var<storage, read> texels: array<Texel>;
 @group(1) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(1) var<storage, read_write> accum: array<vec4<f32>>;
 // Denoiser guide buffer: first-hit world normal (.xyz) + linear view depth (.w).
@@ -84,6 +101,9 @@ const MAT_DIFFUSE: u32 = 0u;
 const MAT_METAL: u32 = 1u;
 const MAT_DIELECTRIC: u32 = 2u;
 const MAT_EMISSIVE: u32 = 3u;
+const MAT_TEXTURED_DIFFUSE: u32 = 4u;
+const MAT_DEPTH_MAPPED_DIFFUSE: u32 = 5u;
+const NO_TEXTURE: u32 = 0xffffffffu;
 
 const PARALLEL_EPS: f32 = 1.0e-8;
 const RAY_EPSILON: f32 = 1.0e-3;
@@ -116,6 +136,8 @@ struct Hit {
     point: vec3<f32>,
     normal: vec3<f32>,
     geom_normal: vec3<f32>,
+    u: f32,
+    v: f32,
     front_face: bool,
     material: u32,
     valid: bool,
@@ -183,6 +205,8 @@ fn intersect_tri(ray: Ray, ti: u32, hit: ptr<function, Hit>) {
     }
     (*hit).t = t;
     (*hit).point = ray.origin + ray.dir * t;
+    (*hit).u = uu;
+    (*hit).v = vv;
     let front = dot(ray.dir, tri.normal) < 0.0;
     (*hit).front_face = front;
     (*hit).normal = select(-tri.normal, tri.normal, front);
@@ -383,6 +407,58 @@ fn refract_dir(uv: vec3<f32>, n: vec3<f32>, eta: f32) -> Refract {
 
 // ---- BSDF scatter -----------------------------------------------------------
 
+fn texture_uv(hit: Hit, scale: f32) -> vec2<f32> {
+    let s = max(scale, 1.0e-3);
+    return vec2<f32>((hit.point.x + hit.point.y) / s, hit.point.z / s);
+}
+
+fn sample_texture(texture_id: u32, hit: Hit, scale: f32, fallback: vec3<f32>) -> vec3<f32> {
+    if (texture_id == NO_TEXTURE || texture_id >= arrayLength(&textures)) {
+        return fallback;
+    }
+    let texture = textures[texture_id];
+    if (texture.width == 0u || texture.height == 0u) {
+        return fallback;
+    }
+    let uv = texture_uv(hit, scale);
+    let x = min(u32(floor(fract(uv.x) * f32(texture.width))), texture.width - 1u);
+    let y = min(u32(floor(fract(uv.y) * f32(texture.height))), texture.height - 1u);
+    let offset = texture.offset + y * texture.width + x;
+    if (offset >= arrayLength(&texels)) {
+        return fallback;
+    }
+    return texels[offset].color.xyz;
+}
+
+fn luminance(color: vec3<f32>) -> f32 {
+    return color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722;
+}
+
+fn diffuse_material(albedo: vec3<f32>) -> Material {
+    return Material(
+        albedo,
+        MAT_DIFFUSE,
+        vec3<f32>(0.0),
+        0.0,
+        NO_TEXTURE,
+        NO_TEXTURE,
+        1.0,
+        0u,
+    );
+}
+
+fn resolve_material(hit: Hit, mat: Material) -> Material {
+    if (mat.kind == MAT_TEXTURED_DIFFUSE) {
+        return diffuse_material(sample_texture(mat.texture, hit, mat.scale, mat.color));
+    }
+    if (mat.kind == MAT_DEPTH_MAPPED_DIFFUSE) {
+        let height = sample_texture(mat.height, hit, mat.scale, vec3<f32>(1.0));
+        let relief = clamp(luminance(height), 0.0, 1.0);
+        return diffuse_material(mat.color * (0.65 + 0.35 * relief));
+    }
+    return mat;
+}
+
 struct Scatter {
     dir: vec3<f32>,
     throughput: vec3<f32>,
@@ -502,7 +578,7 @@ fn radiance(primary: Ray, rng: ptr<function, Rng>) -> vec3<f32> {
             acc = acc + throughput * env;
             break;
         }
-        let mat = materials[hit.material];
+        let mat = resolve_material(hit, materials[hit.material]);
         if (mat.kind == MAT_EMISSIVE) {
             acc = acc + throughput * mat.color;
         }

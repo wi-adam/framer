@@ -1,0 +1,4 @@
+interface:
+  display_name: "Framer Development"
+  short_description: "Plan, implement, and pre-review Framer feature work."
+  default_prompt: "Use $framer-development to plan and implement Framer changes with a pre-PR risk review, targeted coverage matrix, and CI-equivalent validation."

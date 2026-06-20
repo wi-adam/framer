@@ -1,17 +1,26 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
+    io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
 use framer_core::{
-    BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp, Material,
-    MaterialSource, ModelError, Provenance, load_library, save_library,
+    Appearance, BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp,
+    Material, MaterialSource, ModelError, ProjectError, Provenance, is_blake3_hash, load_library,
+    load_project, save_library, save_project,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zip::{
+    CompressionMethod, DateTime, ZipArchive, ZipWriter, read::read_zipfile_from_stream,
+    write::SimpleFileOptions,
+};
 
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
+pub const PACKAGE_FORMAT: &str = "framer.package";
+pub const PACKAGE_SCHEMA_VERSION: u32 = 1;
 static STARTER_LIBRARY: OnceLock<LoadedLibrary> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +124,79 @@ pub struct LibraryIssue {
     pub actual_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageManifest {
+    pub format: String,
+    pub schema_version: u32,
+    pub project: String,
+    pub assets: Vec<PackageAssetEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageAssetEntry {
+    pub hash: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPackage {
+    pub project: BuildingModel,
+    pub assets: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentAddressedAssetStore {
+    root: PathBuf,
+}
+
+impl ContentAddressedAssetStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn put(&self, bytes: &[u8]) -> Result<String, LibraryImportError> {
+        let hash = asset_content_hash(bytes);
+        let path = self.path_for_hash(&hash)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| LibraryImportError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(&path, bytes).map_err(|source| LibraryImportError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(hash)
+    }
+
+    pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>, LibraryImportError> {
+        let path = self.path_for_hash(hash)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                verify_asset_hash(hash, &bytes)?;
+                Ok(Some(bytes))
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(LibraryImportError::Io { path, source }),
+        }
+    }
+
+    pub fn contains(&self, hash: &str) -> Result<bool, LibraryImportError> {
+        Ok(self.path_for_hash(hash)?.is_file())
+    }
+
+    fn path_for_hash(&self, hash: &str) -> Result<PathBuf, LibraryImportError> {
+        Ok(self.root.join(asset_file_name(hash)?))
+    }
+}
+
 impl LibraryIssue {
     pub fn item_id(&self) -> &ElementId {
         match &self.item {
@@ -183,6 +265,100 @@ pub fn resync_item(
         LibraryItem::Material(id) => resync_material(project, library, library_content_hash, &id),
         LibraryItem::System(id) => resync_system(project, library, library_content_hash, &id),
     }
+}
+
+pub fn asset_content_hash(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+}
+
+pub fn referenced_asset_hashes(project: &BuildingModel) -> BTreeSet<String> {
+    let mut hashes = BTreeSet::new();
+    for material in &project.materials {
+        match &material.appearance {
+            Appearance::SolidColor(_) => {}
+            Appearance::Textured { texture, .. } => {
+                hashes.insert(texture.hash.clone());
+            }
+            Appearance::DepthMapped { height, .. } => {
+                hashes.insert(height.hash.clone());
+            }
+        }
+    }
+    hashes
+}
+
+pub fn collect_project_assets(
+    project: &BuildingModel,
+    store: &ContentAddressedAssetStore,
+) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
+    let mut assets = BTreeMap::new();
+    for hash in referenced_asset_hashes(project) {
+        let Some(bytes) = store.get(&hash)? else {
+            continue;
+        };
+        assets.insert(hash, bytes);
+    }
+    Ok(assets)
+}
+
+pub fn save_project_package(
+    project: &BuildingModel,
+    assets: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, LibraryImportError> {
+    let project_json = save_project(project)?;
+    let mut entries = BTreeMap::new();
+    entries.insert("project.framer".to_owned(), project_json.into_bytes());
+
+    let manifest = package_manifest(assets)?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)? + "\n";
+    entries.insert("manifest.json".to_owned(), manifest_json.into_bytes());
+
+    for (hash, bytes) in assets {
+        verify_asset_hash(hash, bytes)?;
+        entries.insert(asset_package_path(hash)?, bytes.clone());
+    }
+
+    write_stored_zip(&entries)
+}
+
+pub fn save_project_package_from_store(
+    project: &BuildingModel,
+    store: &ContentAddressedAssetStore,
+) -> Result<Vec<u8>, LibraryImportError> {
+    let assets = collect_project_assets(project, store)?;
+    save_project_package(project, &assets)
+}
+
+pub fn load_project_package(bytes: &[u8]) -> Result<ProjectPackage, LibraryImportError> {
+    let entries = read_stored_zip(bytes)?;
+    let project_bytes = entries
+        .get("project.framer")
+        .ok_or(LibraryImportError::PackageProjectMissing)?;
+    let project_source = std::str::from_utf8(project_bytes)
+        .map_err(|source| LibraryImportError::PackageUtf8 { source })?;
+    let project = load_project(project_source)?;
+
+    let manifest_bytes = entries
+        .get("manifest.json")
+        .ok_or(LibraryImportError::PackageManifestMissing)?;
+    let manifest_source = std::str::from_utf8(manifest_bytes)
+        .map_err(|source| LibraryImportError::PackageUtf8 { source })?;
+    let manifest: PackageManifest = serde_json::from_str(manifest_source)?;
+    validate_manifest(&manifest)?;
+
+    let mut assets = BTreeMap::new();
+    for asset in &manifest.assets {
+        let bytes =
+            entries
+                .get(&asset.path)
+                .ok_or_else(|| LibraryImportError::PackageAssetMissing {
+                    path: asset.path.clone(),
+                })?;
+        verify_asset_hash(&asset.hash, bytes)?;
+        assets.insert(asset.hash.clone(), bytes.clone());
+    }
+
+    Ok(ProjectPackage { project, assets })
 }
 
 pub fn import_material(
@@ -848,6 +1024,202 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
+fn package_manifest(
+    assets: &BTreeMap<String, Vec<u8>>,
+) -> Result<PackageManifest, LibraryImportError> {
+    let mut entries = Vec::with_capacity(assets.len());
+    for (hash, bytes) in assets {
+        verify_asset_hash(hash, bytes)?;
+        entries.push(PackageAssetEntry {
+            hash: hash.clone(),
+            path: asset_package_path(hash)?,
+        });
+    }
+    Ok(PackageManifest {
+        format: PACKAGE_FORMAT.to_owned(),
+        schema_version: PACKAGE_SCHEMA_VERSION,
+        project: "project.framer".to_owned(),
+        assets: entries,
+    })
+}
+
+fn validate_manifest(manifest: &PackageManifest) -> Result<(), LibraryImportError> {
+    if manifest.format != PACKAGE_FORMAT {
+        return Err(LibraryImportError::InvalidPackageFormat {
+            found: manifest.format.clone(),
+        });
+    }
+    if manifest.schema_version != PACKAGE_SCHEMA_VERSION {
+        return Err(LibraryImportError::UnsupportedPackageSchemaVersion {
+            found: manifest.schema_version,
+            supported: PACKAGE_SCHEMA_VERSION,
+        });
+    }
+    if manifest.project != "project.framer" {
+        return Err(LibraryImportError::InvalidPackageProjectPath {
+            path: manifest.project.clone(),
+        });
+    }
+    for asset in &manifest.assets {
+        validate_asset_hash(&asset.hash)?;
+        let expected_path = asset_package_path(&asset.hash)?;
+        if asset.path != expected_path {
+            return Err(LibraryImportError::InvalidPackageAssetPath {
+                hash: asset.hash.clone(),
+                path: asset.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_asset_hash(expected: &str, bytes: &[u8]) -> Result<(), LibraryImportError> {
+    validate_asset_hash(expected)?;
+    let actual = asset_content_hash(bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(LibraryImportError::AssetHashMismatch {
+            expected: expected.to_owned(),
+            actual,
+        })
+    }
+}
+
+fn validate_asset_hash(hash: &str) -> Result<(), LibraryImportError> {
+    if is_blake3_hash(hash) {
+        Ok(())
+    } else {
+        Err(LibraryImportError::InvalidAssetHash {
+            hash: hash.to_owned(),
+        })
+    }
+}
+
+fn asset_file_name(hash: &str) -> Result<String, LibraryImportError> {
+    validate_asset_hash(hash)?;
+    let hex = hash
+        .strip_prefix("blake3:")
+        .expect("validated asset hash must carry the blake3 prefix");
+    Ok(format!("blake3-{hex}"))
+}
+
+fn asset_package_path(hash: &str) -> Result<String, LibraryImportError> {
+    Ok(format!("assets/{}", asset_file_name(hash)?))
+}
+
+fn write_stored_zip(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, LibraryImportError> {
+    u16::try_from(entries.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .unix_permissions(0o644)
+        .large_file(false);
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+
+    for (name, bytes) in entries {
+        validate_package_zip_entry_name(name)?;
+        u32::try_from(bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        zip.start_file(name, options).map_err(package_zip_error)?;
+        zip.write_all(bytes).map_err(package_zip_io_error)?;
+    }
+
+    let out = zip.finish().map_err(package_zip_error)?;
+    Ok(out.into_inner())
+}
+
+fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
+    let streamed_names = read_streamed_zip_entry_names(bytes)?;
+
+    let cursor = Cursor::new(bytes);
+    let mut zip = ZipArchive::new(cursor).map_err(package_zip_error)?;
+    u16::try_from(zip.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+    if zip.len() != streamed_names.len() {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "package central directory entries do not match local file entries".to_owned(),
+        ));
+    }
+    let mut entries = BTreeMap::new();
+    for index in 0..zip.len() {
+        let mut file = zip.by_index(index).map_err(package_zip_error)?;
+        let name = file.name().to_owned();
+        validate_package_zip_entry_name(&name)?;
+        if !streamed_names.contains(&name) {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package central directory entry {name:?} has no matching local file entry"
+            )));
+        }
+        if !file.is_file() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} is not a regular file"
+            )));
+        }
+        if file.compression() != CompressionMethod::Stored {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} is not stored"
+            )));
+        }
+        if file.compressed_size() != file.size() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "stored package entry {name:?} has mismatched sizes"
+            )));
+        }
+        let size = usize::try_from(file.size()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        let mut data = Vec::with_capacity(size.min(bytes.len()));
+        file.read_to_end(&mut data).map_err(package_zip_io_error)?;
+        if data.len() != size {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} length mismatch"
+            )));
+        }
+        if entries.insert(name.clone(), data).is_some() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "duplicate package entry {name:?}"
+            )));
+        }
+    }
+
+    Ok(entries)
+}
+
+fn read_streamed_zip_entry_names(bytes: &[u8]) -> Result<BTreeSet<String>, LibraryImportError> {
+    let mut cursor = Cursor::new(bytes);
+    let mut names = BTreeSet::new();
+    while let Some(file) = read_zipfile_from_stream(&mut cursor).map_err(package_zip_error)? {
+        let name = file.name().to_owned();
+        validate_package_zip_entry_name(&name)?;
+        if !names.insert(name.clone()) {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "duplicate package entry {name:?}"
+            )));
+        }
+    }
+    Ok(names)
+}
+
+fn validate_package_zip_entry_name(name: &str) -> Result<(), LibraryImportError> {
+    let invalid = name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..");
+    if invalid {
+        return Err(LibraryImportError::InvalidPackageZip(format!(
+            "invalid package entry name {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn package_zip_error(error: zip::result::ZipError) -> LibraryImportError {
+    LibraryImportError::InvalidPackageZip(error.to_string())
+}
+
+fn package_zip_io_error(error: io::Error) -> LibraryImportError {
+    LibraryImportError::InvalidPackageZip(error.to_string())
+}
+
 fn read_library_source(path: &Path) -> Result<String, LibraryImportError> {
     fs::read_to_string(path).map_err(|source| LibraryImportError::Io {
         path: path.to_path_buf(),
@@ -929,6 +1301,8 @@ pub enum LibraryImportError {
     #[error(transparent)]
     Library(#[from] LibraryError),
     #[error(transparent)]
+    Project(#[from] ProjectError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Model(#[from] ModelError),
@@ -959,16 +1333,44 @@ pub enum LibraryImportError {
     ItemHasNoLibrarySource { id: ElementId },
     #[error("library uid mismatch: item references {expected:?}, got {actual:?}")]
     LibraryUidMismatch { expected: String, actual: String },
+    #[error("asset hash {hash:?} must be a full lowercase blake3:<hex> content hash")]
+    InvalidAssetHash { hash: String },
+    #[error("asset content hash mismatch: expected {expected}, got {actual}")]
+    AssetHashMismatch { expected: String, actual: String },
+    #[error("invalid Framer package format {found:?}")]
+    InvalidPackageFormat { found: String },
+    #[error("unsupported Framer package schema version {found}; this build supports {supported}")]
+    UnsupportedPackageSchemaVersion { found: u32, supported: u32 },
+    #[error("package project path must be project.framer, got {path:?}")]
+    InvalidPackageProjectPath { path: String },
+    #[error("asset {hash:?} has invalid package path {path:?}")]
+    InvalidPackageAssetPath { hash: String, path: String },
+    #[error("package is missing project.framer")]
+    PackageProjectMissing,
+    #[error("package is missing manifest.json")]
+    PackageManifestMissing,
+    #[error("package is missing asset entry {path:?}")]
+    PackageAssetMissing { path: String },
+    #[error("package text is not valid UTF-8")]
+    PackageUtf8 { source: std::str::Utf8Error },
+    #[error("invalid Framer package zip: {0}")]
+    InvalidPackageZip(String),
+    #[error("Framer package is too large for the v1 zip writer")]
+    PackageTooLarge,
 }
 
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        BoardProfile, CodeProfile, ConstructionLayer, FramingPattern, FramingSpec, LayerFunction,
-        Length, ModelError, SystemKind, load_project, save_project,
+        Appearance, AssetRef, BoardProfile, CodeProfile, ConstructionLayer, FramingPattern,
+        FramingSpec, LayerFunction, Length, ModelError, SystemKind, TextureRole, load_project,
+        save_project,
     };
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn fixture_library() -> Library {
         Library {
@@ -1007,6 +1409,111 @@ mod tests {
         }
     }
 
+    fn temp_path(name: &str) -> PathBuf {
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("framer-library-{name}-{}-{id}", std::process::id()))
+    }
+
+    fn textured_project() -> (BuildingModel, BTreeMap<String, Vec<u8>>) {
+        let bytes = b"not-a-real-png-but-content-addressed".to_vec();
+        let hash = asset_content_hash(&bytes);
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut material = Material::solid_color("mat-textured", "Textured", [48, 96, 144]);
+        material.appearance = Appearance::Textured {
+            color: [48, 96, 144],
+            texture: AssetRef::new(hash.clone(), "image/png", TextureRole::Texture),
+            scale: Length::from_whole_inches(24),
+        };
+        model.materials.push(material);
+
+        let mut assets = BTreeMap::new();
+        assets.insert(hash, bytes);
+        (model, assets)
+    }
+
+    fn package_entries(
+        model: &BuildingModel,
+        assets: &BTreeMap<String, Vec<u8>>,
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "project.framer".to_owned(),
+            save_project(model).unwrap().into_bytes(),
+        );
+        entries.insert(
+            "manifest.json".to_owned(),
+            manifest_bytes(&package_manifest(assets).unwrap()),
+        );
+        for (hash, bytes) in assets {
+            entries.insert(asset_package_path(hash).unwrap(), bytes.clone());
+        }
+        entries
+    }
+
+    fn manifest_bytes(manifest: &PackageManifest) -> Vec<u8> {
+        (serde_json::to_string_pretty(manifest).unwrap() + "\n").into_bytes()
+    }
+
+    fn test_zip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+        let entries = entries
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        test_zip_entries(&entries)
+    }
+
+    fn test_zip_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .last_modified_time(DateTime::default());
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn set_zip_u16_after_signature(
+        bytes: &mut [u8],
+        signature: &[u8; 4],
+        offset: usize,
+        value: u16,
+    ) {
+        for index in 0..bytes.len().saturating_sub(signature.len() + offset + 1) {
+            if bytes[index..].starts_with(signature) {
+                bytes[index + offset..index + offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    fn replace_central_zip_name(bytes: &mut [u8], from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let name_offset = 46;
+        for index in 0..bytes.len().saturating_sub(name_offset + from.len()) {
+            if bytes[index..].starts_with(b"PK\x01\x02") {
+                let name_start = index + name_offset;
+                let name_end = name_start + from.len();
+                if &bytes[name_start..name_end] == from {
+                    bytes[name_start..name_end].copy_from_slice(to);
+                }
+            }
+        }
+    }
+
+    fn set_zip_u32_after_signature(
+        bytes: &mut [u8],
+        signature: &[u8; 4],
+        offset: usize,
+        value: u32,
+    ) {
+        for index in 0..bytes.len().saturating_sub(signature.len() + offset + 3) {
+            if bytes[index..].starts_with(signature) {
+                bytes[index + offset..index + offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
     #[test]
     fn starter_library_hash_is_golden() {
         let loaded = starter_library().unwrap();
@@ -1038,6 +1545,278 @@ mod tests {
             load_verified_library(&bad),
             Err(LibraryImportError::ContentHashMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn content_addressed_asset_store_writes_by_blake3_hash() {
+        let root = temp_path("cas");
+        let store = ContentAddressedAssetStore::new(&root);
+        let bytes = b"asset-bytes";
+        let missing_hash = asset_content_hash(b"missing-asset");
+
+        let hash = store.put(bytes).unwrap();
+
+        assert_eq!(hash, asset_content_hash(bytes));
+        assert!(store.contains(&hash).unwrap());
+        assert_eq!(store.get(&hash).unwrap(), Some(bytes.to_vec()));
+        assert!(store.get(&missing_hash).unwrap().is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_addressed_asset_store_rejects_tampered_cached_bytes() {
+        let root = temp_path("cas-tampered");
+        let store = ContentAddressedAssetStore::new(&root);
+        let hash = store.put(b"asset-bytes").unwrap();
+        fs::write(
+            store.root().join(asset_file_name(&hash).unwrap()),
+            b"tampered-bytes",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.get(&hash),
+            Err(LibraryImportError::AssetHashMismatch { expected, .. }) if expected == hash
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_package_is_deterministic_and_round_trips_assets() {
+        let (model, assets) = textured_project();
+
+        let first = save_project_package(&model, &assets).unwrap();
+        let second = save_project_package(&model, &assets).unwrap();
+        assert_eq!(first, second);
+
+        let loaded = load_project_package(&first).unwrap();
+        assert_eq!(
+            save_project(&loaded.project).unwrap(),
+            save_project(&model).unwrap()
+        );
+        assert_eq!(loaded.assets, assets);
+    }
+
+    #[test]
+    fn project_package_rejects_unsafe_zip_entry_names() {
+        let mut entries = BTreeMap::new();
+        entries.insert("../project.framer".to_owned(), b"{}".to_vec());
+        let package = test_zip(&entries);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_zip_bytes() {
+        assert!(matches!(
+            load_project_package(b"not a zip"),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_non_stored_zip_entries() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u16_after_signature(&mut package, b"PK\x03\x04", 8, 8);
+        set_zip_u16_after_signature(&mut package, b"PK\x01\x02", 10, 8);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_duplicate_zip_entry_names() {
+        let mut package = test_zip_entries(&[
+            ("project.framer", br#"{"first":true}"#),
+            ("projecu.framer", br#"{"second":true}"#),
+        ]);
+        replace_central_zip_name(&mut package, b"projecu.framer", b"project.framer");
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_zip_symlink_entries() {
+        let mut package = test_zip_entries(&[("project.framer", b"target")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 38, 0o120777 << 16);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_stored_size_mismatch() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 20, 1);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_forged_large_stored_size_without_large_allocation() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 20, u32::MAX);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 24, u32::MAX);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_project_entry() {
+        let (model, assets) = textured_project();
+
+        let mut missing_project = package_entries(&model, &assets);
+        missing_project.remove("project.framer");
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_project)),
+            Err(LibraryImportError::PackageProjectMissing)
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_manifest_entry() {
+        let (model, assets) = textured_project();
+
+        let mut missing_manifest = package_entries(&model, &assets);
+        missing_manifest.remove("manifest.json");
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_manifest)),
+            Err(LibraryImportError::PackageManifestMissing)
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_missing_asset_entry() {
+        let (model, assets) = textured_project();
+
+        let mut missing_asset = package_entries(&model, &assets);
+        let asset_path = missing_asset
+            .keys()
+            .find(|path| path.starts_with("assets/"))
+            .unwrap()
+            .clone();
+        missing_asset.remove(&asset_path);
+        assert!(matches!(
+            load_project_package(&test_zip(&missing_asset)),
+            Err(LibraryImportError::PackageAssetMissing { path }) if path == asset_path
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_tampered_asset_bytes_on_load() {
+        let (model, assets) = textured_project();
+        let hash = assets.keys().next().unwrap().clone();
+        let asset_path = asset_package_path(&hash).unwrap();
+        let mut entries = package_entries(&model, &assets);
+        entries.insert(asset_path, b"different-bytes".to_vec());
+
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::AssetHashMismatch { expected, .. }) if expected == hash
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_format() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+        let mut manifest = package_manifest(&assets).unwrap();
+
+        manifest.format = "wrong.package".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageFormat { found }) if found == "wrong.package"
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_unsupported_manifest_schema_version() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.schema_version = PACKAGE_SCHEMA_VERSION + 1;
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::UnsupportedPackageSchemaVersion { found, supported })
+                if found == PACKAGE_SCHEMA_VERSION + 1 && supported == PACKAGE_SCHEMA_VERSION
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_project_path() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.project = "other.framer".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageProjectPath { path }) if path == "other.framer"
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_invalid_manifest_asset_path() {
+        let (model, assets) = textured_project();
+        let mut entries = package_entries(&model, &assets);
+        let mut manifest = package_manifest(&assets).unwrap();
+        manifest.assets[0].path = "assets/not-the-content-hash".to_owned();
+        entries.insert("manifest.json".to_owned(), manifest_bytes(&manifest));
+
+        assert!(matches!(
+            load_project_package(&test_zip(&entries)),
+            Err(LibraryImportError::InvalidPackageAssetPath { path, .. })
+                if path == "assets/not-the-content-hash"
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_asset_hash_mismatch() {
+        let (model, mut assets) = textured_project();
+        let hash = assets.keys().next().unwrap().clone();
+        assets.insert(hash, b"different-bytes".to_vec());
+
+        assert!(matches!(
+            save_project_package(&model, &assets),
+            Err(LibraryImportError::AssetHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn project_package_from_store_includes_only_available_referenced_assets() {
+        let root = temp_path("package-store");
+        let store = ContentAddressedAssetStore::new(&root);
+        let (model, assets) = textured_project();
+        let (hash, bytes) = assets.iter().next().unwrap();
+        assert_eq!(store.put(bytes).unwrap(), *hash);
+
+        let package = save_project_package_from_store(&model, &store).unwrap();
+        let loaded = load_project_package(&package).unwrap();
+
+        assert_eq!(loaded.assets, assets);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

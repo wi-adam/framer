@@ -40,8 +40,8 @@ Builds on (cite paths; durable detail in the [spec](../specs/libraries.md)):
 | **4** | Remote / URL libraries (mandatory hash pin, cache-first, fail-closed); provider interface shaped for a future managed/RPC backend. | none |
 | **5** | Furnishings / MEP element families + catalog placement through the same spine. | bump when families land |
 
-Slices 0–1 are the near-term focus. The detailed task breakdown below covers them; later
-slices are sketched and will get their own task detail when scheduled.
+Slices 0–3 are implemented. The detailed task breakdown below records the shippable cuts; later
+slices remain sketched until scheduled.
 
 ### Slice 0 — Library file format + dogfood the starter library
 
@@ -148,11 +148,50 @@ slices are sketched and will get their own task detail when scheduled.
   - Verify: `python3 scripts/check-markdown-links.py`.
   - Commit: `docs(libraries): document update lifecycle`
 
-### Slices 3–5 — sketch (task detail when scheduled)
+### Slice 3 — Binary assets, packages, and render sampling (v8 → v9)
 
-- **Slice 3 (v8 → v9):** `AssetRef` + `Appearance::Textured`/`DepthMapped`; disposable
-  content-addressed asset store; deterministic `.framerpkg`; texture/depth sampling wired into
-  `framer-render` (CPU reference first), keeping `tests/gpu_parity.rs` green.
+- **Task 3.1** — Add hash-only binary asset refs to the core model: `TextureRole`,
+  `AssetRef { hash, media_type, role }`, `Appearance::Textured`, and
+  `Appearance::DepthMapped`, with positive `Length` scale and `blake3:<hex>` validation.
+  - Files: `crates/framer-core/src/model.rs`, `crates/framer-core/src/project.rs`,
+    `crates/framer-core/src/lib.rs`, `crates/framer-core/src/library.rs`.
+  - Verify: `cargo test -p framer-core --locked` — asset-backed material round-trip,
+    invalid-hash rejection, and starter `.framerlib` validation.
+  - Commit: `feat(core)!: add v9 asset-backed material appearances`
+- **Task 3.2** — Run the v9 schema bump ritual: `PROJECT_SCHEMA_VERSION = 9`, explicit v8
+  rejection, regenerated example `.framer` fixtures, and project-file docs.
+  - Files: `crates/framer-core/src/project.rs`, `examples/projects/*.framer`,
+    `docs/project-files.md`.
+  - Verify: `cargo test -p framer-core --locked`.
+  - Commit: `feat(core)!: bump .framer schema to v9 for assets`
+- **Task 3.3** — Add disposable asset/cache and deterministic package APIs in
+  `framer-library`: `ContentAddressedAssetStore`, `referenced_asset_hashes`,
+  `save_project_package`, and `load_project_package`. `.framerpkg` is stored-entry ZIP with
+  sorted paths, zero mtimes, `project.framer`, `manifest.json`, and `assets/blake3-<hex>`.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: `cargo test -p framer-library --locked` — CAS write/read, package determinism,
+    asset hash mismatch rejection, and package round-trip.
+  - Commit: `feat(library): content-addressed assets and deterministic project packages`
+- **Task 3.4** — Wire asset-backed appearances into the renderer. `framer-render` lowers
+  resolved `RenderAssets` into texture/depth materials, samples textures with deterministic
+  world-space projection, and degrades to fallback color when assets are absent. The app GPU
+  shader mirrors the CPU material resolution with texture metadata/texel buffers.
+  - Files: `crates/framer-render/src/material.rs`, `scene.rs`, `build.rs`, `gpu.rs`,
+    `crates/framer-app/src/app/render/pathtrace.wgsl`, `render/mod.rs`,
+    `crates/framer-app/tests/gpu_parity.rs`.
+  - Verify: `cargo test -p framer-render --locked`;
+    `cargo test -p framer-app --test gpu_parity --locked -- --nocapture`.
+  - Commit: `feat(render): sample library material textures and depth maps`
+- **Task 3.5** — Refresh navigation/docs and inspector handling for asset-backed appearances.
+  The material inspector edits fallback color and displays asset refs read-only until an asset
+  picker lands.
+  - Files: `crates/framer-app/src/app/panels.rs`, `docs/specs/libraries.md`,
+    `docs/plans/2026-06-19-libraries.md`, `docs/code-map.md`, `docs/project-files.md`.
+  - Verify: `python3 scripts/check-markdown-links.py`; full workspace gate.
+  - Commit: `docs(libraries): document phase 3 assets and packages`
+
+### Slices 4–5 — sketch (task detail when scheduled)
+
 - **Slice 4:** `Remote { url, hash }` resolver — mandatory pin, cache-first, fail-closed; shape
   the provider interface so a managed/RPC backend slots in (publish/edit catalog remotely;
   consume always pins a snapshot).
@@ -174,8 +213,9 @@ Feature-specific:
 - **Slice 0/1:** `.framerlib` round-trip; **absent-library-still-opens** + **no-library body
   byte-identical after the v8 bump** tests; golden-hash regression; namespacing-closure tests;
   regenerated example fixtures; `python3 scripts/check-markdown-links.py` for doc edits.
-- **Slice 3:** `cargo test -p framer-app --test gpu_parity` stays green after asset sampling;
-  deterministic-zip test for `.framerpkg`.
+- **Slice 3:** asset appearance round-trip + v8 rejection; deterministic `.framerpkg` test;
+  texture/depth sampling tests in `framer-render`; `cargo test -p framer-app --test gpu_parity`
+  stays green after asset sampling.
 
 When a slice lands, update the spec's **Status** / **Last reviewed**, and refresh affected
 durable docs — [project-files.md](../project-files.md), [code-map.md](../code-map.md) (a "where

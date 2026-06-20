@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Phase 2 implemented · **Linked goal:** G-013 (Libraries) ·
+> **Status:** Phase 3 implemented · **Linked goal:** G-013 (Libraries) ·
 > **Plan:** [2026-06-19 — Libraries](../plans/2026-06-19-libraries.md) ·
 > **Last reviewed:** 2026-06-20
 
@@ -172,7 +172,7 @@ pub enum MaterialSource { Project, Library(Provenance) }
 // Symmetric — same schema bump as the material change:
 pub struct ConstructionSystem { /* … */ pub source: Option<Provenance> }
 
-// Asset seam (later phase; charset/Eq-safe — scale is Length, never f32):
+// Asset seam (phase 3; charset/Eq-safe — scale is Length, never f32):
 pub struct AssetRef { pub hash: String, pub media_type: String, pub role: TextureRole }
 pub enum Appearance {
     SolidColor([u8; 3]),
@@ -244,9 +244,14 @@ closure items.
   remote fetch verifies the hash and writes a content-addressed cache, then behaves like local.
 - **Assets** (textures/depth maps now; meshes later) live in a disposable content-addressed
   store keyed by `blake3` of the bytes; the model holds only the `AssetRef` hash string.
-- **Portable bundle** (`.framerpkg`, only once binary assets exist): a deterministic zip
-  (stored entries, sorted paths, zeroed mtimes) of the canonical `project.framer` +
-  `assets/blake3-<hash>` blobs + a manifest. The bare `.framer` stays the primary format.
+- **Portable bundle** (`.framerpkg`): a deterministic zip (stored entries, sorted paths,
+  zeroed mtimes) of the canonical `project.framer` + `assets/blake3-<hash>` blobs + a
+  manifest. The bare `.framer` stays the primary format.
+- **Render v1:** `framer-render` lowers asset-backed appearances only when callers provide a
+  resolved in-memory texture map. Missing assets fall back to the authored color. Textures use a
+  deterministic world-space projection; depth maps currently modulate diffuse albedo as a relief
+  cue rather than displacing geometry. The app GPU shader mirrors the CPU path and keeps
+  GPU↔CPU parity green.
 
 ## Constraints & invariants
 
@@ -287,8 +292,9 @@ This feature must preserve every [architecture invariant](../architecture.md) an
 - **Furnishing/MEP geometry, placement, and drawing.** Only the *spine* (shared `Provenance` +
   per-kind collection pattern) is established early; the element families and drag-and-drop
   catalog placement are a later, larger feature.
-- **Binary asset rendering** (texture/depth sampling in the path tracer) lands after the asset
-  seam, behind GPU↔CPU parity ([render-view.md](render-view.md)).
+- **Geometric displacement / normal mapping.** Phase 3 samples textures and depth maps in the
+  path tracer, but true surface displacement/normal mapping is deferred behind a separate render
+  spec update and GPU↔CPU parity work ([render-view.md](render-view.md)).
 - **A library coordinate registry / namespace authority** — see Open questions.
 
 ## Authenticity & signing (future direction — design-for, not building now)
@@ -347,5 +353,3 @@ here so the substrate stays compatible; the trust-model choices below are open, 
   (collision-negligible, needs no authority) vs a registry-issued UID once the managed/RPC
   backend lands. Also open: whether to record version **lineage** (a parent `version_id`) so we
   can tell *descent* (B derived from A), not just wall-clock *age* — deferred unless needed.
-- **Bundle scope.** Is `.framerpkg` worth shipping, or is "single `.framer` + a shared local
-  asset store" sufficient for the near-term texture/depth-map use case?

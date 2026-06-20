@@ -42,10 +42,15 @@ pub const MAT_KIND_DIFFUSE: u32 = 0;
 pub const MAT_KIND_METAL: u32 = 1;
 pub const MAT_KIND_DIELECTRIC: u32 = 2;
 pub const MAT_KIND_EMISSIVE: u32 = 3;
+pub const MAT_KIND_TEXTURED_DIFFUSE: u32 = 4;
+pub const MAT_KIND_DEPTH_MAPPED_DIFFUSE: u32 = 5;
+pub const GPU_NO_TEXTURE: u32 = u32::MAX;
 
 /// A material for the GPU. `color` is albedo (diffuse/metal) or radiance
 /// (emissive); `tint` is the dielectric transmission tint; `param` is roughness
-/// (metal) or IOR (dielectric). `kind` selects the interpretation. 32 bytes.
+/// (metal) or IOR (dielectric). `kind` selects the interpretation. Texture
+/// indices point into the `GpuTexture` table, with `GPU_NO_TEXTURE` as absent.
+/// 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct GpuMaterial {
@@ -53,6 +58,28 @@ pub struct GpuMaterial {
     pub kind: u32,
     pub tint: [f32; 3],
     pub param: f32,
+    pub texture: u32,
+    pub height: u32,
+    pub scale: f32,
+    pub _pad_tex: u32,
+}
+
+/// Texture metadata for the GPU. Texels are packed in a separate contiguous
+/// storage buffer starting at `offset`. 16 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuTexture {
+    pub offset: u32,
+    pub width: u32,
+    pub height: u32,
+    pub _pad0: u32,
+}
+
+/// One linear RGB texel. 16-byte aligned for storage-buffer portability.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuTexel {
+    pub color: [f32; 4],
 }
 
 /// Per-frame uniforms: camera basis, sun (with precomputed `cos(angular_radius)`
@@ -170,6 +197,8 @@ pub struct GpuScene {
     pub nodes: Vec<GpuBvhNode>,
     pub indices: Vec<u32>,
     pub materials: Vec<GpuMaterial>,
+    pub textures: Vec<GpuTexture>,
+    pub texels: Vec<GpuTexel>,
 }
 
 #[inline]
@@ -185,24 +214,68 @@ impl From<&Material> for GpuMaterial {
                 kind: MAT_KIND_DIFFUSE,
                 tint: [0.0; 3],
                 param: 0.0,
+                texture: GPU_NO_TEXTURE,
+                height: GPU_NO_TEXTURE,
+                scale: 1.0,
+                _pad_tex: 0,
+            },
+            Material::TexturedDiffuse {
+                fallback,
+                texture,
+                scale,
+            } => GpuMaterial {
+                color: arr(fallback),
+                kind: MAT_KIND_TEXTURED_DIFFUSE,
+                tint: [0.0; 3],
+                param: 0.0,
+                texture,
+                height: GPU_NO_TEXTURE,
+                scale,
+                _pad_tex: 0,
+            },
+            Material::DepthMappedDiffuse {
+                albedo,
+                height,
+                scale,
+            } => GpuMaterial {
+                color: arr(albedo),
+                kind: MAT_KIND_DEPTH_MAPPED_DIFFUSE,
+                tint: [0.0; 3],
+                param: 0.0,
+                texture: GPU_NO_TEXTURE,
+                height,
+                scale,
+                _pad_tex: 0,
             },
             Material::Metal { albedo, roughness } => GpuMaterial {
                 color: arr(albedo),
                 kind: MAT_KIND_METAL,
                 tint: [0.0; 3],
                 param: roughness,
+                texture: GPU_NO_TEXTURE,
+                height: GPU_NO_TEXTURE,
+                scale: 1.0,
+                _pad_tex: 0,
             },
             Material::Dielectric { ior, tint } => GpuMaterial {
                 color: [0.0; 3],
                 kind: MAT_KIND_DIELECTRIC,
                 tint: arr(tint),
                 param: ior,
+                texture: GPU_NO_TEXTURE,
+                height: GPU_NO_TEXTURE,
+                scale: 1.0,
+                _pad_tex: 0,
             },
             Material::Emissive { radiance } => GpuMaterial {
                 color: arr(radiance),
                 kind: MAT_KIND_EMISSIVE,
                 tint: [0.0; 3],
                 param: 0.0,
+                texture: GPU_NO_TEXTURE,
+                height: GPU_NO_TEXTURE,
+                scale: 1.0,
+                _pad_tex: 0,
             },
         }
     }
@@ -239,11 +312,40 @@ impl Scene {
             })
             .collect();
         let materials = self.materials.iter().map(GpuMaterial::from).collect();
+        let mut textures = Vec::with_capacity(self.textures.len().max(1));
+        let mut texels = Vec::new();
+        for texture in &self.textures {
+            let offset = texels.len() as u32;
+            textures.push(GpuTexture {
+                offset,
+                width: texture.width,
+                height: texture.height,
+                _pad0: 0,
+            });
+            texels.extend(texture.pixels.iter().map(|pixel| GpuTexel {
+                color: [pixel.x, pixel.y, pixel.z, 1.0],
+            }));
+        }
+        if textures.is_empty() {
+            textures.push(GpuTexture {
+                offset: 0,
+                width: 1,
+                height: 1,
+                _pad0: 0,
+            });
+        }
+        if texels.is_empty() {
+            texels.push(GpuTexel {
+                color: [0.0, 0.0, 0.0, 1.0],
+            });
+        }
         GpuScene {
             triangles,
             nodes,
             indices: self.bvh.indices.clone(),
             materials,
+            textures,
+            texels,
         }
     }
 }
@@ -253,7 +355,7 @@ mod tests {
     use super::*;
     use crate::camera::Camera;
     use crate::geom::Triangle;
-    use crate::material::Material;
+    use crate::material::{Material, Texture};
     use crate::math::Vec3;
     use crate::scene::{DirectionalSun, Scene, Sky};
     use std::mem::size_of;
@@ -264,12 +366,16 @@ mod tests {
     fn struct_sizes_match_wgsl_layout() {
         assert_eq!(size_of::<GpuTriangle>(), 64);
         assert_eq!(size_of::<GpuBvhNode>(), 32);
-        assert_eq!(size_of::<GpuMaterial>(), 32);
+        assert_eq!(size_of::<GpuMaterial>(), 48);
+        assert_eq!(size_of::<GpuTexture>(), 16);
+        assert_eq!(size_of::<GpuTexel>(), 16);
         assert_eq!(size_of::<GpuUniforms>(), 192);
         for s in [
             size_of::<GpuTriangle>(),
             size_of::<GpuBvhNode>(),
             size_of::<GpuMaterial>(),
+            size_of::<GpuTexture>(),
+            size_of::<GpuTexel>(),
             size_of::<GpuUniforms>(),
         ] {
             assert_eq!(s % 16, 0, "size {s} not a multiple of 16");
@@ -308,6 +414,58 @@ mod tests {
         assert_eq!(gpu.nodes.len(), scene.bvh.nodes.len());
         assert_eq!(gpu.indices, scene.bvh.indices);
         assert_eq!(gpu.materials.len(), scene.materials.len());
+        assert_eq!(gpu.textures.len(), 1);
+        assert_eq!(gpu.texels.len(), 1);
+    }
+
+    #[test]
+    fn to_gpu_flattens_texture_metadata_and_texels() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        let green = Vec3::new(0.0, 1.0, 0.0);
+        let blue = Vec3::new(0.0, 0.0, 1.0);
+        let white = Vec3::splat(1.0);
+        let mut scene = one_tri_scene();
+        scene.textures = vec![
+            Texture::new(2, 1, vec![red, green]),
+            Texture::new(1, 2, vec![blue, white]),
+        ];
+
+        let gpu = scene.to_gpu();
+
+        assert_eq!(
+            gpu.textures,
+            vec![
+                GpuTexture {
+                    offset: 0,
+                    width: 2,
+                    height: 1,
+                    _pad0: 0,
+                },
+                GpuTexture {
+                    offset: 2,
+                    width: 1,
+                    height: 2,
+                    _pad0: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            gpu.texels,
+            vec![
+                GpuTexel {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                GpuTexel {
+                    color: [0.0, 1.0, 0.0, 1.0],
+                },
+                GpuTexel {
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+                GpuTexel {
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -355,6 +513,26 @@ mod tests {
         });
         assert_eq!(emit.kind, MAT_KIND_EMISSIVE);
         assert_eq!(emit.color, [3.0, 2.0, 1.0]);
+
+        let textured = GpuMaterial::from(&Material::TexturedDiffuse {
+            fallback: Vec3::new(0.1, 0.2, 0.3),
+            texture: 7,
+            scale: 24.0,
+        });
+        assert_eq!(textured.kind, MAT_KIND_TEXTURED_DIFFUSE);
+        assert_eq!(textured.color, [0.1, 0.2, 0.3]);
+        assert_eq!(textured.texture, 7);
+        assert_eq!(textured.scale, 24.0);
+
+        let depth = GpuMaterial::from(&Material::DepthMappedDiffuse {
+            albedo: Vec3::new(0.3, 0.4, 0.5),
+            height: 9,
+            scale: 16.0,
+        });
+        assert_eq!(depth.kind, MAT_KIND_DEPTH_MAPPED_DIFFUSE);
+        assert_eq!(depth.color, [0.3, 0.4, 0.5]);
+        assert_eq!(depth.height, 9);
+        assert_eq!(depth.scale, 16.0);
     }
 
     #[test]

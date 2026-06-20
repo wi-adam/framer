@@ -37,6 +37,7 @@ impl Library {
         for material in &self.materials {
             validate_element_id(&material.id)?;
             insert_unique_id(&mut ids, &material.id)?;
+            material.validate()?;
             material_lookup.insert(material.id.clone(), material);
         }
 

@@ -21,6 +21,20 @@ use crate::sampling::{
 pub enum Material {
     /// Lambertian diffuse reflector.
     Diffuse { albedo: Vec3 },
+    /// Lambertian reflector with a content-addressed texture, sampled by the
+    /// scene when an asset store has resolved it.
+    TexturedDiffuse {
+        fallback: Vec3,
+        texture: u32,
+        scale: f32,
+    },
+    /// A v1 depth-map appearance. Until geometry displacement lands, the height
+    /// map modulates diffuse albedo as a deterministic relief cue.
+    DepthMappedDiffuse {
+        albedo: Vec3,
+        height: u32,
+        scale: f32,
+    },
     /// GGX microfacet conductor; `albedo` is the F0 reflectance, `roughness` in
     /// `[0, 1]` (perceptual; squared internally for the GGX alpha).
     Metal { albedo: Vec3, roughness: f32 },
@@ -29,6 +43,67 @@ pub enum Material {
     Dielectric { ior: f32, tint: Vec3 },
     /// Emitter — a light source. Terminal (does not scatter).
     Emissive { radiance: Vec3 },
+}
+
+/// Decoded, CPU/GPU-shareable texture data. Pixels are linear RGB values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Texture {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<Vec3>,
+}
+
+impl Texture {
+    pub fn new(width: u32, height: u32, pixels: Vec<Vec3>) -> Self {
+        assert!(width > 0, "texture width must be positive");
+        assert!(height > 0, "texture height must be positive");
+        assert_eq!(
+            pixels.len(),
+            width as usize * height as usize,
+            "texture pixel count must match dimensions"
+        );
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    pub fn from_rgb8(width: u32, height: u32, bytes: &[u8]) -> Self {
+        assert_eq!(
+            bytes.len(),
+            width as usize * height as usize * 3,
+            "rgb8 byte count must match dimensions"
+        );
+        let pixels = bytes
+            .chunks_exact(3)
+            .map(|rgb| {
+                Vec3::new(
+                    srgb_to_linear(rgb[0]),
+                    srgb_to_linear(rgb[1]),
+                    srgb_to_linear(rgb[2]),
+                )
+            })
+            .collect();
+        Self::new(width, height, pixels)
+    }
+
+    pub fn sample_repeat_nearest(&self, u: f32, v: f32) -> Vec3 {
+        let x = (u - u.floor()) * self.width as f32;
+        let y = (v - v.floor()) * self.height as f32;
+        let xi = (x as u32).min(self.width - 1);
+        let yi = (y as u32).min(self.height - 1);
+        self.pixels[(yi * self.width + xi) as usize]
+    }
+}
+
+pub(crate) fn srgb_to_linear(value: u8) -> f32 {
+    let c = value as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// The result of scattering a ray off a surface.
@@ -65,7 +140,11 @@ impl Material {
     #[inline]
     pub fn diffuse_albedo(&self) -> Option<Vec3> {
         match self {
-            Material::Diffuse { albedo } => Some(*albedo),
+            Material::Diffuse { albedo }
+            | Material::TexturedDiffuse {
+                fallback: albedo, ..
+            }
+            | Material::DepthMappedDiffuse { albedo, .. } => Some(*albedo),
             _ => None,
         }
     }
@@ -77,7 +156,11 @@ impl Material {
         match self {
             Material::Emissive { .. } => None,
 
-            Material::Diffuse { albedo } => {
+            Material::Diffuse { albedo }
+            | Material::TexturedDiffuse {
+                fallback: albedo, ..
+            }
+            | Material::DepthMappedDiffuse { albedo, .. } => {
                 let onb = Onb::from_normal(hit.normal);
                 let local = cosine_sample_hemisphere(rng);
                 let dir = onb.to_world(local).normalize();
@@ -220,6 +303,19 @@ mod tests {
             assert!((s.throughput - albedo).length() < 1e-5);
             assert!(s.pdf > 0.0);
         }
+    }
+
+    #[test]
+    fn texture_repeat_nearest_wraps_negative_and_overflow_uvs() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        let green = Vec3::new(0.0, 1.0, 0.0);
+        let blue = Vec3::new(0.0, 0.0, 1.0);
+        let yellow = Vec3::new(1.0, 1.0, 0.0);
+        let texture = Texture::new(2, 2, vec![red, green, blue, yellow]);
+
+        assert_eq!(texture.sample_repeat_nearest(-0.25, 0.25), green);
+        assert_eq!(texture.sample_repeat_nearest(1.25, 1.75), blue);
+        assert_eq!(texture.sample_repeat_nearest(-0.25, -0.25), yellow);
     }
 
     #[test]

@@ -89,6 +89,11 @@ impl Vec3 {
     }
 
     #[inline]
+    pub fn luminance(self) -> f32 {
+        self.x * 0.2126 + self.y * 0.7152 + self.z * 0.0722
+    }
+
+    #[inline]
     pub fn min_component(self) -> f32 {
         self.x.min(self.y).min(self.z)
     }

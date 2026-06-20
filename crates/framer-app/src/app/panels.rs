@@ -2718,13 +2718,32 @@ fn system_summary(
         });
 }
 
-/// Appearance editor for a material. Returns whether it changed. Currently the
-/// only `Appearance` variant is `SolidColor`, edited via an sRGB color button.
+/// Appearance editor for a material. Returns whether it changed. Asset-backed
+/// appearances keep their binary refs read-only here; the fallback color remains
+/// editable.
 fn material_appearance_editor(ui: &mut Ui, material: &mut framer_core::Material) -> bool {
     let mut changed = false;
     property_row(ui, "Appearance", |ui| match &mut material.appearance {
         framer_core::Appearance::SolidColor(rgb) => {
             changed |= ui.color_edit_button_srgb(rgb).changed();
+        }
+        framer_core::Appearance::Textured {
+            color,
+            texture,
+            scale,
+        } => {
+            changed |= ui.color_edit_button_srgb(color).changed();
+            ui.label(format!("texture · {} · {}", texture.media_type, scale));
+            ui.monospace(&texture.hash);
+        }
+        framer_core::Appearance::DepthMapped {
+            color,
+            height,
+            scale,
+        } => {
+            changed |= ui.color_edit_button_srgb(color).changed();
+            ui.label(format!("height · {} · {}", height.media_type, scale));
+            ui.monospace(&height.hash);
         }
     });
     changed
