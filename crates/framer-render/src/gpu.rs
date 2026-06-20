@@ -355,7 +355,7 @@ mod tests {
     use super::*;
     use crate::camera::Camera;
     use crate::geom::Triangle;
-    use crate::material::Material;
+    use crate::material::{Material, Texture};
     use crate::math::Vec3;
     use crate::scene::{DirectionalSun, Scene, Sky};
     use std::mem::size_of;
@@ -416,6 +416,56 @@ mod tests {
         assert_eq!(gpu.materials.len(), scene.materials.len());
         assert_eq!(gpu.textures.len(), 1);
         assert_eq!(gpu.texels.len(), 1);
+    }
+
+    #[test]
+    fn to_gpu_flattens_texture_metadata_and_texels() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        let green = Vec3::new(0.0, 1.0, 0.0);
+        let blue = Vec3::new(0.0, 0.0, 1.0);
+        let white = Vec3::splat(1.0);
+        let mut scene = one_tri_scene();
+        scene.textures = vec![
+            Texture::new(2, 1, vec![red, green]),
+            Texture::new(1, 2, vec![blue, white]),
+        ];
+
+        let gpu = scene.to_gpu();
+
+        assert_eq!(
+            gpu.textures,
+            vec![
+                GpuTexture {
+                    offset: 0,
+                    width: 2,
+                    height: 1,
+                    _pad0: 0,
+                },
+                GpuTexture {
+                    offset: 2,
+                    width: 1,
+                    height: 2,
+                    _pad0: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            gpu.texels,
+            vec![
+                GpuTexel {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                GpuTexel {
+                    color: [0.0, 1.0, 0.0, 1.0],
+                },
+                GpuTexel {
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+                GpuTexel {
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ]
+        );
     }
 
     #[test]
