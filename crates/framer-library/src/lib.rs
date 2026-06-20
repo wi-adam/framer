@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
+    io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -12,6 +13,7 @@ use framer_core::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
 pub const PACKAGE_FORMAT: &str = "framer.package";
@@ -1115,259 +1117,89 @@ fn asset_package_path(hash: &str) -> Result<String, LibraryImportError> {
     Ok(format!("assets/{}", asset_file_name(hash)?))
 }
 
-#[derive(Debug)]
-struct ZipCentralEntry {
-    name: String,
-    crc32: u32,
-    size: u32,
-    local_offset: u32,
-}
-
 fn write_stored_zip(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, LibraryImportError> {
-    let mut out = Vec::new();
-    let mut central = Vec::with_capacity(entries.len());
+    u16::try_from(entries.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(DateTime::default())
+        .unix_permissions(0o644)
+        .large_file(false);
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
 
     for (name, bytes) in entries {
-        let name_bytes = name.as_bytes();
-        let size = u32::try_from(bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-        let name_len =
-            u16::try_from(name_bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-        let local_offset =
-            u32::try_from(out.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-        let crc32 = crc32(bytes);
-
-        push_u32(&mut out, 0x0403_4b50);
-        push_u16(&mut out, 20);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u32(&mut out, crc32);
-        push_u32(&mut out, size);
-        push_u32(&mut out, size);
-        push_u16(&mut out, name_len);
-        push_u16(&mut out, 0);
-        out.extend_from_slice(name_bytes);
-        out.extend_from_slice(bytes);
-
-        central.push(ZipCentralEntry {
-            name: name.clone(),
-            crc32,
-            size,
-            local_offset,
-        });
+        validate_package_zip_entry_name(name)?;
+        u32::try_from(bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        zip.start_file(name, options).map_err(package_zip_error)?;
+        zip.write_all(bytes).map_err(package_zip_io_error)?;
     }
 
-    let central_offset =
-        u32::try_from(out.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-    for entry in &central {
-        let name_bytes = entry.name.as_bytes();
-        let name_len =
-            u16::try_from(name_bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-        push_u32(&mut out, 0x0201_4b50);
-        push_u16(&mut out, 20);
-        push_u16(&mut out, 20);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u32(&mut out, entry.crc32);
-        push_u32(&mut out, entry.size);
-        push_u32(&mut out, entry.size);
-        push_u16(&mut out, name_len);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u16(&mut out, 0);
-        push_u32(&mut out, 0);
-        push_u32(&mut out, entry.local_offset);
-        out.extend_from_slice(name_bytes);
-    }
-    let central_size = u32::try_from(out.len() - central_offset as usize)
-        .map_err(|_| LibraryImportError::PackageTooLarge)?;
-    let entry_count =
-        u16::try_from(central.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
-
-    push_u32(&mut out, 0x0605_4b50);
-    push_u16(&mut out, 0);
-    push_u16(&mut out, 0);
-    push_u16(&mut out, entry_count);
-    push_u16(&mut out, entry_count);
-    push_u32(&mut out, central_size);
-    push_u32(&mut out, central_offset);
-    push_u16(&mut out, 0);
-
-    Ok(out)
+    let out = zip.finish().map_err(package_zip_error)?;
+    Ok(out.into_inner())
 }
 
 fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
-    let eocd = find_eocd(bytes)?;
-    let entry_count = read_u16(bytes, eocd + 10)? as usize;
-    let central_size = read_u32(bytes, eocd + 12)? as usize;
-    let central_offset = read_u32(bytes, eocd + 16)? as usize;
-    if central_offset
-        .checked_add(central_size)
-        .is_none_or(|end| end > bytes.len())
-    {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "central directory is out of bounds".to_owned(),
-        ));
-    }
-
+    let cursor = Cursor::new(bytes);
+    let mut zip = ZipArchive::new(cursor).map_err(package_zip_error)?;
+    u16::try_from(zip.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
     let mut entries = BTreeMap::new();
-    let mut offset = central_offset;
-    for _ in 0..entry_count {
-        if read_u32(bytes, offset)? != 0x0201_4b50 {
-            return Err(LibraryImportError::InvalidPackageZip(
-                "invalid central directory signature".to_owned(),
-            ));
+    for index in 0..zip.len() {
+        let mut file = zip.by_index(index).map_err(package_zip_error)?;
+        let name = file.name().to_owned();
+        validate_package_zip_entry_name(&name)?;
+        if !file.is_file() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} is not a regular file"
+            )));
         }
-        let method = read_u16(bytes, offset + 10)?;
-        if method != 0 {
-            return Err(LibraryImportError::InvalidPackageZip(
-                "compressed package entries are not supported".to_owned(),
-            ));
+        if file.compression() != CompressionMethod::Stored {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} is not stored"
+            )));
         }
-        let crc = read_u32(bytes, offset + 16)?;
-        let compressed_size = read_u32(bytes, offset + 20)? as usize;
-        let uncompressed_size = read_u32(bytes, offset + 24)? as usize;
-        if compressed_size != uncompressed_size {
-            return Err(LibraryImportError::InvalidPackageZip(
-                "stored entry size mismatch".to_owned(),
-            ));
+        if file.compressed_size() != file.size() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "stored package entry {name:?} has mismatched sizes"
+            )));
         }
-        let name_len = read_u16(bytes, offset + 28)? as usize;
-        let extra_len = read_u16(bytes, offset + 30)? as usize;
-        let comment_len = read_u16(bytes, offset + 32)? as usize;
-        let local_offset = read_u32(bytes, offset + 42)? as usize;
-        let name_start = offset + 46;
-        let name_end = name_start.checked_add(name_len).ok_or_else(|| {
-            LibraryImportError::InvalidPackageZip("entry name overflow".to_owned())
-        })?;
-        let next = name_end
-            .checked_add(extra_len)
-            .and_then(|value| value.checked_add(comment_len))
-            .ok_or_else(|| {
-                LibraryImportError::InvalidPackageZip("central entry overflow".to_owned())
-            })?;
-        if next > bytes.len() {
-            return Err(LibraryImportError::InvalidPackageZip(
-                "central entry is out of bounds".to_owned(),
-            ));
+        let size = usize::try_from(file.size()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        let mut data = Vec::with_capacity(size);
+        file.read_to_end(&mut data).map_err(package_zip_io_error)?;
+        if data.len() != size {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package entry {name:?} length mismatch"
+            )));
         }
-        let name = std::str::from_utf8(&bytes[name_start..name_end])
-            .map_err(|source| LibraryImportError::PackageUtf8 { source })?
-            .to_owned();
-        let data = read_stored_zip_entry(bytes, local_offset, compressed_size, crc)?;
-        entries.insert(name, data);
-        offset = next;
-    }
-
-    if offset != central_offset + central_size {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "central directory length mismatch".to_owned(),
-        ));
+        if entries.insert(name.clone(), data).is_some() {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "duplicate package entry {name:?}"
+            )));
+        }
     }
 
     Ok(entries)
 }
 
-fn read_stored_zip_entry(
-    bytes: &[u8],
-    offset: usize,
-    size: usize,
-    expected_crc: u32,
-) -> Result<Vec<u8>, LibraryImportError> {
-    if read_u32(bytes, offset)? != 0x0403_4b50 {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "invalid local file header signature".to_owned(),
-        ));
+fn validate_package_zip_entry_name(name: &str) -> Result<(), LibraryImportError> {
+    let invalid = name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..");
+    if invalid {
+        return Err(LibraryImportError::InvalidPackageZip(format!(
+            "invalid package entry name {name:?}"
+        )));
     }
-    let method = read_u16(bytes, offset + 8)?;
-    if method != 0 {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "compressed package entries are not supported".to_owned(),
-        ));
-    }
-    let name_len = read_u16(bytes, offset + 26)? as usize;
-    let extra_len = read_u16(bytes, offset + 28)? as usize;
-    let data_start = offset
-        .checked_add(30)
-        .and_then(|value| value.checked_add(name_len))
-        .and_then(|value| value.checked_add(extra_len))
-        .ok_or_else(|| LibraryImportError::InvalidPackageZip("local entry overflow".to_owned()))?;
-    let data_end = data_start
-        .checked_add(size)
-        .ok_or_else(|| LibraryImportError::InvalidPackageZip("entry data overflow".to_owned()))?;
-    if data_end > bytes.len() {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "entry data is out of bounds".to_owned(),
-        ));
-    }
-    let data = bytes[data_start..data_end].to_vec();
-    if crc32(&data) != expected_crc {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "entry crc mismatch".to_owned(),
-        ));
-    }
-    Ok(data)
+    Ok(())
 }
 
-fn find_eocd(bytes: &[u8]) -> Result<usize, LibraryImportError> {
-    if bytes.len() < 22 {
-        return Err(LibraryImportError::InvalidPackageZip(
-            "package is too small".to_owned(),
-        ));
-    }
-    let search_start = bytes.len().saturating_sub(22 + u16::MAX as usize);
-    for offset in (search_start..=bytes.len() - 22).rev() {
-        if bytes[offset..].starts_with(&0x0605_4b50u32.to_le_bytes()) {
-            return Ok(offset);
-        }
-    }
-    Err(LibraryImportError::InvalidPackageZip(
-        "end of central directory not found".to_owned(),
-    ))
+fn package_zip_error(error: zip::result::ZipError) -> LibraryImportError {
+    LibraryImportError::InvalidPackageZip(error.to_string())
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, LibraryImportError> {
-    let end = offset
-        .checked_add(2)
-        .ok_or_else(|| LibraryImportError::InvalidPackageZip("u16 offset overflow".to_owned()))?;
-    let chunk = bytes.get(offset..end).ok_or_else(|| {
-        LibraryImportError::InvalidPackageZip("unexpected end of package".to_owned())
-    })?;
-    Ok(u16::from_le_bytes([chunk[0], chunk[1]]))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, LibraryImportError> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| LibraryImportError::InvalidPackageZip("u32 offset overflow".to_owned()))?;
-    let chunk = bytes.get(offset..end).ok_or_else(|| {
-        LibraryImportError::InvalidPackageZip("unexpected end of package".to_owned())
-    })?;
-    Ok(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-}
-
-fn push_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in bytes {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
+fn package_zip_io_error(error: io::Error) -> LibraryImportError {
+    LibraryImportError::InvalidPackageZip(error.to_string())
 }
 
 fn read_library_source(path: &Path) -> Result<String, LibraryImportError> {
@@ -1643,6 +1475,22 @@ mod tests {
             save_project(&model).unwrap()
         );
         assert_eq!(loaded.assets, assets);
+    }
+
+    #[test]
+    fn project_package_rejects_unsafe_zip_entry_names() {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .last_modified_time(DateTime::default());
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("../project.framer", options).unwrap();
+        zip.write_all(b"{}").unwrap();
+        let package = zip.finish().unwrap().into_inner();
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
     }
 
     #[test]
