@@ -2365,7 +2365,7 @@ fn selected_library_status(
         _ => return None,
     };
 
-    let loaded = framer_library::starter_library().ok();
+    let loaded = framer_library::starter_library_ref().ok();
     let issues = library_issues
         .iter()
         .filter(|issue| issue.item == item)

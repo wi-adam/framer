@@ -538,17 +538,23 @@ pub fn system_content_hash(system: &ConstructionSystem) -> Result<String, Librar
     hash_json(&system)
 }
 
-pub fn starter_library() -> Result<LoadedLibrary, LibraryImportError> {
+pub fn starter_library_ref() -> Result<&'static LoadedLibrary, LibraryImportError> {
     if let Some(library) = STARTER_LIBRARY.get() {
-        return Ok(library.clone());
+        return Ok(library);
     }
 
     let loaded = load_verified_library(&LibraryBytes {
         source: STARTER_LIBRARY_SOURCE.to_owned(),
         expected_hash: None,
     })?;
-    let _ = STARTER_LIBRARY.set(loaded.clone());
-    Ok(loaded)
+    let _ = STARTER_LIBRARY.set(loaded);
+    Ok(STARTER_LIBRARY
+        .get()
+        .expect("starter library should be initialized"))
+}
+
+pub fn starter_library() -> Result<LoadedLibrary, LibraryImportError> {
+    starter_library_ref().cloned()
 }
 
 fn vendor_material(

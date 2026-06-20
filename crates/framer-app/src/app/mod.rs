@@ -1738,11 +1738,11 @@ impl FramerApp {
 fn collect_library_lifecycle_issues(
     model: &BuildingModel,
 ) -> Result<Vec<framer_library::LibraryIssue>, String> {
-    let current_libraries = framer_library::starter_library()
+    let current_libraries = framer_library::starter_library_ref()
         .ok()
-        .map(|loaded| vec![loaded.library])
+        .map(|loaded| std::slice::from_ref(&loaded.library))
         .unwrap_or_default();
-    framer_library::library_lifecycle_issues(model, &current_libraries)
+    framer_library::library_lifecycle_issues(model, current_libraries)
         .map_err(|error| error.to_string())
 }
 
