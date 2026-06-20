@@ -32,6 +32,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # Required even with the OAuth token: the action mints its short-lived,
+      # repo-scoped GitHub App token via OIDC to perform GitHub API calls
+      # (posting review comments). Without it the action fails at auth.
+      id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -60,6 +64,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # Required even with the OAuth token: the action mints its short-lived,
+      # repo-scoped GitHub App token via OIDC to perform GitHub API calls
+      # (posting review comments). Without it the action fails at auth.
+      id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
