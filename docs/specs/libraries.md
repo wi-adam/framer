@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Phase 1 implemented · **Linked goal:** G-013 (Libraries) ·
+> **Status:** Phase 2 implemented · **Linked goal:** G-013 (Libraries) ·
 > **Plan:** [2026-06-19 — Libraries](../plans/2026-06-19-libraries.md) ·
 > **Last reviewed:** 2026-06-20
 
@@ -101,7 +101,7 @@ The observable contract (prefer testable statements):
   independent) vs immutable content versions identified by a content hash (with a human semver
   alongside). Publishing edited content yields a new hash; old hashes stay valid forever.
 - **Content hashing is determinism-critical and pinned.** A fixed, exactly-pinned algorithm
-  (proposed: `blake3`), encoded as full lowercase hex with the algorithm self-described in the
+  (`blake3`), encoded as full lowercase hex with the algorithm self-described in the
   string (`"blake3:<hex>"`), **no truncation**, stored as `Text`, never recomputed at load, and
   guarded by a golden-hash regression test. Two granularities: a **library-version hash** over
   the whole `.framerlib` canonical bytes (on `LibraryStamp`, the content/trust anchor), and an
@@ -216,6 +216,26 @@ owned — so the only rewrites are `system.id` plus each `ConstructionLayer.mate
 `FramingSpec.cavity_material`. **The solver and renderer see nothing new**: a flat,
 locally-unique, fully-resolved `BuildingModel`, exactly as today.
 
+### Update lifecycle
+
+Lifecycle state is derived, never persisted. `framer-library` recomputes an imported material or
+system's provenance-excluded item hash in the original library-local id space, using
+`source_id` and matching vendored material provenance to reverse the project-local remap. A
+fresh import therefore reads "current" even though its project ids differ from the library ids.
+If the recomputed project hash differs from the stamped item hash, the item is **divergent**. If
+an available current library with the same `uid` carries a different source-item hash, the item
+is **out of date**. If the available library no longer carries `source_id`, the item is **source
+missing**. These are surfaced as derived Plan diagnostics; missing libraries simply mean
+out-of-date/source-missing checks are unavailable.
+
+Re-sync is an explicit author-time operation. It replaces the selected vendored material/system
+from the available source library, keeps the project-local id stable, stamps the current
+`version_id` + item hash, and prunes unused `LibraryStamp`s. Re-syncing a system also refreshes
+the material closure it references, preserving existing local material ids where possible and
+minting ids only for newly introduced source materials. Detach clears provenance from the
+selected item, making it project-owned content; it does not delete or rewrite unrelated vendored
+closure items.
+
 ### Resolver, assets, bundle (`framer-library` crate)
 
 - A `Locator` (opaque to core) abstracts origin: `Builtin`, `Local { path }` /
@@ -329,5 +349,3 @@ here so the substrate stays compatible; the trust-model choices below are open, 
   can tell *descent* (B derived from A), not just wall-clock *age* — deferred unless needed.
 - **Bundle scope.** Is `.framerpkg` worth shipping, or is "single `.framer` + a shared local
   asset store" sufficient for the near-term texture/depth-map use case?
-- **Hash crate approval.** Confirm `blake3` (vs `sha2`) as the pinned, determinism-critical
-  dependency and golden-test it on adoption.

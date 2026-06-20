@@ -265,6 +265,16 @@ This metadata is descriptive. Do not make wall/material/system references point
 outside the project; every layer `material`, framing `cavity_material`, and wall
 `system` must still resolve to a local definition in this file.
 
+Library lifecycle state is derived from the embedded definitions plus any
+currently available source library. A vendored item whose project-local content
+no longer matches its stamped source-item hash is reported as locally modified;
+an item whose available source library now has a different source-item hash is
+reported as out of date. Re-sync overwrites the embedded vendored definition from
+the source library while keeping project-local ids stable; Detach clears the
+selected item's provenance so it becomes ordinary project-owned content. None of
+these checks run during `load_project`, and a missing `.framerlib` never blocks
+opening this file.
+
 ## Dimensions
 
 Each wall may carry driving or reference dimensions between wall-local anchors on

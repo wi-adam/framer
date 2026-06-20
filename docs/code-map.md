@@ -20,7 +20,7 @@ framer-core   ─┬─→ framer-solver  ─┐
 | Crate | Responsibility | Depends on | UI? |
 | --- | --- | --- | --- |
 | [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, code profiles, validation, room topology, `.framer` serialization. | — | No |
-| [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap pipeline for `.framerlib` content. | `framer-core` | No |
+| [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
 | [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
@@ -128,7 +128,7 @@ Headless, IO-capable support crate for the [Libraries spec](specs/libraries.md).
 
 | File | Contains |
 | --- | --- |
-| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, and import functions. |
+| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, import functions, lifecycle diagnostics, re-sync, and detach. |
 
 Key entry points:
 
@@ -139,6 +139,13 @@ Key entry points:
 - `import_material` / `import_system` / `import_item` — stage an atomic vendor-on-use import
   into a `BuildingModel`, mint project-local ids, copy referenced material closure, stamp
   `LibraryStamp` + per-item `Provenance`, validate the staged model, then commit it.
+- `library_lifecycle_issues` — detect locally modified, out-of-date, or missing-source
+  vendored materials/systems by recomputing provenance-excluded hashes in source id space.
+- `resync_material` / `resync_system` / `resync_item` — replace a vendored definition from an
+  available library while preserving project-local ids; system re-sync also refreshes the
+  referenced material closure.
+- `detach_material` / `detach_system` / `detach_item` — clear provenance on selected vendored
+  definitions and prune unused library stamps.
 - `LocalSearchPathResolver` — resolves built-in, local path, and installed-library locators.
   Remote locators are represented but intentionally unsupported until the remote/cache phase.
 

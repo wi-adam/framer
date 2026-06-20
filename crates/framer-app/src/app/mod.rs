@@ -25,7 +25,8 @@ use framer_core::{
     load_project as load_project_document, save_project as save_project_document,
 };
 use framer_solver::{
-    FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg, generate_project_plan,
+    DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
+    export_project_svg, generate_project_plan,
 };
 
 use draw_wall::{SnapResult, joins_for_new_wall};
@@ -378,7 +379,8 @@ impl FramerApp {
         self.model.apply_driving_dimensions();
 
         match generate_project_plan(&self.model) {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                append_library_diagnostics(&self.model, &mut plan);
                 self.project_plan = Some(plan);
                 self.error = None;
             }
@@ -1710,6 +1712,59 @@ impl FramerApp {
         if self.workspace_mode.allows_design_edits() && self.viewport_mode == ViewportMode::Plan {
             self.viewport_mode = ViewportMode::Elevation;
         }
+    }
+}
+
+fn append_library_diagnostics(model: &BuildingModel, plan: &mut ProjectFramePlan) {
+    let current_libraries = framer_library::starter_library()
+        .ok()
+        .map(|loaded| vec![loaded.library])
+        .unwrap_or_default();
+    let issues = match framer_library::library_lifecycle_issues(model, &current_libraries) {
+        Ok(issues) => issues,
+        Err(error) => {
+            plan.diagnostics.push(PlanDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: "library.lifecycle.check-failed".to_owned(),
+                source: None,
+                message: format!("Library lifecycle status could not be checked: {error}."),
+            });
+            return;
+        }
+    };
+
+    for issue in issues {
+        let item_kind = match &issue.item {
+            framer_library::LibraryItem::Material(_) => "material",
+            framer_library::LibraryItem::System(_) => "system",
+        };
+        let code = match issue.kind {
+            framer_library::LibraryIssueKind::Diverged => "library.item.diverged",
+            framer_library::LibraryIssueKind::OutOfDate => "library.item.out-of-date",
+            framer_library::LibraryIssueKind::SourceMissing => "library.item.source-missing",
+        };
+        let message = match issue.kind {
+            framer_library::LibraryIssueKind::Diverged => format!(
+                "Library {item_kind} '{}' has local edits; detach it to keep those edits or re-sync it to overwrite them from the source library.",
+                issue.item_id().0
+            ),
+            framer_library::LibraryIssueKind::OutOfDate => format!(
+                "Library {item_kind} '{}' is out of date with source item '{}'.",
+                issue.item_id().0,
+                issue.source_id.0
+            ),
+            framer_library::LibraryIssueKind::SourceMissing => format!(
+                "Library {item_kind} '{}' references source item '{}' which is not present in the available library.",
+                issue.item_id().0,
+                issue.source_id.0
+            ),
+        };
+        plan.diagnostics.push(PlanDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: code.to_owned(),
+            source: Some(issue.item_id().clone()),
+            message,
+        });
     }
 }
 
