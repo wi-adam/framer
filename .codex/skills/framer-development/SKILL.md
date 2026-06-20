@@ -72,3 +72,11 @@ Run a self-review pass before pushing:
 ## PR Follow-Through
 
 After opening a PR, watch CI and PR Review. Treat blocking inline review comments as required work, but still classify advisory/nit comments separately. After fixing review feedback, rerun the local gates that cover the touched area, push a new commit, and watch the latest head run rather than stale runs.
+
+For Claude/PR Review feedback, use thread-aware GitHub reads and close the loop on GitHub, not only in the local commit:
+
+- Fetch unresolved review threads before editing and group them into blocking, advisory, outdated, and already-addressed buckets.
+- For each blocking thread, implement the fix, add/adjust the regression test that would fail without it, and cite the fixing commit/test in a concise thread reply.
+- Resolve threads that are addressed by the pushed code after the relevant local gates pass. If a newer review repeats the same issue, leave or reopen the thread and keep working.
+- Do not resolve advisory/nit threads unless the PR actually implements them; reply only when the disposition is useful.
+- Before final handoff, report the current PR review decision, the latest CI/pr-review run, any unresolved blocking threads, and any unresolved advisories intentionally left open.
