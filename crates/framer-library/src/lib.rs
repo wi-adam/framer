@@ -13,7 +13,10 @@ use framer_core::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
+use zip::{
+    CompressionMethod, DateTime, ZipArchive, ZipWriter, read::read_zipfile_from_stream,
+    write::SimpleFileOptions,
+};
 
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
 pub const PACKAGE_FORMAT: &str = "framer.package";
@@ -1126,14 +1129,26 @@ fn write_stored_zip(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, Libr
 }
 
 fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
+    let streamed_names = read_streamed_zip_entry_names(bytes)?;
+
     let cursor = Cursor::new(bytes);
     let mut zip = ZipArchive::new(cursor).map_err(package_zip_error)?;
     u16::try_from(zip.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+    if zip.len() != streamed_names.len() {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "package central directory entries do not match local file entries".to_owned(),
+        ));
+    }
     let mut entries = BTreeMap::new();
     for index in 0..zip.len() {
         let mut file = zip.by_index(index).map_err(package_zip_error)?;
         let name = file.name().to_owned();
         validate_package_zip_entry_name(&name)?;
+        if !streamed_names.contains(&name) {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "package central directory entry {name:?} has no matching local file entry"
+            )));
+        }
         if !file.is_file() {
             return Err(LibraryImportError::InvalidPackageZip(format!(
                 "package entry {name:?} is not a regular file"
@@ -1165,6 +1180,21 @@ fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImp
     }
 
     Ok(entries)
+}
+
+fn read_streamed_zip_entry_names(bytes: &[u8]) -> Result<BTreeSet<String>, LibraryImportError> {
+    let mut cursor = Cursor::new(bytes);
+    let mut names = BTreeSet::new();
+    while let Some(file) = read_zipfile_from_stream(&mut cursor).map_err(package_zip_error)? {
+        let name = file.name().to_owned();
+        validate_package_zip_entry_name(&name)?;
+        if !names.insert(name.clone()) {
+            return Err(LibraryImportError::InvalidPackageZip(format!(
+                "duplicate package entry {name:?}"
+            )));
+        }
+    }
+    Ok(names)
 }
 
 fn validate_package_zip_entry_name(name: &str) -> Result<(), LibraryImportError> {
@@ -1425,6 +1455,14 @@ mod tests {
     }
 
     fn test_zip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+        let entries = entries
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        test_zip_entries(&entries)
+    }
+
+    fn test_zip_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .last_modified_time(DateTime::default());
@@ -1434,6 +1472,46 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    fn set_zip_u16_after_signature(
+        bytes: &mut [u8],
+        signature: &[u8; 4],
+        offset: usize,
+        value: u16,
+    ) {
+        for index in 0..bytes.len().saturating_sub(signature.len() + offset + 1) {
+            if bytes[index..].starts_with(signature) {
+                bytes[index + offset..index + offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    fn replace_central_zip_name(bytes: &mut [u8], from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let name_offset = 46;
+        for index in 0..bytes.len().saturating_sub(name_offset + from.len()) {
+            if bytes[index..].starts_with(b"PK\x01\x02") {
+                let name_start = index + name_offset;
+                let name_end = name_start + from.len();
+                if &bytes[name_start..name_end] == from {
+                    bytes[name_start..name_end].copy_from_slice(to);
+                }
+            }
+        }
+    }
+
+    fn set_zip_u32_after_signature(
+        bytes: &mut [u8],
+        signature: &[u8; 4],
+        offset: usize,
+        value: u32,
+    ) {
+        for index in 0..bytes.len().saturating_sub(signature.len() + offset + 3) {
+            if bytes[index..].starts_with(signature) {
+                bytes[index + offset..index + offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
     }
 
     #[test]
@@ -1516,6 +1594,54 @@ mod tests {
     fn project_package_rejects_invalid_zip_bytes() {
         assert!(matches!(
             load_project_package(b"not a zip"),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_non_stored_zip_entries() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u16_after_signature(&mut package, b"PK\x03\x04", 8, 8);
+        set_zip_u16_after_signature(&mut package, b"PK\x01\x02", 10, 8);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_duplicate_zip_entry_names() {
+        let mut package = test_zip_entries(&[
+            ("project.framer", br#"{"first":true}"#),
+            ("projecu.framer", br#"{"second":true}"#),
+        ]);
+        replace_central_zip_name(&mut package, b"projecu.framer", b"project.framer");
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_zip_symlink_entries() {
+        let mut package = test_zip_entries(&[("project.framer", b"target")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 38, 0o120777 << 16);
+
+        assert!(matches!(
+            load_project_package(&package),
+            Err(LibraryImportError::InvalidPackageZip(_))
+        ));
+    }
+
+    #[test]
+    fn project_package_rejects_stored_size_mismatch() {
+        let mut package = test_zip_entries(&[("project.framer", b"{}")]);
+        set_zip_u32_after_signature(&mut package, b"PK\x01\x02", 20, 1);
+
+        assert!(matches!(
+            load_project_package(&package),
             Err(LibraryImportError::InvalidPackageZip(_))
         ));
     }
