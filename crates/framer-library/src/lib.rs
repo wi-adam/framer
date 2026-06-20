@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use framer_core::{
@@ -11,6 +12,7 @@ use framer_core::{
 use thiserror::Error;
 
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
+static STARTER_LIBRARY: OnceLock<LoadedLibrary> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Locator {
@@ -221,7 +223,7 @@ pub fn import_system(
 }
 
 pub fn library_content_hash(library: &Library) -> Result<String, LibraryImportError> {
-    hash_bytes(save_library(library)?.as_bytes())
+    Ok(hash_bytes(save_library(library)?.as_bytes()))
 }
 
 pub fn material_content_hash(material: &Material) -> Result<String, LibraryImportError> {
@@ -237,10 +239,16 @@ pub fn system_content_hash(system: &ConstructionSystem) -> Result<String, Librar
 }
 
 pub fn starter_library() -> Result<LoadedLibrary, LibraryImportError> {
-    load_verified_library(&LibraryBytes {
+    if let Some(library) = STARTER_LIBRARY.get() {
+        return Ok(library.clone());
+    }
+
+    let loaded = load_verified_library(&LibraryBytes {
         source: STARTER_LIBRARY_SOURCE.to_owned(),
         expected_hash: None,
-    })
+    })?;
+    let _ = STARTER_LIBRARY.set(loaded.clone());
+    Ok(loaded)
 }
 
 fn vendor_material(
@@ -342,11 +350,11 @@ fn library_system<'a>(
 fn hash_json<T: serde::Serialize>(value: &T) -> Result<String, LibraryImportError> {
     let mut json = serde_json::to_string_pretty(value)?;
     json.push('\n');
-    hash_bytes(json.as_bytes())
+    Ok(hash_bytes(json.as_bytes()))
 }
 
-fn hash_bytes(bytes: &[u8]) -> Result<String, LibraryImportError> {
-    Ok(format!("blake3:{}", blake3::hash(bytes).to_hex()))
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 fn read_library_source(path: &Path) -> Result<String, LibraryImportError> {
@@ -573,6 +581,42 @@ mod tests {
             Some(ElementId::new("acme-walls-mat-mineral-wool"))
         );
         assert_eq!(project.libraries.len(), 1);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn repeated_imports_from_same_library_version_share_one_stamp() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
+        import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+
+        assert_eq!(project.libraries.len(), 1);
+        assert_eq!(project.libraries[0].uid, library.uid);
+        assert_eq!(project.libraries[0].version_id, library.version_id);
+        assert_eq!(project.libraries[0].content_hash, hash);
+        assert_eq!(
+            project
+                .materials
+                .iter()
+                .filter(|material| matches!(material.source, MaterialSource::Library(_)))
+                .count(),
+            3
+        );
+        assert!(
+            project
+                .systems
+                .iter()
+                .any(|system| system.id == ElementId::new("acme-walls-system-rainscreen"))
+        );
         project.validate().unwrap();
     }
 

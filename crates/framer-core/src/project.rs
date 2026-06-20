@@ -176,6 +176,55 @@ mod tests {
     }
 
     #[test]
+    fn save_project_sorts_library_stamps_deterministically() {
+        let first_stamp = LibraryStamp {
+            uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000001".to_owned(),
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            coordinate: "framer-lib://acme/first".to_owned(),
+            version: "1.0.0".to_owned(),
+        };
+        let second_stamp = LibraryStamp {
+            uid: "22222222-2222-4222-8222-222222222222".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000002".to_owned(),
+            content_hash: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            coordinate: "framer-lib://acme/second".to_owned(),
+            version: "1.0.0".to_owned(),
+        };
+
+        let mut first = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        first.libraries = vec![second_stamp.clone(), first_stamp.clone()];
+        let mut second = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        second.libraries = vec![first_stamp, second_stamp];
+
+        let saved = save_project(&first).unwrap();
+
+        assert_eq!(saved, save_project(&second).unwrap());
+
+        let document: ProjectDocument = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            document
+                .authored
+                .libraries
+                .iter()
+                .map(|stamp| (stamp.uid.as_str(), stamp.version_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "11111111-1111-4111-8111-111111111111",
+                    "019e9150-0000-7000-8000-000000000001"
+                ),
+                (
+                    "22222222-2222-4222-8222-222222222222",
+                    "019e9150-0000-7000-8000-000000000002"
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
