@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Keep our GitHub Actions SHA pins fresh. Dependabot understands hash-pinned
+  # `uses:` and bumps both the commit SHA *and* the trailing `# vX.Y.Z` comment,
+  # so pinning for security doesn't mean silently running stale (and unpatched)
+  # action code. Grouped into a single weekly PR to keep review noise low.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Rust/Cargo dependencies for the whole workspace. Patch + minor bumps are
+  # grouped together; majors come as their own PRs so breaking changes are
+  # reviewed deliberately.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    groups:
+      cargo-minor:
+        update-types:
+          - minor
+          - patch
