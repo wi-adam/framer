@@ -7,17 +7,26 @@ Review the given pull request in a **single pass** that fans out to framer's fou
 review subagents, validates their findings, and posts one consolidated, high-signal
 set of comments. This replaces running separate review tools.
 
-The argument is a PR (URL or number), optionally followed by `--comment`. Without
-`--comment`, review and print findings only — make no GitHub writes, including no
-formal review verdict (safe to run locally).
+**Arguments: `$ARGUMENTS`** — parse the first token as the PR to review (a URL or a
+number; called `<PR>` below) and treat a trailing `--comment` as the write-enable
+flag. Without `--comment`, review and print findings only — make no GitHub writes,
+including no formal review verdict (safe to run locally).
 
 Follow these steps precisely:
 
-1. **Skip gate.** Look at the PR (`gh pr view <PR>`). Stop, doing nothing, if the PR
-   is closed or a draft, or the change is obviously trivial and correct (a dependency
-   bump, a pure formatting or mechanical edit). Otherwise proceed — re-review on every
-   push so the verdict reflects the current head and supersedes any earlier verdict.
-   Still review PRs authored by Claude.
+1. **Skip gate.** Look at the PR (`gh pr view <PR>`). Stop, doing nothing, ONLY if the
+   PR is closed, or it is a draft and you were not explicitly asked to review it, or
+   the change is *both* trivial in shape *and* introduces nothing new (a pure
+   dependency bump, a pure formatting pass, or a comment-only edit). **Never skip on
+   surface shape alone.** A diff is NOT trivial — and MUST be reviewed — if it
+   introduces or changes any of: a public API or re-export, an on-disk/serialization
+   format or schema, a new module or file format, determinism/canonicalization
+   behavior, or error handling — *even if most of its lines are relocated, look
+   mechanical, or just move code between files.* Relocating code into a data file,
+   raising visibility (`fn` → `pub(crate)`), or adding docs does not make a change
+   trivial when it stands up a new format or public surface. When unsure, do NOT skip.
+   Otherwise proceed — re-review on every push so the verdict reflects the current head
+   and supersedes any earlier verdict. Still review PRs authored by Claude.
 
 2. **Gather context once.** Get the diff (`gh pr diff <PR>`) and the PR title + body
    (`gh pr view <PR>`). You will pass this same context to every reviewer so they
@@ -33,6 +42,11 @@ Follow these steps precisely:
    - **correctness-reviewer** — real logic bugs, panics, and error-handling defects.
    - **rust-quality-reviewer** — Rust safety/idiom/API and hot-path performance.
    - **test-coverage-reviewer** — behavior changes missing adequate tests.
+
+   If for any reason a subagent cannot be dispatched or returns nothing usable, do NOT
+   abandon the review — perform the four-dimension analysis yourself directly from the
+   diff before proceeding. The fan-out is an optimization, not a precondition; the
+   review must complete and reach a verdict either way.
 
 4. **Validate.** For each candidate finding, launch a subagent to confirm it with
    high confidence before it can be posted — that the issue is real, in scope for the
@@ -77,6 +91,11 @@ Follow these steps precisely:
         `<summary>` is a short `## Claude review` block stating the verdict, a
         **Must fix** list (the blocking findings, or "none"), and the **Advisory**
         count. Submit exactly one verdict per run.
+
+   When `--comment` is provided and the skip gate did not fire, you **MUST** submit
+   exactly one verdict before finishing — even if zero inline comments survive, submit
+   `--approve` with a body noting "No high-signal issues found." Finishing with neither
+   inline comments nor a verdict is a failure of this command, not a valid outcome.
 
 Keep every comment concise and grounded. If you cannot justify a finding from the
 diff (or quote the spec/invariant it contradicts), do not post it — and never let an
