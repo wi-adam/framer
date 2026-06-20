@@ -466,7 +466,7 @@ pub enum LibraryImportError {
 mod tests {
     use framer_core::{
         BoardProfile, CodeProfile, ConstructionLayer, FramingPattern, FramingSpec, LayerFunction,
-        Length, SystemKind, load_project, save_project,
+        Length, ModelError, SystemKind, load_project, save_project,
     };
 
     use super::*;
@@ -642,6 +642,116 @@ mod tests {
             .material(&ElementId::new("acme-walls-mat-cedar-2"))
             .unwrap();
         assert!(matches!(material.source, MaterialSource::Library(_)));
+    }
+
+    #[test]
+    fn failed_material_import_rolls_back_project_mutation() {
+        let mut library = fixture_library();
+        library.materials[0].id = ElementId::new("Bad Material");
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let before = save_project(&project).unwrap();
+
+        let result = import_material(
+            &mut project,
+            &library,
+            "blake3:test",
+            &ElementId::new("Bad Material"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(LibraryImportError::Model(
+                ModelError::InvalidElementId { .. }
+            ))
+        ));
+        assert_eq!(save_project(&project).unwrap(), before);
+        assert!(project.libraries.is_empty());
+    }
+
+    #[test]
+    fn failed_system_import_rolls_back_project_mutation() {
+        let mut library = fixture_library();
+        library.systems[0].id = ElementId::new("Bad System");
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let before = save_project(&project).unwrap();
+
+        let result = import_system(
+            &mut project,
+            &library,
+            "blake3:test",
+            &ElementId::new("Bad System"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(LibraryImportError::Model(
+                ModelError::InvalidElementId { .. }
+            ))
+        ));
+        assert_eq!(save_project(&project).unwrap(), before);
+        assert!(project.libraries.is_empty());
+    }
+
+    #[test]
+    fn import_errors_are_explicit_for_missing_items_and_resolvers() {
+        let library = fixture_library();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        assert!(matches!(
+            import_material(
+                &mut project,
+                &library,
+                "blake3:test",
+                &ElementId::new("mat-missing"),
+            ),
+            Err(LibraryImportError::MaterialNotFound { id })
+                if id == ElementId::new("mat-missing")
+        ));
+        assert!(matches!(
+            import_system(
+                &mut project,
+                &library,
+                "blake3:test",
+                &ElementId::new("system-missing"),
+            ),
+            Err(LibraryImportError::SystemNotFound { id })
+                if id == ElementId::new("system-missing")
+        ));
+
+        let mut dangling = fixture_library();
+        dangling.systems[0].layers[0].material = ElementId::new("mat-missing");
+        assert!(matches!(
+            import_system(
+                &mut project,
+                &dangling,
+                "blake3:test",
+                &ElementId::new("system-rainscreen"),
+            ),
+            Err(LibraryImportError::MissingReferencedMaterial { system, material })
+                if system == ElementId::new("system-rainscreen")
+                    && material == ElementId::new("mat-missing")
+        ));
+
+        let resolver = LocalSearchPathResolver::default();
+        assert!(matches!(
+            resolver.resolve(&Locator::Builtin {
+                id: "missing".to_owned(),
+            }),
+            Err(LibraryImportError::UnknownBuiltin { id }) if id == "missing"
+        ));
+        assert!(matches!(
+            resolver.resolve(&Locator::Installed {
+                id: "missing".to_owned(),
+            }),
+            Err(LibraryImportError::InstalledLibraryNotFound { id }) if id == "missing"
+        ));
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.invalid/library.framerlib".to_owned(),
+                hash: "blake3:test".to_owned(),
+            }),
+            Err(LibraryImportError::RemoteUnsupported)
+        ));
     }
 
     #[test]

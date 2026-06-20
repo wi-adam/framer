@@ -3734,6 +3734,32 @@ mod tests {
         app.model.validate().unwrap();
     }
 
+    #[test]
+    fn inserting_starter_material_vendors_provenance_and_selects_it() {
+        let mut app = FramerApp::default();
+        let material_count = app.model.materials.len();
+
+        app.insert_starter_material("mat-fiber-cement".to_owned());
+
+        assert_eq!(app.model.libraries.len(), 1);
+        assert!(app.model.materials.len() > material_count);
+        let Selection::Material(material_id) = &app.selected else {
+            panic!("imported material should be selected");
+        };
+        let material = app
+            .model
+            .materials
+            .iter()
+            .find(|material| material.id.0 == *material_id)
+            .expect("selected imported material should exist");
+        let MaterialSource::Library(source) = &material.source else {
+            panic!("material should have provenance");
+        };
+        assert_eq!(source.source_id, ElementId::new("mat-fiber-cement"));
+        assert!(source.content_hash.starts_with("blake3:"));
+        app.model.validate().unwrap();
+    }
+
     #[derive(Debug, Clone, Copy)]
     enum WindowAnchor {
         Left,
