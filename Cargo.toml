@@ -2,6 +2,7 @@
 members = [
     "crates/framer-app",
     "crates/framer-core",
+    "crates/framer-library",
     "crates/framer-render",
     "crates/framer-solver",
 ]
@@ -15,9 +16,11 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
+blake3 = "1.8.5"
 eframe = "0.34.2"
 env_logger = "0.11.8"
 framer-core = { path = "crates/framer-core" }
+framer-library = { path = "crates/framer-library" }
 framer-render = { path = "crates/framer-render" }
 framer-solver = { path = "crates/framer-solver" }
 image = { version = "0.25.10", default-features = false, features = ["png"] }

@@ -28,8 +28,29 @@ impl ElementId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct LibraryStamp {
+    pub uid: String,
+    pub version_id: String,
+    pub content_hash: String,
+    pub coordinate: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provenance {
+    pub library_uid: String,
+    pub version_id: String,
+    pub source_id: ElementId,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildingModel {
     pub code: CodeProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<LibraryStamp>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materials: Vec<Material>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -48,6 +69,7 @@ impl BuildingModel {
         let (materials, systems) = Self::starter_library();
         Self {
             code,
+            libraries: Vec::new(),
             materials,
             systems,
             levels: default_levels(),
@@ -89,6 +111,7 @@ impl BuildingModel {
         let (materials, systems) = Self::starter_library();
         Self {
             code,
+            libraries: Vec::new(),
             materials,
             systems,
             levels: default_levels(),
@@ -181,6 +204,7 @@ impl BuildingModel {
         let (materials, systems) = Self::starter_library();
         Self {
             code,
+            libraries: Vec::new(),
             materials,
             systems,
             levels: default_levels(),
@@ -376,6 +400,7 @@ impl BuildingModel {
         let (materials, systems) = Self::starter_library();
         Self {
             code,
+            libraries: Vec::new(),
             materials,
             systems,
             levels: default_levels(),
@@ -501,6 +526,11 @@ impl BuildingModel {
     }
 
     pub fn sort_deterministically(&mut self) {
+        self.libraries.sort_by(|left, right| {
+            left.uid
+                .cmp(&right.uid)
+                .then_with(|| left.version_id.cmp(&right.version_id))
+        });
         self.materials.sort_by(|left, right| left.id.cmp(&right.id));
         // Systems sort by id; layer ORDER is semantic (interior -> exterior) and
         // must never be reordered.
@@ -1093,6 +1123,8 @@ pub struct ConstructionSystem {
     pub id: ElementId,
     pub name: String,
     pub kind: SystemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Provenance>,
     pub layers: Vec<ConstructionLayer>,
 }
 
@@ -1220,16 +1252,15 @@ impl ConstructionSystem {
     }
 }
 
-/// Where a material is defined. `Project` materials are embedded in the model;
-/// `External` references a shared/imported library (resolver widens later).
+/// Where a material is defined. `Project` materials are embedded first-party
+/// definitions; `Library` materials are vendored into the model with descriptive
+/// provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum MaterialSource {
     #[default]
     Project,
-    External {
-        reference: String,
-    },
+    Library(Provenance),
 }
 
 impl MaterialSource {
@@ -3664,6 +3695,7 @@ mod tests {
             id: ElementId::new("system-test"),
             name: "Test".to_owned(),
             kind: SystemKind::Wall,
+            source: None,
             layers: vec![
                 ConstructionLayer::new(LayerFunction::InteriorFinish, "mat-drywall", thickness),
                 ConstructionLayer::new(

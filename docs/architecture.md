@@ -22,6 +22,8 @@ small buildings, garages, decks, and wood framed BBQ islands.
 - `crates/framer-core`: shared domain types, units, structure model, openings,
   construction systems, the material library, code profiles, room topology, and
   validation.
+- `crates/framer-library`: library resolution, exact content hashing, and
+  vendor-on-use import/remap for reusable `.framerlib` content.
 - `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
   and BOM generation.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
@@ -126,7 +128,7 @@ multi-wall CAD shell:
 - `framer-core` represents levels, wall segment placement, wall joins/corners,
   wall openings, rooms, a reusable material library, layered construction systems
   (applied to walls by reference), and deterministic project ordering. The
-  `.framer` format is schema **v7** and v7-only: pre-v7 files are rejected with an
+  `.framer` format is schema **v8** and v8-only: older files are rejected with an
   explicit unsupported-schema error rather than migrated. See the
   [Construction Systems spec](specs/construction-systems.md).
 - `framer-solver` deterministically generates per-wall plates, common studs,
@@ -166,7 +168,7 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v7 `.framer` format is documented in
+The current v8 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
 (including the material library and construction systems); derived framing plans,
 cached view state, and exports remain disposable outputs that are regenerated from

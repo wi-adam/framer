@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented (schema v7) · **Linked goal:** G-008 (Code Profile Data) /
+> **Status:** Implemented · **Linked goal:** G-008 (Code Profile Data) /
 > G-001 (Project Files) · **Last reviewed:** 2026-06-19
 
 > Authored retroactively from the shipped v7 implementation (PR #16) to capture the durable
@@ -76,8 +76,8 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `Material { id, name, source: MaterialSource, appearance: Appearance, tags, properties }`;
   `PropertyValue`, `Appearance::SolidColor`.
 - `Wall.system: ElementId`; `BuildingModel::system_for(wall)`, `material(&id)`.
-- Serialization: schema **v7** in [`project.rs`](../../crates/framer-core/src/project.rs)
-  (`systems`/`materials` are top-level authored keys; v7-only — older files are rejected). The
+- Serialization: schema **v8** in [`project.rs`](../../crates/framer-core/src/project.rs)
+  (`systems`/`materials` are top-level authored keys; v8-only — older files are rejected). The
   shape is documented in [project-files.md](../project-files.md).
 - Takeoff: `layer_bom()` / `LayerBomItem` and the layered rendering in
   [`framer-solver`](../../crates/framer-solver/src/lib.rs),
@@ -89,7 +89,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `framer-core`/`framer-solver` stay UI-free; the model stays deterministic and `Eq`.
 - Authored layer stack is the source of truth; thickness/exposure/R-value/members/BOM are all
   regenerated, never stored.
-- `.framer` is v7-only and canonical (see [project-files.md](../project-files.md#determinism)).
+- `.framer` is v8-only and canonical (see [project-files.md](../project-files.md#determinism)).
 
 ## Out of scope (YAGNI)
 

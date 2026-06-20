@@ -58,7 +58,7 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
   the dependency, because skipping would let the renderer and its WGSL mirror drift apart
   undetected.
 - **Edition 2024, resolver 3, workspace-pinned dependencies** for reproducible builds across
-  the four crates.
+  the workspace crates.
 
 ## Architecture (grounded in the codebase)
 
@@ -81,7 +81,7 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 - CI must mechanically enforce the [architecture invariants](../architecture.md): determinism
   (round-trip + golden + parity tests), UI-free core/solver/render (they build and test without
-  the app), and the v7 `.framer` round-trip fixtures.
+  the app), and the v8 `.framer` round-trip fixtures.
 - The local gate, the commit skill, and CI must stay in lockstep — changing one means changing
   the others.
 

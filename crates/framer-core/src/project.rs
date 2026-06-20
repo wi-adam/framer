@@ -4,10 +4,10 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 7;
-/// The model is v7-only — older on-disk shapes (pre-v7 wall `assembly`,
-/// `stud_spacing`, etc.) are no longer representable, so loading them must fail
-/// with a clear unsupported-schema error rather than confusing serde errors.
+pub const PROJECT_SCHEMA_VERSION: u32 = 8;
+/// The model is v8-only — older on-disk shapes and pre-provenance schemas are no
+/// longer representable, so loading them must fail with a clear
+/// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v7-only model,
+    // Peek the format/version header before deserializing into the v8-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v7-only) deserialization.
+/// and schema versions before attempting the full (v8-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -113,7 +113,10 @@ pub enum ProjectError {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BuildingModel, CodeProfile, Length, ModelError, Opening, Wall};
+    use crate::{
+        BuildingModel, CodeProfile, ElementId, Length, LibraryStamp, MaterialSource, ModelError,
+        Opening, Provenance, Wall,
+    };
 
     use super::*;
 
@@ -122,13 +125,21 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 7,\n"));
+        assert!(json.contains("  \"schema_version\": 8,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
         assert!(!json.contains("\"generated\""));
         assert!(!json.contains("\"cache\""));
         assert!(!json.contains("\"exports\""));
+    }
+
+    #[test]
+    fn no_library_model_omits_provenance_fields() {
+        let json = save_project(&BuildingModel::demo_wall()).unwrap();
+
+        assert!(!json.contains("\"libraries\""));
+        assert!(!json.contains("\"source\""));
     }
 
     #[test]
@@ -165,10 +176,73 @@ mod tests {
     }
 
     #[test]
+    fn save_project_sorts_library_stamps_deterministically() {
+        let first_stamp = LibraryStamp {
+            uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000001".to_owned(),
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            coordinate: "framer-lib://acme/first".to_owned(),
+            version: "1.0.0".to_owned(),
+        };
+        let second_stamp = LibraryStamp {
+            uid: "22222222-2222-4222-8222-222222222222".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000002".to_owned(),
+            content_hash: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            coordinate: "framer-lib://acme/second".to_owned(),
+            version: "1.0.0".to_owned(),
+        };
+        let material_source = Provenance {
+            library_uid: first_stamp.uid.clone(),
+            version_id: first_stamp.version_id.clone(),
+            source_id: ElementId::new("mat-library-cedar"),
+            content_hash: first_stamp.content_hash.clone(),
+        };
+        let system_source = Provenance {
+            source_id: ElementId::new("system-library-wall"),
+            ..material_source.clone()
+        };
+
+        let mut first = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        first.libraries = vec![second_stamp.clone(), first_stamp.clone()];
+        first.materials[0].source = MaterialSource::Library(material_source.clone());
+        first.systems[0].source = Some(system_source.clone());
+        let mut second = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        second.libraries = vec![first_stamp, second_stamp];
+        second.materials[0].source = MaterialSource::Library(material_source);
+        second.systems[0].source = Some(system_source);
+
+        let saved = save_project(&first).unwrap();
+
+        assert_eq!(saved, save_project(&second).unwrap());
+
+        let document: ProjectDocument = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            document
+                .authored
+                .libraries
+                .iter()
+                .map(|stamp| (stamp.uid.as_str(), stamp.version_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "11111111-1111-4111-8111-111111111111",
+                    "019e9150-0000-7000-8000-000000000001"
+                ),
+                (
+                    "22222222-2222-4222-8222-222222222222",
+                    "019e9150-0000-7000-8000-000000000002"
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 7,
+  "schema_version": 8,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -191,12 +265,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
-        // A v6 document with the pre-v7 wall shape ("assembly", "stud_spacing")
-        // must be rejected by the header peek with a clear unsupported-schema
-        // error, NOT a serde error about the removed fields.
+        // A v7 document must be rejected by the header peek with a clear
+        // unsupported-schema error, NOT serde errors from the current v8 model.
+        // The pre-v8 body remains self-contained, but schema support is v8-only.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 6,
+  "schema_version": 7,
   "authored": {
     "walls": [
       {
@@ -215,7 +289,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 6,
+                found: 7,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -342,9 +416,45 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_dangling_wall_system() {
-        use crate::ElementId;
+    fn library_provenance_round_trips_with_identity_table() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.libraries.push(LibraryStamp {
+            uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000001".to_owned(),
+            content_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            coordinate: "framer-lib://round-trip/sentinel".to_owned(),
+            version: "1.0.0".to_owned(),
+        });
+        let material_source = Provenance {
+            library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000001".to_owned(),
+            source_id: ElementId::new("mat-drywall"),
+            content_hash: "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+        };
+        model.materials[0].source = MaterialSource::Library(material_source.clone());
+        model.systems[0].source = Some(Provenance {
+            source_id: ElementId::new("system-wall-exterior-1"),
+            ..material_source
+        });
 
+        let reloaded = load_project(&save_project(&model).unwrap()).unwrap();
+
+        assert_eq!(reloaded.libraries.len(), 1);
+        assert!(matches!(
+            &reloaded.materials[0].source,
+            MaterialSource::Library(source)
+                if source.source_id == ElementId::new("mat-drywall")
+        ));
+        assert_eq!(
+            reloaded.systems[0].source.as_ref().unwrap().source_id,
+            ElementId::new("system-wall-exterior-1")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_dangling_wall_system() {
         let code = CodeProfile::irc_2021_prescriptive();
         let mut model = BuildingModel::new(code.clone());
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
@@ -377,7 +487,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 7,"));
+        assert!(json.contains("\"schema_version\": 8,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 

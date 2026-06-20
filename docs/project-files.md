@@ -5,7 +5,7 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v7 format stores only the canonical intent model. Generated framing plans,
+The v8 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 file.
@@ -28,14 +28,15 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V7 Shape
+## V8 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 7,
+  "schema_version": 8,
   "authored": {
     "code": {},
+    "libraries": [],
     "materials": [],
     "systems": [],
     "levels": [],
@@ -47,21 +48,21 @@ for the single-wall example.
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `7` when saving from the current app.
+- `schema_version` must be `8` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `cache`, `exports`, or presentation data to project files.
-- `materials`, `systems`, and `rooms` are omitted when empty; `wall_joins`
-  defaults to an empty list; `levels` defaults to a single `level-1`.
+- `libraries`, `materials`, `systems`, and `rooms` are omitted when empty;
+  `wall_joins` defaults to an empty list; `levels` defaults to a single
+  `level-1`.
 
-### Schema versioning is v7-only
+### Schema versioning is v8-only
 
-The current build is **v7-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `7` with an explicit
-`unsupported Framer project schema version N` error — pre-v7 files are *not*
-migrated in place, because the older wall shape (inline `assembly`,
-`stud_spacing`) is no longer representable in the model. Convert old files with an
-older Framer build, or re-author them.
+The current build is **v8-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `8` with an explicit
+`unsupported Framer project schema version N` error — older files are *not*
+migrated in place. Convert old files with an older Framer build, or re-author
+them.
 
 Lengths are exact integer ticks:
 
@@ -119,9 +120,11 @@ does not read any `.framerlib`; projects remain self-contained.
 
 ## Authored Model
 
-The v7 authored model holds:
+The v8 authored model holds:
 
 - `code`: the prescriptive code profile (starter framing defaults).
+- `libraries`: optional descriptive stamps for library versions that supplied
+  vendored definitions.
 - `materials`: the project's material library (see below).
 - `systems`: the project's construction systems (layered assemblies, see below).
 - `levels`: deterministic list of project levels.
@@ -171,7 +174,8 @@ Each material in `materials` stores:
 
 - `id`: a stable semantic identifier (e.g. `mat-drywall`).
 - `name`: a human-readable name.
-- `source`: `Project` (default, omitted) or `External { "reference": "..." }`.
+- `source`: `Project` (default, omitted) or `Library(Provenance)` for vendored
+  definitions copied from a `.framerlib`.
 - `appearance`: an authored finish, currently `{ "SolidColor": [r, g, b] }`.
 - `tags`: optional free-form string list, omitted when empty.
 - `properties`: an extensible, **float-free** map of typed values
@@ -192,6 +196,7 @@ Each system in `systems` stores:
 
 - `id`, `name`.
 - `kind`: `Wall`, `Floor`, or `Roof` (only `Wall` is wired today).
+- `source`: optional `Provenance` for systems copied from a `.framerlib`.
 - `layers`: an ordered list from **interior → exterior**. Layer order is semantic
   and is **never sorted**.
 
@@ -234,6 +239,31 @@ Total through-wall thickness, derived exposure (Exterior vs Interior), and the
 clear-wall R-value are *derived* from the layer stack and materials — they are not
 stored. The R-value is a clear-wall approximation; the framing-factor
 (parallel-path) derate is not yet applied.
+
+### Library provenance
+
+Using a library item copies the full definition into the project. The project
+stays self-contained: opening, validating, solving, and rendering never read a
+`.framerlib` file.
+
+When a copied item came from a library, the project records one `libraries` stamp
+for that library version:
+
+- `uid`: stable library identity.
+- `version_id`: immutable published-version identity.
+- `content_hash`: `blake3:<hex>` hash of the canonical `.framerlib` bytes.
+- `coordinate`: human/resolver hint, not identity.
+- `version`: human semver label.
+
+Each vendored material/system may also carry `Provenance`:
+
+- `library_uid` and `version_id`: point to the matching library stamp.
+- `source_id`: the element id inside the library before project-local remapping.
+- `content_hash`: `blake3:<hex>` hash of the source item canonical form.
+
+This metadata is descriptive. Do not make wall/material/system references point
+outside the project; every layer `material`, framing `cavity_material`, and wall
+`system` must still resolve to a local definition in this file.
 
 ## Dimensions
 
@@ -409,7 +439,7 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`7`). The build is v7-only; do not
+3. Preserve `format` and `schema_version` (`8`). The build is v8-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,

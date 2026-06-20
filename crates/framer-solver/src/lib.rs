@@ -1803,6 +1803,7 @@ mod tests {
             id: ElementId::new(id),
             name: id.to_owned(),
             kind: framer_core::SystemKind::Wall,
+            source: None,
             layers: vec![
                 framer_core::ConstructionLayer::new(
                     framer_core::LayerFunction::Framing,

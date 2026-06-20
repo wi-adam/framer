@@ -28,7 +28,7 @@ Depends on: nothing in the workspace. Consumed by: `framer-solver`, `framer-rend
 - Construct: `BuildingModel::new(code)`, `demo_wall()`, `demo_shell()`, `demo_two_bedroom()`.
 - Validate: `BuildingModel::validate()`.
 - Serialize: `load_project(&str)` / `save_project(&BuildingModel)`;
-  `PROJECT_SCHEMA_VERSION` (currently **7**, v7-only).
+  `PROJECT_SCHEMA_VERSION` (currently **8**, v8-only).
 - Topology: `room_boundaries(model)`, `room_boundary(model, seed)`.
 
 See [`docs/code-map.md`](../../docs/code-map.md#framer-core--the-domain-model) for full detail
