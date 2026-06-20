@@ -45,6 +45,8 @@ pub(crate) struct FramerApp {
     selected_wall: usize,
     selected: Selection,
     project_plan: Option<ProjectFramePlan>,
+    library_issues: Vec<framer_library::LibraryIssue>,
+    library_issue_error: Option<String>,
     error: Option<String>,
     project_path: String,
     file_status: Option<String>,
@@ -301,6 +303,8 @@ impl Default for FramerApp {
             selected_wall: 0,
             selected: Selection::Wall,
             project_plan: None,
+            library_issues: Vec::new(),
+            library_issue_error: None,
             error: None,
             project_path: DEFAULT_PROJECT_PATH.to_owned(),
             file_status: None,
@@ -378,9 +382,25 @@ impl FramerApp {
 
         self.model.apply_driving_dimensions();
 
+        let library_issue_result = collect_library_lifecycle_issues(&self.model);
+        match &library_issue_result {
+            Ok(issues) => {
+                self.library_issues = issues.clone();
+                self.library_issue_error = None;
+            }
+            Err(error) => {
+                self.library_issues.clear();
+                self.library_issue_error = Some(error.clone());
+            }
+        }
+
         match generate_project_plan(&self.model) {
             Ok(mut plan) => {
-                append_library_diagnostics(&self.model, &mut plan);
+                append_library_diagnostics(
+                    &mut plan,
+                    &self.library_issues,
+                    self.library_issue_error.as_deref(),
+                );
                 self.project_plan = Some(plan);
                 self.error = None;
             }
@@ -1715,23 +1735,31 @@ impl FramerApp {
     }
 }
 
-fn append_library_diagnostics(model: &BuildingModel, plan: &mut ProjectFramePlan) {
+fn collect_library_lifecycle_issues(
+    model: &BuildingModel,
+) -> Result<Vec<framer_library::LibraryIssue>, String> {
     let current_libraries = framer_library::starter_library()
         .ok()
         .map(|loaded| vec![loaded.library])
         .unwrap_or_default();
-    let issues = match framer_library::library_lifecycle_issues(model, &current_libraries) {
-        Ok(issues) => issues,
-        Err(error) => {
-            plan.diagnostics.push(PlanDiagnostic {
-                severity: DiagnosticSeverity::Warning,
-                code: "library.lifecycle.check-failed".to_owned(),
-                source: None,
-                message: format!("Library lifecycle status could not be checked: {error}."),
-            });
-            return;
-        }
-    };
+    framer_library::library_lifecycle_issues(model, &current_libraries)
+        .map_err(|error| error.to_string())
+}
+
+fn append_library_diagnostics(
+    plan: &mut ProjectFramePlan,
+    issues: &[framer_library::LibraryIssue],
+    check_error: Option<&str>,
+) {
+    if let Some(error) = check_error {
+        plan.diagnostics.push(PlanDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: "library.lifecycle.check-failed".to_owned(),
+            source: None,
+            message: format!("Library lifecycle status could not be checked: {error}."),
+        });
+        return;
+    }
 
     for issue in issues {
         let item_kind = match &issue.item {

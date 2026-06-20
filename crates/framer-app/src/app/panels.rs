@@ -1036,7 +1036,8 @@ impl FramerApp {
         } else {
             false
         };
-        let selected_library_status = selected_library_status(&self.model, &selection);
+        let selected_library_status =
+            selected_library_status(&self.model, &selection, &self.library_issues);
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
@@ -2337,6 +2338,7 @@ struct LibrarySelectionStatus {
 fn selected_library_status(
     model: &framer_core::BuildingModel,
     selection: &Selection,
+    library_issues: &[framer_library::LibraryIssue],
 ) -> Option<LibrarySelectionStatus> {
     let (item, source) = match selection {
         Selection::System(id) => {
@@ -2364,13 +2366,8 @@ fn selected_library_status(
     };
 
     let loaded = framer_library::starter_library().ok();
-    let current_libraries = loaded
-        .as_ref()
-        .map(|loaded| vec![loaded.library.clone()])
-        .unwrap_or_default();
-    let issues = framer_library::library_lifecycle_issues(model, &current_libraries)
-        .unwrap_or_default()
-        .into_iter()
+    let issues = library_issues
+        .iter()
         .filter(|issue| issue.item == item)
         .map(|issue| issue.kind)
         .collect::<Vec<_>>();

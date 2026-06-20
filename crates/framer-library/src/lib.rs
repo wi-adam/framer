@@ -1192,6 +1192,88 @@ mod tests {
         assert!(detach_material(&mut project, &local_id).unwrap());
         assert!(library_lifecycle_issues(&project, &[]).unwrap().is_empty());
         assert!(project.libraries.is_empty());
+        assert!(!detach_material(&mut project, &local_id).unwrap());
+    }
+
+    #[test]
+    fn local_system_edits_emit_divergence_after_clean_import() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported.system.unwrap();
+
+        assert!(
+            library_lifecycle_issues(&project, std::slice::from_ref(&library))
+                .unwrap()
+                .is_empty()
+        );
+
+        let system = project
+            .systems
+            .iter_mut()
+            .find(|system| system.id == local_system_id)
+            .unwrap();
+        system.layers[1].framing.as_mut().unwrap().cavity_material = None;
+
+        let issues = library_lifecycle_issues(&project, &[]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::Diverged);
+        assert_eq!(issues[0].item, LibraryItem::System(local_system_id));
+    }
+
+    #[test]
+    fn missing_source_items_emit_source_missing_for_materials_and_systems() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+
+        let mut material_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_material = import_material(
+            &mut material_project,
+            &library,
+            &hash,
+            &ElementId::new("mat-cedar"),
+        )
+        .unwrap();
+        let local_material_id = imported_material.materials[0].clone();
+        let mut material_missing = library.clone();
+        material_missing
+            .materials
+            .retain(|material| material.id != ElementId::new("mat-cedar"));
+
+        let material_issues =
+            library_lifecycle_issues(&material_project, &[material_missing]).unwrap();
+        assert_eq!(material_issues.len(), 1);
+        assert_eq!(material_issues[0].kind, LibraryIssueKind::SourceMissing);
+        assert_eq!(
+            material_issues[0].item,
+            LibraryItem::Material(local_material_id)
+        );
+
+        let mut system_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_system = import_system(
+            &mut system_project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported_system.system.unwrap();
+        let mut system_missing = library;
+        system_missing
+            .systems
+            .retain(|system| system.id != ElementId::new("system-rainscreen"));
+
+        let system_issues = library_lifecycle_issues(&system_project, &[system_missing]).unwrap();
+        assert_eq!(system_issues.len(), 1);
+        assert_eq!(system_issues[0].kind, LibraryIssueKind::SourceMissing);
+        assert_eq!(system_issues[0].item, LibraryItem::System(local_system_id));
     }
 
     #[test]
@@ -1252,6 +1334,15 @@ mod tests {
         updated.materials[0].name = "Updated cedar".to_owned();
         let updated_hash = library_content_hash(&updated).unwrap();
 
+        let issues = library_lifecycle_issues(&project, &[updated.clone()]).unwrap();
+        assert!(
+            issues.iter().any(|issue| {
+                issue.kind == LibraryIssueKind::OutOfDate
+                    && issue.item == LibraryItem::System(local_system_id.clone())
+            }),
+            "changed source system should be reported out of date"
+        );
+
         resync_system(&mut project, &updated, &updated_hash, &local_system_id).unwrap();
 
         let system = project
@@ -1291,6 +1382,83 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn detach_system_clears_source_and_reports_false_when_already_detached() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let local_system_id = imported.system.unwrap();
+
+        for material_id in imported.materials {
+            assert!(detach_material(&mut project, &material_id).unwrap());
+        }
+        assert_eq!(project.libraries.len(), 1);
+
+        assert!(detach_system(&mut project, &local_system_id).unwrap());
+        assert!(
+            project
+                .systems
+                .iter()
+                .find(|system| system.id == local_system_id)
+                .unwrap()
+                .source
+                .is_none()
+        );
+        assert!(project.libraries.is_empty());
+        assert!(
+            library_lifecycle_issues(&project, &[library])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!detach_system(&mut project, &local_system_id).unwrap());
+    }
+
+    #[test]
+    fn resync_rejects_mismatched_library_uid() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported_material =
+            import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
+        let imported_system = import_system(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+
+        let mut impostor = library.clone();
+        impostor.uid = "22222222-2222-4222-8222-222222222222".to_owned();
+        let impostor_hash = library_content_hash(&impostor).unwrap();
+
+        assert!(matches!(
+            resync_material(
+                &mut project,
+                &impostor,
+                &impostor_hash,
+                &imported_material.materials[0],
+            ),
+            Err(LibraryImportError::LibraryUidMismatch { .. })
+        ));
+        assert!(matches!(
+            resync_system(
+                &mut project,
+                &impostor,
+                &impostor_hash,
+                imported_system.system.as_ref().unwrap(),
+            ),
+            Err(LibraryImportError::LibraryUidMismatch { .. })
+        ));
     }
 
     #[test]
