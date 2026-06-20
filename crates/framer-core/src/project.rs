@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 8;
-/// The model is v8-only — older on-disk shapes and pre-provenance schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 9;
+/// The model is v9-only — older on-disk shapes and pre-provenance schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v8-only model,
+    // Peek the format/version header before deserializing into the v9-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v8-only) deserialization.
+/// and schema versions before attempting the full (v9-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -125,7 +125,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 8,\n"));
+        assert!(json.contains("  \"schema_version\": 9,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -242,7 +242,7 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 8,
+  "schema_version": 9,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -265,12 +265,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
-        // A v7 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v8 model.
-        // The pre-v8 body remains self-contained, but schema support is v8-only.
+        // A v8 document must be rejected by the header peek with a clear
+        // unsupported-schema error, NOT serde errors from the current v9 model.
+        // The pre-v9 body remains self-contained, but schema support is v9-only.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 7,
+  "schema_version": 8,
   "authored": {
     "walls": [
       {
@@ -289,7 +289,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 7,
+                found: 8,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -416,6 +416,73 @@ mod tests {
     }
 
     #[test]
+    fn asset_backed_material_appearances_round_trip_and_validate() {
+        use crate::{Appearance, AssetRef, Material, TextureRole};
+
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let texture = AssetRef::new(
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "image/png",
+            TextureRole::Texture,
+        );
+        let height = AssetRef::new(
+            "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "image/png",
+            TextureRole::Height,
+        );
+        let mut textured = Material::solid_color("mat-textured", "Textured", [10, 20, 30]);
+        textured.appearance = Appearance::Textured {
+            color: [10, 20, 30],
+            texture,
+            scale: Length::from_whole_inches(12),
+        };
+        let mut depth = Material::solid_color("mat-depth", "Depth", [40, 50, 60]);
+        depth.appearance = Appearance::DepthMapped {
+            color: [40, 50, 60],
+            height,
+            scale: Length::from_whole_inches(8),
+        };
+        model.materials.push(textured);
+        model.materials.push(depth);
+
+        let reloaded = load_project(&save_project(&model).unwrap()).unwrap();
+
+        assert!(matches!(
+            reloaded
+                .material(&ElementId::new("mat-textured"))
+                .unwrap()
+                .appearance,
+            Appearance::Textured { scale, .. } if scale == Length::from_whole_inches(12)
+        ));
+        assert!(matches!(
+            reloaded
+                .material(&ElementId::new("mat-depth"))
+                .unwrap()
+                .appearance,
+            Appearance::DepthMapped { scale, .. } if scale == Length::from_whole_inches(8)
+        ));
+    }
+
+    #[test]
+    fn asset_backed_material_rejects_invalid_hash() {
+        use crate::{Appearance, AssetRef, Material, TextureRole};
+
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut material = Material::solid_color("mat-bad-asset", "Bad asset", [10, 20, 30]);
+        material.appearance = Appearance::Textured {
+            color: [10, 20, 30],
+            texture: AssetRef::new("blake3:ABC", "image/png", TextureRole::Texture),
+            scale: Length::from_whole_inches(12),
+        };
+        model.materials.push(material);
+
+        assert!(matches!(
+            save_project(&model),
+            Err(ProjectError::Model(ModelError::InvalidAssetHash { .. }))
+        ));
+    }
+
+    #[test]
     fn library_provenance_round_trips_with_identity_table() {
         let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
         model.libraries.push(LibraryStamp {
@@ -487,7 +554,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 8,"));
+        assert!(json.contains("\"schema_version\": 9,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 

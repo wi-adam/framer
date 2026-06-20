@@ -176,6 +176,8 @@ fn accumulate_on_gpu(
     let node_buf = storage("nodes", bytemuck::cast_slice(&gpu.nodes));
     let idx_buf = storage("indices", bytemuck::cast_slice(&gpu.indices));
     let mat_buf = storage("materials", bytemuck::cast_slice(&gpu.materials));
+    let tex_buf = storage("textures", bytemuck::cast_slice(&gpu.textures));
+    let texel_buf = storage("texels", bytemuck::cast_slice(&gpu.texels));
 
     let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("uniforms"),
@@ -231,6 +233,14 @@ fn accumulate_on_gpu(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: mat_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: tex_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: texel_buf.as_entire_binding(),
             },
         ],
     });

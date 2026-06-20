@@ -428,6 +428,7 @@ impl BuildingModel {
         for material in &self.materials {
             validate_element_id(&material.id)?;
             insert_unique_id(&mut ids, &material.id)?;
+            material.validate()?;
             material_lookup.insert(material.id.clone(), material);
         }
 
@@ -1280,19 +1281,78 @@ pub enum PropertyValue {
     Flag(bool),
 }
 
-/// Authored finish for a material. Starts as a flat color; the enum is the seam
-/// for richer, possibly geometry-affecting finishes, lowered into framer-render's
-/// path-tracer material later.
+/// Binary asset role carried by an [`AssetRef`]. The bytes live outside the
+/// canonical model; the role records how render/build code should interpret the
+/// content when a caller has a local asset store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum TextureRole {
+    Texture,
+    Height,
+}
+
+/// A content-addressed binary asset reference. The model stores only the hash
+/// and enough metadata to interpret locally cached bytes; missing assets degrade
+/// to the material's flat fallback color.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRef {
+    pub hash: String,
+    pub media_type: String,
+    pub role: TextureRole,
+}
+
+impl AssetRef {
+    pub fn new(hash: impl Into<String>, media_type: impl Into<String>, role: TextureRole) -> Self {
+        Self {
+            hash: hash.into(),
+            media_type: media_type.into(),
+            role,
+        }
+    }
+
+    fn validate(&self, expected_role: TextureRole) -> Result<(), ModelError> {
+        if self.role != expected_role {
+            return Err(ModelError::AssetRoleMismatch {
+                expected: expected_role,
+                found: self.role,
+            });
+        }
+        if !is_blake3_hash(&self.hash) {
+            return Err(ModelError::InvalidAssetHash {
+                hash: self.hash.clone(),
+            });
+        }
+        if self.media_type.trim().is_empty() {
+            return Err(ModelError::InvalidAssetMediaType {
+                hash: self.hash.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Authored finish for a material. Textured/depth mapped materials remain
+/// self-contained: their binary bytes live in an out-of-band content-addressed
+/// asset store and the fallback color keeps open/render possible without it.
 ///
 /// GROWTH PATH (not built now):
-///   - `Textured { color, texture_ref, scale }`
 ///   - `LappedSiding { color, reveal: Length }` — parametric, may affect geometry
 ///   - `Masonry { unit, coursing, color }` — depth-mapped brick/block
-///   - `DepthMapped { color, height_ref, scale }`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Appearance {
     SolidColor([u8; 3]),
+    Textured {
+        color: [u8; 3],
+        texture: AssetRef,
+        scale: Length,
+    },
+    DepthMapped {
+        color: [u8; 3],
+        height: AssetRef,
+        scale: Length,
+    },
 }
 
 impl Appearance {
@@ -1300,6 +1360,21 @@ impl Appearance {
     pub fn color(&self) -> [u8; 3] {
         match self {
             Self::SolidColor(color) => *color,
+            Self::Textured { color, .. } | Self::DepthMapped { color, .. } => *color,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ModelError> {
+        match self {
+            Self::SolidColor(_) => Ok(()),
+            Self::Textured { texture, scale, .. } => {
+                validate_asset_scale(*scale)?;
+                texture.validate(TextureRole::Texture)
+            }
+            Self::DepthMapped { height, scale, .. } => {
+                validate_asset_scale(*scale)?;
+                height.validate(TextureRole::Height)
+            }
         }
     }
 }
@@ -1349,6 +1424,10 @@ impl Material {
             PropertyValue::Int(r_per_inch_milli),
         );
         self
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ModelError> {
+        self.appearance.validate()
     }
 
     /// The representative color from this material's appearance.
@@ -2563,6 +2642,17 @@ pub enum ModelError {
         system: ElementId,
         material: ElementId,
     },
+    #[error("asset hash {hash:?} must be a full lowercase blake3:<hex> content hash")]
+    InvalidAssetHash { hash: String },
+    #[error("asset {hash:?} must have a non-empty media type")]
+    InvalidAssetMediaType { hash: String },
+    #[error("asset role mismatch: expected {expected:?}, found {found:?}")]
+    AssetRoleMismatch {
+        expected: TextureRole,
+        found: TextureRole,
+    },
+    #[error("asset-backed material appearances must use a positive scale")]
+    InvalidAssetScale,
     #[error(
         "wall construction system {system:?} must have exactly one framing layer, found {found}"
     )]
@@ -2598,6 +2688,24 @@ pub(crate) fn insert_unique_id(
     } else {
         Err(ModelError::DuplicateElementId { id: id.clone() })
     }
+}
+
+fn validate_asset_scale(scale: Length) -> Result<(), ModelError> {
+    if scale > Length::ZERO {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidAssetScale)
+    }
+}
+
+fn is_blake3_hash(hash: &str) -> bool {
+    let Some(hex) = hash.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_id_start(value: char) -> bool {

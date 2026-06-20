@@ -369,7 +369,7 @@ struct PtResources {
     scene_key: u64,
     scene_bg: wgpu::BindGroup,
     // Held so the bind group's buffer references stay alive.
-    _scene_buffers: [wgpu::Buffer; 4],
+    _scene_buffers: [wgpu::Buffer; 6],
     width: u32,
     height: u32,
     accum_buf: wgpu::Buffer,
@@ -605,7 +605,7 @@ fn storage_init(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffe
     })
 }
 
-fn make_scene_buffers(device: &wgpu::Device, scene: &GpuScene) -> [wgpu::Buffer; 4] {
+fn make_scene_buffers(device: &wgpu::Device, scene: &GpuScene) -> [wgpu::Buffer; 6] {
     [
         storage_init(
             device,
@@ -627,13 +627,23 @@ fn make_scene_buffers(device: &wgpu::Device, scene: &GpuScene) -> [wgpu::Buffer;
             "framer_pt_materials",
             bytemuck::cast_slice(&scene.materials),
         ),
+        storage_init(
+            device,
+            "framer_pt_textures",
+            bytemuck::cast_slice(&scene.textures),
+        ),
+        storage_init(
+            device,
+            "framer_pt_texels",
+            bytemuck::cast_slice(&scene.texels),
+        ),
     ]
 }
 
 fn make_scene_bind_group(
     device: &wgpu::Device,
     compute_pipeline: &wgpu::ComputePipeline,
-    buffers: &[wgpu::Buffer; 4],
+    buffers: &[wgpu::Buffer; 6],
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("framer_pt_scene_bg"),
@@ -654,6 +664,14 @@ fn make_scene_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: buffers[3].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buffers[4].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buffers[5].as_entire_binding(),
             },
         ],
     })

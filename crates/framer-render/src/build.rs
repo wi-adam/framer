@@ -6,12 +6,17 @@
 //! and a procedural sky + sun complete the scene. The camera is derived from an
 //! orbit state so the render matches the interactive 3D view's vantage.
 
-use framer_core::{BuildingModel, OpeningKind, Wall, WallExposure};
+use std::collections::BTreeMap;
+
+use framer_core::{
+    Appearance, BuildingModel, ConstructionSystem, ElementId, LayerFunction, OpeningKind, Wall,
+    WallExposure,
+};
 
 use crate::aabb::Aabb;
 use crate::camera::Camera;
 use crate::geom::Triangle;
-use crate::material::Material;
+use crate::material::{Material, Texture};
 use crate::math::Vec3;
 use crate::scene::{DirectionalSun, Scene, Sky};
 
@@ -22,6 +27,27 @@ pub const MAT_GLASS: u32 = 2;
 pub const MAT_DOOR: u32 = 3;
 pub const MAT_GARAGE: u32 = 4;
 pub const MAT_GROUND: u32 = 5;
+
+/// Resolved binary assets available to the render builder. The model stores only
+/// hashes; callers populate this map from a content-addressed cache or package.
+#[derive(Clone, Debug, Default)]
+pub struct RenderAssets {
+    textures: BTreeMap<String, Texture>,
+}
+
+impl RenderAssets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_texture(&mut self, hash: impl Into<String>, texture: Texture) {
+        self.textures.insert(hash.into(), texture);
+    }
+
+    pub fn texture(&self, hash: &str) -> Option<&Texture> {
+        self.textures.get(hash)
+    }
+}
 
 /// Knobs for the render. Camera fields come from the app's orbit state; lighting
 /// and exposure have sensible architectural defaults.
@@ -128,12 +154,116 @@ impl SceneFraming {
 /// Builds the model's triangles and the orbit framing they imply. Geometry-only:
 /// the result depends on `model` but not on the view (yaw/pitch/zoom/aspect), so
 /// it is safe to cache across camera moves.
-fn geometry_from_model(model: &BuildingModel) -> (Vec<Triangle>, SceneFraming) {
+struct PaletteBuilder<'a> {
+    assets: &'a RenderAssets,
+    materials: Vec<Material>,
+    textures: Vec<Texture>,
+    by_material: BTreeMap<ElementId, u32>,
+}
+
+impl<'a> PaletteBuilder<'a> {
+    fn new(model: &BuildingModel, assets: &'a RenderAssets) -> Self {
+        Self {
+            assets,
+            materials: palette(),
+            textures: Vec::new(),
+            by_material: model
+                .materials
+                .iter()
+                .map(|material| (material.id.clone(), u32::MAX))
+                .collect(),
+        }
+    }
+
+    fn material_index(&mut self, model: &BuildingModel, id: &ElementId) -> Option<u32> {
+        let current = *self.by_material.get(id)?;
+        if current != u32::MAX {
+            return Some(current);
+        }
+        let material = model.material(id)?;
+        let index = self.materials.len() as u32;
+        let render_material = render_material_for_appearance(&material.appearance, self);
+        self.materials.push(render_material);
+        self.by_material.insert(id.clone(), index);
+        Some(index)
+    }
+
+    fn add_texture(&mut self, hash: &str) -> Option<u32> {
+        let texture = self.assets.texture(hash)?;
+        let index = self.textures.len() as u32;
+        self.textures.push(texture.clone());
+        Some(index)
+    }
+}
+
+fn render_material_for_appearance(
+    appearance: &Appearance,
+    palette: &mut PaletteBuilder<'_>,
+) -> Material {
+    match appearance {
+        Appearance::SolidColor(color) => Material::Diffuse {
+            albedo: color_to_linear(*color),
+        },
+        Appearance::Textured {
+            color,
+            texture,
+            scale,
+        } => {
+            let fallback = color_to_linear(*color);
+            match palette.add_texture(&texture.hash) {
+                Some(texture) => Material::TexturedDiffuse {
+                    fallback,
+                    texture,
+                    scale: scale.inches() as f32,
+                },
+                None => Material::Diffuse { albedo: fallback },
+            }
+        }
+        Appearance::DepthMapped {
+            color,
+            height,
+            scale,
+        } => {
+            let albedo = color_to_linear(*color);
+            match palette.add_texture(&height.hash) {
+                Some(height) => Material::DepthMappedDiffuse {
+                    albedo,
+                    height,
+                    scale: scale.inches() as f32,
+                },
+                None => Material::Diffuse { albedo },
+            }
+        }
+    }
+}
+
+fn color_to_linear(color: [u8; 3]) -> Vec3 {
+    Vec3::new(
+        srgb_to_linear(color[0]),
+        srgb_to_linear(color[1]),
+        srgb_to_linear(color[2]),
+    )
+}
+
+fn srgb_to_linear(value: u8) -> f32 {
+    let c = value as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn geometry_from_model(
+    model: &BuildingModel,
+    assets: &RenderAssets,
+) -> (Vec<Triangle>, Vec<Material>, Vec<Texture>, SceneFraming) {
     let mut tris: Vec<Triangle> = Vec::new();
     let mut bounds = Aabb::EMPTY;
+    let mut palette = PaletteBuilder::new(model, assets);
 
     for wall in &model.walls {
-        push_wall(&mut tris, &mut bounds, model, wall);
+        push_wall(&mut tris, &mut bounds, model, wall, &mut palette);
     }
 
     // Ground plane: a large quad just below the lowest wall base.
@@ -152,16 +282,38 @@ fn geometry_from_model(model: &BuildingModel) -> (Vec<Triangle>, SceneFraming) {
     };
     push_ground(&mut tris, center, radius, ground_z);
 
-    (tris, SceneFraming { center, radius })
+    (
+        tris,
+        palette.materials,
+        palette.textures,
+        SceneFraming { center, radius },
+    )
 }
 
 /// Builds a render scene **and** its orbit framing. The framing lets an
 /// interactive caller re-aim the camera on an orbit/zoom without rebuilding the
 /// triangles + BVH (which are geometry-only and unchanged by a camera move).
 pub fn build_scene(model: &BuildingModel, opts: &RenderOptions) -> (Scene, SceneFraming) {
-    let (tris, framing) = geometry_from_model(model);
+    build_scene_with_assets(model, opts, &RenderAssets::default())
+}
+
+/// Builds a render scene using resolved texture/depth assets when available.
+pub fn build_scene_with_assets(
+    model: &BuildingModel,
+    opts: &RenderOptions,
+    assets: &RenderAssets,
+) -> (Scene, SceneFraming) {
+    let (tris, materials, textures, framing) = geometry_from_model(model, assets);
     let camera = framing.camera(opts);
-    let scene = Scene::new(tris, palette(), opts.sun, opts.sky, camera, opts.exposure);
+    let scene = Scene::with_textures(
+        tris,
+        materials,
+        textures,
+        opts.sun,
+        opts.sky,
+        camera,
+        opts.exposure,
+    );
     (scene, framing)
 }
 
@@ -169,6 +321,14 @@ pub fn build_scene(model: &BuildingModel, opts: &RenderOptions) -> (Scene, Scene
 /// plane and lighting even when the model has no walls.
 pub fn scene_from_model(model: &BuildingModel, opts: &RenderOptions) -> Scene {
     build_scene(model, opts).0
+}
+
+pub fn scene_from_model_with_assets(
+    model: &BuildingModel,
+    opts: &RenderOptions,
+    assets: &RenderAssets,
+) -> Scene {
+    build_scene_with_assets(model, opts, assets).0
 }
 
 /// Wall-local basis: `along` runs start→end, `side` is the perpendicular.
@@ -227,7 +387,13 @@ fn opening_panel_material(kind: OpeningKind) -> Option<u32> {
     }
 }
 
-fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel, wall: &Wall) {
+fn push_wall(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    model: &BuildingModel,
+    wall: &Wall,
+    palette: &mut PaletteBuilder<'_>,
+) {
     let base = level_elevation(model, wall);
     let height = wall.height.inches() as f32;
     let length = wall.length.inches() as f32;
@@ -244,10 +410,7 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
     let exposure = system
         .map(|system| system.exposure())
         .unwrap_or(WallExposure::Exterior);
-    let wall_mat = match exposure {
-        WallExposure::Exterior => MAT_CLADDING,
-        WallExposure::Interior => MAT_DRYWALL,
-    };
+    let wall_mat = wall_surface_material(model, system, exposure, palette);
 
     // Track the wall's footprint for camera framing.
     for &(lx, sd, z) in &[
@@ -326,6 +489,36 @@ fn push_wall(tris: &mut Vec<Triangle>, bounds: &mut Aabb, model: &BuildingModel,
     );
 }
 
+fn wall_surface_material(
+    model: &BuildingModel,
+    system: Option<&ConstructionSystem>,
+    exposure: WallExposure,
+    palette: &mut PaletteBuilder<'_>,
+) -> u32 {
+    let fallback = match exposure {
+        WallExposure::Exterior => MAT_CLADDING,
+        WallExposure::Interior => MAT_DRYWALL,
+    };
+    let Some(system) = system else {
+        return fallback;
+    };
+    let preferred = match exposure {
+        WallExposure::Interior => system.layers.iter().find_map(|layer| {
+            (layer.function == LayerFunction::InteriorFinish).then_some(&layer.material)
+        }),
+        WallExposure::Exterior => system.layers.iter().rev().find_map(|layer| {
+            matches!(
+                layer.function,
+                LayerFunction::Cladding | LayerFunction::Masonry
+            )
+            .then_some(&layer.material)
+        }),
+    };
+    preferred
+        .and_then(|material| palette.material_index(model, material))
+        .unwrap_or(fallback)
+}
+
 /// Pushes an axis-aligned box (in wall-local coords) as 12 triangles. The box
 /// spans `[x0, x1]` along the wall, `[-half, half]` across its thickness, and
 /// `[z0, z1]` vertically. Degenerate boxes are skipped.
@@ -388,7 +581,8 @@ fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framer_core::{CodeProfile, Length, Opening, Point2};
+    use crate::geom::Hit;
+    use framer_core::{AssetRef, CodeProfile, Length, Opening, Point2, TextureRole};
 
     fn material_histogram(scene: &Scene) -> std::collections::HashMap<u32, usize> {
         let mut h = std::collections::HashMap::new();
@@ -411,6 +605,15 @@ mod tests {
         wall.openings = openings;
         model.walls.push(wall);
         model
+    }
+
+    fn wall_surface_triangle_materials(scene: &Scene) -> Vec<u32> {
+        scene
+            .triangles
+            .iter()
+            .map(|triangle| triangle.material)
+            .filter(|material| !matches!(*material, MAT_GROUND | MAT_GLASS | MAT_DOOR | MAT_GARAGE))
+            .collect()
     }
 
     #[test]
@@ -518,18 +721,73 @@ mod tests {
     fn exterior_wall_uses_cladding_not_drywall() {
         let model = wall_model(WallExposure::Exterior, vec![]);
         let scene = scene_from_model(&model, &RenderOptions::default());
-        let hist = material_histogram(&scene);
-        assert!(hist.get(&MAT_CLADDING).copied().unwrap_or(0) >= 12);
-        assert_eq!(hist.get(&MAT_DRYWALL).copied().unwrap_or(0), 0);
+        let wall_materials = wall_surface_triangle_materials(&scene);
+        assert!(wall_materials.len() >= 12);
+        assert!(!wall_materials.contains(&MAT_DRYWALL));
     }
 
     #[test]
     fn interior_wall_uses_drywall_not_cladding() {
         let model = wall_model(WallExposure::Interior, vec![]);
         let scene = scene_from_model(&model, &RenderOptions::default());
-        let hist = material_histogram(&scene);
-        assert!(hist.get(&MAT_DRYWALL).copied().unwrap_or(0) >= 12);
-        assert_eq!(hist.get(&MAT_CLADDING).copied().unwrap_or(0), 0);
+        let wall_materials = wall_surface_triangle_materials(&scene);
+        assert!(wall_materials.len() >= 12);
+        assert!(!wall_materials.contains(&MAT_CLADDING));
+    }
+
+    #[test]
+    fn textured_wall_material_samples_resolved_asset() {
+        let mut model = wall_model(WallExposure::Exterior, vec![]);
+        let system = model
+            .systems
+            .iter()
+            .find(|system| system.id.0 == "system-wall-exterior-1")
+            .unwrap();
+        let cladding_id = system
+            .layers
+            .iter()
+            .rev()
+            .find(|layer| layer.function == LayerFunction::Cladding)
+            .unwrap()
+            .material
+            .clone();
+        let hash = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let material = model
+            .materials
+            .iter_mut()
+            .find(|m| m.id == cladding_id)
+            .unwrap();
+        material.appearance = Appearance::Textured {
+            color: [20, 30, 40],
+            texture: AssetRef::new(hash, "image/png", TextureRole::Texture),
+            scale: Length::from_whole_inches(12),
+        };
+        let mut assets = RenderAssets::new();
+        assets.insert_texture(hash, Texture::from_rgb8(2, 1, &[255, 0, 0, 0, 255, 0]));
+
+        let scene = scene_from_model_with_assets(&model, &RenderOptions::default(), &assets);
+        let textured_index = scene
+            .materials
+            .iter()
+            .position(|material| matches!(material, Material::TexturedDiffuse { .. }))
+            .expect("textured material should be lowered into the scene")
+            as u32;
+        let hit = Hit {
+            t: 1.0,
+            u: 0.0,
+            v: 0.0,
+            point: Vec3::new(0.0, 0.0, 6.0),
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            geom_normal: Vec3::new(0.0, 0.0, 1.0),
+            front_face: true,
+            material: textured_index,
+        };
+
+        assert!(matches!(
+            scene.material(&hit),
+            Material::Diffuse { albedo }
+                if (albedo - Vec3::new(1.0, 0.0, 0.0)).length() < 1.0e-5
+        ));
     }
 
     #[test]

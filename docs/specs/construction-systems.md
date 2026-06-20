@@ -76,8 +76,8 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `Material { id, name, source: MaterialSource, appearance: Appearance, tags, properties }`;
   `PropertyValue`, `Appearance::SolidColor`.
 - `Wall.system: ElementId`; `BuildingModel::system_for(wall)`, `material(&id)`.
-- Serialization: schema **v8** in [`project.rs`](../../crates/framer-core/src/project.rs)
-  (`systems`/`materials` are top-level authored keys; v8-only — older files are rejected). The
+- Serialization: schema **v9** in [`project.rs`](../../crates/framer-core/src/project.rs)
+  (`systems`/`materials` are top-level authored keys; v9-only — older files are rejected). The
   shape is documented in [project-files.md](../project-files.md).
 - Takeoff: `layer_bom()` / `LayerBomItem` and the layered rendering in
   [`framer-solver`](../../crates/framer-solver/src/lib.rs),
@@ -89,7 +89,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `framer-core`/`framer-solver` stay UI-free; the model stays deterministic and `Eq`.
 - Authored layer stack is the source of truth; thickness/exposure/R-value/members/BOM are all
   regenerated, never stored.
-- `.framer` is v8-only and canonical (see [project-files.md](../project-files.md#determinism)).
+- `.framer` is v9-only and canonical (see [project-files.md](../project-files.md#determinism)).
 
 ## Out of scope (YAGNI)
 

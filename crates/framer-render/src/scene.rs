@@ -3,7 +3,7 @@
 use crate::bvh::Bvh;
 use crate::camera::Camera;
 use crate::geom::{Hit, Triangle};
-use crate::material::Material;
+use crate::material::{Material, Texture};
 use crate::math::Vec3;
 use crate::ray::Ray;
 
@@ -88,6 +88,7 @@ impl Sky {
 pub struct Scene {
     pub triangles: Vec<Triangle>,
     pub materials: Vec<Material>,
+    pub textures: Vec<Texture>,
     pub bvh: Bvh,
     pub sun: DirectionalSun,
     pub sky: Sky,
@@ -106,10 +107,25 @@ impl Scene {
         camera: Camera,
         exposure: f32,
     ) -> Self {
+        Self::with_textures(triangles, materials, Vec::new(), sun, sky, camera, exposure)
+    }
+
+    /// Builds the scene with decoded texture assets. Missing or invalid material
+    /// texture indices still shade with their authored fallback colors.
+    pub fn with_textures(
+        triangles: Vec<Triangle>,
+        materials: Vec<Material>,
+        textures: Vec<Texture>,
+        sun: DirectionalSun,
+        sky: Sky,
+        camera: Camera,
+        exposure: f32,
+    ) -> Self {
         let bvh = Bvh::build(&triangles);
         Self {
             triangles,
             materials,
+            textures,
             bvh,
             sun,
             sky,
@@ -133,8 +149,48 @@ impl Scene {
     /// The material struck by `hit`.
     #[inline]
     pub fn material(&self, hit: &Hit) -> Material {
-        self.materials[hit.material as usize]
+        let material = self.materials[hit.material as usize];
+        match material {
+            Material::TexturedDiffuse {
+                fallback,
+                texture,
+                scale,
+            } => {
+                let albedo = self
+                    .textures
+                    .get(texture as usize)
+                    .map(|texture| sample_texture_at_hit(texture, hit, scale))
+                    .unwrap_or(fallback);
+                Material::Diffuse { albedo }
+            }
+            Material::DepthMappedDiffuse {
+                albedo,
+                height,
+                scale,
+            } => {
+                let albedo = self
+                    .textures
+                    .get(height as usize)
+                    .map(|texture| {
+                        let height = sample_texture_at_hit(texture, hit, scale);
+                        let relief = height.luminance().clamp(0.0, 1.0);
+                        albedo * (0.65 + 0.35 * relief)
+                    })
+                    .unwrap_or(albedo);
+                Material::Diffuse { albedo }
+            }
+            other => other,
+        }
     }
+}
+
+fn sample_texture_at_hit(texture: &Texture, hit: &Hit, scale: f32) -> Vec3 {
+    let scale = scale.max(1.0e-3);
+    // V1 uses a deterministic world-space projection. It avoids storing UVs in
+    // authored geometry and keeps CPU/GPU parity straightforward.
+    let u = (hit.point.x + hit.point.y) / scale;
+    let v = hit.point.z / scale;
+    texture.sample_repeat_nearest(u, v)
 }
 
 #[cfg(test)]

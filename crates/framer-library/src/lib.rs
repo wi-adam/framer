@@ -6,12 +6,16 @@ use std::{
 };
 
 use framer_core::{
-    BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp, Material,
-    MaterialSource, ModelError, Provenance, load_library, save_library,
+    Appearance, BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp,
+    Material, MaterialSource, ModelError, ProjectError, Provenance, load_library, load_project,
+    save_library, save_project,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
+pub const PACKAGE_FORMAT: &str = "framer.package";
+pub const PACKAGE_SCHEMA_VERSION: u32 = 1;
 static STARTER_LIBRARY: OnceLock<LoadedLibrary> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,79 @@ pub struct LibraryIssue {
     pub actual_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageManifest {
+    pub format: String,
+    pub schema_version: u32,
+    pub project: String,
+    pub assets: Vec<PackageAssetEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageAssetEntry {
+    pub hash: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPackage {
+    pub project: BuildingModel,
+    pub assets: BTreeMap<String, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentAddressedAssetStore {
+    root: PathBuf,
+}
+
+impl ContentAddressedAssetStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn put(&self, bytes: &[u8]) -> Result<String, LibraryImportError> {
+        let hash = asset_content_hash(bytes);
+        let path = self.path_for_hash(&hash)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| LibraryImportError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(&path, bytes).map_err(|source| LibraryImportError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(hash)
+    }
+
+    pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>, LibraryImportError> {
+        let path = self.path_for_hash(hash)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                verify_asset_hash(hash, &bytes)?;
+                Ok(Some(bytes))
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(LibraryImportError::Io { path, source }),
+        }
+    }
+
+    pub fn contains(&self, hash: &str) -> Result<bool, LibraryImportError> {
+        Ok(self.path_for_hash(hash)?.is_file())
+    }
+
+    fn path_for_hash(&self, hash: &str) -> Result<PathBuf, LibraryImportError> {
+        Ok(self.root.join(asset_file_name(hash)?))
+    }
+}
+
 impl LibraryIssue {
     pub fn item_id(&self) -> &ElementId {
         match &self.item {
@@ -183,6 +260,100 @@ pub fn resync_item(
         LibraryItem::Material(id) => resync_material(project, library, library_content_hash, &id),
         LibraryItem::System(id) => resync_system(project, library, library_content_hash, &id),
     }
+}
+
+pub fn asset_content_hash(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+}
+
+pub fn referenced_asset_hashes(project: &BuildingModel) -> BTreeSet<String> {
+    let mut hashes = BTreeSet::new();
+    for material in &project.materials {
+        match &material.appearance {
+            Appearance::SolidColor(_) => {}
+            Appearance::Textured { texture, .. } => {
+                hashes.insert(texture.hash.clone());
+            }
+            Appearance::DepthMapped { height, .. } => {
+                hashes.insert(height.hash.clone());
+            }
+        }
+    }
+    hashes
+}
+
+pub fn collect_project_assets(
+    project: &BuildingModel,
+    store: &ContentAddressedAssetStore,
+) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
+    let mut assets = BTreeMap::new();
+    for hash in referenced_asset_hashes(project) {
+        let Some(bytes) = store.get(&hash)? else {
+            continue;
+        };
+        assets.insert(hash, bytes);
+    }
+    Ok(assets)
+}
+
+pub fn save_project_package(
+    project: &BuildingModel,
+    assets: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, LibraryImportError> {
+    let project_json = save_project(project)?;
+    let mut entries = BTreeMap::new();
+    entries.insert("project.framer".to_owned(), project_json.into_bytes());
+
+    let manifest = package_manifest(assets)?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)? + "\n";
+    entries.insert("manifest.json".to_owned(), manifest_json.into_bytes());
+
+    for (hash, bytes) in assets {
+        verify_asset_hash(hash, bytes)?;
+        entries.insert(asset_package_path(hash)?, bytes.clone());
+    }
+
+    write_stored_zip(&entries)
+}
+
+pub fn save_project_package_from_store(
+    project: &BuildingModel,
+    store: &ContentAddressedAssetStore,
+) -> Result<Vec<u8>, LibraryImportError> {
+    let assets = collect_project_assets(project, store)?;
+    save_project_package(project, &assets)
+}
+
+pub fn load_project_package(bytes: &[u8]) -> Result<ProjectPackage, LibraryImportError> {
+    let entries = read_stored_zip(bytes)?;
+    let project_bytes = entries
+        .get("project.framer")
+        .ok_or(LibraryImportError::PackageProjectMissing)?;
+    let project_source = std::str::from_utf8(project_bytes)
+        .map_err(|source| LibraryImportError::PackageUtf8 { source })?;
+    let project = load_project(project_source)?;
+
+    let manifest_bytes = entries
+        .get("manifest.json")
+        .ok_or(LibraryImportError::PackageManifestMissing)?;
+    let manifest_source = std::str::from_utf8(manifest_bytes)
+        .map_err(|source| LibraryImportError::PackageUtf8 { source })?;
+    let manifest: PackageManifest = serde_json::from_str(manifest_source)?;
+    validate_manifest(&manifest)?;
+
+    let mut assets = BTreeMap::new();
+    for asset in &manifest.assets {
+        let bytes =
+            entries
+                .get(&asset.path)
+                .ok_or_else(|| LibraryImportError::PackageAssetMissing {
+                    path: asset.path.clone(),
+                })?;
+        verify_asset_hash(&asset.hash, bytes)?;
+        assets.insert(asset.hash.clone(), bytes.clone());
+    }
+
+    Ok(ProjectPackage { project, assets })
 }
 
 pub fn import_material(
@@ -848,6 +1019,357 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
+fn package_manifest(
+    assets: &BTreeMap<String, Vec<u8>>,
+) -> Result<PackageManifest, LibraryImportError> {
+    let mut entries = Vec::with_capacity(assets.len());
+    for (hash, bytes) in assets {
+        verify_asset_hash(hash, bytes)?;
+        entries.push(PackageAssetEntry {
+            hash: hash.clone(),
+            path: asset_package_path(hash)?,
+        });
+    }
+    Ok(PackageManifest {
+        format: PACKAGE_FORMAT.to_owned(),
+        schema_version: PACKAGE_SCHEMA_VERSION,
+        project: "project.framer".to_owned(),
+        assets: entries,
+    })
+}
+
+fn validate_manifest(manifest: &PackageManifest) -> Result<(), LibraryImportError> {
+    if manifest.format != PACKAGE_FORMAT {
+        return Err(LibraryImportError::InvalidPackageFormat {
+            found: manifest.format.clone(),
+        });
+    }
+    if manifest.schema_version != PACKAGE_SCHEMA_VERSION {
+        return Err(LibraryImportError::UnsupportedPackageSchemaVersion {
+            found: manifest.schema_version,
+            supported: PACKAGE_SCHEMA_VERSION,
+        });
+    }
+    if manifest.project != "project.framer" {
+        return Err(LibraryImportError::InvalidPackageProjectPath {
+            path: manifest.project.clone(),
+        });
+    }
+    for asset in &manifest.assets {
+        validate_asset_hash(&asset.hash)?;
+        let expected_path = asset_package_path(&asset.hash)?;
+        if asset.path != expected_path {
+            return Err(LibraryImportError::InvalidPackageAssetPath {
+                hash: asset.hash.clone(),
+                path: asset.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_asset_hash(expected: &str, bytes: &[u8]) -> Result<(), LibraryImportError> {
+    validate_asset_hash(expected)?;
+    let actual = asset_content_hash(bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(LibraryImportError::AssetHashMismatch {
+            expected: expected.to_owned(),
+            actual,
+        })
+    }
+}
+
+fn validate_asset_hash(hash: &str) -> Result<(), LibraryImportError> {
+    if is_blake3_hash(hash) {
+        Ok(())
+    } else {
+        Err(LibraryImportError::InvalidAssetHash {
+            hash: hash.to_owned(),
+        })
+    }
+}
+
+fn is_blake3_hash(hash: &str) -> bool {
+    let Some(hex) = hash.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn asset_file_name(hash: &str) -> Result<String, LibraryImportError> {
+    let Some(hex) = hash.strip_prefix("blake3:") else {
+        return Err(LibraryImportError::InvalidAssetHash {
+            hash: hash.to_owned(),
+        });
+    };
+    validate_asset_hash(hash)?;
+    Ok(format!("blake3-{hex}"))
+}
+
+fn asset_package_path(hash: &str) -> Result<String, LibraryImportError> {
+    Ok(format!("assets/{}", asset_file_name(hash)?))
+}
+
+#[derive(Debug)]
+struct ZipCentralEntry {
+    name: String,
+    crc32: u32,
+    size: u32,
+    local_offset: u32,
+}
+
+fn write_stored_zip(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, LibraryImportError> {
+    let mut out = Vec::new();
+    let mut central = Vec::with_capacity(entries.len());
+
+    for (name, bytes) in entries {
+        let name_bytes = name.as_bytes();
+        let size = u32::try_from(bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        let name_len =
+            u16::try_from(name_bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        let local_offset =
+            u32::try_from(out.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        let crc32 = crc32(bytes);
+
+        push_u32(&mut out, 0x0403_4b50);
+        push_u16(&mut out, 20);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u32(&mut out, crc32);
+        push_u32(&mut out, size);
+        push_u32(&mut out, size);
+        push_u16(&mut out, name_len);
+        push_u16(&mut out, 0);
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(bytes);
+
+        central.push(ZipCentralEntry {
+            name: name.clone(),
+            crc32,
+            size,
+            local_offset,
+        });
+    }
+
+    let central_offset =
+        u32::try_from(out.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+    for entry in &central {
+        let name_bytes = entry.name.as_bytes();
+        let name_len =
+            u16::try_from(name_bytes.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+        push_u32(&mut out, 0x0201_4b50);
+        push_u16(&mut out, 20);
+        push_u16(&mut out, 20);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u32(&mut out, entry.crc32);
+        push_u32(&mut out, entry.size);
+        push_u32(&mut out, entry.size);
+        push_u16(&mut out, name_len);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u16(&mut out, 0);
+        push_u32(&mut out, 0);
+        push_u32(&mut out, entry.local_offset);
+        out.extend_from_slice(name_bytes);
+    }
+    let central_size = u32::try_from(out.len() - central_offset as usize)
+        .map_err(|_| LibraryImportError::PackageTooLarge)?;
+    let entry_count =
+        u16::try_from(central.len()).map_err(|_| LibraryImportError::PackageTooLarge)?;
+
+    push_u32(&mut out, 0x0605_4b50);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, entry_count);
+    push_u16(&mut out, entry_count);
+    push_u32(&mut out, central_size);
+    push_u32(&mut out, central_offset);
+    push_u16(&mut out, 0);
+
+    Ok(out)
+}
+
+fn read_stored_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, LibraryImportError> {
+    let eocd = find_eocd(bytes)?;
+    let entry_count = read_u16(bytes, eocd + 10)? as usize;
+    let central_size = read_u32(bytes, eocd + 12)? as usize;
+    let central_offset = read_u32(bytes, eocd + 16)? as usize;
+    if central_offset
+        .checked_add(central_size)
+        .is_none_or(|end| end > bytes.len())
+    {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "central directory is out of bounds".to_owned(),
+        ));
+    }
+
+    let mut entries = BTreeMap::new();
+    let mut offset = central_offset;
+    for _ in 0..entry_count {
+        if read_u32(bytes, offset)? != 0x0201_4b50 {
+            return Err(LibraryImportError::InvalidPackageZip(
+                "invalid central directory signature".to_owned(),
+            ));
+        }
+        let method = read_u16(bytes, offset + 10)?;
+        if method != 0 {
+            return Err(LibraryImportError::InvalidPackageZip(
+                "compressed package entries are not supported".to_owned(),
+            ));
+        }
+        let crc = read_u32(bytes, offset + 16)?;
+        let compressed_size = read_u32(bytes, offset + 20)? as usize;
+        let uncompressed_size = read_u32(bytes, offset + 24)? as usize;
+        if compressed_size != uncompressed_size {
+            return Err(LibraryImportError::InvalidPackageZip(
+                "stored entry size mismatch".to_owned(),
+            ));
+        }
+        let name_len = read_u16(bytes, offset + 28)? as usize;
+        let extra_len = read_u16(bytes, offset + 30)? as usize;
+        let comment_len = read_u16(bytes, offset + 32)? as usize;
+        let local_offset = read_u32(bytes, offset + 42)? as usize;
+        let name_start = offset + 46;
+        let name_end = name_start.checked_add(name_len).ok_or_else(|| {
+            LibraryImportError::InvalidPackageZip("entry name overflow".to_owned())
+        })?;
+        let next = name_end
+            .checked_add(extra_len)
+            .and_then(|value| value.checked_add(comment_len))
+            .ok_or_else(|| {
+                LibraryImportError::InvalidPackageZip("central entry overflow".to_owned())
+            })?;
+        if next > bytes.len() {
+            return Err(LibraryImportError::InvalidPackageZip(
+                "central entry is out of bounds".to_owned(),
+            ));
+        }
+        let name = std::str::from_utf8(&bytes[name_start..name_end])
+            .map_err(|source| LibraryImportError::PackageUtf8 { source })?
+            .to_owned();
+        let data = read_stored_zip_entry(bytes, local_offset, compressed_size, crc)?;
+        entries.insert(name, data);
+        offset = next;
+    }
+
+    if offset != central_offset + central_size {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "central directory length mismatch".to_owned(),
+        ));
+    }
+
+    Ok(entries)
+}
+
+fn read_stored_zip_entry(
+    bytes: &[u8],
+    offset: usize,
+    size: usize,
+    expected_crc: u32,
+) -> Result<Vec<u8>, LibraryImportError> {
+    if read_u32(bytes, offset)? != 0x0403_4b50 {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "invalid local file header signature".to_owned(),
+        ));
+    }
+    let method = read_u16(bytes, offset + 8)?;
+    if method != 0 {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "compressed package entries are not supported".to_owned(),
+        ));
+    }
+    let name_len = read_u16(bytes, offset + 26)? as usize;
+    let extra_len = read_u16(bytes, offset + 28)? as usize;
+    let data_start = offset
+        .checked_add(30)
+        .and_then(|value| value.checked_add(name_len))
+        .and_then(|value| value.checked_add(extra_len))
+        .ok_or_else(|| LibraryImportError::InvalidPackageZip("local entry overflow".to_owned()))?;
+    let data_end = data_start
+        .checked_add(size)
+        .ok_or_else(|| LibraryImportError::InvalidPackageZip("entry data overflow".to_owned()))?;
+    if data_end > bytes.len() {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "entry data is out of bounds".to_owned(),
+        ));
+    }
+    let data = bytes[data_start..data_end].to_vec();
+    if crc32(&data) != expected_crc {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "entry crc mismatch".to_owned(),
+        ));
+    }
+    Ok(data)
+}
+
+fn find_eocd(bytes: &[u8]) -> Result<usize, LibraryImportError> {
+    if bytes.len() < 22 {
+        return Err(LibraryImportError::InvalidPackageZip(
+            "package is too small".to_owned(),
+        ));
+    }
+    let search_start = bytes.len().saturating_sub(22 + u16::MAX as usize);
+    for offset in (search_start..=bytes.len() - 22).rev() {
+        if bytes[offset..].starts_with(&0x0605_4b50u32.to_le_bytes()) {
+            return Ok(offset);
+        }
+    }
+    Err(LibraryImportError::InvalidPackageZip(
+        "end of central directory not found".to_owned(),
+    ))
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, LibraryImportError> {
+    let end = offset
+        .checked_add(2)
+        .ok_or_else(|| LibraryImportError::InvalidPackageZip("u16 offset overflow".to_owned()))?;
+    let chunk = bytes.get(offset..end).ok_or_else(|| {
+        LibraryImportError::InvalidPackageZip("unexpected end of package".to_owned())
+    })?;
+    Ok(u16::from_le_bytes([chunk[0], chunk[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, LibraryImportError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| LibraryImportError::InvalidPackageZip("u32 offset overflow".to_owned()))?;
+    let chunk = bytes.get(offset..end).ok_or_else(|| {
+        LibraryImportError::InvalidPackageZip("unexpected end of package".to_owned())
+    })?;
+    Ok(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 fn read_library_source(path: &Path) -> Result<String, LibraryImportError> {
     fs::read_to_string(path).map_err(|source| LibraryImportError::Io {
         path: path.to_path_buf(),
@@ -929,6 +1451,8 @@ pub enum LibraryImportError {
     #[error(transparent)]
     Library(#[from] LibraryError),
     #[error(transparent)]
+    Project(#[from] ProjectError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Model(#[from] ModelError),
@@ -959,16 +1483,44 @@ pub enum LibraryImportError {
     ItemHasNoLibrarySource { id: ElementId },
     #[error("library uid mismatch: item references {expected:?}, got {actual:?}")]
     LibraryUidMismatch { expected: String, actual: String },
+    #[error("asset hash {hash:?} must be a full lowercase blake3:<hex> content hash")]
+    InvalidAssetHash { hash: String },
+    #[error("asset content hash mismatch: expected {expected}, got {actual}")]
+    AssetHashMismatch { expected: String, actual: String },
+    #[error("invalid Framer package format {found:?}")]
+    InvalidPackageFormat { found: String },
+    #[error("unsupported Framer package schema version {found}; this build supports {supported}")]
+    UnsupportedPackageSchemaVersion { found: u32, supported: u32 },
+    #[error("package project path must be project.framer, got {path:?}")]
+    InvalidPackageProjectPath { path: String },
+    #[error("asset {hash:?} has invalid package path {path:?}")]
+    InvalidPackageAssetPath { hash: String, path: String },
+    #[error("package is missing project.framer")]
+    PackageProjectMissing,
+    #[error("package is missing manifest.json")]
+    PackageManifestMissing,
+    #[error("package is missing asset entry {path:?}")]
+    PackageAssetMissing { path: String },
+    #[error("package text is not valid UTF-8")]
+    PackageUtf8 { source: std::str::Utf8Error },
+    #[error("invalid Framer package zip: {0}")]
+    InvalidPackageZip(String),
+    #[error("Framer package is too large for the v1 zip writer")]
+    PackageTooLarge,
 }
 
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        BoardProfile, CodeProfile, ConstructionLayer, FramingPattern, FramingSpec, LayerFunction,
-        Length, ModelError, SystemKind, load_project, save_project,
+        Appearance, AssetRef, BoardProfile, CodeProfile, ConstructionLayer, FramingPattern,
+        FramingSpec, LayerFunction, Length, ModelError, SystemKind, TextureRole, load_project,
+        save_project,
     };
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn fixture_library() -> Library {
         Library {
@@ -1007,6 +1559,28 @@ mod tests {
         }
     }
 
+    fn temp_path(name: &str) -> PathBuf {
+        let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("framer-library-{name}-{}-{id}", std::process::id()))
+    }
+
+    fn textured_project() -> (BuildingModel, BTreeMap<String, Vec<u8>>) {
+        let bytes = b"not-a-real-png-but-content-addressed".to_vec();
+        let hash = asset_content_hash(&bytes);
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut material = Material::solid_color("mat-textured", "Textured", [48, 96, 144]);
+        material.appearance = Appearance::Textured {
+            color: [48, 96, 144],
+            texture: AssetRef::new(hash.clone(), "image/png", TextureRole::Texture),
+            scale: Length::from_whole_inches(24),
+        };
+        model.materials.push(material);
+
+        let mut assets = BTreeMap::new();
+        assets.insert(hash, bytes);
+        (model, assets)
+    }
+
     #[test]
     fn starter_library_hash_is_golden() {
         let loaded = starter_library().unwrap();
@@ -1038,6 +1612,64 @@ mod tests {
             load_verified_library(&bad),
             Err(LibraryImportError::ContentHashMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn content_addressed_asset_store_writes_by_blake3_hash() {
+        let root = temp_path("cas");
+        let store = ContentAddressedAssetStore::new(&root);
+        let bytes = b"asset-bytes";
+
+        let hash = store.put(bytes).unwrap();
+
+        assert_eq!(hash, asset_content_hash(bytes));
+        assert!(store.contains(&hash).unwrap());
+        assert_eq!(store.get(&hash).unwrap(), Some(bytes.to_vec()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_package_is_deterministic_and_round_trips_assets() {
+        let (model, assets) = textured_project();
+
+        let first = save_project_package(&model, &assets).unwrap();
+        let second = save_project_package(&model, &assets).unwrap();
+        assert_eq!(first, second);
+
+        let loaded = load_project_package(&first).unwrap();
+        assert_eq!(
+            save_project(&loaded.project).unwrap(),
+            save_project(&model).unwrap()
+        );
+        assert_eq!(loaded.assets, assets);
+    }
+
+    #[test]
+    fn project_package_rejects_asset_hash_mismatch() {
+        let (model, mut assets) = textured_project();
+        let hash = assets.keys().next().unwrap().clone();
+        assets.insert(hash, b"different-bytes".to_vec());
+
+        assert!(matches!(
+            save_project_package(&model, &assets),
+            Err(LibraryImportError::AssetHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn project_package_from_store_includes_only_available_referenced_assets() {
+        let root = temp_path("package-store");
+        let store = ContentAddressedAssetStore::new(&root);
+        let (model, assets) = textured_project();
+        let (hash, bytes) = assets.iter().next().unwrap();
+        assert_eq!(store.put(bytes).unwrap(), *hash);
+
+        let package = save_project_package_from_store(&model, &store).unwrap();
+        let loaded = load_project_package(&package).unwrap();
+
+        assert_eq!(loaded.assets, assets);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

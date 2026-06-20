@@ -68,6 +68,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   Appearance, tags, properties: BTreeMap<String, PropertyValue>`. Open/extensible: substance
   lives in `properties` (e.g. `"r_per_inch_milli": Int`), not in the enum. `PropertyValue`
   is float-free (`Int|Length|Text|Flag`) so the model stays `Eq` + deterministic.
+- **`AssetRef`** / **`TextureRole`** — hash-only references for binary material assets.
+  `Appearance::Textured` and `Appearance::DepthMapped` carry a fallback color, `AssetRef`, and
+  positive `Length` scale; asset bytes stay outside `.framer`.
 - **`LibraryStamp`** / **`Provenance`** — descriptive library metadata for vendored
   definitions. It is never used to resolve walls/materials/systems at load or solve time.
 - **`Opening`** (`OpeningKind`: Door/Window/GarageDoor/Skylight/Stair…), **`WallJoin`**
@@ -94,9 +97,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framer` serialization (`src/project.rs`)
 
-- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 8`**.
-- The model is **v8-only**: `load_project` peeks a `SchemaHeader` first and returns
-  `ProjectError::UnsupportedSchemaVersion` for any non-v8 file. `#[serde(deny_unknown_fields)]`
+- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 9`**.
+- The model is **v9-only**: `load_project` peeks a `SchemaHeader` first and returns
+  `ProjectError::UnsupportedSchemaVersion` for any non-v9 file. `#[serde(deny_unknown_fields)]`
   rejects unknown keys.
 - Canonical output: `to_canonical_json()` re-stamps the version, calls
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a
@@ -128,7 +131,7 @@ Headless, IO-capable support crate for the [Libraries spec](specs/libraries.md).
 
 | File | Contains |
 | --- | --- |
-| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, import functions, lifecycle diagnostics, re-sync, and detach. |
+| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, import functions, lifecycle diagnostics, re-sync/detach, content-addressed asset store, and deterministic `.framerpkg` package IO. |
 
 Key entry points:
 
@@ -146,6 +149,10 @@ Key entry points:
   referenced material closure.
 - `detach_material` / `detach_system` / `detach_item` — clear provenance on selected vendored
   definitions and prune unused library stamps.
+- `ContentAddressedAssetStore` / `asset_content_hash` / `referenced_asset_hashes` — store and
+  discover binary assets by full `blake3:<hex>` hash.
+- `save_project_package` / `load_project_package` — write/read deterministic `.framerpkg`
+  archives with `project.framer`, `manifest.json`, and `assets/blake3-<hex>` blobs.
 - `LocalSearchPathResolver` — resolves built-in, local path, and installed-library locators.
   Remote locators are represented but intentionally unsupported until the remote/cache phase.
 
@@ -301,14 +308,14 @@ the real symbols:
 | Goal | Touch | Then |
 | --- | --- | --- |
 | **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render/3D handling in `framer-render/src/build.rs` + `viewport/scene_build.rs`; inspector in `framer-app` `panels.rs`. |
-| **New construction layer function / material** | `LayerFunction` / `Material` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material in `framer-render/src/build.rs`. |
+| **New construction layer function / material** | `LayerFunction` / `Material` / `Appearance` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material lowering in `framer-render/src/build.rs`; asset bytes via `framer-library` package/store helpers. |
 | **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import UI in `framer-app/src/app/panels.rs`; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
 | **New solver rule / member** | `MemberKind` + rule in `framer-solver/src/lib.rs` | attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
 | **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
 | **Schema change** | bump `PROJECT_SCHEMA_VERSION` in `project.rs`; add types in `model.rs` | update the three `examples/projects/*.framer` (round-trip tests are byte-exact); update [project-files.md](project-files.md); add a rejection/round-trip test. |
 | **New UI control / styling** | `framer-app/src/app/design/` | use semantic tokens; don't hard-code colors inline. |
-| **Render math change** | `framer-render` integrator/material (CPU = reference) | mirror it in `app/render/*.wgsl`; keep `tests/gpu_parity.rs` green. |
+| **Render math change** | `framer-render` integrator/material/build scene (CPU = reference) | mirror it in `app/render/*.wgsl`; keep `tests/gpu_parity.rs` green. |
 
 ---
 

@@ -128,7 +128,7 @@ multi-wall CAD shell:
 - `framer-core` represents levels, wall segment placement, wall joins/corners,
   wall openings, rooms, a reusable material library, layered construction systems
   (applied to walls by reference), and deterministic project ordering. The
-  `.framer` format is schema **v8** and v8-only: older files are rejected with an
+  `.framer` format is schema **v9** and v9-only: older files are rejected with an
   explicit unsupported-schema error rather than migrated. See the
   [Construction Systems spec](specs/construction-systems.md).
 - `framer-solver` deterministically generates per-wall plates, common studs,
@@ -168,7 +168,7 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v8 `.framer` format is documented in
+The current v9 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
 (including the material library and construction systems); derived framing plans,
 cached view state, and exports remain disposable outputs that are regenerated from

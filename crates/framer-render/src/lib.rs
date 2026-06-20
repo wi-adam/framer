@@ -30,7 +30,10 @@ pub mod sampling;
 pub mod scene;
 pub mod scenes;
 
-pub use build::{RenderOptions, SceneFraming, build_scene, scene_from_model};
+pub use build::{
+    RenderAssets, RenderOptions, SceneFraming, build_scene, build_scene_with_assets,
+    scene_from_model, scene_from_model_with_assets,
+};
 
 use math::Vec3;
 use scene::Scene;

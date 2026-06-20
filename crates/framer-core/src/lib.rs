@@ -11,12 +11,12 @@ pub use library::{
     save_library,
 };
 pub use model::{
-    Appearance, BoardProfile, BuildingModel, CodeProfile, ConstructionLayer, ConstructionSystem,
-    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
+    Appearance, AssetRef, BoardProfile, BuildingModel, CodeProfile, ConstructionLayer,
+    ConstructionSystem, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
     DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
     FramingPattern, FramingSpec, LayerFunction, Level, LibraryStamp, Material, MaterialSource,
     ModelError, Opening, OpeningKind, PrescriptiveCode, PropertyValue, Provenance, Room, RoomUsage,
-    Sheathing, SystemKind, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind,
+    Sheathing, SystemKind, TextureRole, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,
