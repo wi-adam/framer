@@ -1,10 +1,15 @@
 mod constraints;
+mod library;
 mod model;
 mod project;
 mod topology;
 mod units;
 
 pub use constraints::{ConstraintSystem, ConstraintVariable, LinearConstraint, LinearExpression};
+pub use library::{
+    LIBRARY_FORMAT, LIBRARY_SCHEMA_VERSION, Library, LibraryDocument, LibraryError, load_library,
+    save_library,
+};
 pub use model::{
     Appearance, BoardProfile, BuildingModel, CodeProfile, ConstructionLayer, ConstructionSystem,
     DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
