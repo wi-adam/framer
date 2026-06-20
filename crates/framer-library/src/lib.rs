@@ -542,6 +542,81 @@ mod tests {
     }
 
     #[test]
+    fn resolver_loads_builtin_and_local_libraries() {
+        let resolver = LocalSearchPathResolver::default();
+        let builtin = load_verified_library(
+            &resolver
+                .resolve(&Locator::Builtin {
+                    id: "framer-starter".to_owned(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let local = load_verified_library(
+            &resolver
+                .resolve(&Locator::Local {
+                    path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../libraries/framer-starter.framerlib"),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(builtin.library.coordinate, "framer-lib://framer/starter");
+        assert_eq!(local.library.coordinate, builtin.library.coordinate);
+        assert_eq!(local.content_hash, builtin.content_hash);
+    }
+
+    #[test]
+    fn vendored_item_provenance_uses_source_normalized_content_hashes() {
+        let mut library = fixture_library();
+        let stale_source = Provenance {
+            library_uid: "22222222-2222-4222-8222-222222222222".to_owned(),
+            version_id: "019e9150-0000-7000-8000-000000000002".to_owned(),
+            source_id: ElementId::new("stale-source"),
+            content_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+        };
+        library.materials[0].source = MaterialSource::Library(stale_source.clone());
+        library.systems[0].source = Some(stale_source);
+        let library_hash = library_content_hash(&library).unwrap();
+        let expected_material_hash = material_content_hash(&library.materials[0]).unwrap();
+        let expected_system_hash = system_content_hash(&library.systems[0]).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        let imported_material = import_material(
+            &mut project,
+            &library,
+            &library_hash,
+            &ElementId::new("mat-cedar"),
+        )
+        .unwrap();
+        let material = project.material(&imported_material.materials[0]).unwrap();
+        let MaterialSource::Library(material_source) = &material.source else {
+            panic!("vendored material should have provenance");
+        };
+        assert_eq!(material_source.content_hash, expected_material_hash);
+
+        let imported_system = import_system(
+            &mut project,
+            &library,
+            &library_hash,
+            &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+        let system = project
+            .systems
+            .iter()
+            .find(|system| Some(&system.id) == imported_system.system.as_ref())
+            .unwrap();
+        assert_eq!(
+            system.source.as_ref().unwrap().content_hash,
+            expected_system_hash
+        );
+        project.validate().unwrap();
+    }
+
+    #[test]
     fn importing_system_vendors_material_closure_and_remaps_references() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
