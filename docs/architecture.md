@@ -20,8 +20,8 @@ small buildings, garages, decks, and wood framed BBQ islands.
 ## Workspace
 
 - `crates/framer-core`: shared domain types, units, structure model, openings,
-  construction systems, the material library, code profiles, room topology, and
-  validation.
+  construction systems, the material/object libraries, code profiles, room
+  topology, and validation.
 - `crates/framer-library`: library resolution, exact content hashing,
   cache-first remote URL fetching, and vendor-on-use import/remap for reusable
   `.framerlib` content.
@@ -128,18 +128,21 @@ multi-wall CAD shell:
   garage-door-style opening on different walls.
 - `framer-core` represents levels, wall segment placement, wall joins/corners,
   wall openings, rooms, a reusable material library, layered construction systems
-  (applied to walls by reference), and deterministic project ordering. The
-  `.framer` format is schema **v9** and v9-only: older files are rejected with an
-  explicit unsupported-schema error rather than migrated. See the
-  [Construction Systems spec](specs/construction-systems.md).
+  (applied to walls by reference), furnishing/MEP object families and placed
+  instances, and deterministic project ordering. The `.framer` format is schema
+  **v10** and v10-only: older files are rejected with an explicit
+  unsupported-schema error rather than migrated. See the
+  [Construction Systems spec](specs/construction-systems.md) and
+  [Libraries spec](specs/libraries.md).
 - `framer-solver` deterministically generates per-wall plates, common studs,
   king studs, jack studs, headers, rough sills, cripples, join corner posts,
   grouped whole-project BOM rows, diagnostics, and per-member rule provenance.
 - `framer-app` exposes a CAD-oriented shell with explicit Design and Plan
   workspace modes; a model tree for levels, wall segments, openings, joins, and
   generated framing; an inspector for selectable objects; catalog placement for
-  doors, windows, and garage doors; diagnostics; a BOM table; a whole-shell plan
-  viewport; selected-wall elevation view; and a WGPU-backed 3D viewport with
+  doors, windows, garage doors, furnishings, and MEP objects; diagnostics; a BOM
+  table; a whole-shell plan viewport; selected-wall elevation view; and a
+  WGPU-backed 3D viewport with
   selectable wall, opening, and generated-member solids.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
@@ -169,11 +172,11 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v9 `.framer` format is documented in
+The current v10 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
-(including the material library and construction systems); derived framing plans,
-cached view state, and exports remain disposable outputs that are regenerated from
-the project.
+(including the material library, construction systems, furnishing/MEP families,
+and placed object instances); derived framing plans, cached view state, and
+exports remain disposable outputs that are regenerated from the project.
 
 Binary caches are acceptable only as disposable acceleration data. They must not
 be the only source of truth for a design.

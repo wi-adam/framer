@@ -14,10 +14,11 @@ pub use model::{
     Appearance, AssetRef, BoardProfile, BuildingModel, CodeProfile, ConstructionLayer,
     ConstructionSystem, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
     DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
-    FramingPattern, FramingSpec, LayerFunction, Level, LibraryStamp, Material, MaterialSource,
-    ModelError, Opening, OpeningKind, PrescriptiveCode, PropertyValue, Provenance, Room, RoomUsage,
-    Sheathing, SystemKind, TextureRole, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind,
-    is_blake3_hash,
+    FramingPattern, FramingSpec, Furnishing, FurnishingInstance, LayerFunction, Level,
+    LibraryStamp, Material, MaterialSource, MepInstance, MepObject, MepObjectKind, ModelError,
+    ObjectSize, Opening, OpeningKind, PrescriptiveCode, PropertyValue, Provenance, QuarterTurn,
+    Room, RoomUsage, Sheathing, SystemKind, TextureRole, Wall, WallEnd, WallExposure, WallJoin,
+    WallJoinKind, is_blake3_hash,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,

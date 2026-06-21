@@ -117,6 +117,10 @@ enum Selection {
     Member { wall_id: String, member_id: String },
     System(String),
     Material(String),
+    Furnishing(String),
+    MepObject(String),
+    FurnishingInstance(String),
+    MepInstance(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +234,12 @@ enum ViewClick {
     /// Select an existing room (e.g. clicking its fill in the plan).
     Room {
         room_id: String,
+    },
+    FurnishingInstance {
+        instance_id: String,
+    },
+    MepInstance {
+        instance_id: String,
     },
     Member {
         wall_id: String,
@@ -691,7 +701,7 @@ impl FramerApp {
     }
 
     /// Delete whatever authored element is selected (wall, opening, room,
-    /// construction system, or material).
+    /// construction system, material, object family, or placed object).
     fn delete_selected(&mut self) {
         match &self.selected {
             Selection::Opening(_) => self.delete_selected_opening(),
@@ -699,6 +709,10 @@ impl FramerApp {
             Selection::Room(_) => self.delete_selected_room(),
             Selection::System(_) => self.delete_selected_system(),
             Selection::Material(_) => self.delete_selected_material(),
+            Selection::Furnishing(_) => self.delete_selected_furnishing(),
+            Selection::MepObject(_) => self.delete_selected_mep_object(),
+            Selection::FurnishingInstance(_) => self.delete_selected_furnishing_instance(),
+            Selection::MepInstance(_) => self.delete_selected_mep_instance(),
             _ => {}
         }
     }
@@ -756,6 +770,98 @@ impl FramerApp {
             let before = app.model.materials.len();
             app.model.materials.retain(|material| material.id.0 != id);
             if app.model.materials.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    fn delete_selected_furnishing(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::Furnishing(id) = self.selected.clone() else {
+            return;
+        };
+        if self
+            .model
+            .furnishing_instances
+            .iter()
+            .any(|instance| instance.family.0 == id)
+        {
+            self.error = Some(format!(
+                "Cannot delete furnishing '{id}': it is still placed in the model"
+            ));
+            return;
+        }
+        self.edit("Delete furnishing", |app| {
+            let before = app.model.furnishings.len();
+            app.model
+                .furnishings
+                .retain(|furnishing| furnishing.id.0 != id);
+            if app.model.furnishings.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    fn delete_selected_mep_object(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::MepObject(id) = self.selected.clone() else {
+            return;
+        };
+        if self
+            .model
+            .mep_instances
+            .iter()
+            .any(|instance| instance.family.0 == id)
+        {
+            self.error = Some(format!(
+                "Cannot delete MEP object '{id}': it is still placed in the model"
+            ));
+            return;
+        }
+        self.edit("Delete MEP object", |app| {
+            let before = app.model.mep_objects.len();
+            app.model.mep_objects.retain(|object| object.id.0 != id);
+            if app.model.mep_objects.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    fn delete_selected_furnishing_instance(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::FurnishingInstance(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete furnishing instance", |app| {
+            let before = app.model.furnishing_instances.len();
+            app.model
+                .furnishing_instances
+                .retain(|instance| instance.id.0 != id);
+            if app.model.furnishing_instances.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    fn delete_selected_mep_instance(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::MepInstance(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete MEP instance", |app| {
+            let before = app.model.mep_instances.len();
+            app.model
+                .mep_instances
+                .retain(|instance| instance.id.0 != id);
+            if app.model.mep_instances.len() != before {
                 app.selected = Selection::Wall;
             }
         });
@@ -893,7 +999,11 @@ impl FramerApp {
             | Selection::Join(_)
             | Selection::Room(_)
             | Selection::System(_)
-            | Selection::Material(_) => {
+            | Selection::Material(_)
+            | Selection::Furnishing(_)
+            | Selection::MepObject(_)
+            | Selection::FurnishingInstance(_)
+            | Selection::MepInstance(_) => {
                 self.selected = Selection::Wall;
             }
             Selection::Dimension(_) => unreachable!("dimension selections exit above"),
@@ -1711,6 +1821,12 @@ impl FramerApp {
             ViewClick::Room { room_id } => {
                 self.selected = Selection::Room(room_id);
             }
+            ViewClick::FurnishingInstance { instance_id } => {
+                self.selected = Selection::FurnishingInstance(instance_id);
+            }
+            ViewClick::MepInstance { instance_id } => {
+                self.selected = Selection::MepInstance(instance_id);
+            }
             ViewClick::Member { wall_id, member_id } => {
                 if self.workspace_mode.shows_generated_plan() {
                     if let Some(index) = self
@@ -1764,6 +1880,8 @@ fn append_library_diagnostics(
         let item_kind = match &issue.item {
             framer_library::LibraryItem::Material(_) => "material",
             framer_library::LibraryItem::System(_) => "system",
+            framer_library::LibraryItem::Furnishing(_) => "furnishing",
+            framer_library::LibraryItem::MepObject(_) => "MEP object",
         };
         let code = match issue.kind {
             framer_library::LibraryIssueKind::Diverged => "library.item.diverged",
@@ -1898,7 +2016,10 @@ impl FramerApp {
 mod tests {
     use std::{fs, process};
 
-    use framer_core::{DimensionHorizontalReference, DimensionVerticalReference};
+    use framer_core::{
+        DimensionHorizontalReference, DimensionVerticalReference, Furnishing, FurnishingInstance,
+        MepInstance, MepObject, MepObjectKind,
+    };
 
     use super::*;
 
@@ -2080,6 +2201,95 @@ mod tests {
         app.add_opening(OpeningKind::Door);
 
         assert_eq!(app.model.walls[0].openings.len(), opening_count);
+    }
+
+    #[test]
+    fn view_click_selects_placed_object_instances() {
+        let mut app = FramerApp::default();
+
+        app.handle_view_click(ViewClick::FurnishingInstance {
+            instance_id: "furnishing-instance-7".to_owned(),
+        });
+        assert_eq!(
+            app.selected,
+            Selection::FurnishingInstance("furnishing-instance-7".to_owned())
+        );
+
+        app.handle_view_click(ViewClick::MepInstance {
+            instance_id: "mep-instance-2".to_owned(),
+        });
+        assert_eq!(
+            app.selected,
+            Selection::MepInstance("mep-instance-2".to_owned())
+        );
+    }
+
+    #[test]
+    fn delete_refuses_furnishing_family_that_is_still_placed() {
+        let mut app = FramerApp::default();
+        let level_id = app.model.levels[0].id.0.clone();
+        app.model.furnishings.push(Furnishing::new(
+            "furnishing-test",
+            "Test furnishing",
+            Length::from_inches(24.0),
+            Length::from_inches(18.0),
+            Length::from_inches(34.5),
+        ));
+        app.model.furnishing_instances.push(FurnishingInstance::new(
+            "furnishing-instance-test",
+            "Placed test furnishing",
+            "furnishing-test",
+            level_id,
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+        app.selected = Selection::Furnishing("furnishing-test".to_owned());
+
+        app.delete_selected();
+
+        assert_eq!(app.model.furnishings.len(), 1);
+        assert_eq!(
+            app.selected,
+            Selection::Furnishing("furnishing-test".to_owned())
+        );
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("still placed"))
+        );
+        app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn delete_refuses_mep_family_that_is_still_placed() {
+        let mut app = FramerApp::default();
+        let level_id = app.model.levels[0].id.0.clone();
+        app.model.mep_objects.push(MepObject::new(
+            "mep-test",
+            "Test MEP object",
+            MepObjectKind::Electrical,
+            Length::from_inches(14.0),
+            Length::from_inches(4.0),
+            Length::from_inches(24.0),
+        ));
+        app.model.mep_instances.push(MepInstance::new(
+            "mep-instance-test",
+            "Placed test MEP object",
+            "mep-test",
+            level_id,
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+        app.selected = Selection::MepObject("mep-test".to_owned());
+
+        app.delete_selected();
+
+        assert_eq!(app.model.mep_objects.len(), 1);
+        assert_eq!(app.selected, Selection::MepObject("mep-test".to_owned()));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("still placed"))
+        );
+        app.model.validate().unwrap();
     }
 
     #[test]
