@@ -2189,6 +2189,45 @@ mod tests {
     }
 
     #[test]
+    fn remote_resolver_propagates_provider_failure_on_cache_miss() {
+        let (_source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-provider-failure");
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::RemoteFetchFailed { .. })
+        ));
+        assert_eq!(provider.request_count(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_fails_closed_on_cache_io_error_without_refetch() {
+        let (_source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-cache-io-error");
+        fs::create_dir_all(root.join(library_file_name(&hash).unwrap())).unwrap();
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::Io { .. })
+        ));
+        assert_eq!(provider.request_count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn remote_resolver_rejects_unpinned_or_invalid_remote_inputs_before_fetch() {
         let (_source, hash) = fixture_library_source_and_hash();
         let root = temp_path("remote-invalid-input");
