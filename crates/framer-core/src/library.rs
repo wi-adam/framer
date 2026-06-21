@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConstructionSystem, Material, ModelError,
+    ConstructionSystem, Furnishing, Material, MepObject, ModelError,
     model::{insert_unique_id, validate_element_id},
 };
 
 pub const LIBRARY_FORMAT: &str = "framer.library";
-pub const LIBRARY_SCHEMA_VERSION: u32 = 1;
+pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
 const MIN_SUPPORTED_LIBRARY_SCHEMA_VERSION: u32 = LIBRARY_SCHEMA_VERSION;
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
 
@@ -27,6 +27,10 @@ pub struct Library {
     pub materials: Vec<Material>,
     #[serde(default)]
     pub systems: Vec<ConstructionSystem>,
+    #[serde(default)]
+    pub furnishings: Vec<Furnishing>,
+    #[serde(default)]
+    pub mep_objects: Vec<MepObject>,
 }
 
 impl Library {
@@ -45,12 +49,24 @@ impl Library {
             system.validate(&material_lookup, &mut ids)?;
         }
 
+        for furnishing in &self.furnishings {
+            furnishing.validate(&mut ids)?;
+        }
+
+        for object in &self.mep_objects {
+            object.validate(&mut ids)?;
+        }
+
         Ok(())
     }
 
     pub fn sort_deterministically(&mut self) {
         self.materials.sort_by(|left, right| left.id.cmp(&right.id));
         self.systems.sort_by(|left, right| left.id.cmp(&right.id));
+        self.furnishings
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.mep_objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -75,6 +91,10 @@ pub struct LibraryDocument {
     pub materials: Vec<Material>,
     #[serde(default)]
     pub systems: Vec<ConstructionSystem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub furnishings: Vec<Furnishing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mep_objects: Vec<MepObject>,
 }
 
 impl LibraryDocument {
@@ -89,6 +109,8 @@ impl LibraryDocument {
             coordinate: library.coordinate,
             materials: library.materials,
             systems: library.systems,
+            furnishings: library.furnishings,
+            mep_objects: library.mep_objects,
         }
     }
 
@@ -100,6 +122,8 @@ impl LibraryDocument {
             coordinate: self.coordinate,
             materials: self.materials,
             systems: self.systems,
+            furnishings: self.furnishings,
+            mep_objects: self.mep_objects,
         }
     }
 
@@ -135,6 +159,10 @@ impl LibraryDocument {
     fn sort_deterministically(&mut self) {
         self.materials.sort_by(|left, right| left.id.cmp(&right.id));
         self.systems.sort_by(|left, right| left.id.cmp(&right.id));
+        self.furnishings
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.mep_objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
     }
 }
 
@@ -196,8 +224,8 @@ pub enum LibraryError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ConstructionLayer, ConstructionSystem, ElementId, LayerFunction, Length, Material,
-        SystemKind,
+        ConstructionLayer, ConstructionSystem, ElementId, Furnishing, LayerFunction, Length,
+        Material, MepObject, MepObjectKind, SystemKind,
     };
 
     use super::*;
@@ -211,10 +239,12 @@ mod tests {
         let json = save_library(&checked_in_starter_library()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.library\",\n"));
-        assert!(json.contains("  \"schema_version\": 1,\n"));
+        assert!(json.contains("  \"schema_version\": 2,\n"));
         assert!(json.contains("  \"uid\": \"8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8\",\n"));
         assert!(json.contains("  \"materials\": ["));
         assert!(json.contains("  \"systems\": ["));
+        assert!(json.contains("  \"furnishings\": ["));
+        assert!(json.contains("  \"mep_objects\": ["));
         assert!(!json.contains("\"authored\""));
     }
 
@@ -255,6 +285,21 @@ mod tests {
                     Length::from_whole_inches(1),
                 )],
             }],
+            furnishings: vec![Furnishing::new(
+                "furnishing-round-trip",
+                "Round-trip cabinet",
+                Length::from_whole_inches(36),
+                Length::from_whole_inches(24),
+                Length::from_whole_inches(34),
+            )],
+            mep_objects: vec![MepObject::new(
+                "mep-round-trip",
+                "Round-trip panel",
+                MepObjectKind::Electrical,
+                Length::from_whole_inches(14),
+                Length::from_whole_inches(4),
+                Length::from_whole_inches(24),
+            )],
         };
 
         let reloaded = load_library(&save_library(&library).unwrap()).unwrap();
@@ -340,7 +385,7 @@ mod tests {
     fn load_library_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.library",
-  "schema_version": 1,
+  "schema_version": 2,
   "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
   "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
   "version": "0.1.0",

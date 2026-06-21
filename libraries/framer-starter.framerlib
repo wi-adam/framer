@@ -1,6 +1,6 @@
 {
   "format": "framer.library",
-  "schema_version": 1,
+  "schema_version": 2,
   "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
   "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
   "version": "0.1.0",
@@ -232,6 +232,94 @@
           }
         }
       ]
+    }
+  ],
+  "furnishings": [
+    {
+      "id": "furnishing-base-cabinet",
+      "name": "Base cabinet",
+      "size": {
+        "width": {
+          "ticks": 576
+        },
+        "depth": {
+          "ticks": 384
+        },
+        "height": {
+          "ticks": 544
+        }
+      },
+      "tags": [
+        "cabinetry"
+      ]
+    },
+    {
+      "id": "furnishing-workbench",
+      "name": "Workbench",
+      "size": {
+        "width": {
+          "ticks": 1152
+        },
+        "depth": {
+          "ticks": 480
+        },
+        "height": {
+          "ticks": 576
+        }
+      },
+      "tags": [
+        "shop"
+      ]
+    }
+  ],
+  "mep_objects": [
+    {
+      "id": "mep-load-center",
+      "name": "Load center",
+      "kind": "Electrical",
+      "size": {
+        "width": {
+          "ticks": 224
+        },
+        "depth": {
+          "ticks": 64
+        },
+        "height": {
+          "ticks": 384
+        }
+      },
+      "tags": [
+        "electrical"
+      ],
+      "properties": {
+        "amperage": {
+          "Int": 200
+        }
+      }
+    },
+    {
+      "id": "mep-recessed-light",
+      "name": "Recessed light",
+      "kind": "Lighting",
+      "size": {
+        "width": {
+          "ticks": 96
+        },
+        "depth": {
+          "ticks": 96
+        },
+        "height": {
+          "ticks": 64
+        }
+      },
+      "tags": [
+        "lighting"
+      ],
+      "properties": {
+        "wattage": {
+          "Int": 12
+        }
+      }
     }
   ]
 }

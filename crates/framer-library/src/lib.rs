@@ -7,9 +7,9 @@ use std::{
 };
 
 use framer_core::{
-    Appearance, BuildingModel, ConstructionSystem, ElementId, Library, LibraryError, LibraryStamp,
-    Material, MaterialSource, ModelError, ProjectError, Provenance, is_blake3_hash, load_library,
-    load_project, save_library, save_project,
+    Appearance, BuildingModel, ConstructionSystem, ElementId, Furnishing, Library, LibraryError,
+    LibraryStamp, Material, MaterialSource, MepObject, ModelError, ProjectError, Provenance,
+    is_blake3_hash, load_library, load_project, save_library, save_project,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -272,12 +272,16 @@ pub struct LoadedLibrary {
 pub enum LibraryItem {
     Material(ElementId),
     System(ElementId),
+    Furnishing(ElementId),
+    MepObject(ElementId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportResult {
     pub materials: Vec<ElementId>,
     pub system: Option<ElementId>,
+    pub furnishing: Option<ElementId>,
+    pub mep_object: Option<ElementId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,7 +378,10 @@ impl ContentAddressedAssetStore {
 impl LibraryIssue {
     pub fn item_id(&self) -> &ElementId {
         match &self.item {
-            LibraryItem::Material(id) | LibraryItem::System(id) => id,
+            LibraryItem::Material(id)
+            | LibraryItem::System(id)
+            | LibraryItem::Furnishing(id)
+            | LibraryItem::MepObject(id) => id,
         }
     }
 }
@@ -416,6 +423,12 @@ pub fn import_item(
     match item {
         LibraryItem::Material(id) => import_material(project, library, library_content_hash, &id),
         LibraryItem::System(id) => import_system(project, library, library_content_hash, &id),
+        LibraryItem::Furnishing(id) => {
+            import_furnishing(project, library, library_content_hash, &id)
+        }
+        LibraryItem::MepObject(id) => {
+            import_mep_object(project, library, library_content_hash, &id)
+        }
     }
 }
 
@@ -426,6 +439,8 @@ pub fn detach_item(
     match item {
         LibraryItem::Material(id) => detach_material(project, &id),
         LibraryItem::System(id) => detach_system(project, &id),
+        LibraryItem::Furnishing(id) => detach_furnishing(project, &id),
+        LibraryItem::MepObject(id) => detach_mep_object(project, &id),
     }
 }
 
@@ -438,6 +453,12 @@ pub fn resync_item(
     match item {
         LibraryItem::Material(id) => resync_material(project, library, library_content_hash, &id),
         LibraryItem::System(id) => resync_system(project, library, library_content_hash, &id),
+        LibraryItem::Furnishing(id) => {
+            resync_furnishing(project, library, library_content_hash, &id)
+        }
+        LibraryItem::MepObject(id) => {
+            resync_mep_object(project, library, library_content_hash, &id)
+        }
     }
 }
 
@@ -557,6 +578,8 @@ pub fn import_material(
     Ok(ImportResult {
         materials: vec![remapped],
         system: None,
+        furnishing: None,
+        mep_object: None,
     })
 }
 
@@ -598,6 +621,8 @@ pub fn resync_material(
     Ok(ImportResult {
         materials: vec![local_id],
         system: None,
+        furnishing: None,
+        mep_object: None,
     })
 }
 
@@ -686,6 +711,8 @@ pub fn import_system(
     Ok(ImportResult {
         materials: material_ids,
         system: Some(remapped_system),
+        furnishing: None,
+        mep_object: None,
     })
 }
 
@@ -759,6 +786,8 @@ pub fn resync_system(
     Ok(ImportResult {
         materials: imported_materials,
         system: Some(project_id.clone()),
+        furnishing: None,
+        mep_object: None,
     })
 }
 
@@ -780,6 +809,192 @@ pub fn detach_system(
     }
 
     staged.systems[system_index].source = None;
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+    Ok(true)
+}
+
+pub fn import_furnishing(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    source_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let source = library_furnishing(library, source_id)?.clone();
+    let prefix = library_id_prefix(library);
+    let mut staged = project.clone();
+    let mut used = collect_project_ids(&staged);
+    let remapped = mint_project_id(&prefix, &source.id, &mut used);
+    let furnishing = vendor_furnishing(library, &source, remapped.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    staged.furnishings.push(furnishing);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: Some(remapped),
+        mep_object: None,
+    })
+}
+
+pub fn resync_furnishing(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    project_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let mut staged = project.clone();
+    let furnishing_index = staged
+        .furnishings
+        .iter()
+        .position(|furnishing| furnishing.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectFurnishingNotFound {
+            id: project_id.clone(),
+        })?;
+    let source = staged.furnishings[furnishing_index]
+        .source
+        .clone()
+        .ok_or_else(|| LibraryImportError::ItemHasNoLibrarySource {
+            id: project_id.clone(),
+        })?;
+    ensure_library_matches(&source, library)?;
+
+    let source_furnishing = library_furnishing(library, &source.source_id)?.clone();
+    let local_id = staged.furnishings[furnishing_index].id.clone();
+    staged.furnishings[furnishing_index] =
+        vendor_furnishing(library, &source_furnishing, local_id.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: Some(local_id),
+        mep_object: None,
+    })
+}
+
+pub fn detach_furnishing(
+    project: &mut BuildingModel,
+    project_id: &ElementId,
+) -> Result<bool, LibraryImportError> {
+    let mut staged = project.clone();
+    let furnishing_index = staged
+        .furnishings
+        .iter()
+        .position(|furnishing| furnishing.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectFurnishingNotFound {
+            id: project_id.clone(),
+        })?;
+
+    if staged.furnishings[furnishing_index].source.is_none() {
+        return Ok(false);
+    }
+
+    staged.furnishings[furnishing_index].source = None;
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+    Ok(true)
+}
+
+pub fn import_mep_object(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    source_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let source = library_mep_object(library, source_id)?.clone();
+    let prefix = library_id_prefix(library);
+    let mut staged = project.clone();
+    let mut used = collect_project_ids(&staged);
+    let remapped = mint_project_id(&prefix, &source.id, &mut used);
+    let object = vendor_mep_object(library, &source, remapped.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    staged.mep_objects.push(object);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: None,
+        mep_object: Some(remapped),
+    })
+}
+
+pub fn resync_mep_object(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    project_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let mut staged = project.clone();
+    let object_index = staged
+        .mep_objects
+        .iter()
+        .position(|object| object.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectMepObjectNotFound {
+            id: project_id.clone(),
+        })?;
+    let source = staged.mep_objects[object_index]
+        .source
+        .clone()
+        .ok_or_else(|| LibraryImportError::ItemHasNoLibrarySource {
+            id: project_id.clone(),
+        })?;
+    ensure_library_matches(&source, library)?;
+
+    let source_object = library_mep_object(library, &source.source_id)?.clone();
+    let local_id = staged.mep_objects[object_index].id.clone();
+    staged.mep_objects[object_index] =
+        vendor_mep_object(library, &source_object, local_id.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: None,
+        mep_object: Some(local_id),
+    })
+}
+
+pub fn detach_mep_object(
+    project: &mut BuildingModel,
+    project_id: &ElementId,
+) -> Result<bool, LibraryImportError> {
+    let mut staged = project.clone();
+    let object_index = staged
+        .mep_objects
+        .iter()
+        .position(|object| object.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectMepObjectNotFound {
+            id: project_id.clone(),
+        })?;
+
+    if staged.mep_objects[object_index].source.is_none() {
+        return Ok(false);
+    }
+
+    staged.mep_objects[object_index].source = None;
     prune_unused_library_stamps(&mut staged);
     staged.sort_deterministically();
     staged.validate()?;
@@ -869,6 +1084,78 @@ pub fn library_lifecycle_issues(
         }
     }
 
+    for furnishing in &project.furnishings {
+        let Some(source) = &furnishing.source else {
+            continue;
+        };
+        let current_hash = vendored_furnishing_content_hash(furnishing, source)?;
+        if current_hash != source.content_hash {
+            issues.push(library_issue(
+                LibraryIssueKind::Diverged,
+                LibraryItem::Furnishing(furnishing.id.clone()),
+                source,
+                Some(current_hash),
+            ));
+        }
+        if let Some(library) = current_by_uid.get(source.library_uid.as_str()) {
+            match find_library_furnishing(library, &source.source_id) {
+                Some(source_furnishing) => {
+                    let library_hash = furnishing_content_hash(source_furnishing)?;
+                    if library_hash != source.content_hash {
+                        issues.push(library_issue(
+                            LibraryIssueKind::OutOfDate,
+                            LibraryItem::Furnishing(furnishing.id.clone()),
+                            source,
+                            Some(library_hash),
+                        ));
+                    }
+                }
+                None => issues.push(library_issue(
+                    LibraryIssueKind::SourceMissing,
+                    LibraryItem::Furnishing(furnishing.id.clone()),
+                    source,
+                    None,
+                )),
+            }
+        }
+    }
+
+    for object in &project.mep_objects {
+        let Some(source) = &object.source else {
+            continue;
+        };
+        let current_hash = vendored_mep_object_content_hash(object, source)?;
+        if current_hash != source.content_hash {
+            issues.push(library_issue(
+                LibraryIssueKind::Diverged,
+                LibraryItem::MepObject(object.id.clone()),
+                source,
+                Some(current_hash),
+            ));
+        }
+        if let Some(library) = current_by_uid.get(source.library_uid.as_str()) {
+            match find_library_mep_object(library, &source.source_id) {
+                Some(source_object) => {
+                    let library_hash = mep_object_content_hash(source_object)?;
+                    if library_hash != source.content_hash {
+                        issues.push(library_issue(
+                            LibraryIssueKind::OutOfDate,
+                            LibraryItem::MepObject(object.id.clone()),
+                            source,
+                            Some(library_hash),
+                        ));
+                    }
+                }
+                None => issues.push(library_issue(
+                    LibraryIssueKind::SourceMissing,
+                    LibraryItem::MepObject(object.id.clone()),
+                    source,
+                    None,
+                )),
+            }
+        }
+    }
+
     Ok(issues)
 }
 
@@ -886,6 +1173,18 @@ pub fn system_content_hash(system: &ConstructionSystem) -> Result<String, Librar
     let mut system = system.clone();
     system.source = None;
     hash_json(&system)
+}
+
+pub fn furnishing_content_hash(furnishing: &Furnishing) -> Result<String, LibraryImportError> {
+    let mut furnishing = furnishing.clone();
+    furnishing.source = None;
+    hash_json(&furnishing)
+}
+
+pub fn mep_object_content_hash(object: &MepObject) -> Result<String, LibraryImportError> {
+    let mut object = object.clone();
+    object.source = None;
+    hash_json(&object)
 }
 
 pub fn starter_library_ref() -> Result<&'static LoadedLibrary, LibraryImportError> {
@@ -951,6 +1250,30 @@ fn vendor_system(
     Ok(system)
 }
 
+fn vendor_furnishing(
+    library: &Library,
+    source: &Furnishing,
+    remapped: ElementId,
+) -> Result<Furnishing, LibraryImportError> {
+    let mut furnishing = source.clone();
+    let content_hash = furnishing_content_hash(source)?;
+    furnishing.id = remapped;
+    furnishing.source = Some(provenance(library, &source.id, content_hash));
+    Ok(furnishing)
+}
+
+fn vendor_mep_object(
+    library: &Library,
+    source: &MepObject,
+    remapped: ElementId,
+) -> Result<MepObject, LibraryImportError> {
+    let mut object = source.clone();
+    let content_hash = mep_object_content_hash(source)?;
+    object.id = remapped;
+    object.source = Some(provenance(library, &source.id, content_hash));
+    Ok(object)
+}
+
 fn library_issue(
     kind: LibraryIssueKind,
     item: LibraryItem,
@@ -1013,6 +1336,26 @@ fn vendored_system_content_hash(
     hash_json(&system)
 }
 
+fn vendored_furnishing_content_hash(
+    furnishing: &Furnishing,
+    source: &Provenance,
+) -> Result<String, LibraryImportError> {
+    let mut furnishing = furnishing.clone();
+    furnishing.id = source.source_id.clone();
+    furnishing.source = None;
+    hash_json(&furnishing)
+}
+
+fn vendored_mep_object_content_hash(
+    object: &MepObject,
+    source: &Provenance,
+) -> Result<String, LibraryImportError> {
+    let mut object = object.clone();
+    object.id = source.source_id.clone();
+    object.source = None;
+    hash_json(&object)
+}
+
 fn provenance(library: &Library, source_id: &ElementId, content_hash: String) -> Provenance {
     Provenance {
         library_uid: library.uid.clone(),
@@ -1069,6 +1412,18 @@ fn prune_unused_library_stamps(project: &mut BuildingModel) {
                 .as_ref()
                 .map(|source| (source.library_uid.clone(), source.version_id.clone()))
         }))
+        .chain(project.furnishings.iter().filter_map(|furnishing| {
+            furnishing
+                .source
+                .as_ref()
+                .map(|source| (source.library_uid.clone(), source.version_id.clone()))
+        }))
+        .chain(project.mep_objects.iter().filter_map(|object| {
+            object
+                .source
+                .as_ref()
+                .map(|source| (source.library_uid.clone(), source.version_id.clone()))
+        }))
         .collect::<BTreeSet<_>>();
     project
         .libraries
@@ -1092,6 +1447,26 @@ fn find_library_system<'a>(
         .find(|system| system.id == *source_id)
 }
 
+fn find_library_furnishing<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Option<&'a Furnishing> {
+    library
+        .furnishings
+        .iter()
+        .find(|furnishing| furnishing.id == *source_id)
+}
+
+fn find_library_mep_object<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Option<&'a MepObject> {
+    library
+        .mep_objects
+        .iter()
+        .find(|object| object.id == *source_id)
+}
+
 fn library_material<'a>(
     library: &'a Library,
     source_id: &ElementId,
@@ -1107,6 +1482,28 @@ fn library_system<'a>(
 ) -> Result<&'a ConstructionSystem, LibraryImportError> {
     find_library_system(library, source_id).ok_or_else(|| LibraryImportError::SystemNotFound {
         id: source_id.clone(),
+    })
+}
+
+fn library_furnishing<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Result<&'a Furnishing, LibraryImportError> {
+    find_library_furnishing(library, source_id).ok_or_else(|| {
+        LibraryImportError::FurnishingNotFound {
+            id: source_id.clone(),
+        }
+    })
+}
+
+fn library_mep_object<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Result<&'a MepObject, LibraryImportError> {
+    find_library_mep_object(library, source_id).ok_or_else(|| {
+        LibraryImportError::MepObjectNotFound {
+            id: source_id.clone(),
+        }
     })
 }
 
@@ -1438,6 +1835,13 @@ fn collect_project_ids(project: &BuildingModel) -> BTreeSet<ElementId> {
     ids.extend(project.levels.iter().map(|level| level.id.clone()));
     ids.extend(project.materials.iter().map(|material| material.id.clone()));
     ids.extend(project.systems.iter().map(|system| system.id.clone()));
+    ids.extend(
+        project
+            .furnishings
+            .iter()
+            .map(|furnishing| furnishing.id.clone()),
+    );
+    ids.extend(project.mep_objects.iter().map(|object| object.id.clone()));
     ids.extend(project.walls.iter().map(|wall| wall.id.clone()));
     ids.extend(
         project
@@ -1453,6 +1857,18 @@ fn collect_project_ids(project: &BuildingModel) -> BTreeSet<ElementId> {
     );
     ids.extend(project.wall_joins.iter().map(|join| join.id.clone()));
     ids.extend(project.rooms.iter().map(|room| room.id.clone()));
+    ids.extend(
+        project
+            .furnishing_instances
+            .iter()
+            .map(|instance| instance.id.clone()),
+    );
+    ids.extend(
+        project
+            .mep_instances
+            .iter()
+            .map(|instance| instance.id.clone()),
+    );
     ids
 }
 
@@ -1518,6 +1934,10 @@ pub enum LibraryImportError {
     MaterialNotFound { id: ElementId },
     #[error("system {id:?} was not found in the library")]
     SystemNotFound { id: ElementId },
+    #[error("furnishing {id:?} was not found in the library")]
+    FurnishingNotFound { id: ElementId },
+    #[error("MEP object {id:?} was not found in the library")]
+    MepObjectNotFound { id: ElementId },
     #[error("system {system:?} references missing material {material:?}")]
     MissingReferencedMaterial {
         system: ElementId,
@@ -1548,6 +1968,10 @@ pub enum LibraryImportError {
     ProjectMaterialNotFound { id: ElementId },
     #[error("project system {id:?} was not found")]
     ProjectSystemNotFound { id: ElementId },
+    #[error("project furnishing {id:?} was not found")]
+    ProjectFurnishingNotFound { id: ElementId },
+    #[error("project MEP object {id:?} was not found")]
+    ProjectMepObjectNotFound { id: ElementId },
     #[error("project item {id:?} is not library-backed")]
     ItemHasNoLibrarySource { id: ElementId },
     #[error("library uid mismatch: item references {expected:?}, got {actual:?}")]
@@ -1582,8 +2006,8 @@ pub enum LibraryImportError {
 mod tests {
     use framer_core::{
         Appearance, AssetRef, BoardProfile, CodeProfile, ConstructionLayer, FramingPattern,
-        FramingSpec, LayerFunction, Length, ModelError, SystemKind, TextureRole, load_project,
-        save_project,
+        FramingSpec, Furnishing, LayerFunction, Length, MepObject, MepObjectKind, ModelError,
+        SystemKind, TextureRole, load_project, save_project,
     };
 
     use super::*;
@@ -1661,6 +2085,21 @@ mod tests {
                     }),
                 ],
             }],
+            furnishings: vec![Furnishing::new(
+                "furnishing-workbench",
+                "Workbench",
+                Length::from_whole_inches(72),
+                Length::from_whole_inches(30),
+                Length::from_whole_inches(36),
+            )],
+            mep_objects: vec![MepObject::new(
+                "mep-load-center",
+                "Load center",
+                MepObjectKind::Electrical,
+                Length::from_whole_inches(14),
+                Length::from_whole_inches(4),
+                Length::from_whole_inches(24),
+            )],
         }
     }
 
@@ -1782,7 +2221,7 @@ mod tests {
 
         assert_eq!(
             loaded.content_hash,
-            "blake3:f0399fdb44f4f2c696d4b8a69955d174e5fa8aa8366aae0410c4d6a63f265a5f"
+            "blake3:0b183b4be43d95e540f5593f11fff6fb0f4962672fe9faedc581b1bcb94b7649"
         );
     }
 
@@ -2384,6 +2823,41 @@ mod tests {
     }
 
     #[test]
+    fn importing_furnishing_and_mep_object_vendors_family_definitions() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        let furnishing = import_furnishing(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("furnishing-workbench"),
+        )
+        .unwrap();
+        let mep = import_mep_object(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("mep-load-center"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            furnishing.furnishing,
+            Some(ElementId::new("acme-walls-furnishing-workbench"))
+        );
+        assert_eq!(
+            mep.mep_object,
+            Some(ElementId::new("acme-walls-mep-load-center"))
+        );
+        assert_eq!(project.libraries.len(), 1);
+        assert!(project.furnishings[0].source.is_some());
+        assert!(project.mep_objects[0].source.is_some());
+        project.validate().unwrap();
+    }
+
+    #[test]
     fn newly_imported_items_have_no_lifecycle_issues() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
@@ -2394,6 +2868,30 @@ mod tests {
             &library,
             &hash,
             &ElementId::new("system-rainscreen"),
+        )
+        .unwrap();
+
+        assert_eq!(library_lifecycle_issues(&project, &[library]).unwrap(), []);
+    }
+
+    #[test]
+    fn newly_imported_family_definitions_have_no_lifecycle_issues() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+
+        import_furnishing(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("furnishing-workbench"),
+        )
+        .unwrap();
+        import_mep_object(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("mep-load-center"),
         )
         .unwrap();
 
@@ -2505,6 +3003,78 @@ mod tests {
         assert_eq!(system_issues.len(), 1);
         assert_eq!(system_issues[0].kind, LibraryIssueKind::SourceMissing);
         assert_eq!(system_issues[0].item, LibraryItem::System(local_system_id));
+    }
+
+    #[test]
+    fn family_definitions_report_lifecycle_and_detach() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_furnishing(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("furnishing-workbench"),
+        )
+        .unwrap();
+        let local_id = imported.furnishing.unwrap();
+
+        project.furnishings[0].name = "Locally edited workbench".to_owned();
+        let issues = library_lifecycle_issues(&project, &[]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::Diverged);
+        assert_eq!(issues[0].item, LibraryItem::Furnishing(local_id.clone()));
+
+        assert!(detach_furnishing(&mut project, &local_id).unwrap());
+        assert!(
+            library_lifecycle_issues(&project, &[library])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(project.libraries.is_empty());
+    }
+
+    #[test]
+    fn mep_object_resync_updates_source_content() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let imported = import_mep_object(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("mep-load-center"),
+        )
+        .unwrap();
+        let local_id = imported.mep_object.unwrap();
+
+        let mut updated = library.clone();
+        updated.version_id = "019e9150-0000-7000-8000-000000000101".to_owned();
+        updated.version = "1.1.0".to_owned();
+        updated.mep_objects[0].name = "Updated load center".to_owned();
+        let updated_hash = library_content_hash(&updated).unwrap();
+
+        let issues = library_lifecycle_issues(&project, &[updated.clone()]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::OutOfDate);
+        assert_eq!(issues[0].item, LibraryItem::MepObject(local_id.clone()));
+
+        resync_mep_object(&mut project, &updated, &updated_hash, &local_id).unwrap();
+        let object = project
+            .mep_objects
+            .iter()
+            .find(|object| object.id == local_id)
+            .unwrap();
+        assert_eq!(object.name, "Updated load center");
+        assert_eq!(
+            object.source.as_ref().unwrap().version_id,
+            updated.version_id
+        );
+        assert!(
+            library_lifecycle_issues(&project, &[updated])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2824,6 +3394,26 @@ mod tests {
             ),
             Err(LibraryImportError::SystemNotFound { id })
                 if id == ElementId::new("system-missing")
+        ));
+        assert!(matches!(
+            import_furnishing(
+                &mut project,
+                &library,
+                "blake3:test",
+                &ElementId::new("furnishing-missing"),
+            ),
+            Err(LibraryImportError::FurnishingNotFound { id })
+                if id == ElementId::new("furnishing-missing")
+        ));
+        assert!(matches!(
+            import_mep_object(
+                &mut project,
+                &library,
+                "blake3:test",
+                &ElementId::new("mep-missing"),
+            ),
+            Err(LibraryImportError::MepObjectNotFound { id })
+                if id == ElementId::new("mep-missing")
         ));
 
         let mut dangling = fixture_library();

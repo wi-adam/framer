@@ -465,6 +465,38 @@ pub(super) fn next_room_id(model: &BuildingModel) -> (String, usize) {
     }
 }
 
+/// Generate the next free placed-furnishing id.
+pub(super) fn next_furnishing_instance_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.furnishing_instances.len() + 1;
+    loop {
+        let id = format!("furnishing-instance-{index}");
+        if model
+            .furnishing_instances
+            .iter()
+            .all(|instance| instance.id.0 != id)
+        {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
+/// Generate the next free placed-MEP-object id.
+pub(super) fn next_mep_instance_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.mep_instances.len() + 1;
+    loop {
+        let id = format!("mep-instance-{index}");
+        if model
+            .mep_instances
+            .iter()
+            .all(|instance| instance.id.0 != id)
+        {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
 pub(super) fn next_opening_id(wall: &Wall, prefix: &str) -> (String, usize) {
     let mut index = wall.openings.len() + 1;
     loop {

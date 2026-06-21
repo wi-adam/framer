@@ -19,7 +19,7 @@ framer-core   ─┬─→ framer-solver  ─┐
 
 | Crate | Responsibility | Depends on | UI? |
 | --- | --- | --- | --- |
-| [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, code profiles, validation, room topology, `.framer` serialization. | — | No |
+| [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, furnishings/MEP objects, code profiles, validation, room topology, `.framer` serialization. | — | No |
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
@@ -39,7 +39,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | File | Contains |
 | --- | --- |
 | `src/lib.rs` | Module wiring + the crate's public API (the `pub use` re-export list *is* the public surface). |
-| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~3.8k lines.) |
+| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~4.2k lines.) |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; `wall_interior_sides`. |
@@ -50,8 +50,10 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 - **`BuildingModel`** — root authored container:
   `code: CodeProfile`, `libraries: Vec<LibraryStamp>`, `materials: Vec<Material>`,
-  `systems: Vec<ConstructionSystem>`,
-  `levels`, `walls`, `wall_joins`, `rooms`. This is the only thing persisted.
+  `systems: Vec<ConstructionSystem>`, `furnishings: Vec<Furnishing>`,
+  `mep_objects: Vec<MepObject>`, `levels`, `walls`, `wall_joins`, `rooms`,
+  `furnishing_instances: Vec<FurnishingInstance>`, `mep_instances: Vec<MepInstance>`.
+  This is the only thing persisted.
 - **`Wall`** — `id, name, level, start, end, length, height, system: ElementId, openings,
   dimensions, tags`. A wall references a construction system **by id** (it does not embed its
   assembly). `Wall::new` defaults `system` to `"system-wall-exterior-1"`.
@@ -71,8 +73,13 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - **`AssetRef`** / **`TextureRole`** — hash-only references for binary material assets.
   `Appearance::Textured` and `Appearance::DepthMapped` carry a fallback color, `AssetRef`, and
   positive `Length` scale; asset bytes stay outside `.framer`.
+- **`ObjectSize`**, **`Furnishing`**, **`MepObject`** (`MepObjectKind`), and placed
+  **`FurnishingInstance`** / **`MepInstance`** — simple library-backed object families and
+  level-owned plan placements. Instance `rotation` is a `QuarterTurn`; family sizes and all
+  positions are tick-based.
 - **`LibraryStamp`** / **`Provenance`** — descriptive library metadata for vendored
-  definitions. It is never used to resolve walls/materials/systems at load or solve time.
+  definitions. It is never used to resolve walls/materials/systems/families at load or solve
+  time.
 - **`Opening`** (`OpeningKind`: Door/Window/GarageDoor/Skylight/Stair…), **`WallJoin`**
   (`WallJoinKind`: Corner/EndToEnd/Tee/Cross), **`Room`** (`RoomUsage`), **`Level`**,
   **`DimensionConstraint`** (+ anchor/axis/kind enums) — the rest of the authored model.
@@ -86,7 +93,8 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - `BuildingModel::new(code)` / `demo_wall()` / `demo_shell()` / `demo_two_bedroom()` —
   construct models; `new`/demos seed the starter material + system library
   (`BuildingModel::starter_library()`), sourced from
-  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
+  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib). Furnishing and
+  MEP object families remain in the starter catalog until placed/imported.
 - `BuildingModel::validate()` — full model validation (called before every save).
 - `load_project(&str) -> BuildingModel` / `save_project(&BuildingModel) -> String` (`project.rs`).
 - `load_library(&str) -> Library` / `save_library(&Library) -> String` (`library.rs`).
@@ -97,9 +105,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framer` serialization (`src/project.rs`)
 
-- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 9`**.
-- The model is **v9-only**: `load_project` peeks a `SchemaHeader` first and returns
-  `ProjectError::UnsupportedSchemaVersion` for any non-v9 file. `#[serde(deny_unknown_fields)]`
+- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 10`**.
+- The model is **v10-only**: `load_project` peeks a `SchemaHeader` first and returns
+  `ProjectError::UnsupportedSchemaVersion` for any non-v10 file. `#[serde(deny_unknown_fields)]`
   rejects unknown keys.
 - Canonical output: `to_canonical_json()` re-stamps the version, calls
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a
@@ -108,15 +116,17 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framerlib` serialization (`src/library.rs`)
 
-- Constants: `LIBRARY_FORMAT = "framer.library"`, **`LIBRARY_SCHEMA_VERSION = 1`**.
+- Constants: `LIBRARY_FORMAT = "framer.library"`, **`LIBRARY_SCHEMA_VERSION = 2`**.
 - A library document is a headless, versioned catalog of typed definitions:
-  `uid`, `version_id`, `version`, `coordinate`, `materials`, and `systems`.
+  `uid`, `version_id`, `version`, `coordinate`, `materials`, `systems`, `furnishings`, and
+  `mep_objects`.
 - `load_library` peeks a header first, rejects non-library formats or unsupported
-  schemas explicitly, then validates that every material/system id is valid and every
-  construction layer or cavity material reference resolves inside the library.
+  schemas explicitly, then validates that every material/system/family id is valid and every
+  construction layer or cavity material reference resolves inside the library. Furnishing and
+  MEP family sizes must be positive.
 - Canonical output mirrors project files: re-stamp the schema version, sort
-  materials/systems by id, pretty-print, and append a trailing newline. Layer order
-  remains semantic and is never sorted.
+  materials/systems/furnishings/MEP objects by id, pretty-print, and append a trailing newline.
+  Layer order remains semantic and is never sorted.
 - The built-in starter catalog lives at
   [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib);
   `BuildingModel::new` and the demo constructors vendor those definitions into each
@@ -139,16 +149,19 @@ Key entry points:
   library-version hash.
 - `load_verified_library(&LibraryBytes)` — parse a `.framerlib`, compute the canonical
   `blake3` hash, and fail closed if an expected hash is present and does not match.
-- `import_material` / `import_system` / `import_item` — stage an atomic vendor-on-use import
-  into a `BuildingModel`, mint project-local ids, copy referenced material closure, stamp
-  `LibraryStamp` + per-item `Provenance`, validate the staged model, then commit it.
+- `import_material` / `import_system` / `import_furnishing` / `import_mep_object` /
+  `import_item` — stage an atomic vendor-on-use import into a `BuildingModel`, mint
+  project-local ids, copy referenced material closure for systems, stamp `LibraryStamp` +
+  per-item `Provenance`, validate the staged model, then commit it.
 - `library_lifecycle_issues` — detect locally modified, out-of-date, or missing-source
-  vendored materials/systems by recomputing provenance-excluded hashes in source id space.
-- `resync_material` / `resync_system` / `resync_item` — replace a vendored definition from an
-  available library while preserving project-local ids; system re-sync also refreshes the
-  referenced material closure.
-- `detach_material` / `detach_system` / `detach_item` — clear provenance on selected vendored
-  definitions and prune unused library stamps.
+  vendored materials/systems/furnishings/MEP objects by recomputing provenance-excluded hashes
+  in source id space.
+- `resync_material` / `resync_system` / `resync_furnishing` / `resync_mep_object` /
+  `resync_item` — replace a vendored definition from an available library while preserving
+  project-local ids; system re-sync also refreshes the referenced material closure.
+- `detach_material` / `detach_system` / `detach_furnishing` / `detach_mep_object` /
+  `detach_item` — clear provenance on selected vendored definitions and prune unused library
+  stamps.
 - `ContentAddressedAssetStore` / `asset_content_hash` / `referenced_asset_hashes` — store and
   discover binary assets by full `blake3:<hex>` hash.
 - `save_project_package` / `load_project_package` — write/read deterministic `.framerpkg`
@@ -257,7 +270,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
@@ -316,7 +329,7 @@ the real symbols:
 | --- | --- | --- |
 | **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render/3D handling in `framer-render/src/build.rs` + `viewport/scene_build.rs`; inspector in `framer-app` `panels.rs`. |
 | **New construction layer function / material** | `LayerFunction` / `Material` / `Appearance` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material lowering in `framer-render/src/build.rs`; asset bytes via `framer-library` package/store helpers. |
-| **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import UI in `framer-app/src/app/panels.rs`; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
+| **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import/placement UI in `framer-app/src/app/panels.rs`; add drawing/picking in the relevant viewport; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
 | **New solver rule / member** | `MemberKind` + rule in `framer-solver/src/lib.rs` | attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
 | **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |

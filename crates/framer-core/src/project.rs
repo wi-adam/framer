@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 9;
-/// The model is v9-only — older on-disk shapes and pre-provenance schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 10;
+/// The model is v10-only — older on-disk shapes and pre-provenance schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v9-only model,
+    // Peek the format/version header before deserializing into the v10-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v9-only) deserialization.
+/// and schema versions before attempting the full (v10-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -114,8 +114,9 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Appearance, AssetRef, BuildingModel, CodeProfile, ElementId, Length, LibraryStamp,
-        Material, MaterialSource, ModelError, Opening, Provenance, TextureRole, Wall,
+        Appearance, AssetRef, BuildingModel, CodeProfile, ElementId, Furnishing,
+        FurnishingInstance, Length, LibraryStamp, Material, MaterialSource, MepInstance, MepObject,
+        MepObjectKind, ModelError, Opening, Point2, Provenance, QuarterTurn, TextureRole, Wall,
     };
 
     use super::*;
@@ -125,7 +126,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 9,\n"));
+        assert!(json.contains("  \"schema_version\": 10,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -239,10 +240,85 @@ mod tests {
     }
 
     #[test]
+    fn object_families_and_placements_round_trip() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.furnishings.push(Furnishing::new(
+            "furnishing-base-cabinet",
+            "Base cabinet",
+            Length::from_whole_inches(36),
+            Length::from_whole_inches(24),
+            Length::from_whole_inches(34),
+        ));
+        model.mep_objects.push(MepObject::new(
+            "mep-panel",
+            "Load center",
+            MepObjectKind::Electrical,
+            Length::from_whole_inches(14),
+            Length::from_whole_inches(4),
+            Length::from_whole_inches(24),
+        ));
+        let mut furnishing = FurnishingInstance::new(
+            "furnishing-instance-1",
+            "Kitchen base cabinet",
+            "furnishing-base-cabinet",
+            "level-1",
+            Point2::new(Length::from_feet(4.0), Length::from_feet(3.0)),
+        );
+        furnishing.rotation = QuarterTurn::Deg90;
+        model.furnishing_instances.push(furnishing);
+        model.mep_instances.push(MepInstance::new(
+            "mep-instance-1",
+            "Main panel",
+            "mep-panel",
+            "level-1",
+            Point2::new(Length::from_feet(1.0), Length::from_feet(6.0)),
+        ));
+
+        let saved = save_project(&model).unwrap();
+        let loaded = load_project(&saved).unwrap();
+
+        assert_eq!(loaded.furnishings.len(), 1);
+        assert_eq!(loaded.mep_objects.len(), 1);
+        assert_eq!(loaded.furnishing_instances[0].rotation, QuarterTurn::Deg90);
+        assert_eq!(save_project(&loaded).unwrap(), saved);
+    }
+
+    #[test]
+    fn object_placements_reject_missing_families_and_levels() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "furnishing-instance-1",
+            "Missing chair",
+            "furnishing-missing",
+            "level-1",
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::FurnishingInstanceReferencesUnknownFamily { .. })
+        ));
+
+        model.furnishings.push(Furnishing::new(
+            "furnishing-missing",
+            "Chair",
+            Length::from_whole_inches(18),
+            Length::from_whole_inches(18),
+            Length::from_whole_inches(36),
+        ));
+        model.furnishing_instances[0].level = ElementId::new("level-missing");
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::FurnishingInstanceReferencesUnknownLevel { .. })
+        ));
+    }
+
+    #[test]
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 9,
+  "schema_version": 10,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -265,12 +341,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
-        // A v8 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v9 model.
-        // The pre-v9 body remains self-contained, but schema support is v9-only.
+        // A v9 document must be rejected by the header peek with a clear
+        // unsupported-schema error, NOT serde errors from the current v10 model.
+        // The pre-v10 body remains self-contained, but schema support is v10-only.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 8,
+  "schema_version": 9,
   "authored": {
     "walls": [
       {
@@ -289,7 +365,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 8,
+                found: 9,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -614,7 +690,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 9,"));
+        assert!(json.contains("\"schema_version\": 10,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 

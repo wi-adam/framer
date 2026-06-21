@@ -8,7 +8,7 @@ use std::f32::consts::FRAC_PI_2;
 use std::ops::Neg;
 
 use eframe::egui::{Pos2, Rect, Vec2};
-use framer_core::{BuildingModel, Length, Point2};
+use framer_core::{BuildingModel, Length, Point2, QuarterTurn};
 
 use super::camera_2d::View2dState;
 use super::camera_3d::View3dState;
@@ -25,25 +25,82 @@ impl ModelBounds {
     pub(super) fn from_model(model: &BuildingModel) -> Option<Self> {
         let mut bounds = None::<Self>;
         for point in model.walls.iter().flat_map(|wall| [wall.start, wall.end]) {
-            let x = point.x.inches() as f32;
-            let y = point.y.inches() as f32;
-            bounds = Some(match bounds {
-                Some(existing) => Self {
-                    min_x: existing.min_x.min(x),
-                    min_y: existing.min_y.min(y),
-                    max_x: existing.max_x.max(x),
-                    max_y: existing.max_y.max(y),
-                },
-                None => Self {
-                    min_x: x,
-                    min_y: y,
-                    max_x: x,
-                    max_y: y,
-                },
-            });
+            bounds = Some(include_model_point(bounds, point));
+        }
+
+        for instance in &model.furnishing_instances {
+            if let Some(family) = model
+                .furnishings
+                .iter()
+                .find(|family| family.id == instance.family)
+            {
+                bounds = include_object_footprint(
+                    bounds,
+                    instance.position,
+                    family.size.width,
+                    family.size.depth,
+                    instance.rotation,
+                );
+            }
+        }
+        for instance in &model.mep_instances {
+            if let Some(family) = model
+                .mep_objects
+                .iter()
+                .find(|family| family.id == instance.family)
+            {
+                bounds = include_object_footprint(
+                    bounds,
+                    instance.position,
+                    family.size.width,
+                    family.size.depth,
+                    instance.rotation,
+                );
+            }
         }
         bounds
     }
+}
+
+fn include_model_point(bounds: Option<ModelBounds>, point: Point2) -> ModelBounds {
+    let x = point.x.inches() as f32;
+    let y = point.y.inches() as f32;
+    match bounds {
+        Some(existing) => ModelBounds {
+            min_x: existing.min_x.min(x),
+            min_y: existing.min_y.min(y),
+            max_x: existing.max_x.max(x),
+            max_y: existing.max_y.max(y),
+        },
+        None => ModelBounds {
+            min_x: x,
+            min_y: y,
+            max_x: x,
+            max_y: y,
+        },
+    }
+}
+
+fn include_object_footprint(
+    bounds: Option<ModelBounds>,
+    position: Point2,
+    width: Length,
+    depth: Length,
+    rotation: QuarterTurn,
+) -> Option<ModelBounds> {
+    let rotated = matches!(rotation, QuarterTurn::Deg90 | QuarterTurn::Deg270);
+    let footprint_width = if rotated { depth } else { width };
+    let footprint_depth = if rotated { width } else { depth };
+    let half_width = footprint_width / 2;
+    let half_depth = footprint_depth / 2;
+    let bounds = Some(include_model_point(
+        bounds,
+        Point2::new(position.x - half_width, position.y - half_depth),
+    ));
+    Some(include_model_point(
+        bounds,
+        Point2::new(position.x + half_width, position.y + half_depth),
+    ))
 }
 
 pub(super) fn plan_point(

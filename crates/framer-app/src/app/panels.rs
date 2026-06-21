@@ -7,8 +7,9 @@ use eframe::egui::{
 };
 use framer_core::{
     DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
-    DimensionKind, DimensionVerticalReference, ElementId, Length, Level, MaterialSource, Opening,
-    OpeningKind, Provenance, Wall, WallJoin, WallJoinKind,
+    DimensionKind, DimensionVerticalReference, ElementId, FurnishingInstance, Length, Level,
+    MaterialSource, MepInstance, Opening, OpeningKind, Point2, Provenance, QuarterTurn, Wall,
+    WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -17,7 +18,8 @@ use super::labels::{
     diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
 };
 use super::model_edit::{
-    opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
+    next_furnishing_instance_id, next_mep_instance_id, opening_max_bottom, opening_top_clearance,
+    set_wall_length_keep_direction,
 };
 use super::{
     DrawWallToolState, FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design,
@@ -671,6 +673,33 @@ impl FramerApp {
                 )
             })
             .collect();
+        let furnishings: Vec<(String, String, String, bool)> = self
+            .model
+            .furnishings
+            .iter()
+            .map(|furnishing| {
+                (
+                    furnishing.id.0.clone(),
+                    furnishing.name.clone(),
+                    object_size_label(&furnishing.size),
+                    furnishing.source.is_some(),
+                )
+            })
+            .collect();
+        let mep_objects: Vec<(String, String, &'static str, String, bool)> = self
+            .model
+            .mep_objects
+            .iter()
+            .map(|object| {
+                (
+                    object.id.0.clone(),
+                    object.name.clone(),
+                    object.kind.label(),
+                    object_size_label(&object.size),
+                    object.source.is_some(),
+                )
+            })
+            .collect();
         let starter = can_edit
             .then(framer_library::starter_library)
             .and_then(Result::ok);
@@ -708,8 +737,45 @@ impl FramerApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let starter_furnishings = starter
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .library
+                    .furnishings
+                    .iter()
+                    .map(|furnishing| {
+                        (
+                            furnishing.id.0.clone(),
+                            furnishing.name.clone(),
+                            object_size_label(&furnishing.size),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let starter_mep_objects = starter
+            .as_ref()
+            .map(|loaded| {
+                loaded
+                    .library
+                    .mep_objects
+                    .iter()
+                    .map(|object| {
+                        (
+                            object.id.0.clone(),
+                            object.name.clone(),
+                            object.kind.label(),
+                            object_size_label(&object.size),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut insert_system: Option<String> = None;
         let mut insert_material: Option<String> = None;
+        let mut place_furnishing: Option<String> = None;
+        let mut place_mep_object: Option<String> = None;
 
         egui::CollapsingHeader::new("Library")
             .default_open(false)
@@ -766,7 +832,52 @@ impl FramerApp {
                     self.add_material();
                 }
 
-                if can_edit && (!starter_systems.is_empty() || !starter_materials.is_empty()) {
+                ui.separator();
+                ui.strong("Furnishings");
+                for (id, name, size, from_library) in &furnishings {
+                    let selected = matches!(&self.selected, Selection::Furnishing(f) if f == id);
+                    if ui
+                        .horizontal(|ui| {
+                            let clicked = ui.selectable_label(selected, name).clicked();
+                            ui.label(RichText::new(size).size(design::text_size::LABEL));
+                            if *from_library {
+                                library_badge(ui);
+                            }
+                            clicked
+                        })
+                        .inner
+                    {
+                        self.selected = Selection::Furnishing(id.clone());
+                    }
+                }
+
+                ui.separator();
+                ui.strong("MEP");
+                for (id, name, kind, size, from_library) in &mep_objects {
+                    let selected = matches!(&self.selected, Selection::MepObject(m) if m == id);
+                    if ui
+                        .horizontal(|ui| {
+                            let clicked = ui
+                                .selectable_label(selected, format!("{name} ({kind})"))
+                                .clicked();
+                            ui.label(RichText::new(size).size(design::text_size::LABEL));
+                            if *from_library {
+                                library_badge(ui);
+                            }
+                            clicked
+                        })
+                        .inner
+                    {
+                        self.selected = Selection::MepObject(id.clone());
+                    }
+                }
+
+                if can_edit
+                    && (!starter_systems.is_empty()
+                        || !starter_materials.is_empty()
+                        || !starter_furnishings.is_empty()
+                        || !starter_mep_objects.is_empty())
+                {
                     ui.separator();
                     ui.strong("Starter");
                     for (id, name, kind) in &starter_systems {
@@ -787,6 +898,22 @@ impl FramerApp {
                             }
                         });
                     }
+                    for (id, name, size) in &starter_furnishings {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{name} ({size})"));
+                            if ui.button("Place").clicked() {
+                                place_furnishing = Some(id.clone());
+                            }
+                        });
+                    }
+                    for (id, name, kind, size) in &starter_mep_objects {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{name} ({kind}, {size})"));
+                            if ui.button("Place").clicked() {
+                                place_mep_object = Some(id.clone());
+                            }
+                        });
+                    }
                 }
             });
 
@@ -795,6 +922,12 @@ impl FramerApp {
         }
         if let Some(id) = insert_material {
             self.insert_starter_material(id);
+        }
+        if let Some(id) = place_furnishing {
+            self.place_starter_furnishing(id);
+        }
+        if let Some(id) = place_mep_object {
+            self.place_starter_mep_object(id);
         }
     }
 
@@ -874,6 +1007,134 @@ impl FramerApp {
                 format!("Inserted {id} from starter library")
             }
             Err(error) => format!("Library import failed: {error}"),
+        });
+    }
+
+    fn place_starter_furnishing(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library placement failed: {error}"));
+                return;
+            }
+        };
+        let position = self
+            .cursor_model
+            .unwrap_or(Point2::new(Length::ZERO, Length::ZERO));
+
+        let mut result = None;
+        self.edit("Place library furnishing", |app| {
+            let source_id = ElementId::new(&id);
+            let family = matching_furnishing_family_id(&app.model, &loaded.library, &source_id)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    framer_library::import_furnishing(
+                        &mut app.model,
+                        &loaded.library,
+                        &loaded.content_hash,
+                        &source_id,
+                    )
+                    .map(|imported| {
+                        imported
+                            .furnishing
+                            .expect("furnishing import should return a family id")
+                    })
+                });
+            match family {
+                Ok(family_id) => {
+                    let (instance_id, index) = next_furnishing_instance_id(&app.model);
+                    let family_name = app
+                        .model
+                        .furnishings
+                        .iter()
+                        .find(|furnishing| furnishing.id == family_id)
+                        .map(|furnishing| furnishing.name.clone())
+                        .unwrap_or_else(|| "Furnishing".to_owned());
+                    let level = first_level_id(&app.model);
+                    app.model.furnishing_instances.push(FurnishingInstance::new(
+                        instance_id.clone(),
+                        format!("{family_name} {index}"),
+                        family_id.0.clone(),
+                        level.0,
+                        position,
+                    ));
+                    app.selected = Selection::FurnishingInstance(instance_id.clone());
+                    app.viewport_mode = ViewportMode::Plan;
+                    result = Some(Ok(instance_id));
+                }
+                Err(error) => result = Some(Err(error)),
+            }
+        });
+        self.file_status = Some(match result.expect("placement closure should run") {
+            Ok(id) => format!("Placed furnishing {id}"),
+            Err(error) => format!("Library placement failed: {error}"),
+        });
+    }
+
+    fn place_starter_mep_object(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library placement failed: {error}"));
+                return;
+            }
+        };
+        let position = self
+            .cursor_model
+            .unwrap_or(Point2::new(Length::ZERO, Length::ZERO));
+
+        let mut result = None;
+        self.edit("Place library MEP object", |app| {
+            let source_id = ElementId::new(&id);
+            let family = matching_mep_object_id(&app.model, &loaded.library, &source_id)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    framer_library::import_mep_object(
+                        &mut app.model,
+                        &loaded.library,
+                        &loaded.content_hash,
+                        &source_id,
+                    )
+                    .map(|imported| {
+                        imported
+                            .mep_object
+                            .expect("MEP import should return a family id")
+                    })
+                });
+            match family {
+                Ok(family_id) => {
+                    let (instance_id, index) = next_mep_instance_id(&app.model);
+                    let family_name = app
+                        .model
+                        .mep_objects
+                        .iter()
+                        .find(|object| object.id == family_id)
+                        .map(|object| object.name.clone())
+                        .unwrap_or_else(|| "MEP object".to_owned());
+                    let level = first_level_id(&app.model);
+                    app.model.mep_instances.push(MepInstance::new(
+                        instance_id.clone(),
+                        format!("{family_name} {index}"),
+                        family_id.0.clone(),
+                        level.0,
+                        position,
+                    ));
+                    app.selected = Selection::MepInstance(instance_id.clone());
+                    app.viewport_mode = ViewportMode::Plan;
+                    result = Some(Ok(instance_id));
+                }
+                Err(error) => result = Some(Err(error)),
+            }
+        });
+        self.file_status = Some(match result.expect("placement closure should run") {
+            Ok(id) => format!("Placed MEP object {id}"),
+            Err(error) => format!("Library placement failed: {error}"),
         });
     }
 
@@ -1017,6 +1278,18 @@ impl FramerApp {
             .iter()
             .map(|material| (material.id.0.clone(), material.color()))
             .collect::<Vec<(String, [u8; 3])>>();
+        let furnishing_options = self
+            .model
+            .furnishings
+            .iter()
+            .map(|furnishing| (furnishing.id.0.clone(), furnishing.name.clone()))
+            .collect::<Vec<(String, String)>>();
+        let mep_options = self
+            .model
+            .mep_objects
+            .iter()
+            .map(|object| (object.id.0.clone(), object.name.clone()))
+            .collect::<Vec<(String, String)>>();
         // R-value of the selected system (clear-wall, milli-R), computed before the
         // mutable borrow since it reads the whole material library.
         let selected_system_r_milli = if let Selection::System(id) = &selection {
@@ -1577,6 +1850,169 @@ impl FramerApp {
                     ui.label("Material no longer exists");
                 }
             }
+            Selection::Furnishing(id) => {
+                if let Some(furnishing) = self
+                    .model
+                    .furnishings
+                    .iter_mut()
+                    .find(|furnishing| furnishing.id.0 == id)
+                {
+                    inspector_object_id(ui, &furnishing.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut furnishing.name);
+                        if let Some(status) = selected_library_status.as_ref() {
+                            widgets::section(
+                                ui,
+                                "furnishing-library-source",
+                                "Library",
+                                true,
+                                |ui| {
+                                    library_lifecycle_controls(
+                                        ui,
+                                        status,
+                                        &mut deferred_resync_library,
+                                        &mut deferred_detach_library,
+                                    );
+                                },
+                            );
+                        }
+                        widgets::section(ui, "furnishing-size", "Size", true, |ui| {
+                            changed |= object_size_editor(ui, &mut furnishing.size);
+                        });
+                        widgets::section(ui, "furnishing-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut furnishing.tags);
+                        });
+                    } else {
+                        object_family_summary(ui, &furnishing.name, &furnishing.size, None);
+                    }
+                } else {
+                    ui.label("Furnishing no longer exists");
+                }
+            }
+            Selection::MepObject(id) => {
+                if let Some(object) = self
+                    .model
+                    .mep_objects
+                    .iter_mut()
+                    .find(|object| object.id.0 == id)
+                {
+                    inspector_object_id(ui, &object.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut object.name);
+                        property_row(ui, "Kind", |ui| {
+                            ComboBox::from_id_salt("mep-kind")
+                                .selected_text(object.kind.label())
+                                .show_ui(ui, |ui| {
+                                    for kind in framer_core::MepObjectKind::ALL {
+                                        changed |= ui
+                                            .selectable_value(&mut object.kind, kind, kind.label())
+                                            .changed();
+                                    }
+                                });
+                        });
+                        if let Some(status) = selected_library_status.as_ref() {
+                            widgets::section(ui, "mep-library-source", "Library", true, |ui| {
+                                library_lifecycle_controls(
+                                    ui,
+                                    status,
+                                    &mut deferred_resync_library,
+                                    &mut deferred_detach_library,
+                                );
+                            });
+                        }
+                        widgets::section(ui, "mep-size", "Size", true, |ui| {
+                            changed |= object_size_editor(ui, &mut object.size);
+                        });
+                        widgets::section(ui, "mep-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut object.tags);
+                        });
+                    } else {
+                        object_family_summary(
+                            ui,
+                            &object.name,
+                            &object.size,
+                            Some(object.kind.label()),
+                        );
+                    }
+                } else {
+                    ui.label("MEP object no longer exists");
+                }
+            }
+            Selection::FurnishingInstance(id) => {
+                if let Some(instance) = self
+                    .model
+                    .furnishing_instances
+                    .iter_mut()
+                    .find(|instance| instance.id.0 == id)
+                {
+                    inspector_object_id(ui, &instance.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut instance.name);
+                        changed |=
+                            family_picker(ui, "Family", &mut instance.family, &furnishing_options);
+                        changed |= level_picker(ui, &mut instance.level, &level_options);
+                        changed |= coordinate_drag(ui, "X", &mut instance.position.x);
+                        changed |= coordinate_drag(ui, "Y", &mut instance.position.y);
+                        changed |= rotation_picker(ui, &mut instance.rotation);
+                        widgets::section(ui, "furnishing-instance-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut instance.tags);
+                        });
+                        ui.separator();
+                        if ui.button("Remove Furnishing").clicked() {
+                            deferred_remove = Some(DeferredRemove::FurnishingInstance(id.clone()));
+                        }
+                    } else {
+                        placed_object_summary(
+                            ui,
+                            &instance.name,
+                            family_display_name(&furnishing_options, &instance.family.0),
+                            &level_options,
+                            instance.level.0.as_str(),
+                            instance.position,
+                            instance.rotation,
+                        );
+                    }
+                } else {
+                    ui.label("Furnishing instance no longer exists");
+                }
+            }
+            Selection::MepInstance(id) => {
+                if let Some(instance) = self
+                    .model
+                    .mep_instances
+                    .iter_mut()
+                    .find(|instance| instance.id.0 == id)
+                {
+                    inspector_object_id(ui, &instance.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut instance.name);
+                        changed |= family_picker(ui, "Family", &mut instance.family, &mep_options);
+                        changed |= level_picker(ui, &mut instance.level, &level_options);
+                        changed |= coordinate_drag(ui, "X", &mut instance.position.x);
+                        changed |= coordinate_drag(ui, "Y", &mut instance.position.y);
+                        changed |= rotation_picker(ui, &mut instance.rotation);
+                        widgets::section(ui, "mep-instance-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut instance.tags);
+                        });
+                        ui.separator();
+                        if ui.button("Remove MEP Object").clicked() {
+                            deferred_remove = Some(DeferredRemove::MepInstance(id.clone()));
+                        }
+                    } else {
+                        placed_object_summary(
+                            ui,
+                            &instance.name,
+                            family_display_name(&mep_options, &instance.family.0),
+                            &level_options,
+                            instance.level.0.as_str(),
+                            instance.position,
+                            instance.rotation,
+                        );
+                    }
+                } else {
+                    ui.label("MEP instance no longer exists");
+                }
+            }
         }
 
         // Replay a deferred Remove as one discrete, labelled undo step now that
@@ -1601,6 +2037,28 @@ impl FramerApp {
                         if wall.dimensions.len() != before {
                             app.selected = Selection::Wall;
                         }
+                    }
+                });
+            }
+            Some(DeferredRemove::FurnishingInstance(instance_id)) => {
+                self.edit("Remove furnishing", |app| {
+                    let before = app.model.furnishing_instances.len();
+                    app.model
+                        .furnishing_instances
+                        .retain(|instance| instance.id.0 != instance_id);
+                    if app.model.furnishing_instances.len() != before {
+                        app.selected = Selection::Wall;
+                    }
+                });
+            }
+            Some(DeferredRemove::MepInstance(instance_id)) => {
+                self.edit("Remove MEP object", |app| {
+                    let before = app.model.mep_instances.len();
+                    app.model
+                        .mep_instances
+                        .retain(|instance| instance.id.0 != instance_id);
+                    if app.model.mep_instances.len() != before {
+                        app.selected = Selection::Wall;
                     }
                 });
             }
@@ -1877,6 +2335,10 @@ impl FramerApp {
             Selection::Member { member_id, .. } => format!("Member: {member_id}"),
             Selection::System(id) => format!("System: {id}"),
             Selection::Material(id) => format!("Material: {id}"),
+            Selection::Furnishing(id) => format!("Furnishing: {id}"),
+            Selection::MepObject(id) => format!("MEP object: {id}"),
+            Selection::FurnishingInstance(id) => format!("Furnishing instance: {id}"),
+            Selection::MepInstance(id) => format!("MEP instance: {id}"),
         }
     }
 
@@ -1996,6 +2458,10 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Member { .. } => "Edit",
         Selection::System(_) => "Edit system",
         Selection::Material(_) => "Edit material",
+        Selection::Furnishing(_) => "Edit furnishing",
+        Selection::MepObject(_) => "Edit MEP object",
+        Selection::FurnishingInstance(_) => "Edit furnishing placement",
+        Selection::MepInstance(_) => "Edit MEP placement",
     }
 }
 
@@ -2005,6 +2471,8 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
 enum DeferredRemove {
     Opening(String),
     Dimension(String),
+    FurnishingInstance(String),
+    MepInstance(String),
 }
 
 /// Whether to snapshot a pre-edit baseline this frame for the inspector's undo
@@ -2147,6 +2615,10 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Member { .. } => "Member",
         Selection::System(_) => "System",
         Selection::Material(_) => "Material",
+        Selection::Furnishing(_) => "Furnishing",
+        Selection::MepObject(_) => "MEP",
+        Selection::FurnishingInstance(_) => "Placed Furnishing",
+        Selection::MepInstance(_) => "Placed MEP",
     }
 }
 
@@ -2327,6 +2799,56 @@ fn provenance_label(source: &Provenance) -> String {
     format!("{} ({short_hash})", source.source_id.0)
 }
 
+fn object_size_label(size: &framer_core::ObjectSize) -> String {
+    format!("{} x {} x {}", size.width, size.depth, size.height)
+}
+
+fn first_level_id(model: &framer_core::BuildingModel) -> ElementId {
+    model
+        .levels
+        .first()
+        .map(|level| level.id.clone())
+        .unwrap_or_else(|| ElementId::new("level-1"))
+}
+
+fn matching_library_source(
+    source: &Provenance,
+    library: &framer_core::Library,
+    id: &ElementId,
+) -> bool {
+    source.library_uid == library.uid
+        && source.version_id == library.version_id
+        && source.source_id == *id
+}
+
+fn matching_furnishing_family_id(
+    model: &framer_core::BuildingModel,
+    library: &framer_core::Library,
+    source_id: &ElementId,
+) -> Option<ElementId> {
+    model.furnishings.iter().find_map(|furnishing| {
+        furnishing
+            .source
+            .as_ref()
+            .filter(|source| matching_library_source(source, library, source_id))
+            .map(|_| furnishing.id.clone())
+    })
+}
+
+fn matching_mep_object_id(
+    model: &framer_core::BuildingModel,
+    library: &framer_core::Library,
+    source_id: &ElementId,
+) -> Option<ElementId> {
+    model.mep_objects.iter().find_map(|object| {
+        object
+            .source
+            .as_ref()
+            .filter(|source| matching_library_source(source, library, source_id))
+            .map(|_| object.id.clone())
+    })
+}
+
 #[derive(Debug, Clone)]
 struct LibrarySelectionStatus {
     item: framer_library::LibraryItem,
@@ -2359,6 +2881,25 @@ fn selected_library_status(
             };
             (
                 framer_library::LibraryItem::Material(material.id.clone()),
+                source,
+            )
+        }
+        Selection::Furnishing(id) => {
+            let furnishing = model
+                .furnishings
+                .iter()
+                .find(|furnishing| furnishing.id.0 == *id)?;
+            let source = furnishing.source.clone()?;
+            (
+                framer_library::LibraryItem::Furnishing(furnishing.id.clone()),
+                source,
+            )
+        }
+        Selection::MepObject(id) => {
+            let object = model.mep_objects.iter().find(|object| object.id.0 == *id)?;
+            let source = object.source.clone()?;
+            (
+                framer_library::LibraryItem::MepObject(object.id.clone()),
                 source,
             )
         }
@@ -2397,6 +2938,14 @@ fn library_contains_source(
         framer_library::LibraryItem::System(_) => {
             library.systems.iter().any(|system| system.id == *source_id)
         }
+        framer_library::LibraryItem::Furnishing(_) => library
+            .furnishings
+            .iter()
+            .any(|furnishing| furnishing.id == *source_id),
+        framer_library::LibraryItem::MepObject(_) => library
+            .mep_objects
+            .iter()
+            .any(|object| object.id == *source_id),
     }
 }
 
@@ -2454,7 +3003,10 @@ fn library_status_label(status: &LibrarySelectionStatus) -> &'static str {
 
 fn library_item_id(item: &framer_library::LibraryItem) -> &ElementId {
     match item {
-        framer_library::LibraryItem::Material(id) | framer_library::LibraryItem::System(id) => id,
+        framer_library::LibraryItem::Material(id)
+        | framer_library::LibraryItem::System(id)
+        | framer_library::LibraryItem::Furnishing(id)
+        | framer_library::LibraryItem::MepObject(id) => id,
     }
 }
 
@@ -2462,6 +3014,8 @@ fn library_item_kind_label(item: &framer_library::LibraryItem) -> &'static str {
     match item {
         framer_library::LibraryItem::Material(_) => "material",
         framer_library::LibraryItem::System(_) => "system",
+        framer_library::LibraryItem::Furnishing(_) => "furnishing",
+        framer_library::LibraryItem::MepObject(_) => "MEP object",
     }
 }
 
@@ -3043,6 +3597,106 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
             ui.end_row();
         });
     ui.label(&member.provenance.summary);
+}
+
+fn object_size_editor(ui: &mut Ui, size: &mut framer_core::ObjectSize) -> bool {
+    length_drag(ui, "Width", &mut size.width, 1.0, 240.0, "in")
+        | length_drag(ui, "Depth", &mut size.depth, 1.0, 240.0, "in")
+        | length_drag(ui, "Height", &mut size.height, 1.0, 144.0, "in")
+}
+
+fn family_picker(
+    ui: &mut Ui,
+    label: &str,
+    selected: &mut ElementId,
+    options: &[(String, String)],
+) -> bool {
+    property_row(ui, label, |ui| {
+        let before = selected.0.clone();
+        ComboBox::from_id_salt(label)
+            .selected_text(family_display_name(options, &selected.0))
+            .show_ui(ui, |ui| {
+                for (id, name) in options {
+                    ui.selectable_value(selected, ElementId::new(id.clone()), name);
+                }
+            });
+        selected.0 != before
+    })
+}
+
+fn level_picker(ui: &mut Ui, selected: &mut ElementId, options: &[(String, String)]) -> bool {
+    property_row(ui, "Level", |ui| {
+        let before = selected.0.clone();
+        ComboBox::from_id_salt("object-level")
+            .selected_text(level_display_name(options, &selected.0))
+            .show_ui(ui, |ui| {
+                for (id, name) in options {
+                    ui.selectable_value(selected, ElementId::new(id.clone()), name);
+                }
+            });
+        selected.0 != before
+    })
+}
+
+fn rotation_picker(ui: &mut Ui, selected: &mut QuarterTurn) -> bool {
+    property_row(ui, "Rotation", |ui| {
+        let before = *selected;
+        ComboBox::from_id_salt("object-rotation")
+            .selected_text(selected.label())
+            .show_ui(ui, |ui| {
+                for turn in QuarterTurn::ALL {
+                    ui.selectable_value(selected, turn, turn.label());
+                }
+            });
+        *selected != before
+    })
+}
+
+fn family_display_name(options: &[(String, String)], id: &str) -> String {
+    options
+        .iter()
+        .find(|(candidate, _)| candidate == id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| id.to_owned())
+}
+
+fn object_family_summary(
+    ui: &mut Ui,
+    name: &str,
+    size: &framer_core::ObjectSize,
+    kind: Option<&str>,
+) {
+    egui::Grid::new("object-family-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", name);
+            if let Some(kind) = kind {
+                summary_row(ui, "Kind", kind);
+            }
+            summary_row(ui, "Size", object_size_label(size));
+        });
+}
+
+fn placed_object_summary(
+    ui: &mut Ui,
+    name: &str,
+    family: String,
+    level_options: &[(String, String)],
+    level: &str,
+    position: Point2,
+    rotation: QuarterTurn,
+) {
+    egui::Grid::new("placed-object-summary")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            summary_row(ui, "Name", name);
+            summary_row(ui, "Family", family);
+            summary_row(ui, "Level", level_display_name(level_options, level));
+            summary_row(ui, "Position", format!("{}, {}", position.x, position.y));
+            summary_row(ui, "Rotation", rotation.label());
+        });
 }
 
 fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFramePlan>) {
@@ -4072,6 +4726,94 @@ mod tests {
         assert_eq!(source.source_id, ElementId::new("mat-fiber-cement"));
         assert!(source.content_hash.starts_with("blake3:"));
         app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn placing_starter_objects_vendors_families_and_instances() {
+        let mut app = FramerApp::default();
+        let placement = Point2::new(Length::from_inches(24.0), Length::from_inches(36.0));
+        app.cursor_model = Some(placement);
+
+        app.place_starter_furnishing("furnishing-workbench".to_owned());
+
+        assert_eq!(app.model.furnishings.len(), 1);
+        assert_eq!(app.model.furnishing_instances.len(), 1);
+        assert_eq!(app.model.libraries.len(), 1);
+        assert_eq!(
+            app.model.furnishings[0].source.as_ref().unwrap().source_id,
+            ElementId::new("furnishing-workbench")
+        );
+        let furnishing = &app.model.furnishing_instances[0];
+        assert_eq!(furnishing.family, app.model.furnishings[0].id);
+        assert_eq!(furnishing.position, placement);
+        assert_eq!(furnishing.level, app.model.levels[0].id);
+        assert_eq!(
+            app.selected,
+            Selection::FurnishingInstance(furnishing.id.0.clone())
+        );
+        assert_eq!(app.viewport_mode, ViewportMode::Plan);
+        assert!(
+            app.file_status
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Placed furnishing "))
+        );
+
+        app.cursor_model = None;
+        app.place_starter_mep_object("mep-load-center".to_owned());
+
+        assert_eq!(app.model.mep_objects.len(), 1);
+        assert_eq!(app.model.mep_instances.len(), 1);
+        assert_eq!(app.model.libraries.len(), 1);
+        assert_eq!(
+            app.model.mep_objects[0].source.as_ref().unwrap().source_id,
+            ElementId::new("mep-load-center")
+        );
+        let object = &app.model.mep_instances[0];
+        assert_eq!(object.family, app.model.mep_objects[0].id);
+        assert_eq!(object.position, Point2::new(Length::ZERO, Length::ZERO));
+        assert_eq!(object.level, app.model.levels[0].id);
+        assert_eq!(app.selected, Selection::MepInstance(object.id.0.clone()));
+        assert!(
+            app.file_status
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Placed MEP object "))
+        );
+        app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn repeated_starter_object_placement_reuses_imported_family() {
+        let mut app = FramerApp::default();
+
+        app.place_starter_furnishing("furnishing-workbench".to_owned());
+        app.place_starter_furnishing("furnishing-workbench".to_owned());
+
+        assert_eq!(app.model.furnishings.len(), 1);
+        assert_eq!(app.model.furnishing_instances.len(), 2);
+        assert_eq!(app.model.libraries.len(), 1);
+        let family = app.model.furnishings[0].id.clone();
+        assert!(
+            app.model
+                .furnishing_instances
+                .iter()
+                .all(|instance| instance.family == family)
+        );
+        app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn plan_mode_does_not_place_starter_objects() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+
+        app.place_starter_furnishing("furnishing-workbench".to_owned());
+        app.place_starter_mep_object("mep-load-center".to_owned());
+
+        assert!(app.model.furnishings.is_empty());
+        assert!(app.model.furnishing_instances.is_empty());
+        assert!(app.model.mep_objects.is_empty());
+        assert!(app.model.mep_instances.is_empty());
+        assert!(app.model.libraries.is_empty());
     }
 
     #[test]

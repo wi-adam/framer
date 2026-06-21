@@ -55,6 +55,10 @@ pub struct BuildingModel {
     pub materials: Vec<Material>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub systems: Vec<ConstructionSystem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub furnishings: Vec<Furnishing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mep_objects: Vec<MepObject>,
     #[serde(default = "default_levels")]
     pub levels: Vec<Level>,
     pub walls: Vec<Wall>,
@@ -62,6 +66,10 @@ pub struct BuildingModel {
     pub wall_joins: Vec<WallJoin>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rooms: Vec<Room>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub furnishing_instances: Vec<FurnishingInstance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mep_instances: Vec<MepInstance>,
 }
 
 impl BuildingModel {
@@ -72,10 +80,14 @@ impl BuildingModel {
             libraries: Vec::new(),
             materials,
             systems,
+            furnishings: Vec::new(),
+            mep_objects: Vec::new(),
             levels: default_levels(),
             walls: Vec::new(),
             wall_joins: Vec::new(),
             rooms: Vec::new(),
+            furnishing_instances: Vec::new(),
+            mep_instances: Vec::new(),
         }
     }
 
@@ -114,10 +126,14 @@ impl BuildingModel {
             libraries: Vec::new(),
             materials,
             systems,
+            furnishings: Vec::new(),
+            mep_objects: Vec::new(),
             levels: default_levels(),
             walls: vec![wall],
             wall_joins: Vec::new(),
             rooms: Vec::new(),
+            furnishing_instances: Vec::new(),
+            mep_instances: Vec::new(),
         }
     }
 
@@ -207,6 +223,8 @@ impl BuildingModel {
             libraries: Vec::new(),
             materials,
             systems,
+            furnishings: Vec::new(),
+            mep_objects: Vec::new(),
             levels: default_levels(),
             walls: vec![front, right, back, left],
             wall_joins: vec![
@@ -240,6 +258,8 @@ impl BuildingModel {
                 ),
             ],
             rooms: Vec::new(),
+            furnishing_instances: Vec::new(),
+            mep_instances: Vec::new(),
         }
         .into_deterministic()
     }
@@ -403,10 +423,14 @@ impl BuildingModel {
             libraries: Vec::new(),
             materials,
             systems,
+            furnishings: Vec::new(),
+            mep_objects: Vec::new(),
             levels: default_levels(),
             walls,
             wall_joins,
             rooms,
+            furnishing_instances: Vec::new(),
+            mep_instances: Vec::new(),
         }
         .into_deterministic()
     }
@@ -436,6 +460,18 @@ impl BuildingModel {
         for system in &self.systems {
             system.validate(&material_lookup, &mut ids)?;
             system_lookup.insert(system.id.clone(), system);
+        }
+
+        let mut furnishing_lookup = BTreeMap::new();
+        for furnishing in &self.furnishings {
+            furnishing.validate(&mut ids)?;
+            furnishing_lookup.insert(furnishing.id.clone(), furnishing);
+        }
+
+        let mut mep_lookup = BTreeMap::new();
+        for object in &self.mep_objects {
+            object.validate(&mut ids)?;
+            mep_lookup.insert(object.id.clone(), object);
         }
 
         let mut wall_lookup = BTreeMap::new();
@@ -513,6 +549,38 @@ impl BuildingModel {
             }
         }
 
+        for instance in &self.furnishing_instances {
+            instance.validate(&mut ids)?;
+            if !level_ids.contains(&instance.level) {
+                return Err(ModelError::FurnishingInstanceReferencesUnknownLevel {
+                    instance: instance.id.clone(),
+                    level: instance.level.clone(),
+                });
+            }
+            if !furnishing_lookup.contains_key(&instance.family) {
+                return Err(ModelError::FurnishingInstanceReferencesUnknownFamily {
+                    instance: instance.id.clone(),
+                    family: instance.family.clone(),
+                });
+            }
+        }
+
+        for instance in &self.mep_instances {
+            instance.validate(&mut ids)?;
+            if !level_ids.contains(&instance.level) {
+                return Err(ModelError::MepInstanceReferencesUnknownLevel {
+                    instance: instance.id.clone(),
+                    level: instance.level.clone(),
+                });
+            }
+            if !mep_lookup.contains_key(&instance.family) {
+                return Err(ModelError::MepInstanceReferencesUnknownFamily {
+                    instance: instance.id.clone(),
+                    family: instance.family.clone(),
+                });
+            }
+        }
+
         for room in &self.rooms {
             validate_element_id(&room.id)?;
             insert_unique_id(&mut ids, &room.id)?;
@@ -536,6 +604,10 @@ impl BuildingModel {
         // Systems sort by id; layer ORDER is semantic (interior -> exterior) and
         // must never be reordered.
         self.systems.sort_by(|left, right| left.id.cmp(&right.id));
+        self.furnishings
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.mep_objects
+            .sort_by(|left, right| left.id.cmp(&right.id));
         self.levels.sort_by(|left, right| left.id.cmp(&right.id));
         self.walls.sort_by(|left, right| left.id.cmp(&right.id));
         for wall in &mut self.walls {
@@ -544,6 +616,10 @@ impl BuildingModel {
         self.wall_joins
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.rooms.sort_by(|left, right| left.id.cmp(&right.id));
+        self.furnishing_instances
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.mep_instances
+            .sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -1449,6 +1525,258 @@ impl Material {
     /// material contributes 562 milli-R, not 900.
     pub fn r_value_milli(&self, thickness: Length) -> i64 {
         self.r_per_inch_milli() * thickness.ticks() / Length::TICKS_PER_INCH
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectSize {
+    pub width: Length,
+    pub depth: Length,
+    pub height: Length,
+}
+
+impl ObjectSize {
+    pub const fn new(width: Length, depth: Length, height: Length) -> Self {
+        Self {
+            width,
+            depth,
+            height,
+        }
+    }
+
+    fn is_positive(&self) -> bool {
+        self.width > Length::ZERO && self.depth > Length::ZERO && self.height > Length::ZERO
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QuarterTurn {
+    #[default]
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
+
+impl QuarterTurn {
+    pub const ALL: [Self; 4] = [Self::Deg0, Self::Deg90, Self::Deg180, Self::Deg270];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Deg0 => "0 deg",
+            Self::Deg90 => "90 deg",
+            Self::Deg180 => "180 deg",
+            Self::Deg270 => "270 deg",
+        }
+    }
+
+    pub const fn is_zero(&self) -> bool {
+        matches!(self, Self::Deg0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum MepObjectKind {
+    Electrical,
+    Lighting,
+    Plumbing,
+    Mechanical,
+    Other,
+}
+
+impl MepObjectKind {
+    pub const ALL: [Self; 5] = [
+        Self::Electrical,
+        Self::Lighting,
+        Self::Plumbing,
+        Self::Mechanical,
+        Self::Other,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Electrical => "Electrical",
+            Self::Lighting => "Lighting",
+            Self::Plumbing => "Plumbing",
+            Self::Mechanical => "Mechanical",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Furnishing {
+    pub id: ElementId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Provenance>,
+    pub size: ObjectSize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, PropertyValue>,
+}
+
+impl Furnishing {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        width: Length,
+        depth: Length,
+        height: Length,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            source: None,
+            size: ObjectSize::new(width, depth, height),
+            tags: Vec::new(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn validate(&self, ids: &mut BTreeSet<ElementId>) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        insert_unique_id(ids, &self.id)?;
+        if !self.size.is_positive() {
+            return Err(ModelError::InvalidObjectSize {
+                object: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MepObject {
+    pub id: ElementId,
+    pub name: String,
+    pub kind: MepObjectKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Provenance>,
+    pub size: ObjectSize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, PropertyValue>,
+}
+
+impl MepObject {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        kind: MepObjectKind,
+        width: Length,
+        depth: Length,
+        height: Length,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            kind,
+            source: None,
+            size: ObjectSize::new(width, depth, height),
+            tags: Vec::new(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn validate(&self, ids: &mut BTreeSet<ElementId>) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        insert_unique_id(ids, &self.id)?;
+        if !self.size.is_positive() {
+            return Err(ModelError::InvalidObjectSize {
+                object: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FurnishingInstance {
+    pub id: ElementId,
+    pub name: String,
+    pub family: ElementId,
+    #[serde(default = "default_level_id")]
+    pub level: ElementId,
+    pub position: Point2,
+    #[serde(default, skip_serializing_if = "QuarterTurn::is_zero")]
+    pub rotation: QuarterTurn,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl FurnishingInstance {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        family: impl Into<String>,
+        level: impl Into<String>,
+        position: Point2,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            family: ElementId::new(family),
+            level: ElementId::new(level),
+            position,
+            rotation: QuarterTurn::Deg0,
+            tags: Vec::new(),
+        }
+    }
+
+    pub(crate) fn validate(&self, ids: &mut BTreeSet<ElementId>) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        validate_element_id(&self.family)?;
+        validate_element_id(&self.level)?;
+        insert_unique_id(ids, &self.id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MepInstance {
+    pub id: ElementId,
+    pub name: String,
+    pub family: ElementId,
+    #[serde(default = "default_level_id")]
+    pub level: ElementId,
+    pub position: Point2,
+    #[serde(default, skip_serializing_if = "QuarterTurn::is_zero")]
+    pub rotation: QuarterTurn,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl MepInstance {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        family: impl Into<String>,
+        level: impl Into<String>,
+        position: Point2,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            family: ElementId::new(family),
+            level: ElementId::new(level),
+            position,
+            rotation: QuarterTurn::Deg0,
+            tags: Vec::new(),
+        }
+    }
+
+    pub(crate) fn validate(&self, ids: &mut BTreeSet<ElementId>) -> Result<(), ModelError> {
+        validate_element_id(&self.id)?;
+        validate_element_id(&self.family)?;
+        validate_element_id(&self.level)?;
+        insert_unique_id(ids, &self.id)
     }
 }
 
@@ -2661,6 +2989,28 @@ pub enum ModelError {
     WallReferencesUnknownSystem { wall: ElementId, system: ElementId },
     #[error("wall {wall:?} references construction system {system:?} which is not a Wall system")]
     WallSystemWrongKind { wall: ElementId, system: ElementId },
+    #[error("object family {object:?} must have positive width, depth, and height")]
+    InvalidObjectSize { object: ElementId },
+    #[error("furnishing instance {instance:?} references unknown level {level:?}")]
+    FurnishingInstanceReferencesUnknownLevel {
+        instance: ElementId,
+        level: ElementId,
+    },
+    #[error("furnishing instance {instance:?} references unknown family {family:?}")]
+    FurnishingInstanceReferencesUnknownFamily {
+        instance: ElementId,
+        family: ElementId,
+    },
+    #[error("MEP instance {instance:?} references unknown level {level:?}")]
+    MepInstanceReferencesUnknownLevel {
+        instance: ElementId,
+        level: ElementId,
+    },
+    #[error("MEP instance {instance:?} references unknown family {family:?}")]
+    MepInstanceReferencesUnknownFamily {
+        instance: ElementId,
+        family: ElementId,
+    },
 }
 
 fn default_levels() -> Vec<Level> {

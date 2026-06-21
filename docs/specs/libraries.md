@@ -4,17 +4,16 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Phase 4 implemented · **Linked goal:** G-013 (Libraries) ·
+> **Status:** Phase 5 implemented · **Linked goal:** G-013 (Libraries) ·
 > **Plan:** [2026-06-19 — Libraries](../plans/2026-06-19-libraries.md) ·
 > **Last reviewed:** 2026-06-21
 
 ## Intent / Purpose
 
-Users will want to define, reuse, and **distribute** reusable content: wall systems and
-materials today; materials with texture/depth maps; and later furnishings/objects (appliances,
-cabinets, toilets) and electrical/mechanical objects (lights, panels). Today there is **no
-sharing** — `BuildingModel::starter_library()` (`framer-core/src/model.rs`) is the only catalog,
-and the three `examples/projects/*.framer` files each embed a full duplicate copy of it.
+Users will want to define, reuse, and **distribute** reusable content: wall systems,
+materials with texture/depth maps, furnishings/objects (appliances, cabinets, toilets), and
+electrical/mechanical objects (lights, panels). Framer now has a unified starter `.framerlib`
+for those typed definitions; the project files remain self-contained after content is used.
 
 A **Library** is a versioned, distributable collection of typed, reusable definitions. This
 spec defines **one unified mechanism** for all content kinds, designed so that adding a kind
@@ -40,11 +39,16 @@ The observable contract (prefer testable statements):
   `materials` / `systems`, with zero library I/O. A missing library disables "check for
   updates" / "insert new", never "open".
 - **"Using" a library item vendors it** — copies the full definition into the project's own
-  collections, id-remapped to stay unique, and stamps it with provenance (origin library
-  coordinate, immutable version, content hash). After import the project is self-contained.
+  typed collections (`materials`, `systems`, `furnishings`, `mep_objects`), id-remapped to
+  stay unique, and stamps it with provenance (origin library coordinate, immutable version,
+  content hash). After import the project is self-contained.
 - **Importing a definition is an atomic subgraph copy.** Importing a `ConstructionSystem` also
   vendors and remaps every definition it references (each layer's `material` and any
   `FramingSpec.cavity_material`), so no reference dangles and `validate()` passes fail-closed.
+- **Object families and placed object instances are authored intent.** Furnishing and MEP
+  library definitions are reusable families with deterministic size/property data; placement
+  creates level-owned instances with a project position and quarter-turn rotation. The app draws
+  them as simple plan-view footprints and selection targets.
 - **Imported ids never collide.** A unique project-local `ElementId` is minted on import; the
   original library-local id is preserved in provenance for update alignment.
 - **Provenance is descriptive, never load-bearing.** Nothing the solver, renderer, or
@@ -79,9 +83,9 @@ The observable contract (prefer testable statements):
   internal cache/bundle mechanism, never the persisted resting state.
 - **Embedding is the default for structured definitions; the only toggle is Detach.** A true
   embed-vs-reference axis exists *only* for binary assets.
-- **Per-kind typed collections + one shared spine.** Materials, systems, and future
-  furnishings/MEP stay distinct typed collections (keeping type-specific validation and
-  editor ergonomics); only the distribution machinery — one `Provenance`, one resolver, one
+- **Per-kind typed collections + one shared spine.** Materials, systems, furnishings, and MEP
+  objects stay distinct typed collections (keeping type-specific validation and editor
+  ergonomics); only the distribution machinery — one `Provenance`, one resolver, one
   import/remap pass — is shared. *Rejected:* a single generic `LibraryItem` type (loses
   type-specific validation; weakens the strongly-typed model).
 - **Symmetric provenance.** Material **and** system provenance land in the same schema bump;
@@ -135,7 +139,7 @@ resolve (Locator → bytes) → verify content hash → namespace-remap (atomic 
 
 Per-kind types stay distinct; only this pipeline + `Provenance` + the resolver + the asset
 store are shared. Adding a content kind = add a `Vec<_>` to both `BuildingModel` and `Library`
-and reuse the pipeline. Fixture/MEP substance rides the existing float-free
+and reuse the pipeline. Furnishing/MEP substance rides the existing float-free
 `properties: BTreeMap<String, PropertyValue>` (e.g. wattage `Int`, clearance `Length`,
 model-no `Text`) — the same pattern materials already use for `r_per_inch_milli`.
 
@@ -172,6 +176,15 @@ pub enum MaterialSource { Project, Library(Provenance) }
 // Symmetric — same schema bump as the material change:
 pub struct ConstructionSystem { /* … */ pub source: Option<Provenance> }
 
+// Phase 5 object families and placed authored instances (schema v10):
+pub struct ObjectSize { pub width: Length, pub depth: Length, pub height: Length }
+pub enum QuarterTurn { Deg0, Deg90, Deg180, Deg270 }
+pub enum MepObjectKind { Electrical, Lighting, Plumbing, Mechanical, Other }
+pub struct Furnishing { /* id, name, source, size, tags, properties */ }
+pub struct MepObject { /* id, name, kind, source, size, tags, properties */ }
+pub struct FurnishingInstance { /* id, name, family, level, position, rotation, tags */ }
+pub struct MepInstance { /* id, name, family, level, position, rotation, tags */ }
+
 // Asset seam (phase 3; charset/Eq-safe — scale is Length, never f32):
 pub struct AssetRef { pub hash: String, pub media_type: String, pub role: TextureRole }
 pub enum Appearance {
@@ -190,13 +203,15 @@ A new, independently-versioned format that mirrors `BuildingModel`'s collection 
 **same serde types round-trip** at both ends:
 
 ```jsonc
-{ "format": "framer.library", "schema_version": 1,
+{ "format": "framer.library", "schema_version": 2,
   "uid": "0a8f5c2e-…",           // stable library identity (UUID), immutable across the library's life
   "version_id": "018f3b9a-…",    // this published version's identity (UUIDv7 → embeds publish time)
   "version": "1.4.0",            // human semver label
   "coordinate": "framer-lib://acme/envelopes",  // resolvable hint/alias, not identity
   "materials": [ /* full Material objects, library-local ids */ ],
-  "systems":   [ /* full ConstructionSystem objects */ ] }
+  "systems":   [ /* full ConstructionSystem objects */ ],
+  "furnishings": [ /* full Furnishing family objects */ ],
+  "mep_objects": [ /* full MepObject family objects */ ] }
 ```
 
 It gets its own `to_canonical_json` (re-stamp version, sort by id, pretty-print, trailing
@@ -218,23 +233,27 @@ locally-unique, fully-resolved `BuildingModel`, exactly as today.
 
 ### Update lifecycle
 
-Lifecycle state is derived, never persisted. `framer-library` recomputes an imported material or
-system's provenance-excluded item hash in the original library-local id space, using
-`source_id` and matching vendored material provenance to reverse the project-local remap. A
-fresh import therefore reads "current" even though its project ids differ from the library ids.
-If the recomputed project hash differs from the stamped item hash, the item is **divergent**. If
-an available current library with the same `uid` carries a different source-item hash, the item
-is **out of date**. If the available library no longer carries `source_id`, the item is **source
-missing**. These are surfaced as derived Plan diagnostics; missing libraries simply mean
+Lifecycle state is derived, never persisted. `framer-library` recomputes an imported material,
+system, furnishing, or MEP object's provenance-excluded item hash in the original library-local
+id space, using `source_id` and matching vendored material provenance to reverse
+project-local remaps where a system carries a material closure. A fresh import therefore reads
+"current" even though its project ids differ from the library ids. If the recomputed project
+hash differs from the stamped item hash, the item is **divergent**. If an available current
+library with the same `uid` carries a different source-item hash, the item is **out of date**.
+If the available library no longer carries `source_id`, the item is **source missing**. These
+are surfaced as derived Plan diagnostics; missing libraries simply mean
 out-of-date/source-missing checks are unavailable.
 
-Re-sync is an explicit author-time operation. It replaces the selected vendored material/system
-from the available source library, keeps the project-local id stable, stamps the current
-`version_id` + item hash, and prunes unused `LibraryStamp`s. Re-syncing a system also refreshes
-the material closure it references, preserving existing local material ids where possible and
-minting ids only for newly introduced source materials. Detach clears provenance from the
-selected item, making it project-owned content; it does not delete or rewrite unrelated vendored
-closure items.
+Re-sync is an explicit author-time operation. It replaces the selected vendored definition from
+the available source library, keeps the project-local id stable, stamps the current `version_id`
+and item hash, and prunes unused `LibraryStamp`s. Re-syncing a system also refreshes the material
+closure it references, preserving existing local material ids where possible and minting ids only
+for newly introduced source materials. Detach clears provenance from the selected item, making
+it project-owned content; it does not delete or rewrite unrelated vendored closure items.
+
+Furnishing and MEP object re-sync/detach follow the same selected-definition contract as
+materials. Existing placed instances keep their local `family` id when the family is re-synced;
+detaching a family leaves its instances unchanged.
 
 ### Resolver, assets, bundle (`framer-library` crate)
 
@@ -294,9 +313,10 @@ This feature must preserve every [architecture invariant](../architecture.md) an
   publishing, live remote catalog mutation, registry search, and managed/RPC editing are still
   deferred. The provider seam is intentionally narrow so those backends can supply pinned
   library bytes without changing project persistence.
-- **Furnishing/MEP geometry, placement, and drawing.** Only the *spine* (shared `Provenance` +
-  per-kind collection pattern) is established early; the element families and drag-and-drop
-  catalog placement are a later, larger feature.
+- **Advanced furnishing/MEP geometry and hosting.** Phase 5 stores families, places instances,
+  and draws simple plan-view footprints. Mesh geometry, symbol libraries, wall/ceiling hosting,
+  clearance zones, electrical circuits, plumbing connectivity, and true drag-and-drop preview
+  placement are deferred.
 - **Geometric displacement / normal mapping.** Phase 3 samples textures and depth maps in the
   path tracer, but true surface displacement/normal mapping is deferred behind a separate render
   spec update and GPU↔CPU parity work ([render-view.md](render-view.md)).

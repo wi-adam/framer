@@ -38,10 +38,9 @@ Builds on (cite paths; durable detail in the [spec](../specs/libraries.md)):
 | **2** | Update lifecycle: re-sync / detach / divergence detection as diagnostics. | none |
 | **3** | Binary assets (textures + depth maps) + `.framerpkg` + render wiring. | **v8 → v9** |
 | **4** | Remote / URL libraries (mandatory hash pin, cache-first, fail-closed); provider interface shaped for a future managed/RPC backend. | none |
-| **5** | Furnishings / MEP element families + catalog placement through the same spine. | bump when families land |
+| **5** | Furnishings / MEP element families + catalog placement through the same spine. | **v9 → v10**; `.framerlib` **1 → 2** |
 
-Slices 0–3 are implemented. The detailed task breakdown below records the shippable cuts; later
-slices remain sketched until scheduled.
+Slices 0–5 are implemented. The detailed task breakdown below records the shippable cuts.
 
 ### Slice 0 — Library file format + dogfood the starter library
 
@@ -223,10 +222,54 @@ slices remain sketched until scheduled.
   - Verify: `python3 scripts/check-markdown-links.py`.
   - Commit: `docs(libraries): document remote library resolution`
 
-### Slice 5 — sketch (task detail when scheduled)
+### Slice 5 — Furnishings / MEP families and placement (v9 → v10; `.framerlib` 1 → 2)
 
-- **Slice 5:** `Furnishing` / `MepObject` families + library vectors + drag-and-drop placement,
-  through the identical spine.
+- **Task 5.1** — Add authored object family and instance types in `framer-core`:
+  `ObjectSize`, `QuarterTurn`, `MepObjectKind`, `Furnishing`, `MepObject`,
+  `FurnishingInstance`, and `MepInstance`. `BuildingModel` gains family vectors and placed
+  instance vectors; validation rejects non-positive sizes, dangling family refs, and dangling
+  level refs; deterministic sorting includes the new collections.
+  - Files: `crates/framer-core/src/model.rs`, `crates/framer-core/src/lib.rs`.
+  - Verify: `cargo test -p framer-core --locked` — object family + placement round-trip and
+    missing family/level rejection.
+  - Commit: `feat(core)!: add v10 object families and placed instances`
+- **Task 5.2** — Run the v10 project schema bump and v2 library schema bump. Update
+  `PROJECT_SCHEMA_VERSION = 10`, reject v9, regenerate the three checked-in example projects,
+  add `furnishings` and `mep_objects` to `.framerlib`, and seed the starter library with simple
+  cabinet/workbench/electrical/lighting families.
+  - Files: `crates/framer-core/src/project.rs`, `crates/framer-core/src/library.rs`,
+    `examples/projects/*.framer`, `libraries/framer-starter.framerlib`,
+    `docs/project-files.md`.
+  - Verify: `cargo test -p framer-core --locked`.
+  - Commit: `feat(core)!: bump project and library schemas for object families`
+- **Task 5.3** — Extend `framer-library`'s shared spine for family definitions. Add
+  `LibraryItem::Furnishing` / `LibraryItem::MepObject`, typed import/re-sync/detach APIs,
+  provenance-excluded item hashes, lifecycle diagnostics, and stamp pruning for family
+  definitions.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: `cargo test -p framer-library --locked` — import vendors family definitions,
+    repeated placement can reuse an imported family, lifecycle divergence/detach works, and MEP
+    re-sync updates source content.
+  - Commit: `feat(library): vendor object families through library spine`
+- **Task 5.4** — Add app placement and editing. The starter catalog exposes **Place** actions
+  for furnishings and MEP objects; placement vendors the family if needed, then creates a
+  level-owned instance at the current plan cursor (or origin), keeps repeated placement on the
+  same imported family, and selects the new instance. The model tree/inspector supports family
+  and instance editing; the plan view draws and picks simple rotated footprints; model bounds
+  include placed objects.
+  - Files: `crates/framer-app/src/app/panels.rs`, `crates/framer-app/src/app/mod.rs`,
+    `crates/framer-app/src/app/model_edit.rs`, `crates/framer-app/src/app/viewport/plan.rs`,
+    `crates/framer-app/src/app/viewport/geom.rs`.
+  - Verify: `cargo test -p framer-app --locked` — placement vendors family + instance, plan
+    mode does not mutate, repeated placement reuses the imported family, and click selection
+    handles placed instances.
+  - Commit: `feat(app): place library furnishings and MEP objects`
+- **Task 5.5** — Refresh durable docs for object-family schemas, placement behavior, and where
+  to add future library item kinds.
+  - Files: `docs/specs/libraries.md`, `docs/plans/2026-06-19-libraries.md`,
+    `docs/code-map.md`, `docs/project-files.md`, `docs/architecture.md`.
+  - Verify: `python3 scripts/check-markdown-links.py`.
+  - Commit: `docs(libraries): document object families and placement`
 
 ## Final verification
 
@@ -246,6 +289,9 @@ Feature-specific:
 - **Slice 3:** asset appearance round-trip + v8 rejection; deterministic `.framerpkg` test;
   texture/depth sampling tests in `framer-render`; `cargo test -p framer-app --test gpu_parity`
   stays green after asset sampling.
+- **Slice 5:** v10 project round-trip + v9 rejection; `.framerlib` v2 family vectors;
+  family import/lifecycle tests in `framer-library`; app placement/reuse/plan-mode guard tests;
+  docs link check.
 
 When a slice lands, update the spec's **Status** / **Last reviewed**, and refresh affected
 durable docs — [project-files.md](../project-files.md), [code-map.md](../code-map.md) (a "where

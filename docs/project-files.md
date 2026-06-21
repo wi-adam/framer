@@ -5,7 +5,7 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v9 format stores only the canonical intent model. Generated framing plans,
+The v10 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 file.
@@ -28,38 +28,42 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V9 Shape
+## V10 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 9,
+  "schema_version": 10,
   "authored": {
     "code": {},
     "libraries": [],
     "materials": [],
     "systems": [],
+    "furnishings": [],
+    "mep_objects": [],
     "levels": [],
     "walls": [],
     "wall_joins": [],
-    "rooms": []
+    "rooms": [],
+    "furnishing_instances": [],
+    "mep_instances": []
   }
 }
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `9` when saving from the current app.
+- `schema_version` must be `10` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `cache`, `exports`, or presentation data to project files.
-- `libraries`, `materials`, `systems`, and `rooms` are omitted when empty;
-  `wall_joins` defaults to an empty list; `levels` defaults to a single
-  `level-1`.
+- `libraries`, `materials`, `systems`, `furnishings`, `mep_objects`, `rooms`,
+  `furnishing_instances`, and `mep_instances` are omitted when empty; `wall_joins`
+  defaults to an empty list; `levels` defaults to a single `level-1`.
 
-### Schema versioning is v9-only
+### Schema versioning is v10-only
 
-The current build is **v9-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `9` with an explicit
+The current build is **v10-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `10` with an explicit
 `unsupported Framer project schema version N` error — older files are *not*
 migrated in place. Convert old files with an older Framer build, or re-author
 them.
@@ -88,42 +92,46 @@ Framer library files are UTF-8 JSON documents with the `.framerlib` extension.
 They are versioned separately from project files and describe reusable content
 that can be copied into a self-contained `.framer` project.
 
-The initial format is schema 1:
+The current format is schema 2:
 
 ```json
 {
   "format": "framer.library",
-  "schema_version": 1,
+  "schema_version": 2,
   "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
   "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
   "version": "0.1.0",
   "coordinate": "framer-lib://framer/starter",
   "materials": [],
-  "systems": []
+  "systems": [],
+  "furnishings": [],
+  "mep_objects": []
 }
 ```
 
 - `format` must be `framer.library`.
-- `schema_version` must be `1` for the current library loader.
+- `schema_version` must be `2` for the current library loader.
 - `uid` is the stable library identity; `version_id` identifies this published
   content version; `coordinate` is only a resolvable hint.
-- `materials` and `systems` use the same typed definitions as project files.
+- `materials`, `systems`, `furnishings`, and `mep_objects` use the same typed
+  definitions as project files.
 - A library validates internally before save/load succeeds: IDs must be valid and
   unique, and every construction-system material reference must resolve to a
-  material in the same file.
+  material in the same file. Furnishing and MEP family sizes must be positive.
 
 The checked-in starter catalog is
 [`../libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
 New projects and demos load that document and embed its material/system
-definitions into the authored project model. Opening an existing `.framer` project
-does not read any `.framerlib`; projects remain self-contained.
+definitions into the authored project model. Furnishing and MEP object families
+are copied when placed from the starter catalog. Opening an existing `.framer`
+project does not read any `.framerlib`; projects remain self-contained.
 
 ## Project Packages
 
 Portable project packages use the `.framerpkg` extension. A package is a
 deterministic ZIP with stored entries, sorted paths, and zeroed timestamps:
 
-- `project.framer`: the canonical v9 project JSON.
+- `project.framer`: the canonical v10 project JSON.
 - `manifest.json`: `{ "format": "framer.package", "schema_version": 1, ... }`.
 - `assets/blake3-<hex>`: optional content-addressed binary assets referenced by
   material appearances.
@@ -134,17 +142,21 @@ back to the material's authored color and the project still opens.
 
 ## Authored Model
 
-The v9 authored model holds:
+The v10 authored model holds:
 
 - `code`: the prescriptive code profile (starter framing defaults).
 - `libraries`: optional descriptive stamps for library versions that supplied
   vendored definitions.
 - `materials`: the project's material library (see below).
 - `systems`: the project's construction systems (layered assemblies, see below).
+- `furnishings`: reusable furnishing family definitions.
+- `mep_objects`: reusable MEP object family definitions.
 - `levels`: deterministic list of project levels.
 - `walls`: deterministic list of placed rectilinear wall segments.
 - `wall_joins`: deterministic list of authored wall joins/corners.
 - `rooms`: deterministic list of authored rooms (spaces).
+- `furnishing_instances`: level-owned placed furnishing instances.
+- `mep_instances`: level-owned placed MEP object instances.
 - Per wall: `openings` (wall openings) and `dimensions` (wall-local dimension
   constraints).
 
@@ -277,6 +289,72 @@ clear-wall R-value are *derived* from the layer stack and materials — they are
 stored. The R-value is a clear-wall approximation; the framing-factor
 (parallel-path) derate is not yet applied.
 
+## Furnishings and MEP Objects
+
+Furnishing and MEP object definitions are reusable **families**. Instances place
+those families in the project by reference. This mirrors walls referencing
+construction systems: the family definition owns the reusable size/properties,
+and each instance owns level, position, rotation, name, and tags.
+
+Each furnishing in `furnishings` stores:
+
+- `id`, `name`.
+- `source`: optional `Provenance` for families copied from a `.framerlib`.
+- `size`: exact `width`, `depth`, and `height` lengths. All three must be
+  positive.
+- `tags`: optional free-form string list, omitted when empty.
+- `properties`: an extensible float-free typed map (`Int` / `Length` / `Text` /
+  `Flag`).
+
+```json
+{
+  "id": "furnishing-workbench",
+  "name": "Workbench",
+  "size": {
+    "width": { "ticks": 1152 },
+    "depth": { "ticks": 480 },
+    "height": { "ticks": 576 }
+  },
+  "tags": ["shop"]
+}
+```
+
+Each MEP object in `mep_objects` uses the same shape plus `kind`, one of
+`Electrical`, `Lighting`, `Plumbing`, `Mechanical`, or `Other`.
+
+```json
+{
+  "id": "mep-load-center",
+  "name": "Load center",
+  "kind": "Electrical",
+  "size": {
+    "width": { "ticks": 224 },
+    "depth": { "ticks": 64 },
+    "height": { "ticks": 384 }
+  },
+  "tags": ["electrical"],
+  "properties": { "amperage": { "Int": 200 } }
+}
+```
+
+Placed instances store a local family reference and a project coordinate. The
+family and level must both exist in this file.
+
+```json
+{
+  "id": "furnishing-instance-1",
+  "name": "Workbench 1",
+  "family": "furnishing-workbench",
+  "level": "level-1",
+  "position": { "x": { "ticks": 384 }, "y": { "ticks": 576 } },
+  "rotation": "Deg90"
+}
+```
+
+`rotation` is a quarter-turn enum: `Deg0`, `Deg90`, `Deg180`, or `Deg270`.
+`Deg0` is omitted. MEP instances use the same shape in `mep_instances` and point
+their `family` at an id in `mep_objects`.
+
 ### Library provenance
 
 Using a library item copies the full definition into the project. The project
@@ -292,25 +370,27 @@ for that library version:
 - `coordinate`: human/resolver hint, not identity.
 - `version`: human semver label.
 
-Each vendored material/system may also carry `Provenance`:
+Each vendored material, system, furnishing, or MEP object may also carry
+`Provenance`:
 
 - `library_uid` and `version_id`: point to the matching library stamp.
 - `source_id`: the element id inside the library before project-local remapping.
 - `content_hash`: `blake3:<hex>` hash of the source item canonical form.
 
-This metadata is descriptive. Do not make wall/material/system references point
-outside the project; every layer `material`, framing `cavity_material`, and wall
-`system` must still resolve to a local definition in this file.
+This metadata is descriptive. Do not make wall/material/system/family references
+point outside the project; every layer `material`, framing `cavity_material`,
+wall `system`, and object-instance `family` must still resolve to a local
+definition in this file.
 
 Library lifecycle state is derived from the embedded definitions plus any
 currently available source library. A vendored item whose project-local content
 no longer matches its stamped source-item hash is reported as locally modified;
 an item whose available source library now has a different source-item hash is
 reported as out of date. Re-sync overwrites the embedded vendored definition from
-the source library while keeping project-local ids stable; Detach clears the
-selected item's provenance so it becomes ordinary project-owned content. None of
-these checks run during `load_project`, and a missing `.framerlib` never blocks
-opening this file.
+the source library while keeping project-local ids stable; systems also refresh
+their material closure. Detach clears the selected item's provenance so it
+becomes ordinary project-owned content. None of these checks run during
+`load_project`, and a missing `.framerlib` never blocks opening this file.
 
 ## Dimensions
 
@@ -441,11 +521,12 @@ Each room stores:
 
 ## Stable IDs
 
-Material, system, level, wall, join, opening, dimension, and room IDs are stable
-semantic identifiers. They must be non-empty and contain only lowercase letters,
-digits, or hyphens. Examples:
+Material, system, furnishing, MEP object, placed object instance, level, wall,
+join, opening, dimension, and room IDs are stable semantic identifiers. They must
+be non-empty and contain only lowercase letters, digits, or hyphens. Examples:
 
 - `mat-drywall`, `system-wall-exterior-1`
+- `furnishing-workbench`, `mep-load-center`, `furnishing-instance-1`
 - `level-1`, `wall-1`, `join-front-right`
 - `opening-door-1`, `opening-window-1`, `dimension-1`, `room-bed-1`
 
@@ -466,8 +547,9 @@ design is not implemented.
 Framer canonicalizes project files before saving:
 
 - Materials are sorted by `id`.
-- Systems are sorted by `id`; **layers within a system are not sorted** (layer
-  order is semantic: interior → exterior).
+- Systems, furnishings, MEP objects, furnishing instances, and MEP instances are
+  sorted by `id`; **layers within a system are not sorted** (layer order is
+  semantic: interior → exterior).
 - Levels, walls, wall joins, and rooms are sorted by `id`.
 - Openings and dimensions within each wall are sorted by `id`.
 - A material's `properties` map is ordered (a `BTreeMap`), so property insertion
@@ -486,15 +568,17 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`9`). The build is v9-only; do not
+3. Preserve `format` and `schema_version` (`10`). The build is v10-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,
    drawings, BOM exports, and UI state.
 6. Use exact tick values for dimensions and thicknesses.
-7. Apply construction by *reference*: point a wall's `system` at a system `id`, and
-   a layer's `material` at a material `id`. Do not dangle references — every
-   referenced `system`/`material` must exist. Keep layer order interior → exterior.
+7. Apply construction and object families by *reference*: point a wall's `system`
+   at a system `id`, a layer's `material` at a material `id`, and a placed
+   object instance's `family` at a matching furnishing or MEP family `id`. Do not
+   dangle references — every referenced `system`/`material`/`family` must exist.
+   Keep layer order interior → exterior.
 8. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
 9. Do not present the starter IRC 2021 profile as complete code compliance.
 10. Represent plan adjustments as authored design changes or explicit override
@@ -520,18 +604,18 @@ The desktop app opens with the demo shell model and a default project path of
 Use:
 
 - `New` to create a fresh single-wall project (seeded with the starter material +
-  system library).
+  system library; starter object families are available from the catalog when placed).
 - `Shell Demo` / `Wall Demo` to return to the connected multi-wall or single-wall
   examples.
 - `Open` and `Save` to load or persist the authored `.framer` file.
 - `Design` to edit authored levels, wall placement, openings, joins, construction
-  systems, and materials through the model tree, inspector, catalog, and authored
-  viewports.
+  systems, materials, furnishing/MEP families, and placed furnishing/MEP instances
+  through the model tree, inspector, catalog, and authored viewports.
 - `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode for
   laying out authored openings on the selected wall.
 - the Design-mode `Wall` (W) and `Room` (R) tools to draw walls and place rooms in
-  the plan view, and the `Dimension` tool in the wall view to create driving or
-  reference dimensions.
+  the plan view, starter-catalog `Place` actions to place furnishing/MEP instances,
+  and the `Dimension` tool in the wall view to create driving or reference dimensions.
 - `Plan` to inspect generated framing, diagnostics, BOM rows (including the
   per-layer material takeoff), read-only authored summaries, and selectable
   generated members.

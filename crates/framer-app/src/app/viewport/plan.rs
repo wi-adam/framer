@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
-use framer_core::{BuildingModel, ElementId, Length, Point2, Wall};
+use framer_core::{BuildingModel, ElementId, Length, Point2, QuarterTurn, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
 use super::geom::{ModelBounds, distance_to_segment, plan_inverse_point, plan_point};
@@ -439,6 +439,8 @@ pub(super) fn draw_project_plan(
     let pointer = response.interact_pointer_pos();
     let mut clicked_wall = None;
     let mut clicked_opening = None;
+    let mut clicked_furnishing = None;
+    let mut clicked_mep = None;
     let mut clicked_room = None;
     let mut over_element = false;
 
@@ -516,6 +518,77 @@ pub(super) fn draw_project_plan(
         {
             clicked_room = Some(ViewClick::Room {
                 room_id: room.id.0.clone(),
+            });
+        }
+    }
+
+    for instance in &model.furnishing_instances {
+        let Some(family) = model
+            .furnishings
+            .iter()
+            .find(|family| family.id == instance.family)
+        else {
+            continue;
+        };
+        let rect = object_footprint_rect(
+            instance.position,
+            family.size.width,
+            family.size.depth,
+            instance.rotation,
+            bounds,
+            drawing,
+            camera,
+        );
+        let hovered = pointer.is_some_and(|position| rect.contains(position));
+        over_element |= hovered;
+        let selected =
+            matches!(selection, Selection::FurnishingInstance(id) if id == &instance.id.0);
+        draw_object_footprint(
+            &painter,
+            rect,
+            &instance.name,
+            selected,
+            hovered,
+            Color32::from_rgb(190, 172, 132),
+        );
+        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+            clicked_furnishing = Some(ViewClick::FurnishingInstance {
+                instance_id: instance.id.0.clone(),
+            });
+        }
+    }
+
+    for instance in &model.mep_instances {
+        let Some(family) = model
+            .mep_objects
+            .iter()
+            .find(|family| family.id == instance.family)
+        else {
+            continue;
+        };
+        let rect = object_footprint_rect(
+            instance.position,
+            family.size.width,
+            family.size.depth,
+            instance.rotation,
+            bounds,
+            drawing,
+            camera,
+        );
+        let hovered = pointer.is_some_and(|position| rect.contains(position));
+        over_element |= hovered;
+        let selected = matches!(selection, Selection::MepInstance(id) if id == &instance.id.0);
+        draw_object_footprint(
+            &painter,
+            rect,
+            &instance.name,
+            selected,
+            hovered,
+            Color32::from_rgb(124, 162, 186),
+        );
+        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+            clicked_mep = Some(ViewClick::MepInstance {
+                instance_id: instance.id.0.clone(),
             });
         }
     }
@@ -740,7 +813,76 @@ pub(super) fn draw_project_plan(
         });
     }
 
-    clicked_opening.or(clicked_wall).or(clicked_room)
+    clicked_opening
+        .or(clicked_furnishing)
+        .or(clicked_mep)
+        .or(clicked_wall)
+        .or(clicked_room)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn object_footprint_rect(
+    position: Point2,
+    width: Length,
+    depth: Length,
+    rotation: QuarterTurn,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) -> Rect {
+    let rotated = matches!(rotation, QuarterTurn::Deg90 | QuarterTurn::Deg270);
+    let footprint_width = if rotated { depth } else { width };
+    let footprint_depth = if rotated { width } else { depth };
+    let half_width = footprint_width / 2;
+    let half_depth = footprint_depth / 2;
+    Rect::from_two_pos(
+        plan_point(
+            Point2::new(position.x - half_width, position.y - half_depth),
+            bounds,
+            drawing,
+            camera,
+        ),
+        plan_point(
+            Point2::new(position.x + half_width, position.y + half_depth),
+            bounds,
+            drawing,
+            camera,
+        ),
+    )
+}
+
+fn draw_object_footprint(
+    painter: &egui::Painter,
+    rect: Rect,
+    name: &str,
+    selected: bool,
+    hovered: bool,
+    color: Color32,
+) {
+    let fill = if selected {
+        theme::active_blue().gamma_multiply(0.25)
+    } else {
+        color.gamma_multiply(0.35)
+    };
+    let stroke = if selected {
+        Stroke::new(2.0, theme::active_blue())
+    } else if hovered {
+        Stroke::new(1.5, theme::framing_line_dark())
+    } else {
+        Stroke::new(1.0, color.gamma_multiply(0.9))
+    };
+    painter.rect_filled(rect, 2.0, fill);
+    painter.rect_stroke(rect, 2.0, stroke, StrokeKind::Outside);
+    let estimated_text_width = name.chars().count() as f32 * 5.8;
+    if rect.width() >= estimated_text_width + 8.0 && rect.height() >= 22.0 {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            name,
+            FontId::proportional(10.0),
+            theme::framing_line_dark(),
+        );
+    }
 }
 
 /// Even-odd point-in-polygon test in screen space, for picking a room by click.
