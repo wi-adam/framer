@@ -190,11 +190,41 @@ slices remain sketched until scheduled.
   - Verify: `python3 scripts/check-markdown-links.py`; full workspace gate.
   - Commit: `docs(libraries): document phase 3 assets and packages`
 
-### Slices 4–5 — sketch (task detail when scheduled)
+### Slice 4 — Remote / URL libraries
 
-- **Slice 4:** `Remote { url, hash }` resolver — mandatory pin, cache-first, fail-closed; shape
-  the provider interface so a managed/RPC backend slots in (publish/edit catalog remotely;
-  consume always pins a snapshot).
+- **Task 4.1** — Replace the placeholder `RemoteUnsupported` path with cache-aware resolution
+  for `Locator::Remote { url, hash }`. Remote locators require a full lowercase
+  `blake3:<hex>` pin and a configured content-addressed cache root; invalid hashes, invalid
+  URLs, unsupported schemes, non-UTF-8 bodies, provider failures, and hash mismatches all fail
+  closed before import.
+  - Files: `crates/framer-library/src/lib.rs`, workspace `Cargo.toml`,
+    `crates/framer-library/Cargo.toml`.
+  - Verify: `cargo test -p framer-library --locked` — invalid hash/URL rejection, no-cache
+    fail-closed behavior, remote body hash mismatch, and non-UTF-8 rejection.
+  - Commit: `feat(library): resolve hash-pinned remote libraries`
+- **Task 4.2** — Add `RemoteLibraryCache`, keyed by `blake3-<hex>.framerlib`, and make remote
+  resolution cache-first. Cached bytes are parsed and hash-verified before use; corrupt cache
+  entries are ignored and refetched, while IO failures still fail closed. Successfully fetched
+  libraries are canonicalized before writing to cache.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: `cargo test -p framer-library --locked` — verified cache hit does not call the
+    provider; remote fetch writes a verified cache entry; corrupt cache refetches and overwrites.
+  - Commit: `feat(library): cache verified remote library snapshots`
+- **Task 4.3** — Introduce `RemoteLibraryProvider` / `RemoteLibraryRequest` and a default
+  `HttpRemoteLibraryProvider` built on `ureq`, keeping the provider injectable so a future
+  managed/RPC backend can supply pinned library bytes through the same resolver/import spine.
+  - Files: `crates/framer-library/src/lib.rs`.
+  - Verify: unit tests use an injected provider, so the remote contract is covered without
+    relying on live network access.
+  - Commit: `feat(library): add injectable remote library provider`
+- **Task 4.4** — Refresh durable docs for the implemented remote/cache behavior.
+  - Files: `docs/specs/libraries.md`, `docs/plans/2026-06-19-libraries.md`,
+    `docs/code-map.md`, `docs/architecture.md`.
+  - Verify: `python3 scripts/check-markdown-links.py`.
+  - Commit: `docs(libraries): document remote library resolution`
+
+### Slice 5 — sketch (task detail when scheduled)
+
 - **Slice 5:** `Furnishing` / `MepObject` families + library vectors + drag-and-drop placement,
   through the identical spine.
 

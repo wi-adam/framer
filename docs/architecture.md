@@ -22,8 +22,9 @@ small buildings, garages, decks, and wood framed BBQ islands.
 - `crates/framer-core`: shared domain types, units, structure model, openings,
   construction systems, the material library, code profiles, room topology, and
   validation.
-- `crates/framer-library`: library resolution, exact content hashing, and
-  vendor-on-use import/remap for reusable `.framerlib` content.
+- `crates/framer-library`: library resolution, exact content hashing,
+  cache-first remote URL fetching, and vendor-on-use import/remap for reusable
+  `.framerlib` content.
 - `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
   and BOM generation.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
