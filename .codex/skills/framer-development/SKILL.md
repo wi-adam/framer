@@ -22,6 +22,12 @@ Use this skill for Framer feature work before the commit step. The goal is to ca
    - The crate boundary it crosses.
    - The expected tests.
    - The docs/spec files that must stay consistent.
+   - The likely PR Review failure if this row is missed.
+
+   Do not start broad implementation until the ledger has an expected test row
+   for every new validator, untrusted input path, fallback path, CPU/GPU mirror,
+   schema change, and product-visible behavior. If the ledger keeps growing, split
+   the work or narrow the phase before coding.
 
 3. Avoid custom infrastructure unless there is a clear reason:
    - Do not hand-roll parsers, archive formats, checksums, serialization, geometry kernels, image codecs, or dependency-resolution logic when a maintained crate or existing project helper fits.
@@ -45,6 +51,23 @@ Before opening a PR, map changed behavior to tests. Missing rows are blockers.
 - Fallback/degrade behavior: assert both resolved and missing-resource paths.
 - Public or cross-crate helper: test the contract once at the owning crate and reuse it rather than duplicating predicates.
 - Product-visible or schema-visible change: update the durable spec, any dated plan status, `docs/code-map.md`, `docs/project-files.md`, and run the markdown link checker.
+
+## PR-Readiness Gate
+
+Before opening or marking a PR ready, run an adversarial self-review against the
+diff. Treat this as the first PR Review pass, not as a summary:
+
+- Walk the changed files by crate ownership and ask what would break if each new
+  guard, validator, fallback, parser branch, packing loop, or render path were
+  deleted. Add a test before publishing if the suite would stay green.
+- For broad phase work, verify the coverage matrix in one pass instead of
+  waiting for PR Review to find one missing row at a time.
+- Check UI/model creation paths as well as core validation; do not assume a
+  validator is enough if the app can author invalid state first.
+- For schema-visible changes, confirm the version bump, checked-in fixtures,
+  explicit old-schema rejection, round-trip tests, and docs are all updated.
+- The PR Review action should confirm the work, not discover predictable missing
+  coverage rows.
 
 ## Pre-PR Review
 
@@ -72,6 +95,18 @@ Run a self-review pass before pushing:
 ## PR Follow-Through
 
 After opening a PR, watch CI and PR Review. Treat blocking inline review comments as required work, but still classify advisory/nit comments separately. After fixing review feedback, rerun the local gates that cover the touched area, push a new commit, and watch the latest head run rather than stale runs.
+
+Use policy-facing signals for merge readiness:
+
+- Prefer the normal `pull_request` CI run on the latest head. Manual
+  `workflow_dispatch` runs can build confidence, but they may not satisfy branch
+  rulesets or PR-event-only jobs such as `pr-review`.
+- If required checks are missing from `gh pr checks` or the latest commit check
+  runs, diagnose that as a merge blocker instead of calling the PR green.
+- Before merging, verify the latest head SHA, current review verdict, required
+  status checks, and unresolved blocking threads. Do not use an admin bypass
+  unless the user has asked to merge and the only blocker is a known stale or
+  missing policy signal after equivalent substantive gates have passed.
 
 For Claude/PR Review feedback, use thread-aware GitHub reads and close the loop on GitHub, not only in the local commit:
 
