@@ -315,6 +315,42 @@ mod tests {
     }
 
     #[test]
+    fn object_families_reject_non_positive_sizes() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.furnishings.push(Furnishing::new(
+            "furnishing-zero",
+            "Zero-width furnishing",
+            Length::ZERO,
+            Length::from_whole_inches(18),
+            Length::from_whole_inches(36),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::InvalidObjectSize {
+                object
+            }) if object == ElementId::new("furnishing-zero")
+        ));
+
+        model.furnishings.clear();
+        model.mep_objects.push(MepObject::new(
+            "mep-negative",
+            "Negative-depth MEP object",
+            MepObjectKind::Electrical,
+            Length::from_whole_inches(14),
+            Length::from_ticks(-1),
+            Length::from_whole_inches(24),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::InvalidObjectSize {
+                object
+            }) if object == ElementId::new("mep-negative")
+        ));
+    }
+
+    #[test]
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
