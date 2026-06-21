@@ -11,4 +11,6 @@ framer-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
+url.workspace = true
 zip = { version = "8.6.0", default-features = false }

@@ -4,9 +4,9 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Phase 3 implemented · **Linked goal:** G-013 (Libraries) ·
+> **Status:** Phase 4 implemented · **Linked goal:** G-013 (Libraries) ·
 > **Plan:** [2026-06-19 — Libraries](../plans/2026-06-19-libraries.md) ·
-> **Last reviewed:** 2026-06-20
+> **Last reviewed:** 2026-06-21
 
 ## Intent / Purpose
 
@@ -240,8 +240,12 @@ closure items.
 
 - A `Locator` (opaque to core) abstracts origin: `Builtin`, `Local { path }` /
   `Installed { id }` (search path, like fonts), `Remote { url, hash }` (**hash mandatory**),
-  and a future RPC-backed managed provider. A `LibraryResolver` trait returns library bytes;
-  remote fetch verifies the hash and writes a content-addressed cache, then behaves like local.
+  and a future RPC-backed managed provider. A `LibraryResolver` trait returns library bytes.
+  Remote resolution is cache-first: it validates the pinned hash, tries a content-addressed
+  `.framerlib` cache entry keyed by the full `blake3:<hex>` hash, verifies cached bytes before
+  returning them, and only then calls an injected `RemoteLibraryProvider`. Fetched bytes are
+  parsed, canonicalized, hash-verified, and written back to the cache before behaving like a
+  local library. Hash mismatch, invalid URL, non-UTF-8 bytes, or fetch failure all fail closed.
 - **Assets** (textures/depth maps now; meshes later) live in a disposable content-addressed
   store keyed by `blake3` of the bytes; the model holds only the `AssetRef` hash string.
 - **Portable bundle** (`.framerpkg`): a deterministic zip (stored entries, sorted paths,
@@ -286,9 +290,10 @@ This feature must preserve every [architecture invariant](../architecture.md) an
 - **Live shared editing / automatic propagation.** Vendoring trades this for determinism and
   self-containment; updates are an explicit author-time re-sync. Left architecturally open via
   the provenance/update-detection machinery.
-- **Remote/registry transport and a managed RPC backend** are *designed-for* (the `Locator` /
-  resolver seam) but not built now; remote, when built, is mandatorily hash-pinned and
-  fail-closed.
+- **Managed RPC backend / registry editing.** URL fetch + cache consumption is implemented;
+  publishing, live remote catalog mutation, registry search, and managed/RPC editing are still
+  deferred. The provider seam is intentionally narrow so those backends can supply pinned
+  library bytes without changing project persistence.
 - **Furnishing/MEP geometry, placement, and drawing.** Only the *spine* (shared `Provenance` +
   per-kind collection pattern) is established early; the element families and drag-and-drop
   catalog placement are a later, larger feature.

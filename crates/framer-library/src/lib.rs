@@ -41,20 +41,194 @@ pub trait LibraryResolver {
     fn resolve(&self, locator: &Locator) -> Result<LibraryBytes, LibraryImportError>;
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct LocalSearchPathResolver {
-    roots: Vec<PathBuf>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLibraryRequest {
+    pub url: String,
+    pub hash: String,
 }
 
-impl LocalSearchPathResolver {
+pub trait RemoteLibraryProvider {
+    fn fetch(&self, request: &RemoteLibraryRequest) -> Result<Vec<u8>, LibraryImportError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpRemoteLibraryProvider;
+
+impl RemoteLibraryProvider for HttpRemoteLibraryProvider {
+    fn fetch(&self, request: &RemoteLibraryRequest) -> Result<Vec<u8>, LibraryImportError> {
+        validate_remote_url(&request.url)?;
+        let mut response = ureq::get(&request.url).call().map_err(|source| {
+            LibraryImportError::RemoteFetchFailed {
+                url: request.url.clone(),
+                message: source.to_string(),
+            }
+        })?;
+        response
+            .body_mut()
+            .read_to_vec()
+            .map_err(|source| LibraryImportError::RemoteFetchFailed {
+                url: request.url.clone(),
+                message: source.to_string(),
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLibraryCache {
+    root: PathBuf,
+}
+
+impl RemoteLibraryCache {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn get(&self, hash: &str) -> Result<Option<String>, LibraryImportError> {
+        let path = self.path_for_hash(hash)?;
+        match fs::read_to_string(&path) {
+            Ok(source) => {
+                let bytes = LibraryBytes {
+                    source,
+                    expected_hash: Some(hash.to_owned()),
+                };
+                let loaded = load_verified_library(&bytes)?;
+                Ok(Some(save_library(&loaded.library)?))
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(LibraryImportError::Io { path, source }),
+        }
+    }
+
+    pub fn put(&self, hash: &str, source: &str) -> Result<(), LibraryImportError> {
+        let path = self.path_for_hash(hash)?;
+        let bytes = LibraryBytes {
+            source: source.to_owned(),
+            expected_hash: Some(hash.to_owned()),
+        };
+        let loaded = load_verified_library(&bytes)?;
+        let canonical_source = save_library(&loaded.library)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| LibraryImportError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(&path, canonical_source).map_err(|source| LibraryImportError::Io { path, source })
+    }
+
+    fn path_for_hash(&self, hash: &str) -> Result<PathBuf, LibraryImportError> {
+        Ok(self.root.join(library_file_name(hash)?))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSearchPathResolver<P = HttpRemoteLibraryProvider> {
+    roots: Vec<PathBuf>,
+    remote_cache: Option<RemoteLibraryCache>,
+    remote_provider: P,
+}
+
+impl Default for LocalSearchPathResolver<HttpRemoteLibraryProvider> {
+    fn default() -> Self {
+        Self::new([])
+    }
+}
+
+impl LocalSearchPathResolver<HttpRemoteLibraryProvider> {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
         Self {
             roots: roots.into_iter().collect(),
+            remote_cache: None,
+            remote_provider: HttpRemoteLibraryProvider,
+        }
+    }
+
+    pub fn with_remote_cache(
+        roots: impl IntoIterator<Item = PathBuf>,
+        remote_cache: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            roots: roots.into_iter().collect(),
+            remote_cache: Some(RemoteLibraryCache::new(remote_cache)),
+            remote_provider: HttpRemoteLibraryProvider,
         }
     }
 }
 
-impl LibraryResolver for LocalSearchPathResolver {
+impl<P> LocalSearchPathResolver<P> {
+    pub fn with_remote_provider(
+        roots: impl IntoIterator<Item = PathBuf>,
+        remote_cache: impl Into<PathBuf>,
+        remote_provider: P,
+    ) -> Self {
+        Self {
+            roots: roots.into_iter().collect(),
+            remote_cache: Some(RemoteLibraryCache::new(remote_cache)),
+            remote_provider,
+        }
+    }
+
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    pub fn remote_cache(&self) -> Option<&RemoteLibraryCache> {
+        self.remote_cache.as_ref()
+    }
+}
+
+impl<P: RemoteLibraryProvider> LocalSearchPathResolver<P> {
+    fn resolve_remote(&self, url: &str, hash: &str) -> Result<LibraryBytes, LibraryImportError> {
+        validate_library_hash(hash)?;
+        validate_remote_url(url)?;
+        if let Some(cache) = &self.remote_cache {
+            match cache.get(hash) {
+                Ok(Some(source)) => {
+                    return Ok(LibraryBytes {
+                        source,
+                        expected_hash: Some(hash.to_owned()),
+                    });
+                }
+                Ok(None) => {}
+                Err(LibraryImportError::Io { path, source }) => {
+                    return Err(LibraryImportError::Io { path, source });
+                }
+                Err(_) => {}
+            }
+        } else {
+            return Err(LibraryImportError::RemoteCacheRequired);
+        }
+
+        let request = RemoteLibraryRequest {
+            url: url.to_owned(),
+            hash: hash.to_owned(),
+        };
+        let fetched = self.remote_provider.fetch(&request)?;
+        let source =
+            String::from_utf8(fetched).map_err(|source| LibraryImportError::RemoteLibraryUtf8 {
+                url: url.to_owned(),
+                source,
+            })?;
+        let loaded = load_verified_library(&LibraryBytes {
+            source,
+            expected_hash: Some(hash.to_owned()),
+        })?;
+        let canonical_source = save_library(&loaded.library)?;
+        if let Some(cache) = &self.remote_cache {
+            cache.put(hash, &canonical_source)?;
+        }
+        Ok(LibraryBytes {
+            source: canonical_source,
+            expected_hash: Some(hash.to_owned()),
+        })
+    }
+}
+
+impl<P: RemoteLibraryProvider> LibraryResolver for LocalSearchPathResolver<P> {
     fn resolve(&self, locator: &Locator) -> Result<LibraryBytes, LibraryImportError> {
         match locator {
             Locator::Builtin { id } if id == "framer-starter" => Ok(LibraryBytes {
@@ -83,7 +257,7 @@ impl LibraryResolver for LocalSearchPathResolver {
                 }
                 Err(LibraryImportError::InstalledLibraryNotFound { id: id.clone() })
             }
-            Locator::Remote { .. } => Err(LibraryImportError::RemoteUnsupported),
+            Locator::Remote { url, hash } => self.resolve_remote(url, hash),
         }
     }
 }
@@ -1086,6 +1260,16 @@ fn verify_asset_hash(expected: &str, bytes: &[u8]) -> Result<(), LibraryImportEr
     }
 }
 
+fn validate_library_hash(hash: &str) -> Result<(), LibraryImportError> {
+    if is_blake3_hash(hash) {
+        Ok(())
+    } else {
+        Err(LibraryImportError::InvalidLibraryHash {
+            hash: hash.to_owned(),
+        })
+    }
+}
+
 fn validate_asset_hash(hash: &str) -> Result<(), LibraryImportError> {
     if is_blake3_hash(hash) {
         Ok(())
@@ -1094,6 +1278,14 @@ fn validate_asset_hash(hash: &str) -> Result<(), LibraryImportError> {
             hash: hash.to_owned(),
         })
     }
+}
+
+fn library_file_name(hash: &str) -> Result<String, LibraryImportError> {
+    validate_library_hash(hash)?;
+    let hex = hash
+        .strip_prefix("blake3:")
+        .expect("validated library hash must carry the blake3 prefix");
+    Ok(format!("blake3-{hex}.framerlib"))
 }
 
 fn asset_file_name(hash: &str) -> Result<String, LibraryImportError> {
@@ -1212,6 +1404,20 @@ fn validate_package_zip_entry_name(name: &str) -> Result<(), LibraryImportError>
     Ok(())
 }
 
+fn validate_remote_url(url: &str) -> Result<(), LibraryImportError> {
+    let parsed = url::Url::parse(url).map_err(|source| LibraryImportError::InvalidRemoteUrl {
+        url: url.to_owned(),
+        message: source.to_string(),
+    })?;
+    match parsed.scheme() {
+        "https" | "http" => Ok(()),
+        scheme => Err(LibraryImportError::UnsupportedRemoteUrlScheme {
+            url: url.to_owned(),
+            scheme: scheme.to_owned(),
+        }),
+    }
+}
+
 fn package_zip_error(error: zip::result::ZipError) -> LibraryImportError {
     LibraryImportError::InvalidPackageZip(error.to_string())
 }
@@ -1321,8 +1527,21 @@ pub enum LibraryImportError {
     UnknownBuiltin { id: String },
     #[error("installed library {id:?} was not found on the search path")]
     InstalledLibraryNotFound { id: String },
-    #[error("remote library resolution is deferred to a later phase")]
-    RemoteUnsupported,
+    #[error("remote library resolution requires a content-addressed cache root")]
+    RemoteCacheRequired,
+    #[error("library hash {hash:?} must be a full lowercase blake3:<hex> content hash")]
+    InvalidLibraryHash { hash: String },
+    #[error("invalid remote library URL {url:?}: {message}")]
+    InvalidRemoteUrl { url: String, message: String },
+    #[error("remote library URL {url:?} uses unsupported scheme {scheme:?}")]
+    UnsupportedRemoteUrlScheme { url: String, scheme: String },
+    #[error("failed to fetch remote library {url:?}: {message}")]
+    RemoteFetchFailed { url: String, message: String },
+    #[error("remote library {url:?} is not valid UTF-8")]
+    RemoteLibraryUtf8 {
+        url: String,
+        source: std::string::FromUtf8Error,
+    },
     #[error("failed to read library file {path:?}")]
     Io { path: PathBuf, source: io::Error },
     #[error("project material {id:?} was not found")]
@@ -1368,9 +1587,45 @@ mod tests {
     };
 
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone, Default)]
+    struct ScriptedRemoteProvider {
+        responses: Arc<Mutex<Vec<Vec<u8>>>>,
+        requests: Arc<Mutex<Vec<RemoteLibraryRequest>>>,
+    }
+
+    impl ScriptedRemoteProvider {
+        fn new(responses: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    impl RemoteLibraryProvider for ScriptedRemoteProvider {
+        fn fetch(&self, request: &RemoteLibraryRequest) -> Result<Vec<u8>, LibraryImportError> {
+            self.requests.lock().unwrap().push(request.clone());
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err(LibraryImportError::RemoteFetchFailed {
+                    url: request.url.clone(),
+                    message: "no scripted remote response".to_owned(),
+                });
+            }
+            Ok(responses.remove(0))
+        }
+    }
 
     fn fixture_library() -> Library {
         Library {
@@ -1407,6 +1662,13 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    fn fixture_library_source_and_hash() -> (String, String) {
+        let library = fixture_library();
+        let source = save_library(&library).unwrap();
+        let hash = library_content_hash(&library).unwrap();
+        (source, hash)
     }
 
     fn temp_path(name: &str) -> PathBuf {
@@ -1843,6 +2105,190 @@ mod tests {
         assert_eq!(builtin.library.coordinate, "framer-lib://framer/starter");
         assert_eq!(local.library.coordinate, builtin.library.coordinate);
         assert_eq!(local.content_hash, builtin.content_hash);
+    }
+
+    #[test]
+    fn remote_resolver_fetches_hash_verifies_and_caches_library() {
+        let (source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-cache");
+        let provider = ScriptedRemoteProvider::new([source.clone().into_bytes()]);
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+        let locator = Locator::Remote {
+            url: "https://example.test/acme/walls.framerlib".to_owned(),
+            hash: hash.clone(),
+        };
+
+        let first = resolver.resolve(&locator).unwrap();
+        assert_eq!(first.expected_hash, Some(hash.clone()));
+        assert_eq!(load_verified_library(&first).unwrap().content_hash, hash);
+        assert_eq!(provider.request_count(), 1);
+
+        let cached_path = root.join(library_file_name(&hash).unwrap());
+        assert_eq!(fs::read_to_string(&cached_path).unwrap(), first.source);
+
+        let second = resolver.resolve(&locator).unwrap();
+        assert_eq!(load_verified_library(&second).unwrap().content_hash, hash);
+        assert_eq!(
+            provider.request_count(),
+            1,
+            "verified cache hit should not fetch again"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_uses_verified_cache_without_network() {
+        let (source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-cache-hit");
+        let cache = RemoteLibraryCache::new(&root);
+        cache.put(&hash, &source).unwrap();
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        let resolved = resolver
+            .resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash: hash.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(load_verified_library(&resolved).unwrap().content_hash, hash);
+        assert_eq!(provider.request_count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_refetches_corrupt_cache_before_returning_bytes() {
+        let (source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-corrupt-cache");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(library_file_name(&hash).unwrap()), b"not json").unwrap();
+        let provider = ScriptedRemoteProvider::new([source.into_bytes()]);
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        let resolved = resolver
+            .resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash: hash.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(load_verified_library(&resolved).unwrap().content_hash, hash);
+        assert_eq!(provider.request_count(), 1);
+        assert!(
+            load_library(
+                &fs::read_to_string(root.join(library_file_name(&hash).unwrap())).unwrap()
+            )
+            .is_ok()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_propagates_provider_failure_on_cache_miss() {
+        let (_source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-provider-failure");
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::RemoteFetchFailed { .. })
+        ));
+        assert_eq!(provider.request_count(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_fails_closed_on_cache_io_error_without_refetch() {
+        let (_source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-cache-io-error");
+        fs::create_dir_all(root.join(library_file_name(&hash).unwrap())).unwrap();
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::Io { .. })
+        ));
+        assert_eq!(provider.request_count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_rejects_unpinned_or_invalid_remote_inputs_before_fetch() {
+        let (_source, hash) = fixture_library_source_and_hash();
+        let root = temp_path("remote-invalid-input");
+        let provider = ScriptedRemoteProvider::default();
+        let resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), provider.clone());
+
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash: "blake3:test".to_owned(),
+            }),
+            Err(LibraryImportError::InvalidLibraryHash { .. })
+        ));
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "not a url".to_owned(),
+                hash: hash.clone(),
+            }),
+            Err(LibraryImportError::InvalidRemoteUrl { .. })
+        ));
+        assert!(matches!(
+            resolver.resolve(&Locator::Remote {
+                url: "file:///tmp/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::UnsupportedRemoteUrlScheme { .. })
+        ));
+        assert_eq!(provider.request_count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_resolver_fails_closed_on_hash_mismatch_and_non_utf8_body() {
+        let (source, hash) = fixture_library_source_and_hash();
+        let wrong_hash = asset_content_hash(b"different library");
+        let root = temp_path("remote-mismatch");
+        let mismatch_provider = ScriptedRemoteProvider::new([source.into_bytes()]);
+        let mismatch_resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), mismatch_provider);
+
+        assert!(matches!(
+            mismatch_resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash: wrong_hash,
+            }),
+            Err(LibraryImportError::ContentHashMismatch { .. })
+        ));
+
+        let non_utf8_provider = ScriptedRemoteProvider::new([vec![0xff]]);
+        let non_utf8_resolver =
+            LocalSearchPathResolver::with_remote_provider([], root.clone(), non_utf8_provider);
+        assert!(matches!(
+            non_utf8_resolver.resolve(&Locator::Remote {
+                url: "https://example.test/acme/walls.framerlib".to_owned(),
+                hash,
+            }),
+            Err(LibraryImportError::RemoteLibraryUtf8 { .. })
+        ));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2410,9 +2856,9 @@ mod tests {
         assert!(matches!(
             resolver.resolve(&Locator::Remote {
                 url: "https://example.invalid/library.framerlib".to_owned(),
-                hash: "blake3:test".to_owned(),
+                hash: asset_content_hash(b"missing remote"),
             }),
-            Err(LibraryImportError::RemoteUnsupported)
+            Err(LibraryImportError::RemoteCacheRequired)
         ));
     }
 

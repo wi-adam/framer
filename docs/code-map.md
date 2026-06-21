@@ -131,7 +131,7 @@ Headless, IO-capable support crate for the [Libraries spec](specs/libraries.md).
 
 | File | Contains |
 | --- | --- |
-| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in resolver, exact `blake3:<hex>` hashing, import functions, lifecycle diagnostics, re-sync/detach, content-addressed asset store, and deterministic `.framerpkg` package IO. |
+| `src/lib.rs` | `Locator`, `LibraryResolver`, local/built-in/remote resolver, exact `blake3:<hex>` hashing, import functions, lifecycle diagnostics, re-sync/detach, content-addressed library and asset caches, and deterministic `.framerpkg` package IO. |
 
 Key entry points:
 
@@ -153,8 +153,15 @@ Key entry points:
   discover binary assets by full `blake3:<hex>` hash.
 - `save_project_package` / `load_project_package` — write/read deterministic `.framerpkg`
   archives with `project.framer`, `manifest.json`, and `assets/blake3-<hex>` blobs.
-- `LocalSearchPathResolver` — resolves built-in, local path, and installed-library locators.
-  Remote locators are represented but intentionally unsupported until the remote/cache phase.
+- `RemoteLibraryCache` — stores canonical `.framerlib` snapshots at `blake3-<hex>.framerlib`
+  and verifies cached bytes before use.
+- `RemoteLibraryProvider` / `HttpRemoteLibraryProvider` — injected remote byte providers. The
+  default provider fetches URL libraries with `ureq`; future managed/RPC providers plug into the
+  same request/response seam.
+- `LocalSearchPathResolver` — resolves built-in, local path, installed-library, and hash-pinned
+  remote locators. Remote resolution requires a configured cache root, validates the full
+  `blake3:<hex>` pin, prefers verified cache bytes, and fails closed on invalid URLs,
+  unsupported schemes, fetch errors, non-UTF-8 bodies, or content hash mismatches.
 
 ---
 
