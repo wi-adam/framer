@@ -312,6 +312,35 @@ mod tests {
             model.validate(),
             Err(ModelError::FurnishingInstanceReferencesUnknownLevel { .. })
         ));
+
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.mep_instances.push(MepInstance::new(
+            "mep-instance-1",
+            "Missing panel",
+            "mep-missing",
+            "level-1",
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::MepInstanceReferencesUnknownFamily { .. })
+        ));
+
+        model.mep_objects.push(MepObject::new(
+            "mep-missing",
+            "Panel",
+            MepObjectKind::Electrical,
+            Length::from_whole_inches(14),
+            Length::from_whole_inches(4),
+            Length::from_whole_inches(24),
+        ));
+        model.mep_instances[0].level = ElementId::new("level-missing");
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::MepInstanceReferencesUnknownLevel { .. })
+        ));
     }
 
     #[test]
