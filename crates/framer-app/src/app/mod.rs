@@ -2016,7 +2016,10 @@ impl FramerApp {
 mod tests {
     use std::{fs, process};
 
-    use framer_core::{DimensionHorizontalReference, DimensionVerticalReference};
+    use framer_core::{
+        DimensionHorizontalReference, DimensionVerticalReference, Furnishing, FurnishingInstance,
+        MepInstance, MepObject, MepObjectKind,
+    };
 
     use super::*;
 
@@ -2219,6 +2222,74 @@ mod tests {
             app.selected,
             Selection::MepInstance("mep-instance-2".to_owned())
         );
+    }
+
+    #[test]
+    fn delete_refuses_furnishing_family_that_is_still_placed() {
+        let mut app = FramerApp::default();
+        let level_id = app.model.levels[0].id.0.clone();
+        app.model.furnishings.push(Furnishing::new(
+            "furnishing-test",
+            "Test furnishing",
+            Length::from_inches(24.0),
+            Length::from_inches(18.0),
+            Length::from_inches(34.5),
+        ));
+        app.model.furnishing_instances.push(FurnishingInstance::new(
+            "furnishing-instance-test",
+            "Placed test furnishing",
+            "furnishing-test",
+            level_id,
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+        app.selected = Selection::Furnishing("furnishing-test".to_owned());
+
+        app.delete_selected();
+
+        assert_eq!(app.model.furnishings.len(), 1);
+        assert_eq!(
+            app.selected,
+            Selection::Furnishing("furnishing-test".to_owned())
+        );
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("still placed"))
+        );
+        app.model.validate().unwrap();
+    }
+
+    #[test]
+    fn delete_refuses_mep_family_that_is_still_placed() {
+        let mut app = FramerApp::default();
+        let level_id = app.model.levels[0].id.0.clone();
+        app.model.mep_objects.push(MepObject::new(
+            "mep-test",
+            "Test MEP object",
+            MepObjectKind::Electrical,
+            Length::from_inches(14.0),
+            Length::from_inches(4.0),
+            Length::from_inches(24.0),
+        ));
+        app.model.mep_instances.push(MepInstance::new(
+            "mep-instance-test",
+            "Placed test MEP object",
+            "mep-test",
+            level_id,
+            Point2::new(Length::ZERO, Length::ZERO),
+        ));
+        app.selected = Selection::MepObject("mep-test".to_owned());
+
+        app.delete_selected();
+
+        assert_eq!(app.model.mep_objects.len(), 1);
+        assert_eq!(app.selected, Selection::MepObject("mep-test".to_owned()));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("still placed"))
+        );
+        app.model.validate().unwrap();
     }
 
     #[test]
