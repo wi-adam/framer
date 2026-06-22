@@ -42,7 +42,7 @@ Docs index:
 3. **Determinism.** Same model + code profile → byte-identical `.framer` and
    identical framing/render. Lengths are integer **ticks** (16 = 1 inch), no floats
    in the model; `.framer` is ID-sorted + canonical; the renderer is seeded (PCG).
-4. **`.framer` is schema v9 and v9-only.** Bumping the schema means updating
+4. **`.framer` is schema v10 and v10-only.** Bumping the schema means updating
    `PROJECT_SCHEMA_VERSION`, the three `examples/projects/*.framer`, the round-trip
    tests, and [project-files.md](docs/project-files.md).
 5. **CPU render is the reference;** the app's WGSL compute shader mirrors it. Change
