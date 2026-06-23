@@ -594,50 +594,11 @@ fn surface_material(
         SurfaceFace::Ceiling => MAT_DRYWALL,
         SurfaceFace::Roof | SurfaceFace::Floor => MAT_CLADDING,
     };
-    let Some(system) = system else {
-        return fallback;
-    };
-    // The roof's weather face is the outermost (last) layer; a ceiling/floor's
-    // finished face is the conditioned-side (first) layer. Pick the named finish
-    // function, then any structural panel, then the outermost/innermost layer.
-    let preferred = match face {
-        SurfaceFace::Roof => system
-            .layers
-            .iter()
-            .rev()
-            .find(|layer| layer.function == LayerFunction::Roofing)
-            .or_else(|| {
-                system.layers.iter().rev().find(|layer| {
-                    matches!(
-                        layer.function,
-                        LayerFunction::WeatherBarrier | LayerFunction::Sheathing
-                    )
-                })
-            })
-            .or_else(|| system.layers.last()),
-        SurfaceFace::Ceiling => system
-            .layers
-            .iter()
-            .find(|layer| {
-                matches!(
-                    layer.function,
-                    LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
-                )
-            })
-            .or_else(|| system.layers.first()),
-        SurfaceFace::Floor => system
-            .layers
-            .iter()
-            .find(|layer| {
-                matches!(
-                    layer.function,
-                    LayerFunction::InteriorFinish | LayerFunction::Sheathing
-                )
-            })
-            .or_else(|| system.layers.first()),
-    };
-    preferred
-        .and_then(|layer| palette.material_index(model, &layer.material))
+    // The finished-face layer selection lives in `framer-core` so this render path
+    // and the 3-D viewport pick the same face.
+    system
+        .and_then(ConstructionSystem::surface_finish_material)
+        .and_then(|material| palette.material_index(model, material))
         .unwrap_or(fallback)
 }
 

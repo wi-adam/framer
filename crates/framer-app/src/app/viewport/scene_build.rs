@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{Color32, Pos2};
 use framer_core::{
-    BuildingModel, ConstructionSystem, ElementId, LayerFunction, Length, Material, Point2,
-    RoofPlane, SurfaceRegion, Wall,
+    BuildingModel, ConstructionSystem, ElementId, Length, Material, Point2, RoofPlane,
+    SurfaceRegion, Wall,
 };
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
@@ -870,57 +870,21 @@ enum SurfaceFace {
 }
 
 /// The fill color of a roof/ceiling/floor surface: the resolved color of its
-/// system's representative finish layer (the roof's weather face, a ceiling/floor's
-/// conditioned-side finish), falling back to a neutral tone so it stays visible
-/// when the system or material is missing. Mirrors the render path's choice so the
-/// 3D view and the path-traced view agree.
+/// system's representative finish face (the layer selection lives in `framer-core`
+/// so this 3-D view and the path-traced render pick the same face), falling back to
+/// a neutral tone so it stays visible when the system or material is missing.
 fn surface_color(model: &BuildingModel, system_id: &ElementId, face: SurfaceFace) -> Color32 {
     let fallback = match face {
         SurfaceFace::Roof => Color32::from_rgb(96, 99, 107),
         SurfaceFace::Ceiling => Color32::from_rgb(226, 226, 222),
         SurfaceFace::Floor => Color32::from_rgb(150, 120, 86),
     };
-    let Some(system) = model.systems.iter().find(|system| system.id == *system_id) else {
-        return fallback;
-    };
-    let layer = match face {
-        SurfaceFace::Roof => system
-            .layers
-            .iter()
-            .rev()
-            .find(|layer| layer.function == LayerFunction::Roofing)
-            .or_else(|| {
-                system.layers.iter().rev().find(|layer| {
-                    matches!(
-                        layer.function,
-                        LayerFunction::WeatherBarrier | LayerFunction::Sheathing
-                    )
-                })
-            })
-            .or_else(|| system.layers.last()),
-        SurfaceFace::Ceiling => system
-            .layers
-            .iter()
-            .find(|layer| {
-                matches!(
-                    layer.function,
-                    LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
-                )
-            })
-            .or_else(|| system.layers.first()),
-        SurfaceFace::Floor => system
-            .layers
-            .iter()
-            .find(|layer| {
-                matches!(
-                    layer.function,
-                    LayerFunction::InteriorFinish | LayerFunction::Sheathing
-                )
-            })
-            .or_else(|| system.layers.first()),
-    };
-    layer
-        .and_then(|layer| model.material(&layer.material))
+    model
+        .systems
+        .iter()
+        .find(|system| system.id == *system_id)
+        .and_then(ConstructionSystem::surface_finish_material)
+        .and_then(|material| model.material(material))
         .map(|material| {
             let [r, g, b] = material.color();
             Color32::from_rgb(r, g, b)
@@ -1016,7 +980,7 @@ mod surface_tests {
     use eframe::egui::Rect;
     use framer_core::{
         BoardProfile, Ceiling, CodeProfile, ConstructionLayer, FloorDeck, FramingPattern,
-        FramingSpec, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
+        FramingSpec, LayerFunction, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
     };
     use framer_solver::ProjectFramePlan;
 

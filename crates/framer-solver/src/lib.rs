@@ -1046,7 +1046,7 @@ fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
     }
 
     Some(RoofPlaneGeometry {
-        eave_length: Length::from_inches(frame.eave_length),
+        eave_length: Length::from_inches(frame.eave_length()),
         run_extent: Length::from_inches(run_extent),
         high_edge,
     })
