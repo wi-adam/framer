@@ -2123,6 +2123,8 @@ mod tests {
         ];
         let mut plan = ProjectFramePlan {
             wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
@@ -2154,6 +2156,8 @@ mod tests {
 
         let mut failed_plan = ProjectFramePlan {
             wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),

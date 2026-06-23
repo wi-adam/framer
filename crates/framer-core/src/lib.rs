@@ -26,6 +26,7 @@ pub use project::{
     save_project,
 };
 pub use topology::{
-    RoomBoundary, enclosed_room_count, room_boundaries, room_boundary, wall_interior_sides,
+    RoomBoundary, enclosed_room_count, polygon_area_square_inches, room_boundaries, room_boundary,
+    wall_interior_sides,
 };
 pub use units::{Length, Point2};

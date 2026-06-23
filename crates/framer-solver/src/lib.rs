@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, CodeProfile, ConstructionSystem, ElementId, FramingSpec,
-    LayerFunction, Length, Material, ModelError, Opening, Point2, Wall, WallJoin, WallJoinKind,
-    room_boundaries,
+    BoardProfile, BuildingModel, Ceiling, CodeProfile, ConstructionSystem, ElementId, FloorDeck,
+    FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2, SpanDirection,
+    SurfaceRegion, Wall, WallJoin, WallJoinKind, polygon_area_square_inches, room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +30,51 @@ impl WallFramePlan {
     }
 }
 
+/// The derived framing of one floor deck: its joists, rim/band members, and
+/// blocking, plus the per-layer material takeoff and any diagnostics. The shape
+/// mirrors [`WallFramePlan`] (a flat ceiling and a floor deck share one joisting
+/// generator), differing only in which authored element it is keyed to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloorFramePlan {
+    pub floor: ElementId,
+    pub members: Vec<FrameMember>,
+    #[serde(default)]
+    pub layers: Vec<LayerBomItem>,
+    pub diagnostics: Vec<PlanDiagnostic>,
+}
+
+impl FloorFramePlan {
+    pub fn bom(&self) -> Vec<BomItem> {
+        bom_from_members(self.members.iter())
+    }
+
+    pub fn layer_bom(&self) -> Vec<LayerBomItem> {
+        layer_bom_from(self.layers.iter())
+    }
+}
+
+/// The derived framing of one flat ceiling: structurally a floor deck viewed
+/// from below, so it shares the joisting generator and the [`FloorFramePlan`]
+/// shape. Keyed to the authored [`Ceiling`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CeilingFramePlan {
+    pub ceiling: ElementId,
+    pub members: Vec<FrameMember>,
+    #[serde(default)]
+    pub layers: Vec<LayerBomItem>,
+    pub diagnostics: Vec<PlanDiagnostic>,
+}
+
+impl CeilingFramePlan {
+    pub fn bom(&self) -> Vec<BomItem> {
+        bom_from_members(self.members.iter())
+    }
+
+    pub fn layer_bom(&self) -> Vec<LayerBomItem> {
+        layer_bom_from(self.layers.iter())
+    }
+}
+
 /// A per-layer material takeoff row: how much of one material a layer requires.
 /// Area goods (finishes, sheathing, cladding, weather barriers, masonry) report
 /// `area_sq_in` (square inches); volumetric goods (continuous insulation and the
@@ -50,6 +95,10 @@ pub struct LayerBomItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectFramePlan {
     pub wall_plans: Vec<WallFramePlan>,
+    #[serde(default)]
+    pub floor_plans: Vec<FloorFramePlan>,
+    #[serde(default)]
+    pub ceiling_plans: Vec<CeilingFramePlan>,
     pub diagnostics: Vec<PlanDiagnostic>,
     #[serde(default)]
     pub rooms: Vec<RoomSchedule>,
@@ -78,16 +127,25 @@ impl RoomSchedule {
 }
 
 impl ProjectFramePlan {
-    pub fn bom(&self) -> Vec<BomItem> {
-        bom_from_members(
-            self.wall_plans
-                .iter()
-                .flat_map(|wall_plan| wall_plan.members.iter()),
-        )
+    /// Every framing member across every host: walls, floor decks, and ceilings.
+    fn all_members(&self) -> impl Iterator<Item = &FrameMember> {
+        self.wall_plans
+            .iter()
+            .flat_map(|plan| plan.members.iter())
+            .chain(self.floor_plans.iter().flat_map(|plan| plan.members.iter()))
+            .chain(
+                self.ceiling_plans
+                    .iter()
+                    .flat_map(|plan| plan.members.iter()),
+            )
     }
 
-    /// The project-wide per-layer material takeoff, aggregated across every wall
-    /// by (material, function, thickness).
+    pub fn bom(&self) -> Vec<BomItem> {
+        bom_from_members(self.all_members())
+    }
+
+    /// The project-wide per-layer material takeoff, aggregated across every wall,
+    /// floor deck, and ceiling by (material, function, thickness).
     pub fn layer_bom(&self) -> Vec<LayerBomItem> {
         layer_bom_from(self.layers.iter())
     }
@@ -102,6 +160,18 @@ impl ProjectFramePlan {
         self.wall_plans
             .iter_mut()
             .find(|wall_plan| wall_plan.wall == *wall)
+    }
+
+    pub fn floor_plan(&self, floor: &ElementId) -> Option<&FloorFramePlan> {
+        self.floor_plans
+            .iter()
+            .find(|floor_plan| floor_plan.floor == *floor)
+    }
+
+    pub fn ceiling_plan(&self, ceiling: &ElementId) -> Option<&CeilingFramePlan> {
+        self.ceiling_plans
+            .iter()
+            .find(|ceiling_plan| ceiling_plan.ceiling == *ceiling)
     }
 }
 
@@ -157,17 +227,28 @@ fn layer_bom_from<'a>(layers: impl IntoIterator<Item = &'a LayerBomItem>) -> Vec
 }
 
 /// Build the per-layer material takeoff for a single wall. Net face area is the
-/// wall face minus its openings (clamped non-negative). Area goods report area;
-/// continuous insulation and the framing layer's cavity material report
-/// area × thickness; air gaps, the framing layer's lumber, structure, and other
-/// roles are skipped (lumber is covered by the member BOM). The cavity material
-/// uses the framing layer's depth as its thickness.
+/// wall face minus its openings (clamped non-negative).
 fn wall_layer_bom(
     wall: &Wall,
     system: &ConstructionSystem,
     materials: &[Material],
 ) -> Vec<LayerBomItem> {
-    let net_area = net_face_area_sq_in(wall);
+    layers_takeoff(system, net_face_area_sq_in(wall), materials)
+}
+
+/// The per-layer material takeoff for one surface of `area_sq_in` square inches
+/// framed by `system`. Area goods (finishes, sheathing/decking, cladding,
+/// weather barriers, masonry, roofing, ceiling finish) report area; continuous
+/// insulation and the framing layer's cavity material report area × thickness;
+/// air gaps, the framing layer's lumber, structure, and other roles are skipped
+/// (lumber is covered by the member BOM). The cavity material uses the framing
+/// layer's depth as its thickness. Shared by walls, floor decks, and ceilings —
+/// the layer-role classification is identical across [`SystemKind`]s.
+fn layers_takeoff(
+    system: &ConstructionSystem,
+    area_sq_in: i64,
+    materials: &[Material],
+) -> Vec<LayerBomItem> {
     let material_name = |id: &ElementId| {
         materials
             .iter()
@@ -192,7 +273,7 @@ fn wall_layer_bom(
                     material_name: material_name(&layer.material),
                     function: layer.function,
                     thickness: layer.thickness,
-                    area_sq_in: net_area,
+                    area_sq_in,
                     volume_bd_in: 0,
                 });
             }
@@ -203,7 +284,7 @@ fn wall_layer_bom(
                     function: layer.function,
                     thickness: layer.thickness,
                     area_sq_in: 0,
-                    volume_bd_in: volume_bd_in(net_area, layer.thickness),
+                    volume_bd_in: volume_bd_in(area_sq_in, layer.thickness),
                 });
             }
             LayerFunction::Framing => {
@@ -219,7 +300,7 @@ fn wall_layer_bom(
                         function: LayerFunction::ContinuousInsulation,
                         thickness: layer.thickness,
                         area_sq_in: 0,
-                        volume_bd_in: volume_bd_in(net_area, layer.thickness),
+                        volume_bd_in: volume_bd_in(area_sq_in, layer.thickness),
                     });
                 }
             }
@@ -297,6 +378,14 @@ pub enum MemberKind {
     Header,
     RoughSill,
     CrippleStud,
+    /// A floor-deck joist (the horizontal span member of a floor).
+    FloorJoist,
+    /// A flat-ceiling joist (a floor joist viewed from below).
+    CeilingJoist,
+    /// The rim/band member closing the joist ends at a bearing line.
+    RimJoist,
+    /// A short member set between joists (e.g. a mid-span blocking row).
+    Blocking,
 }
 
 impl MemberKind {
@@ -313,6 +402,10 @@ impl MemberKind {
             Self::Header => "header",
             Self::RoughSill => "rough sill",
             Self::CrippleStud => "cripple stud",
+            Self::FloorJoist => "floor joist",
+            Self::CeilingJoist => "ceiling joist",
+            Self::RimJoist => "rim joist",
+            Self::Blocking => "blocking",
         }
     }
 }
@@ -363,10 +456,10 @@ pub enum DiagnosticSeverity {
     Unsupported,
 }
 
-/// The framing detail of a wall's construction system: the single `Framing`
-/// layer's `FramingSpec`. Studs and plates use `member`; spacing is the o.c.
-/// layout.
-fn wall_framing(system: &ConstructionSystem) -> Result<&FramingSpec, SolverError> {
+/// The framing detail of a construction system: the single `Framing` layer's
+/// `FramingSpec`. Studs/plates/joists use `member`; `spacing` is the o.c. layout.
+/// Generic over [`SystemKind`] — walls, floors, and ceilings all read it.
+fn system_framing(system: &ConstructionSystem) -> Result<&FramingSpec, SolverError> {
     system
         .framing_layer()
         .and_then(|layer| layer.framing.as_ref())
@@ -418,7 +511,7 @@ struct WallFraming {
 
 impl WallFraming {
     fn for_system(system: &ConstructionSystem) -> Result<Self, SolverError> {
-        let framing = wall_framing(system)?;
+        let framing = system_framing(system)?;
         Ok(Self {
             member: framing.member,
             spacing: framing.spacing,
@@ -574,11 +667,394 @@ pub fn generate_wall_plan(
     })
 }
 
+/// The plan-local layout of a horizontal surface (floor deck / flat ceiling):
+/// joists run the full `span_length` along the span axis and are arrayed along
+/// the perpendicular layout axis over `layout_length`. v1 is axis-aligned — the
+/// span/layout axes are the world X/Y axes chosen from the region's bounding box
+/// and the authored [`SpanDirection`]. Non-rectangular regions are framed across
+/// their bounding box; clipping to L/T outlines is a later phase.
+struct SurfaceLayout {
+    /// Each joist's length: the region extent along the span axis.
+    span_length: Length,
+    /// The extent the joists are arrayed across: the region's other axis.
+    layout_length: Length,
+}
+
+fn surface_layout(outline: &[Point2], span: SpanDirection) -> SurfaceLayout {
+    let Some(first) = outline.first() else {
+        return SurfaceLayout {
+            span_length: Length::ZERO,
+            layout_length: Length::ZERO,
+        };
+    };
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
+    for point in &outline[1..] {
+        min_x = min_x.min(point.x);
+        min_y = min_y.min(point.y);
+        max_x = max_x.max(point.x);
+        max_y = max_y.max(point.y);
+    }
+    let width = max_x - min_x; // extent along world X
+    let depth = max_y - min_y; // extent along world Y
+
+    // Whether the joists span the world X axis (true) or the world Y axis.
+    let span_along_x = match span {
+        // Span the shorter clear dimension (the structural default), which also
+        // reads as "across the principal/longer axis".
+        SpanDirection::Shorter | SpanDirection::Across => width <= depth,
+        // Span the longer (principal) axis.
+        SpanDirection::Along => width >= depth,
+        // Span the world axis nearest the authored direction vector.
+        SpanDirection::Explicit(direction) => direction.x.abs() >= direction.y.abs(),
+    };
+
+    if span_along_x {
+        SurfaceLayout {
+            span_length: width,
+            layout_length: depth,
+        }
+    } else {
+        SurfaceLayout {
+            span_length: depth,
+            layout_length: width,
+        }
+    }
+}
+
+/// A human-readable name for the span dimension, for member provenance.
+fn span_label(span: SpanDirection) -> &'static str {
+    match span {
+        SpanDirection::Shorter | SpanDirection::Across => "shorter",
+        SpanDirection::Along => "longer",
+        SpanDirection::Explicit(_) => "authored",
+    }
+}
+
+/// The derived contents of one surface (floor deck / flat ceiling) joist plan,
+/// before it is keyed to its host element by the public generators.
+struct JoistPlan {
+    members: Vec<FrameMember>,
+    layers: Vec<LayerBomItem>,
+    diagnostics: Vec<PlanDiagnostic>,
+}
+
+/// Lay out the joists, rim/band members, and blocking for one horizontal surface
+/// region (a floor deck or a flat ceiling — they share this generator). Members
+/// are placed in the surface's plan-local 2-D frame: a member's `x` is its
+/// position along the layout (cross-joist) axis and its `elevation` is its
+/// position along the span (along-joist) axis. The surface's true building
+/// elevation is a property of the host element and is applied when the surface is
+/// rendered, not stored on the member. `joist_kind` is `FloorJoist`/`CeilingJoist`
+/// and `prefix` (`"floor"`/`"ceiling"`) namespaces member ids, provenance, and
+/// diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn generate_joist_plan(
+    element: &ElementId,
+    name: &str,
+    system: &ConstructionSystem,
+    outline: &[Point2],
+    span: SpanDirection,
+    joist_kind: MemberKind,
+    prefix: &str,
+    materials: &[Material],
+) -> Result<JoistPlan, SolverError> {
+    let framing = system_framing(system)?;
+    let band = FramingBand::for_system(system)?;
+    let joist = framing.member;
+    let spacing = framing.spacing;
+    let joist_thickness = joist.thickness();
+
+    let layout = surface_layout(outline, span);
+    let positions = stud_positions(layout.layout_length, spacing, joist_thickness);
+
+    let mut members = Vec::new();
+
+    // Common joists: arrayed across the layout axis at on-center spacing, each
+    // running the full span; the end joists align with the region edges.
+    for mark in &positions {
+        members.push(frame_member(
+            format!("{prefix}-joist-{}", mark.ticks()),
+            element,
+            joist_kind,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                *mark,
+                Length::ZERO,
+                layout.span_length,
+                joist_thickness,
+            ),
+            band,
+            RuleProvenance::new(
+                format!("{prefix}.joists.on-center"),
+                format!(
+                    "Joists span the {} clear dimension; end joists align with the region edges and interior joists fall on {} layout marks.",
+                    span_label(span),
+                    spacing
+                ),
+            ),
+        ));
+    }
+
+    // Rim/band members close the joist ends at each bearing line, running the
+    // full layout width perpendicular to the joists.
+    let far_rim = (layout.span_length - joist_thickness).max(Length::ZERO);
+    for (index, at) in [Length::ZERO, far_rim].into_iter().enumerate() {
+        members.push(frame_member(
+            format!("{prefix}-rim-{}", index + 1),
+            element,
+            MemberKind::RimJoist,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                Length::ZERO,
+                at,
+                layout.layout_length,
+                joist_thickness,
+            ),
+            band,
+            RuleProvenance::new(
+                format!("{prefix}.rim.bearing-ends"),
+                "A rim/band member closes the joist ends at each bearing line.",
+            ),
+        ));
+    }
+
+    // A single mid-span blocking row: one piece in each clear gap between
+    // adjacent joists. A starter rule — real blocking/bridging spacing arrives
+    // with code span tables.
+    let block_at = ((layout.span_length - joist_thickness) / 2).max(Length::ZERO);
+    for pair in positions.windows(2) {
+        let start = pair[0] + joist_thickness / 2;
+        let gap = pair[1] - pair[0] - joist_thickness;
+        if gap <= Length::ZERO {
+            continue;
+        }
+        members.push(frame_member(
+            format!("{prefix}-blocking-{}", start.ticks()),
+            element,
+            MemberKind::Blocking,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                start,
+                block_at,
+                gap,
+                joist_thickness,
+            ),
+            band,
+            RuleProvenance::new(
+                format!("{prefix}.blocking.mid-span"),
+                "A single mid-span blocking row is generated between joists (starter rule).",
+            ),
+        ));
+    }
+
+    let layers = layers_takeoff(
+        system,
+        polygon_area_square_inches(outline).round() as i64,
+        materials,
+    );
+
+    // v1 surfaces structural judgment as a diagnostic, never an enforced span
+    // check (real span tables arrive with M4 code profiles).
+    let diagnostics = vec![PlanDiagnostic::new(
+        DiagnosticSeverity::Info,
+        format!("{prefix}.span.not-checked"),
+        Some(element.clone()),
+        format!(
+            "{name} joists are laid out geometrically; their span has not been checked against a code span table."
+        ),
+    )];
+
+    Ok(JoistPlan {
+        members,
+        layers,
+        diagnostics,
+    })
+}
+
+/// Generate the framing plan for one floor deck from its resolved plan outline. A
+/// sibling of [`generate_wall_plan`]; the open-region case (a `Room` whose wall
+/// loop is not closed) is handled by the project pass, which emits a diagnostic
+/// instead of calling this.
+pub fn generate_floor_plan(
+    deck: &FloorDeck,
+    system: &ConstructionSystem,
+    outline: &[Point2],
+    materials: &[Material],
+) -> Result<FloorFramePlan, SolverError> {
+    let joists = generate_joist_plan(
+        &deck.id,
+        &deck.name,
+        system,
+        outline,
+        deck.span,
+        MemberKind::FloorJoist,
+        "floor",
+        materials,
+    )?;
+    Ok(FloorFramePlan {
+        floor: deck.id.clone(),
+        members: joists.members,
+        layers: joists.layers,
+        diagnostics: joists.diagnostics,
+    })
+}
+
+/// Generate the framing plan for one flat ceiling from its resolved plan outline.
+/// A flat ceiling is a floor deck viewed from below, so it reuses the joisting
+/// generator; v1 ceilings always span the shorter clear dimension.
+pub fn generate_ceiling_plan(
+    ceiling: &Ceiling,
+    system: &ConstructionSystem,
+    outline: &[Point2],
+    materials: &[Material],
+) -> Result<CeilingFramePlan, SolverError> {
+    let joists = generate_joist_plan(
+        &ceiling.id,
+        &ceiling.name,
+        system,
+        outline,
+        SpanDirection::Shorter,
+        MemberKind::CeilingJoist,
+        "ceiling",
+        materials,
+    )?;
+    Ok(CeilingFramePlan {
+        ceiling: ceiling.id.clone(),
+        members: joists.members,
+        layers: joists.layers,
+        diagnostics: joists.diagnostics,
+    })
+}
+
+/// Resolve every surface region to its closed plan outline in a single pass over
+/// the wall graph. `Polygon` regions are their own outline; `Room` regions are
+/// resolved through one [`room_boundaries`] call so the bounded faces are derived
+/// just once for the whole project (rather than per element). Each entry lines up
+/// with `regions`; `None` marks an open `Room` loop (a transient mid-edit
+/// condition, surfaced as a diagnostic) or an unresolvable room reference.
+fn resolve_surface_regions(
+    model: &BuildingModel,
+    regions: &[&SurfaceRegion],
+) -> Vec<Option<Vec<Point2>>> {
+    // The seed of each `Room` region, in order, plus where its boundary will land
+    // in the batch result (`None` for `Polygon` regions and unknown rooms).
+    let mut seeds = Vec::new();
+    let mut slots = Vec::with_capacity(regions.len());
+    for region in regions {
+        match region {
+            SurfaceRegion::Polygon(_) => slots.push(None),
+            SurfaceRegion::Room(room) => {
+                match model.rooms.iter().find(|candidate| candidate.id == *room) {
+                    Some(found) => {
+                        slots.push(Some(seeds.len()));
+                        seeds.push(found.seed);
+                    }
+                    None => slots.push(None),
+                }
+            }
+        }
+    }
+
+    let boundaries = room_boundaries(model, &seeds);
+    regions
+        .iter()
+        .zip(slots)
+        .map(|(region, slot)| match region {
+            SurfaceRegion::Polygon(points) => Some(points.clone()),
+            SurfaceRegion::Room(_) => slot
+                .and_then(|index| boundaries[index].as_ref())
+                .map(|boundary| boundary.vertices.clone()),
+        })
+        .collect()
+}
+
+fn system_by_id<'a>(model: &'a BuildingModel, id: &ElementId) -> Option<&'a ConstructionSystem> {
+    model.systems.iter().find(|system| system.id == *id)
+}
+
+fn open_region_diagnostic(element: &ElementId, name: &str, prefix: &str) -> PlanDiagnostic {
+    PlanDiagnostic::new(
+        DiagnosticSeverity::Warning,
+        format!("{prefix}.boundary.open"),
+        Some(element.clone()),
+        format!("{name} is not enclosed by a closed wall loop, so its joists cannot be laid out."),
+    )
+}
+
+/// Generate the floor-deck and flat-ceiling joist plans, pushing one plan per
+/// authored element. A region whose `Room` loop is open contributes an empty plan
+/// carrying a "boundary open" diagnostic and recovers once the loop closes. Every
+/// `Room` region is resolved in one batch so the wall-graph faces are derived a
+/// single time per project plan.
+fn generate_surface_plans(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+) -> Result<(), SolverError> {
+    // Resolve all deck and ceiling outlines together (decks first, then ceilings)
+    // so the wall-graph faces are computed once for the whole project.
+    let regions: Vec<&SurfaceRegion> = model
+        .floor_decks
+        .iter()
+        .map(|deck| &deck.region)
+        .chain(model.ceilings.iter().map(|ceiling| &ceiling.region))
+        .collect();
+    let mut outlines = resolve_surface_regions(model, &regions).into_iter();
+
+    for deck in &model.floor_decks {
+        let system = system_by_id(model, &deck.system).ok_or_else(|| {
+            SolverError::MissingSystemForElement {
+                element: deck.id.clone(),
+                system: deck.system.clone(),
+            }
+        })?;
+        let floor_plan = match outlines.next().expect("one outline per floor deck") {
+            Some(outline) => generate_floor_plan(deck, system, &outline, &model.materials)?,
+            None => FloorFramePlan {
+                floor: deck.id.clone(),
+                members: Vec::new(),
+                layers: Vec::new(),
+                diagnostics: vec![open_region_diagnostic(&deck.id, &deck.name, "floor")],
+            },
+        };
+        plan.floor_plans.push(floor_plan);
+    }
+
+    for ceiling in &model.ceilings {
+        let system = system_by_id(model, &ceiling.system).ok_or_else(|| {
+            SolverError::MissingSystemForElement {
+                element: ceiling.id.clone(),
+                system: ceiling.system.clone(),
+            }
+        })?;
+        let ceiling_plan = match outlines.next().expect("one outline per ceiling") {
+            Some(outline) => generate_ceiling_plan(ceiling, system, &outline, &model.materials)?,
+            None => CeilingFramePlan {
+                ceiling: ceiling.id.clone(),
+                members: Vec::new(),
+                layers: Vec::new(),
+                diagnostics: vec![open_region_diagnostic(
+                    &ceiling.id,
+                    &ceiling.name,
+                    "ceiling",
+                )],
+            },
+        };
+        plan.ceiling_plans.push(ceiling_plan);
+    }
+
+    Ok(())
+}
+
 pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, SolverError> {
     model.validate()?;
 
     let mut plan = ProjectFramePlan {
         wall_plans: Vec::with_capacity(model.walls.len()),
+        floor_plans: Vec::with_capacity(model.floor_decks.len()),
+        ceiling_plans: Vec::with_capacity(model.ceilings.len()),
         diagnostics: project_diagnostics(model),
         rooms: Vec::new(),
         layers: Vec::new(),
@@ -600,11 +1076,22 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
     }
 
     add_join_members(&mut plan, model)?;
+    generate_surface_plans(&mut plan, model)?;
     plan.rooms = room_schedule(model, &mut plan.diagnostics);
     plan.layers = layer_bom_from(
         plan.wall_plans
             .iter()
-            .flat_map(|wall_plan| wall_plan.layers.iter()),
+            .flat_map(|wall_plan| wall_plan.layers.iter())
+            .chain(
+                plan.floor_plans
+                    .iter()
+                    .flat_map(|floor| floor.layers.iter()),
+            )
+            .chain(
+                plan.ceiling_plans
+                    .iter()
+                    .flat_map(|ceiling| ceiling.layers.iter()),
+            ),
     );
 
     Ok(plan)
@@ -687,7 +1174,7 @@ fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Resul
                 system: wall.system.clone(),
             })?;
         Ok((
-            wall_framing(system)?.member,
+            system_framing(system)?.member,
             FramingBand::for_system(system)?,
         ))
     };
@@ -1636,6 +2123,10 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
         MemberKind::Header => "#738263",
         MemberKind::RoughSill => "#5c7990",
         MemberKind::CrippleStud => "#dabe8b",
+        MemberKind::FloorJoist => "#9c7b4f",
+        MemberKind::CeilingJoist => "#7f9c8f",
+        MemberKind::RimJoist => "#6f5535",
+        MemberKind::Blocking => "#b59a6a",
     }
 }
 
@@ -1740,6 +2231,11 @@ pub enum SolverError {
     OpeningTooCloseToWallEnd { wall: ElementId, opening: ElementId },
     #[error("wall {wall:?} references construction system {system:?} which was not found")]
     MissingSystem { wall: ElementId, system: ElementId },
+    #[error("element {element:?} references construction system {system:?} which was not found")]
+    MissingSystemForElement {
+        element: ElementId,
+        system: ElementId,
+    },
     #[error("construction system {system:?} has no framing layer")]
     SystemHasNoFramingLayer { system: ElementId },
 }
@@ -2614,5 +3110,568 @@ mod tests {
         assert!(csv.contains("Continuous insulation"));
         // The lumber CSV is left untouched.
         assert!(export_bom_csv(&plan.bom()).starts_with("quantity,profile,kind"));
+    }
+
+    // ---- Floor decks & flat ceilings (Slice 2) -----------------------------
+
+    /// A `w_ft` × `d_ft` rectangular surface region anchored at the origin (X is
+    /// the width, Y is the depth).
+    fn rect_region(w_ft: f64, d_ft: f64) -> SurfaceRegion {
+        let (w, d) = (Length::from_feet(w_ft), Length::from_feet(d_ft));
+        SurfaceRegion::Polygon(vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(w, Length::ZERO),
+            Point2::new(w, d),
+            Point2::new(Length::ZERO, d),
+        ])
+    }
+
+    /// The polygon outline behind a `Polygon` region (panics for a `Room` region).
+    fn region_points(region: &SurfaceRegion) -> &[Point2] {
+        match region {
+            SurfaceRegion::Polygon(points) => points,
+            SurfaceRegion::Room(_) => panic!("test region must be a polygon"),
+        }
+    }
+
+    /// A floor system: a 3/4" plywood subfloor over 2x8 joists at 16" o.c.
+    fn floor_system() -> ConstructionSystem {
+        ConstructionSystem {
+            id: ElementId::new("system-floor"),
+            name: "Floor".to_owned(),
+            kind: framer_core::SystemKind::Floor,
+            source: None,
+            layers: vec![
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Sheathing,
+                    "mat-plywood",
+                    Length::from_inches(0.75),
+                ),
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-spf",
+                    BoardProfile::TwoByEight.nominal_depth(),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByEight,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: framer_core::FramingPattern::Single,
+                    member_family: framer_core::MemberFamily::FloorJoist,
+                    cavity_material: None,
+                }),
+            ],
+        }
+    }
+
+    /// A ceiling system: a 5/8" drywall finish under 2x6 joists at 16" o.c.
+    fn ceiling_system() -> ConstructionSystem {
+        ConstructionSystem {
+            id: ElementId::new("system-ceiling"),
+            name: "Ceiling".to_owned(),
+            kind: framer_core::SystemKind::Ceiling,
+            source: None,
+            layers: vec![
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::CeilingFinish,
+                    "mat-drywall",
+                    Length::from_inches(0.625),
+                ),
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-spf",
+                    BoardProfile::TwoBySix.nominal_depth(),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoBySix,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: framer_core::FramingPattern::Single,
+                    member_family: framer_core::MemberFamily::CeilingJoist,
+                    cavity_material: None,
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn floor_deck_arrays_joists_across_the_shorter_span() {
+        // A 20ft (x) × 12ft (y) deck: joists span the shorter 12ft dimension and
+        // are arrayed across the 20ft length at 16in o.c.
+        let deck = FloorDeck::new(
+            "deck",
+            "Deck",
+            "level-1",
+            "system-floor",
+            rect_region(20.0, 12.0),
+        );
+        let plan = generate_floor_plan(
+            &deck,
+            &floor_system(),
+            region_points(&deck.region),
+            &materials(),
+        )
+        .unwrap();
+
+        // stud_positions(240in, 16in, 1.5in) => 0.75, 16, 32, .., 224, 239.25 = 16.
+        let joists: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::FloorJoist)
+            .collect();
+        assert_eq!(joists.len(), 16);
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(12.0)),
+            "every joist spans the shorter 12ft dimension"
+        );
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.profile == BoardProfile::TwoByEight),
+            "joists use the system framing member"
+        );
+        // End joists align with the region edges; interiors fall on 16in marks.
+        let half = BoardProfile::TwoByEight.thickness() / 2;
+        let mut marks: Vec<Length> = joists.iter().map(|member| member.x).collect();
+        marks.sort_unstable();
+        assert_eq!(*marks.first().unwrap(), half);
+        assert_eq!(*marks.last().unwrap(), Length::from_feet(20.0) - half);
+
+        // Two rim/band members run the full 20ft layout width.
+        let rims: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::RimJoist)
+            .collect();
+        assert_eq!(rims.len(), 2);
+        assert!(
+            rims.iter()
+                .all(|member| member.cut_length == Length::from_feet(20.0))
+        );
+
+        // Plan-local frame: joists run along the span axis (Vertical), rim and
+        // blocking run across it (Horizontal).
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.orientation == MemberOrientation::Vertical)
+        );
+        assert!(
+            rims.iter()
+                .all(|member| member.orientation == MemberOrientation::Horizontal)
+        );
+
+        // The two rims sit at the two bearing ends of the 12ft span: one at the
+        // origin and one a joist-thickness inboard of the far edge.
+        let span = Length::from_feet(12.0);
+        let thickness = BoardProfile::TwoByEight.thickness();
+        let mut rim_elevations: Vec<Length> = rims.iter().map(|member| member.elevation).collect();
+        rim_elevations.sort_unstable();
+        assert_eq!(rim_elevations, vec![Length::ZERO, span - thickness]);
+
+        // One mid-span blocking piece sits in each clear gap between adjacent
+        // joists, all on the same mid-span line, each spanning the clear gap.
+        let blocking: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::Blocking)
+            .collect();
+        assert_eq!(blocking.len(), joists.len() - 1);
+        let mid_span = (span - thickness) / 2;
+        assert!(
+            blocking
+                .iter()
+                .all(|member| member.orientation == MemberOrientation::Horizontal
+                    && member.elevation == mid_span)
+        );
+        // An interior gap spans exactly the on-center spacing less a joist face.
+        assert!(
+            blocking
+                .iter()
+                .any(|member| member.cut_length == Length::from_whole_inches(16) - thickness),
+            "an interior blocking piece spans the o.c. spacing minus a joist thickness"
+        );
+    }
+
+    #[test]
+    fn floor_deck_explicit_span_overrides_shorter() {
+        // Spanning the longer (20ft) axis: joists are 20ft long, arrayed across 12ft.
+        let deck = FloorDeck::new(
+            "deck",
+            "Deck",
+            "level-1",
+            "system-floor",
+            rect_region(20.0, 12.0),
+        )
+        .with_span(SpanDirection::Along);
+        let plan = generate_floor_plan(
+            &deck,
+            &floor_system(),
+            region_points(&deck.region),
+            &materials(),
+        )
+        .unwrap();
+
+        let joists: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::FloorJoist)
+            .collect();
+        // stud_positions(144in, 16in, 1.5in) => 0.75, 16, .., 128, 143.25 = 10.
+        assert_eq!(joists.len(), 10);
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(20.0))
+        );
+    }
+
+    #[test]
+    fn floor_deck_explicit_direction_selects_the_nearest_world_axis() {
+        let system = floor_system();
+        let span_along = |direction: Point2| -> Length {
+            let deck = FloorDeck::new(
+                "deck",
+                "Deck",
+                "level-1",
+                "system-floor",
+                rect_region(20.0, 12.0),
+            )
+            .with_span(SpanDirection::Explicit(direction));
+            let plan =
+                generate_floor_plan(&deck, &system, region_points(&deck.region), &materials())
+                    .unwrap();
+            plan.members
+                .iter()
+                .find(|member| member.kind == MemberKind::FloorJoist)
+                .expect("a floor joist")
+                .cut_length
+        };
+
+        // A direction biased toward +x runs joists along the 20ft x axis; one
+        // biased toward +y runs them along the 12ft y axis. Asserting both pins
+        // the axis-selection comparison against an inverted-direction regression.
+        assert_eq!(
+            span_along(Point2::new(
+                Length::from_whole_inches(10),
+                Length::from_whole_inches(1)
+            )),
+            Length::from_feet(20.0)
+        );
+        assert_eq!(
+            span_along(Point2::new(
+                Length::from_whole_inches(1),
+                Length::from_whole_inches(10)
+            )),
+            Length::from_feet(12.0)
+        );
+    }
+
+    #[test]
+    fn surface_plan_reports_missing_system_for_a_dangling_reference() {
+        // generate_surface_plans is defensive against a deck whose system id does
+        // not resolve (model validation normally catches this first).
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-absent",
+            rect_region(10.0, 8.0),
+        ));
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+
+        let error = generate_surface_plans(&mut plan, &model).unwrap_err();
+        assert!(matches!(
+            error,
+            SolverError::MissingSystemForElement { element, system }
+                if element.0 == "deck-1" && system.0 == "system-absent"
+        ));
+    }
+
+    #[test]
+    fn ceiling_generates_ceiling_joists_spanning_the_shorter_dimension() {
+        let ceiling = Ceiling::new(
+            "clg",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            rect_region(20.0, 12.0),
+            Length::from_feet(8.0),
+        );
+        let plan = generate_ceiling_plan(
+            &ceiling,
+            &ceiling_system(),
+            region_points(&ceiling.region),
+            &materials(),
+        )
+        .unwrap();
+
+        let joists: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::CeilingJoist)
+            .collect();
+        assert!(!joists.is_empty());
+        assert!(
+            plan.members
+                .iter()
+                .all(|member| member.kind != MemberKind::FloorJoist),
+            "a ceiling frames ceiling joists, never floor joists"
+        );
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(12.0))
+        );
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.profile == BoardProfile::TwoBySix)
+        );
+    }
+
+    #[test]
+    fn floor_bom_groups_joists_by_profile_kind_and_length() {
+        let deck = FloorDeck::new(
+            "deck",
+            "Deck",
+            "level-1",
+            "system-floor",
+            rect_region(20.0, 12.0),
+        );
+        let plan = generate_floor_plan(
+            &deck,
+            &floor_system(),
+            region_points(&deck.region),
+            &materials(),
+        )
+        .unwrap();
+
+        let joist_row = plan
+            .bom()
+            .into_iter()
+            .find(|item| item.kind == MemberKind::FloorJoist)
+            .expect("a floor-joist BOM row");
+        assert_eq!(joist_row.profile, BoardProfile::TwoByEight);
+        assert_eq!(joist_row.cut_length, Length::from_feet(12.0));
+        assert_eq!(joist_row.quantity, 16);
+        assert_eq!(joist_row.total_length, Length::from_feet(12.0) * 16);
+    }
+
+    #[test]
+    fn floor_layer_takeoff_matches_region_area() {
+        let deck = FloorDeck::new(
+            "deck",
+            "Deck",
+            "level-1",
+            "system-floor",
+            rect_region(20.0, 12.0),
+        );
+        let plan = generate_floor_plan(
+            &deck,
+            &floor_system(),
+            region_points(&deck.region),
+            &materials(),
+        )
+        .unwrap();
+
+        // 20ft × 12ft = 240in × 144in = 34_560 sq in of subfloor, no volume.
+        let subfloor = find_layer(&plan.layers, "mat-plywood");
+        assert_eq!(subfloor.area_sq_in, 240 * 144);
+        assert_eq!(subfloor.volume_bd_in, 0);
+        // Joist lumber stays in the member BOM, not the layer takeoff.
+        assert!(
+            !plan
+                .layers
+                .iter()
+                .any(|layer| layer.material.0 == "mat-spf")
+        );
+    }
+
+    #[test]
+    fn floor_deck_emits_span_not_checked_diagnostic() {
+        let deck = FloorDeck::new(
+            "deck",
+            "Deck",
+            "level-1",
+            "system-floor",
+            rect_region(20.0, 12.0),
+        );
+        let plan = generate_floor_plan(
+            &deck,
+            &floor_system(),
+            region_points(&deck.region),
+            &materials(),
+        )
+        .unwrap();
+
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "floor.span.not-checked"
+                && diagnostic.severity == DiagnosticSeverity::Info
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("deck")
+        }));
+    }
+
+    #[test]
+    fn project_plan_frames_floor_and_ceiling_over_a_room() {
+        let mut model = rectangle_with_room();
+        model.systems.push(floor_system());
+        model.systems.push(ceiling_system());
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+        ));
+        // The ceiling covers a differently-proportioned region than the floor so
+        // a deck<->ceiling outline mix-up in the batch resolver would be caught:
+        // the floor (the 12ft x 8ft room) spans 8ft, the ceiling (a 20ft x 14ft
+        // polygon) spans 14ft.
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            rect_region(20.0, 14.0),
+            Length::from_feet(8.0),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert_eq!(plan.floor_plans.len(), 1);
+        assert_eq!(plan.ceiling_plans.len(), 1);
+
+        let floor = plan.floor_plan(&ElementId::new("deck-1")).unwrap();
+        let floor_joists: Vec<_> = floor
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::FloorJoist)
+            .collect();
+        assert!(!floor_joists.is_empty());
+        // The room is 12ft × 8ft; floor joists span the shorter 8ft dimension.
+        assert!(
+            floor_joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(8.0))
+        );
+
+        // The ceiling joists span its own 14ft shorter dimension, not the floor's.
+        let ceiling = plan.ceiling_plan(&ElementId::new("ceiling-1")).unwrap();
+        let ceiling_joists: Vec<_> = ceiling
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::CeilingJoist)
+            .collect();
+        assert!(!ceiling_joists.is_empty());
+        assert!(
+            ceiling_joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(14.0))
+        );
+
+        // The project BOM folds in the new surfaces' members.
+        let bom = plan.bom();
+        assert!(bom.iter().any(|item| item.kind == MemberKind::FloorJoist));
+        assert!(bom.iter().any(|item| item.kind == MemberKind::CeilingJoist));
+
+        // The deck's own subfloor takeoff covers the 96 sq ft room (144in × 96in
+        // = 13_824 sq in); the project total also folds it into the shared
+        // plywood row alongside the wall sheathing.
+        assert_eq!(
+            find_layer(&floor.layers, "mat-plywood").area_sq_in,
+            144 * 96
+        );
+        let project_plywood: i64 = plan
+            .layers
+            .iter()
+            .filter(|layer| layer.material.0 == "mat-plywood")
+            .map(|layer| layer.area_sq_in)
+            .sum();
+        assert!(project_plywood >= 144 * 96);
+    }
+
+    #[test]
+    fn floor_deck_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
+        use framer_core::{Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // A single wall never encloses a loop, so the room stays open.
+        model
+            .walls
+            .push(Wall::new("w-1", "Wall", Length::from_feet(12.0), &code));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "level-1",
+            Point2::new(Length::from_feet(2.0), Length::from_feet(2.0)),
+        ));
+        model.systems.push(floor_system());
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let floor = plan.floor_plan(&ElementId::new("deck-1")).unwrap();
+
+        assert!(floor.members.is_empty(), "an open region frames no joists");
+        assert!(floor.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "floor.boundary.open"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("deck-1")
+        }));
+    }
+
+    #[test]
+    fn ceiling_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
+        use framer_core::{Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // A single wall never encloses a loop, so the room stays open.
+        model
+            .walls
+            .push(Wall::new("w-1", "Wall", Length::from_feet(12.0), &code));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "level-1",
+            Point2::new(Length::from_feet(2.0), Length::from_feet(2.0)),
+        ));
+        model.systems.push(ceiling_system());
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+            Length::from_feet(8.0),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let ceiling = plan.ceiling_plan(&ElementId::new("ceiling-1")).unwrap();
+
+        assert!(
+            ceiling.members.is_empty(),
+            "an open region frames no joists"
+        );
+        assert!(ceiling.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ceiling.boundary.open"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("ceiling-1")
+        }));
     }
 }
