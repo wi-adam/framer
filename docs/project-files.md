@@ -209,9 +209,11 @@ a construction system** (it does not embed its assembly):
 ## Construction Systems & Materials
 
 A **construction system** is a named, reusable assembly: an ordered stack of
-material layers across the element's thickness, applied to walls by reference. New
-projects seed a starter library (exterior + interior wall systems and their
-materials). The durable intent behind this model is documented in the
+material layers across the element's thickness, applied by reference to walls,
+roof planes, ceilings, and floor decks (each system carries a `kind` matching the
+element it clads). New projects seed a starter library (exterior + interior wall
+systems, a roof, a floor, and a ceiling system, plus their materials). The durable
+intent behind this model is documented in the
 [Construction Systems spec](specs/construction-systems.md).
 
 Each material in `materials` stores:
