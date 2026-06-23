@@ -251,6 +251,13 @@ fn inches_point(x: f64, y: f64) -> Point2 {
     Point2::new(Length::from_inches(x), Length::from_inches(y))
 }
 
+/// The unsigned plan area of a closed polygon, in square inches (shoelace). The
+/// single owner of this formula — the solver's floor/ceiling takeoff calls it
+/// rather than re-deriving it, so the two cannot drift.
+pub fn polygon_area_square_inches(vertices: &[Point2]) -> f64 {
+    signed_area_square_inches(vertices).abs()
+}
+
 /// Shoelace signed area in square inches (counterclockwise positive).
 fn signed_area_square_inches(vertices: &[Point2]) -> f64 {
     if vertices.len() < 3 {
