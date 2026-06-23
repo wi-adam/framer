@@ -1165,6 +1165,7 @@ impl FramerApp {
                     member: BoardProfile::TwoByFour,
                     spacing: Length::from_whole_inches(16),
                     pattern: FramingPattern::Single,
+                    member_family: framer_core::MemberFamily::Stud,
                     cavity_material: None,
                 }),
             ];

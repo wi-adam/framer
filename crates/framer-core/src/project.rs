@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 10;
-/// The model is v10-only — older on-disk shapes and pre-provenance schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 11;
+/// The model is v11-only — older on-disk shapes and pre-provenance schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v10-only model,
+    // Peek the format/version header before deserializing into the v11-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v10-only) deserialization.
+/// and schema versions before attempting the full (v11-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -126,7 +126,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 10,\n"));
+        assert!(json.contains("  \"schema_version\": 11,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -383,7 +383,7 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 10,
+  "schema_version": 11,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -407,8 +407,8 @@ mod tests {
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
         // A v9 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v10 model.
-        // The pre-v10 body remains self-contained, but schema support is v10-only.
+        // unsupported-schema error, NOT serde errors from the current v11 model.
+        // The pre-v11 body remains self-contained, but schema support is v11-only.
         let source = r#"{
   "format": "framer.project",
   "schema_version": 9,
@@ -431,6 +431,28 @@ mod tests {
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
                 found: 9,
+                supported: PROJECT_SCHEMA_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn load_project_rejects_immediately_previous_schema_version() {
+        // The immediately-previous schema (v10) is no longer loadable: the bump
+        // to v11 is a hard cutover, not migrated in place. The header peek rejects
+        // it before the body is deserialized, so a minimal body suffices.
+        let source = r#"{
+  "format": "framer.project",
+  "schema_version": 10,
+  "authored": {
+    "walls": []
+  }
+}"#;
+
+        assert!(matches!(
+            load_project(source),
+            Err(ProjectError::UnsupportedSchemaVersion {
+                found: 10,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -755,7 +777,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 10,"));
+        assert!(json.contains("\"schema_version\": 11,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 
@@ -766,5 +788,151 @@ mod tests {
             reloaded.rooms[0].seed,
             Point2::new(Length::from_feet(6.0), Length::from_feet(6.0))
         );
+    }
+
+    #[test]
+    fn roof_ceiling_floor_round_trip_through_save_and_load() {
+        use crate::{
+            BoardProfile, Ceiling, ConstructionLayer, ConstructionSystem, ElementId, FloorDeck,
+            FramingPattern, FramingSpec, LayerFunction, MemberFamily, OpeningKind, Point2,
+            RoofOpening, RoofPlane, Slope, SpanDirection, SurfaceRegion, SystemKind,
+        };
+
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code);
+
+        let surface_system =
+            |id: &str, kind: SystemKind, family: MemberFamily| ConstructionSystem {
+                id: ElementId::new(id),
+                name: id.to_owned(),
+                kind,
+                source: None,
+                layers: vec![
+                    ConstructionLayer::new(
+                        LayerFunction::Framing,
+                        "mat-spf",
+                        BoardProfile::TwoBySix.nominal_depth(),
+                    )
+                    .with_framing(FramingSpec {
+                        member: BoardProfile::TwoBySix,
+                        spacing: Length::from_whole_inches(16),
+                        pattern: FramingPattern::Single,
+                        member_family: family,
+                        cavity_material: None,
+                    }),
+                ],
+            };
+        model.systems.push(surface_system(
+            "system-roof",
+            SystemKind::Roof,
+            MemberFamily::Rafter,
+        ));
+        model.systems.push(surface_system(
+            "system-floor",
+            SystemKind::Floor,
+            MemberFamily::FloorJoist,
+        ));
+        model.systems.push(surface_system(
+            "system-ceiling",
+            SystemKind::Ceiling,
+            MemberFamily::CeilingJoist,
+        ));
+
+        let outline = vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+            Point2::new(Length::ZERO, Length::from_feet(12.0)),
+        ];
+
+        let mut roof = RoofPlane::new(
+            "roof-1",
+            "Roof",
+            "level-1",
+            "system-roof",
+            outline.clone(),
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_whole_inches(12));
+        // Push openings out of id order to exercise the canonical nested sort.
+        roof.openings.push(RoofOpening::new(
+            "skylight-2",
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(14.0), Length::from_feet(6.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+        roof.openings.push(RoofOpening::new(
+            "skylight-1",
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+        model.roof_planes.push(roof);
+
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(outline.clone()),
+            Length::from_feet(8.0),
+        ));
+        model.floor_decks.push(
+            FloorDeck::new(
+                "deck-1",
+                "Deck",
+                "level-1",
+                "system-floor",
+                SurfaceRegion::Polygon(outline),
+            )
+            .with_span(SpanDirection::Across),
+        );
+
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"roof_planes\": ["));
+        assert!(json.contains("\"ceilings\": ["));
+        assert!(json.contains("\"floor_decks\": ["));
+        // A non-default member family is serialized; Stud (the default) would not be.
+        assert!(json.contains("\"member_family\": \"Rafter\""));
+
+        let reloaded = load_project(&json).unwrap();
+        assert_eq!(reloaded.roof_planes.len(), 1);
+        assert_eq!(reloaded.ceilings.len(), 1);
+        assert_eq!(reloaded.floor_decks.len(), 1);
+        // Nested roof openings are canonically id-sorted on save.
+        let opening_ids: Vec<&str> = reloaded.roof_planes[0]
+            .openings
+            .iter()
+            .map(|opening| opening.id.0.as_str())
+            .collect();
+        assert_eq!(opening_ids, vec!["skylight-1", "skylight-2"]);
+        assert_eq!(reloaded.floor_decks[0].span, SpanDirection::Across);
+        // Re-saving the reloaded model yields byte-identical canonical JSON, and the
+        // model matches its canonical (sorted) form.
+        assert_eq!(save_project(&reloaded).unwrap(), json);
+        assert_eq!(reloaded, model.into_deterministic());
+    }
+
+    #[test]
+    fn level_height_skips_default_and_round_trips_when_set() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code);
+
+        // A default (zero) level height is omitted from the canonical JSON.
+        let default_json = save_project(&model).unwrap();
+        assert!(!default_json.contains("\"height\""));
+
+        // A set height (via the builder) is serialized and round-trips exactly.
+        let with_height = model.levels[0].clone().with_height(Length::from_feet(9.0));
+        model.levels[0] = with_height;
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"height\""));
+
+        let reloaded = load_project(&json).unwrap();
+        assert_eq!(reloaded.levels[0].height, Length::from_feet(9.0));
     }
 }

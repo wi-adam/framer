@@ -105,9 +105,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framer` serialization (`src/project.rs`)
 
-- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 10`**.
-- The model is **v10-only**: `load_project` peeks a `SchemaHeader` first and returns
-  `ProjectError::UnsupportedSchemaVersion` for any non-v10 file. `#[serde(deny_unknown_fields)]`
+- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 11`**.
+- The model is **v11-only**: `load_project` peeks a `SchemaHeader` first and returns
+  `ProjectError::UnsupportedSchemaVersion` for any non-v11 file. `#[serde(deny_unknown_fields)]`
   rejects unknown keys.
 - Canonical output: `to_canonical_json()` re-stamps the version, calls
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a
