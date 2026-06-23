@@ -115,6 +115,9 @@ enum Selection {
     Join(String),
     Room(String),
     Member { wall_id: String, member_id: String },
+    RoofPlane(String),
+    Ceiling(String),
+    FloorDeck(String),
     System(String),
     Material(String),
     Furnishing(String),
@@ -244,6 +247,18 @@ enum ViewClick {
     Member {
         wall_id: String,
         member_id: String,
+    },
+    /// Select an authored roof plane (its surface solid in the 3D view).
+    RoofPlane {
+        id: String,
+    },
+    /// Select an authored flat ceiling (its surface slab in the 3D view).
+    Ceiling {
+        id: String,
+    },
+    /// Select an authored floor deck (its surface slab in the 3D view).
+    FloorDeck {
+        id: String,
     },
 }
 
@@ -998,6 +1013,9 @@ impl FramerApp {
             | Selection::Opening(_)
             | Selection::Join(_)
             | Selection::Room(_)
+            | Selection::RoofPlane(_)
+            | Selection::Ceiling(_)
+            | Selection::FloorDeck(_)
             | Selection::System(_)
             | Selection::Material(_)
             | Selection::Furnishing(_)
@@ -1840,6 +1858,15 @@ impl FramerApp {
                     }
                     self.selected = Selection::Member { wall_id, member_id };
                 }
+            }
+            ViewClick::RoofPlane { id } => {
+                self.selected = Selection::RoofPlane(id);
+            }
+            ViewClick::Ceiling { id } => {
+                self.selected = Selection::Ceiling(id);
+            }
+            ViewClick::FloorDeck { id } => {
+                self.selected = Selection::FloorDeck(id);
             }
         }
     }

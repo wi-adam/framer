@@ -2013,6 +2013,57 @@ impl FramerApp {
                     ui.label("MEP instance no longer exists");
                 }
             }
+            // Read-only summaries for the roof/ceiling/floor surfaces: Slice 4
+            // makes them selectable (in the 3D view); editable inspectors (pitch,
+            // height, span, system) land with the authoring tools in a later slice.
+            Selection::RoofPlane(id) => {
+                if let Some(plane) = self.model.roof_planes.iter().find(|p| p.id.0 == id) {
+                    inspector_object_id(ui, &plane.id.0);
+                    ui.label(&plane.name);
+                    ui.label(format!("System: {}", plane.system.0));
+                    ui.label(format!("Pitch: {}:{}", plane.slope.rise, plane.slope.run));
+                    ui.label(format!("Eave edge: {}", plane.eave_edge));
+                    ui.label(format!(
+                        "Springing elevation: {}",
+                        plane.reference_elevation
+                    ));
+                    ui.label(format!(
+                        "Overhangs: eave {}, rake {}",
+                        plane.eave_overhang, plane.rake_overhang
+                    ));
+                } else {
+                    ui.label("Roof plane no longer exists");
+                }
+            }
+            Selection::Ceiling(id) => {
+                if let Some(ceiling) = self.model.ceilings.iter().find(|c| c.id.0 == id) {
+                    inspector_object_id(ui, &ceiling.id.0);
+                    ui.label(&ceiling.name);
+                    ui.label(format!("System: {}", ceiling.system.0));
+                    ui.label(format!("Height below level top: {}", ceiling.height));
+                    ui.label(format!(
+                        "Region: {}",
+                        surface_region_summary(&ceiling.region)
+                    ));
+                    ui.label(match ceiling.slope {
+                        Some(slope) => format!("Slope: {}:{}", slope.rise, slope.run),
+                        None => "Slope: flat".to_owned(),
+                    });
+                } else {
+                    ui.label("Ceiling no longer exists");
+                }
+            }
+            Selection::FloorDeck(id) => {
+                if let Some(deck) = self.model.floor_decks.iter().find(|d| d.id.0 == id) {
+                    inspector_object_id(ui, &deck.id.0);
+                    ui.label(&deck.name);
+                    ui.label(format!("System: {}", deck.system.0));
+                    ui.label(format!("Region: {}", surface_region_summary(&deck.region)));
+                    ui.label(format!("Span: {}", span_direction_label(deck.span)));
+                } else {
+                    ui.label("Floor deck no longer exists");
+                }
+            }
         }
 
         // Replay a deferred Remove as one discrete, labelled undo step now that
@@ -2333,6 +2384,9 @@ impl FramerApp {
             Selection::Join(id) => format!("Join: {id}"),
             Selection::Room(id) => format!("Room: {id}"),
             Selection::Member { member_id, .. } => format!("Member: {member_id}"),
+            Selection::RoofPlane(id) => format!("Roof plane: {id}"),
+            Selection::Ceiling(id) => format!("Ceiling: {id}"),
+            Selection::FloorDeck(id) => format!("Floor deck: {id}"),
             Selection::System(id) => format!("System: {id}"),
             Selection::Material(id) => format!("Material: {id}"),
             Selection::Furnishing(id) => format!("Furnishing: {id}"),
@@ -2456,6 +2510,9 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Join(_) => "Edit join",
         Selection::Room(_) => "Edit room",
         Selection::Member { .. } => "Edit",
+        Selection::RoofPlane(_) => "Edit roof plane",
+        Selection::Ceiling(_) => "Edit ceiling",
+        Selection::FloorDeck(_) => "Edit floor deck",
         Selection::System(_) => "Edit system",
         Selection::Material(_) => "Edit material",
         Selection::Furnishing(_) => "Edit furnishing",
@@ -2604,6 +2661,24 @@ fn panel_subheader(ui: &mut Ui, title: &str) {
     ui.add_space(3.0);
 }
 
+/// A one-line description of a ceiling/floor-deck surface region for the inspector.
+fn surface_region_summary(region: &framer_core::SurfaceRegion) -> String {
+    match region {
+        framer_core::SurfaceRegion::Room(id) => format!("room {}", id.0),
+        framer_core::SurfaceRegion::Polygon(points) => format!("polygon ({} pts)", points.len()),
+    }
+}
+
+/// The joist span-direction label for the floor-deck inspector.
+fn span_direction_label(span: framer_core::SpanDirection) -> &'static str {
+    match span {
+        framer_core::SpanDirection::Shorter => "shorter clear span",
+        framer_core::SpanDirection::Along => "along",
+        framer_core::SpanDirection::Across => "across",
+        framer_core::SpanDirection::Explicit(_) => "explicit",
+    }
+}
+
 fn selection_badge(selection: &Selection) -> &'static str {
     match selection {
         Selection::Level(_) => "Level",
@@ -2613,6 +2688,9 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Join(_) => "Join",
         Selection::Room(_) => "Room",
         Selection::Member { .. } => "Member",
+        Selection::RoofPlane(_) => "Roof",
+        Selection::Ceiling(_) => "Ceiling",
+        Selection::FloorDeck(_) => "Floor",
         Selection::System(_) => "System",
         Selection::Material(_) => "Material",
         Selection::Furnishing(_) => "Furnishing",

@@ -5,10 +5,13 @@
 use std::collections::BTreeMap;
 
 use eframe::egui::{Color32, Pos2};
-use framer_core::{BuildingModel, ConstructionSystem, ElementId, Length, Material, Wall};
+use framer_core::{
+    BuildingModel, ConstructionSystem, ElementId, LayerFunction, Length, Material, Point2,
+    RoofPlane, SurfaceRegion, Wall,
+};
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
-use super::geom::{OrbitProjector, Point3, point_hits_projected_quad};
+use super::geom::{OrbitProjector, Point3, point_hits_projected_quad, point_in_polygon};
 use super::gpu::GpuVertex;
 use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
 
@@ -88,7 +91,11 @@ impl Scene3d {
         workspace_mode: WorkspaceMode,
         wall_display: WallDisplay,
     ) -> Option<Self> {
-        if model.walls.is_empty() {
+        if model.walls.is_empty()
+            && model.roof_planes.is_empty()
+            && model.ceilings.is_empty()
+            && model.floor_decks.is_empty()
+        {
             return None;
         }
 
@@ -124,6 +131,67 @@ impl Scene3d {
                     }
                 }
             }
+        }
+
+        // Authored roof planes, flat ceilings, and floor decks: opaque surface
+        // slabs that frame and pick like wall envelopes, shown in every workspace
+        // mode (the model carries them whether or not the generated plan is shown).
+        // Each outline is ear-clipped once (concave room loops included) and the
+        // resulting triangulation drives the lifted/sloped vertices.
+        for plane in &model.roof_planes {
+            let Some(verts) = roof_plane_outline_world(plane) else {
+                continue;
+            };
+            let triangles = framer_core::triangulate_simple_polygon(&plane.outline);
+            let color = surface_color(model, &plane.system, SurfaceFace::Roof);
+            let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
+            builder.push_surface(
+                &verts,
+                &triangles,
+                color,
+                ViewClick::RoofPlane {
+                    id: plane.id.0.clone(),
+                },
+                selected,
+            );
+        }
+        for ceiling in &model.ceilings {
+            let z = level_top(model, &ceiling.level) - ceiling.height.inches() as f32;
+            let Some(plan) = region_outline_plan(model, &ceiling.region) else {
+                continue;
+            };
+            let verts = lift_outline(&plan, z);
+            let triangles = framer_core::triangulate_simple_polygon(&plan);
+            let color = surface_color(model, &ceiling.system, SurfaceFace::Ceiling);
+            let selected = matches!(selection, Selection::Ceiling(id) if id == &ceiling.id.0);
+            builder.push_surface(
+                &verts,
+                &triangles,
+                color,
+                ViewClick::Ceiling {
+                    id: ceiling.id.0.clone(),
+                },
+                selected,
+            );
+        }
+        for deck in &model.floor_decks {
+            let z = level_elevation(model, &deck.level);
+            let Some(plan) = region_outline_plan(model, &deck.region) else {
+                continue;
+            };
+            let verts = lift_outline(&plan, z);
+            let triangles = framer_core::triangulate_simple_polygon(&plan);
+            let color = surface_color(model, &deck.system, SurfaceFace::Floor);
+            let selected = matches!(selection, Selection::FloorDeck(id) if id == &deck.id.0);
+            builder.push_surface(
+                &verts,
+                &triangles,
+                color,
+                ViewClick::FloorDeck {
+                    id: deck.id.0.clone(),
+                },
+                selected,
+            );
         }
 
         builder.finish_opaque();
@@ -205,14 +273,14 @@ impl SceneBuilder {
             layer_band_span(interior_sign, total, member.side_offset, member.side_depth);
         let solid = WallCuboid::new(wall, x0, x1, side0, side1, z0, z1);
         self.push_cuboid(&solid, color_to_rgba(color));
-        self.picks.push(PickSolid {
-            click: ViewClick::Member {
+        self.picks.push(PickSolid::cuboid(
+            ViewClick::Member {
                 wall_id: wall.id.0.clone(),
                 member_id: member.id.clone(),
             },
-            priority: 3,
-            corners: solid.corners,
-        });
+            3,
+            solid.corners,
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -278,11 +346,11 @@ impl SceneBuilder {
 
         // The pick envelope spans the full wall thickness regardless of layering,
         // mode, or which side is interior — so walls stay clickable in every mode.
-        self.picks.push(PickSolid {
-            click: ViewClick::Wall(wall_index),
-            priority: 1,
-            corners: envelope.corners,
-        });
+        self.picks.push(PickSolid::cuboid(
+            ViewClick::Wall(wall_index),
+            1,
+            envelope.corners,
+        ));
     }
 
     /// Collect the 12 edges of the wall's full-thickness envelope for the
@@ -391,14 +459,14 @@ impl SceneBuilder {
             opening.sill_height.inches() as f32,
             opening.top().inches() as f32,
         );
-        self.picks.push(PickSolid {
-            click: ViewClick::Opening {
+        self.picks.push(PickSolid::cuboid(
+            ViewClick::Opening {
                 wall_index,
                 opening_id,
             },
-            priority: 2,
-            corners: solid.corners,
-        });
+            2,
+            solid.corners,
+        ));
     }
 
     fn push_cuboid(&mut self, cuboid: &WallCuboid, color: [f32; 4]) {
@@ -419,6 +487,61 @@ impl SceneBuilder {
             }
             self.indices
                 .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    /// Push one flat surface (a roof plane / flat ceiling / floor deck) from its
+    /// world-space outline polygon: an opaque double-faced sheet (top + bottom,
+    /// opposite normals — the axonometric pipeline does not cull, so both sides
+    /// light correctly), feeding the orbit framing and a polygon pick volume. The
+    /// outline lies on the same plane the path-traced render uses, so the two views
+    /// agree. Brightened when selected, like a wall envelope.
+    fn push_surface(
+        &mut self,
+        outline: &[Point3],
+        triangles: &[[usize; 3]],
+        color: Color32,
+        click: ViewClick,
+        selected: bool,
+    ) {
+        if outline.len() < 3 {
+            return;
+        }
+        let fill = color_to_rgba(if selected { brighten(color, 30) } else { color });
+        // Both faces share the same triangulation; the normal (uniform per face)
+        // decides which way each lights, so winding need not be reversed.
+        let up = polygon_normal(outline);
+        self.push_face(outline, triangles, up, fill);
+        self.push_face(outline, triangles, -up, fill);
+        self.points.extend_from_slice(outline);
+        self.picks.push(PickSolid::surface(
+            click,
+            SURFACE_PICK_PRIORITY,
+            outline.to_vec(),
+        ));
+    }
+
+    /// Emit one face of a surface from precomputed triangle index triples (an
+    /// ear-clip from `triangulate_simple_polygon`, correct for concave outlines),
+    /// all sharing a single flat `normal`.
+    fn push_face(
+        &mut self,
+        verts: &[Point3],
+        triangles: &[[usize; 3]],
+        normal: Point3,
+        color: [f32; 4],
+    ) {
+        for &[ia, ib, ic] in triangles {
+            let base = self.vertices.len() as u32;
+            for &index in &[ia, ib, ic] {
+                let point = verts[index];
+                self.vertices.push(GpuVertex {
+                    position: [point.x, point.y, point.z],
+                    color,
+                    normal: [normal.x, normal.y, normal.z],
+                });
+            }
+            self.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
     }
 
@@ -518,21 +641,64 @@ impl CuboidFace {
 pub(super) struct PickSolid {
     pub(super) click: ViewClick,
     priority: u8,
-    corners: [Point3; 8],
+    shape: PickShape,
+}
+
+/// The hit-test geometry of a pickable solid. Walls/members/openings are boxes
+/// (hit face-by-face); roof/ceiling/floor surfaces are thin slabs hit-tested
+/// against their projected outline polygon (which need not be a quad).
+enum PickShape {
+    Cuboid([Point3; 8]),
+    Surface(Vec<Point3>),
 }
 
 impl PickSolid {
+    fn cuboid(click: ViewClick, priority: u8, corners: [Point3; 8]) -> Self {
+        Self {
+            click,
+            priority,
+            shape: PickShape::Cuboid(corners),
+        }
+    }
+
+    fn surface(click: ViewClick, priority: u8, outline: Vec<Point3>) -> Self {
+        Self {
+            click,
+            priority,
+            shape: PickShape::Surface(outline),
+        }
+    }
+
     fn hit_depth(&self, pointer: Pos2, projector: &OrbitProjector) -> Option<f32> {
-        let mut best_depth = None::<f32>;
-        for face in CUBOID_FACE_INDICES {
-            let projected = face.map(|index| projector.project_point(self.corners[index]));
-            let positions = projected.map(|point| point.pos);
-            if point_hits_projected_quad(pointer, &positions) {
-                let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 4.0;
-                best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+        match &self.shape {
+            PickShape::Cuboid(corners) => {
+                let mut best_depth = None::<f32>;
+                for face in CUBOID_FACE_INDICES {
+                    let projected = face.map(|index| projector.project_point(corners[index]));
+                    let positions = projected.map(|point| point.pos);
+                    if point_hits_projected_quad(pointer, &positions) {
+                        let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 4.0;
+                        best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+                    }
+                }
+                best_depth
+            }
+            PickShape::Surface(outline) => {
+                let projected: Vec<_> = outline
+                    .iter()
+                    .map(|point| projector.project_point(*point))
+                    .collect();
+                let positions: Vec<Pos2> = projected.iter().map(|point| point.pos).collect();
+                if positions.len() >= 3 && point_in_polygon(pointer, &positions) {
+                    Some(
+                        projected.iter().map(|point| point.depth).sum::<f32>()
+                            / projected.len() as f32,
+                    )
+                } else {
+                    None
+                }
             }
         }
-        best_depth
     }
 }
 
@@ -685,5 +851,417 @@ pub(super) fn member_color(kind: MemberKind) -> Color32 {
         MemberKind::Blocking => Color32::from_rgb(181, 154, 106),
         MemberKind::Rafter => Color32::from_rgb(138, 111, 74),
         MemberKind::RidgeBoard => Color32::from_rgb(93, 74, 50),
+    }
+}
+
+// === roof / ceiling / floor surfaces ===
+
+/// Surfaces share the wall envelope's pick priority: a roof rarely overlaps a wall
+/// in screen space, and ties fall back to depth (the nearer solid wins).
+const SURFACE_PICK_PRIORITY: u8 = 1;
+
+/// Which finished face of a surface assembly is shown, so it picks the layer the
+/// viewer sees and a sensible fallback color.
+#[derive(Clone, Copy)]
+enum SurfaceFace {
+    Roof,
+    Ceiling,
+    Floor,
+}
+
+/// The fill color of a roof/ceiling/floor surface: the resolved color of its
+/// system's representative finish layer (the roof's weather face, a ceiling/floor's
+/// conditioned-side finish), falling back to a neutral tone so it stays visible
+/// when the system or material is missing. Mirrors the render path's choice so the
+/// 3D view and the path-traced view agree.
+fn surface_color(model: &BuildingModel, system_id: &ElementId, face: SurfaceFace) -> Color32 {
+    let fallback = match face {
+        SurfaceFace::Roof => Color32::from_rgb(96, 99, 107),
+        SurfaceFace::Ceiling => Color32::from_rgb(226, 226, 222),
+        SurfaceFace::Floor => Color32::from_rgb(150, 120, 86),
+    };
+    let Some(system) = model.systems.iter().find(|system| system.id == *system_id) else {
+        return fallback;
+    };
+    let layer = match face {
+        SurfaceFace::Roof => system
+            .layers
+            .iter()
+            .rev()
+            .find(|layer| layer.function == LayerFunction::Roofing)
+            .or_else(|| {
+                system.layers.iter().rev().find(|layer| {
+                    matches!(
+                        layer.function,
+                        LayerFunction::WeatherBarrier | LayerFunction::Sheathing
+                    )
+                })
+            })
+            .or_else(|| system.layers.last()),
+        SurfaceFace::Ceiling => system
+            .layers
+            .iter()
+            .find(|layer| {
+                matches!(
+                    layer.function,
+                    LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
+                )
+            })
+            .or_else(|| system.layers.first()),
+        SurfaceFace::Floor => system
+            .layers
+            .iter()
+            .find(|layer| {
+                matches!(
+                    layer.function,
+                    LayerFunction::InteriorFinish | LayerFunction::Sheathing
+                )
+            })
+            .or_else(|| system.layers.first()),
+    };
+    layer
+        .and_then(|layer| model.material(&layer.material))
+        .map(|material| {
+            let [r, g, b] = material.color();
+            Color32::from_rgb(r, g, b)
+        })
+        .unwrap_or(fallback)
+}
+
+/// A level's floor elevation (inches), or 0 when the level is missing.
+fn level_elevation(model: &BuildingModel, level_id: &ElementId) -> f32 {
+    model
+        .levels
+        .iter()
+        .find(|level| level.id == *level_id)
+        .map(|level| level.elevation.inches() as f32)
+        .unwrap_or(0.0)
+}
+
+/// A level's top plane elevation (`elevation + height`, inches) — the hang
+/// reference a ceiling drops below — or 0 when the level is missing.
+fn level_top(model: &BuildingModel, level_id: &ElementId) -> f32 {
+    model
+        .levels
+        .iter()
+        .find(|level| level.id == *level_id)
+        .map(|level| (level.elevation + level.height).inches() as f32)
+        .unwrap_or(0.0)
+}
+
+/// A ceiling/floor-deck region's closed plan outline. `Room` regions resolve
+/// through the wall graph (mirroring the solver), so the drawn surface tracks the
+/// same enclosed face the joists frame; an unknown room or an open (mid-edit) loop
+/// yields `None` and the surface is simply skipped.
+fn region_outline_plan(model: &BuildingModel, region: &SurfaceRegion) -> Option<Vec<Point2>> {
+    let outline = match region {
+        SurfaceRegion::Polygon(points) => points.clone(),
+        SurfaceRegion::Room(room_id) => {
+            let room = model.rooms.iter().find(|room| room.id == *room_id)?;
+            framer_core::room_boundary(model, room.seed)?.vertices
+        }
+    };
+    (outline.len() >= 3).then_some(outline)
+}
+
+/// Lift a plan outline to constant elevation `z` (a flat ceiling/floor surface).
+fn lift_outline(outline: &[Point2], z: f32) -> Vec<Point3> {
+    outline
+        .iter()
+        .map(|point| Point3::vector(point.x.inches() as f32, point.y.inches() as f32, z))
+        .collect()
+}
+
+/// A roof plane's plan outline lifted onto its sloped plane: each point's
+/// elevation is the springing elevation raised by its up-slope plan distance times
+/// the pitch. Mirrors the solver's `roof_plane_geometry` and the render path so the
+/// rendered surface lies on exactly the plane the rafters frame. The up-slope
+/// normal is oriented toward the outline centroid, so it is winding-independent.
+/// `None` for a degenerate outline (no eave length).
+fn roof_plane_outline_world(plane: &RoofPlane) -> Option<Vec<Point3>> {
+    let n = plane.outline.len();
+    if n < 3 {
+        return None;
+    }
+    let i = plane.eave_edge as usize % n;
+    let a = plane.outline[i];
+    let b = plane.outline[(i + 1) % n];
+    let (ax, ay) = (a.x.inches(), a.y.inches());
+    let ex = b.x.inches() - ax;
+    let ey = b.y.inches() - ay;
+    let eave_len = (ex * ex + ey * ey).sqrt();
+    if eave_len <= f64::EPSILON {
+        return None;
+    }
+    let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
+    let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
+    let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
+    let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
+    if nx * (cx - mx) + ny * (cy - my) < 0.0 {
+        nx = -nx;
+        ny = -ny;
+    }
+    let run = plane.slope.run.inches();
+    let ratio = if run > 0.0 {
+        plane.slope.rise.inches() / run
+    } else {
+        0.0
+    };
+    let reference = plane.reference_elevation.inches();
+    Some(
+        plane
+            .outline
+            .iter()
+            .map(|p| {
+                let (x, y) = (p.x.inches(), p.y.inches());
+                let upslope = (x - ax) * nx + (y - ay) * ny;
+                Point3::vector(x as f32, y as f32, (reference + upslope * ratio) as f32)
+            })
+            .collect(),
+    )
+}
+
+/// The unit normal of a planar polygon (Newell's method), oriented upward (+z) so
+/// a surface's top face faces the sky. Falls back to +Z for a degenerate polygon.
+fn polygon_normal(verts: &[Point3]) -> Point3 {
+    let n = verts.len();
+    let (mut nx, mut ny, mut nz) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for i in 0..n {
+        let a = verts[i];
+        let b = verts[(i + 1) % n];
+        nx += (a.y - b.y) * (a.z + b.z);
+        ny += (a.z - b.z) * (a.x + b.x);
+        nz += (a.x - b.x) * (a.y + b.y);
+    }
+    let length = (nx * nx + ny * ny + nz * nz).sqrt();
+    if length <= f32::EPSILON {
+        return Point3::Z;
+    }
+    let sign = if nz < 0.0 { -1.0 } else { 1.0 };
+    Point3::vector(sign * nx / length, sign * ny / length, sign * nz / length)
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use eframe::egui::Rect;
+    use framer_core::{
+        BoardProfile, Ceiling, CodeProfile, ConstructionLayer, FloorDeck, FramingPattern,
+        FramingSpec, MemberFamily, Point2, Slope, SystemKind,
+    };
+    use framer_solver::ProjectFramePlan;
+
+    use crate::app::viewport::camera_3d::View3dState;
+
+    fn empty_plan() -> ProjectFramePlan {
+        ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        }
+    }
+
+    fn rect() -> Vec<Point2> {
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(12.0), Length::ZERO),
+            Point2::new(Length::from_feet(12.0), Length::from_feet(8.0)),
+            Point2::new(Length::ZERO, Length::from_feet(8.0)),
+        ]
+    }
+
+    fn finish_system(
+        id: &str,
+        kind: SystemKind,
+        finish: LayerFunction,
+        finish_material: &str,
+        finish_first: bool,
+    ) -> ConstructionSystem {
+        let framing = ConstructionLayer::new(
+            LayerFunction::Framing,
+            "mat-spf",
+            BoardProfile::TwoBySix.nominal_depth(),
+        )
+        .with_framing(FramingSpec {
+            member: BoardProfile::TwoBySix,
+            spacing: Length::from_whole_inches(16),
+            pattern: FramingPattern::Single,
+            member_family: MemberFamily::Rafter,
+            cavity_material: None,
+        });
+        let finish = ConstructionLayer::new(finish, finish_material, Length::from_whole_inches(1));
+        ConstructionSystem {
+            id: ElementId::new(id),
+            name: id.to_owned(),
+            kind,
+            source: None,
+            layers: if finish_first {
+                vec![finish, framing]
+            } else {
+                vec![framing, finish]
+            },
+        }
+    }
+
+    /// A model with one sloped roof plane, one flat ceiling, and one floor deck
+    /// over a 12×8 footprint (Polygon regions, so no walls are needed).
+    fn surface_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        for level in &mut model.levels {
+            if level.id.0 == "level-1" {
+                level.height = Length::from_whole_inches(108);
+            }
+        }
+        model
+            .materials
+            .push(Material::solid_color("mat-roof", "Shingle", [44, 46, 52]));
+        model.materials.push(Material::solid_color(
+            "mat-ceil",
+            "Ceiling",
+            [232, 232, 228],
+        ));
+        model.materials.push(Material::solid_color(
+            "mat-floor",
+            "Subfloor",
+            [150, 116, 78],
+        ));
+        model.systems.push(finish_system(
+            "system-roof",
+            SystemKind::Roof,
+            LayerFunction::Roofing,
+            "mat-roof",
+            false,
+        ));
+        model.systems.push(finish_system(
+            "system-ceiling",
+            SystemKind::Ceiling,
+            LayerFunction::CeilingFinish,
+            "mat-ceil",
+            true,
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-1",
+            "Roof",
+            "level-1",
+            "system-roof",
+            rect(),
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect()),
+            Length::from_whole_inches(12),
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect()),
+        ));
+        model
+    }
+
+    fn build(model: &BuildingModel, selection: &Selection) -> Scene3d {
+        Scene3d::from_project(
+            model,
+            &empty_plan(),
+            0,
+            selection,
+            WorkspaceMode::Design,
+            WallDisplay::Outline,
+        )
+        .expect("a model with surfaces builds a scene")
+    }
+
+    fn pick_clicks(scene: &Scene3d) -> Vec<ViewClick> {
+        scene.picks.iter().map(|pick| pick.click.clone()).collect()
+    }
+
+    #[test]
+    fn surfaces_emit_geometry_and_pick_volumes() {
+        let scene = build(&surface_model(), &Selection::Wall);
+        // Each surface is a double-faced sheet (two triangles per side for a quad),
+        // so geometry is present and the framing points include the surface corners.
+        assert!(!scene.vertices.is_empty(), "no surface geometry emitted");
+        assert!(
+            scene.points.len() >= 12,
+            "surfaces did not feed the framing"
+        );
+
+        let clicks = pick_clicks(&scene);
+        assert!(
+            clicks
+                .iter()
+                .any(|c| matches!(c, ViewClick::RoofPlane { id } if id == "roof-1")),
+            "no roof-plane pick volume emitted"
+        );
+        assert!(
+            clicks
+                .iter()
+                .any(|c| matches!(c, ViewClick::Ceiling { id } if id == "ceiling-1")),
+        );
+        assert!(
+            clicks
+                .iter()
+                .any(|c| matches!(c, ViewClick::FloorDeck { id } if id == "deck-1")),
+        );
+    }
+
+    #[test]
+    fn roof_surface_is_sloped_and_decks_sit_at_their_elevations() {
+        let scene = build(&surface_model(), &Selection::Wall);
+        let zs: Vec<f32> = scene.vertices.iter().map(|v| v.position[2]).collect();
+        let lo = zs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        // Floor deck at level elevation 0; roof ridge at 96 + 96*(6/12) = 144".
+        assert!((lo - 0.0).abs() < 0.5, "lowest surface z {lo}, want ~0");
+        assert!(
+            (hi - 144.0).abs() < 0.5,
+            "highest surface z {hi}, want ~144"
+        );
+        // The geometry is finite (no NaN normals from a degenerate fan).
+        for v in &scene.vertices {
+            assert!(v.position.iter().all(|c| c.is_finite()));
+            assert!(v.normal.iter().all(|c| c.is_finite()));
+        }
+    }
+
+    #[test]
+    fn clicking_a_roof_surface_picks_it() {
+        let scene = build(&surface_model(), &Selection::Wall);
+        let drawing = Rect::from_min_size((0.0, 0.0).into(), (600.0, 400.0).into());
+        let projector = OrbitProjector::from_points(&scene.points, drawing, View3dState::default())
+            .expect("a projector for the surface points");
+        // Aim at the roof's plan centroid (6ft, 4ft); the projected point must land
+        // on the roof surface and pick it.
+        let centroid = Point3::vector(
+            Length::from_feet(6.0).inches() as f32,
+            Length::from_feet(4.0).inches() as f32,
+            // The plane elevation at the centroid: springing 96" + 48" up-slope ×
+            // 6/12 = 120".
+            120.0,
+        );
+        let screen = projector.project_point(centroid).pos;
+        match scene.pick(screen, &projector) {
+            Some(ViewClick::RoofPlane { id }) => assert_eq!(id, "roof-1"),
+            _ => panic!("expected to pick the roof plane at its centroid"),
+        }
     }
 }
