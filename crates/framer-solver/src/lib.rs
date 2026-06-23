@@ -3,8 +3,9 @@ use std::fmt::Write;
 
 use framer_core::{
     BoardProfile, BuildingModel, Ceiling, CodeProfile, ConstructionSystem, ElementId, FloorDeck,
-    FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2, SpanDirection,
-    SurfaceRegion, Wall, WallJoin, WallJoinKind, polygon_area_square_inches, room_boundaries,
+    FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2, RoofPlane, Slope,
+    SpanDirection, SurfaceRegion, Wall, WallJoin, WallJoinKind, polygon_area_square_inches,
+    room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -75,6 +76,30 @@ impl CeilingFramePlan {
     }
 }
 
+/// The derived framing of one roof plane: its common rafters, plate blocking,
+/// and (for a gable plane that carries the shared ridge) a ridge board, plus the
+/// per-layer material takeoff and any diagnostics. Mirrors [`WallFramePlan`],
+/// keyed to the authored [`RoofPlane`]. Rafters carry a [`SlopedPlacement`]; the
+/// plan stays float-free (true lengths are rounded to ticks).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoofFramePlan {
+    pub roof: ElementId,
+    pub members: Vec<FrameMember>,
+    #[serde(default)]
+    pub layers: Vec<LayerBomItem>,
+    pub diagnostics: Vec<PlanDiagnostic>,
+}
+
+impl RoofFramePlan {
+    pub fn bom(&self) -> Vec<BomItem> {
+        bom_from_members(self.members.iter())
+    }
+
+    pub fn layer_bom(&self) -> Vec<LayerBomItem> {
+        layer_bom_from(self.layers.iter())
+    }
+}
+
 /// A per-layer material takeoff row: how much of one material a layer requires.
 /// Area goods (finishes, sheathing, cladding, weather barriers, masonry) report
 /// `area_sq_in` (square inches); volumetric goods (continuous insulation and the
@@ -99,6 +124,8 @@ pub struct ProjectFramePlan {
     pub floor_plans: Vec<FloorFramePlan>,
     #[serde(default)]
     pub ceiling_plans: Vec<CeilingFramePlan>,
+    #[serde(default)]
+    pub roof_plans: Vec<RoofFramePlan>,
     pub diagnostics: Vec<PlanDiagnostic>,
     #[serde(default)]
     pub rooms: Vec<RoomSchedule>,
@@ -127,7 +154,8 @@ impl RoomSchedule {
 }
 
 impl ProjectFramePlan {
-    /// Every framing member across every host: walls, floor decks, and ceilings.
+    /// Every framing member across every host: walls, floor decks, ceilings, and
+    /// roof planes.
     fn all_members(&self) -> impl Iterator<Item = &FrameMember> {
         self.wall_plans
             .iter()
@@ -138,6 +166,7 @@ impl ProjectFramePlan {
                     .iter()
                     .flat_map(|plan| plan.members.iter()),
             )
+            .chain(self.roof_plans.iter().flat_map(|plan| plan.members.iter()))
     }
 
     pub fn bom(&self) -> Vec<BomItem> {
@@ -172,6 +201,12 @@ impl ProjectFramePlan {
         self.ceiling_plans
             .iter()
             .find(|ceiling_plan| ceiling_plan.ceiling == *ceiling)
+    }
+
+    pub fn roof_plan(&self, roof: &ElementId) -> Option<&RoofFramePlan> {
+        self.roof_plans
+            .iter()
+            .find(|roof_plan| roof_plan.roof == *roof)
     }
 }
 
@@ -347,7 +382,29 @@ pub struct FrameMember {
     /// (== `member.nominal_depth()`). The member occupies `[side_offset,
     /// side_offset + side_depth]` across the wall section.
     pub side_depth: Length,
+    /// Sloped placement for roof-plane members whose true building elevation
+    /// varies along their in-plane run (a rafter rises from eave to ridge).
+    /// `None` for plain 2-D members (walls, flat floors/ceilings), which sit at a
+    /// single host elevation applied at render. When `Some`, `cut_length` is the
+    /// true sloped length of the board; the in-plane plan run is recovered as
+    /// `sqrt(cut_length² − (high − low)²)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sloped: Option<SlopedPlacement>,
     pub provenance: RuleProvenance,
+}
+
+/// The vertical placement of a sloped roof-plane member: the true building
+/// elevation at each end of its in-plane run. A rafter's `low` is its eave (or
+/// overhang-tail) end and `high` is its ridge end; level roof members (a ridge
+/// board, eave blocking) carry `low == high`. Integer-tick and `Eq` so the
+/// derived plan stays deterministic; true (f64) geometry is computed transiently
+/// in the solver and rounded to ticks here, never stored as a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlopedPlacement {
+    /// True building elevation at the member's low (eave/tail) end.
+    pub low_elevation: Length,
+    /// True building elevation at the member's high (ridge) end.
+    pub high_elevation: Length,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +443,12 @@ pub enum MemberKind {
     RimJoist,
     /// A short member set between joists (e.g. a mid-span blocking row).
     Blocking,
+    /// A common rafter: the sloped span member of a roof plane, running up the
+    /// slope from the eave (downslope) edge to the ridge/high edge.
+    Rafter,
+    /// The ridge board a gable's opposing rafters bear against, running level
+    /// along the ridge (the shared high edge of two roof planes).
+    RidgeBoard,
 }
 
 impl MemberKind {
@@ -406,6 +469,8 @@ impl MemberKind {
             Self::CeilingJoist => "ceiling joist",
             Self::RimJoist => "rim joist",
             Self::Blocking => "blocking",
+            Self::Rafter => "rafter",
+            Self::RidgeBoard => "ridge board",
         }
     }
 }
@@ -929,6 +994,433 @@ pub fn generate_ceiling_plan(
     })
 }
 
+/// The plan-projected geometry of a roof plane derived from its outline and
+/// designated eave edge: the eave (layout) length the rafters are arrayed along,
+/// the up-slope run extent they span in plan, and the high (ridge) edge used to
+/// detect a shared gable ridge. All lengths are horizontal plan projections; the
+/// generator scales the run by the pitch factor to get the true sloped cut.
+struct RoofPlaneGeometry {
+    /// Length of the eave edge — the layout axis the rafters array along.
+    eave_length: Length,
+    /// Greatest perpendicular (up-slope) plan distance from the eave line to the
+    /// outline: how far the rafters run in plan from the eave to the ridge.
+    run_extent: Length,
+    /// The high (ridge) edge as an endpoint pair (exact outline points), compared
+    /// unordered to find two planes that share a gable ridge.
+    high_edge: (Point2, Point2),
+}
+
+/// Derive a roof plane's plan geometry. Returns `None` for a degenerate outline
+/// (no eave length) the model validator would normally reject first. The up-slope
+/// direction is the eave-perpendicular oriented toward the outline centroid, so
+/// it is robust to the polygon's winding.
+fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
+    let n = plane.outline.len();
+    if n < 3 {
+        return None;
+    }
+    let i = plane.eave_edge as usize % n;
+    let a = plane.outline[i];
+    let b = plane.outline[(i + 1) % n];
+    let (ax, ay) = (a.x.inches(), a.y.inches());
+    let ex = b.x.inches() - ax;
+    let ey = b.y.inches() - ay;
+    let eave_len = (ex * ex + ey * ey).sqrt();
+    if eave_len <= f64::EPSILON {
+        return None;
+    }
+
+    // Up-slope unit normal: a perpendicular to the eave oriented toward the
+    // outline centroid (independent of winding order).
+    let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
+    let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
+    let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
+    let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
+    if nx * (cx - mx) + ny * (cy - my) < 0.0 {
+        nx = -nx;
+        ny = -ny;
+    }
+
+    // Run extent: the farthest up-slope perpendicular distance to any vertex.
+    let run_extent = plane
+        .outline
+        .iter()
+        .map(|p| (p.x.inches() - ax) * nx + (p.y.inches() - ay) * ny)
+        .fold(0.0_f64, f64::max);
+
+    // High (ridge) edge: the outline edge whose midpoint is farthest up-slope.
+    let mut high_edge = (a, b);
+    let mut best = f64::MIN;
+    for k in 0..n {
+        let p = plane.outline[k];
+        let q = plane.outline[(k + 1) % n];
+        let mid = (
+            (p.x.inches() + q.x.inches()) / 2.0,
+            (p.y.inches() + q.y.inches()) / 2.0,
+        );
+        let d = (mid.0 - ax) * nx + (mid.1 - ay) * ny;
+        if d > best {
+            best = d;
+            high_edge = (p, q);
+        }
+    }
+
+    Some(RoofPlaneGeometry {
+        eave_length: Length::from_inches(eave_len),
+        run_extent: Length::from_inches(run_extent),
+        high_edge,
+    })
+}
+
+/// True sloped length per unit plan run for a pitch (1 when flat, ≥ 1 otherwise).
+fn slope_factor(slope: Slope) -> f64 {
+    let rise = slope.rise.inches();
+    let run = slope.run.inches();
+    if run <= 0.0 {
+        return 1.0;
+    }
+    ((run * run + rise * rise).sqrt() / run).max(1.0)
+}
+
+/// Rise (vertical) per unit plan run for a pitch.
+fn slope_ratio(slope: Slope) -> f64 {
+    let run = slope.run.inches();
+    if run <= 0.0 {
+        return 0.0;
+    }
+    slope.rise.inches() / run
+}
+
+/// Whether two edges (endpoint pairs) are the same segment, ignoring direction.
+fn same_edge(a: (Point2, Point2), b: (Point2, Point2)) -> bool {
+    (a.0 == b.0 && a.1 == b.1) || (a.0 == b.1 && a.1 == b.0)
+}
+
+/// The true building elevation of a plane's ridge (high edge): the eave springing
+/// raised by the plan run times the pitch. Used both to place the ridge board and
+/// to check that two planes sharing a ridge edge agree on its height.
+fn ridge_elevation(plane: &RoofPlane, run_extent: Length) -> Length {
+    plane.reference_elevation + Length::from_inches(run_extent.inches() * slope_ratio(plane.slope))
+}
+
+/// Generate the framing plan for one roof plane: common rafters arrayed along the
+/// eave at on-center spacing (running up the slope to the ridge, cut to their
+/// true sloped length), level plate blocking between rafters at the eave, and —
+/// when `carries_ridge` — a ridge board along the high edge. A sibling of
+/// [`generate_wall_plan`]. Spacing and area use plan (horizontal) length; only
+/// the rafter cut length is the true sloped length, rounded to integer ticks at
+/// this f64 boundary.
+pub fn generate_roof_plan(
+    plane: &RoofPlane,
+    system: &ConstructionSystem,
+    materials: &[Material],
+    carries_ridge: bool,
+) -> Result<RoofFramePlan, SolverError> {
+    let framing = system_framing(system)?;
+    let band = FramingBand::for_system(system)?;
+    let rafter = framing.member;
+    let spacing = framing.spacing;
+    let rafter_thickness = rafter.thickness();
+
+    let mut members = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    let Some(geometry) = roof_plane_geometry(plane) else {
+        diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Warning,
+            "roof.outline.degenerate",
+            Some(plane.id.clone()),
+            format!(
+                "{} has a degenerate outline, so its rafters cannot be laid out.",
+                plane.name
+            ),
+        ));
+        return Ok(RoofFramePlan {
+            roof: plane.id.clone(),
+            members,
+            layers: Vec::new(),
+            diagnostics,
+        });
+    };
+
+    let factor = slope_factor(plane.slope);
+    let ratio = slope_ratio(plane.slope);
+    let run_extent = geometry.run_extent;
+    let overhang = plane.eave_overhang;
+
+    // The whole rafter board, eave overhang tail included, cut to true length.
+    let total_plan_run = run_extent + overhang;
+    let cut_length = Length::from_inches(total_plan_run.inches() * factor);
+    // Plane-local v = 0 is the eave bearing line; the tail sits at v = -overhang.
+    let tail_v = Length::ZERO - overhang;
+    let ridge_elevation = ridge_elevation(plane, run_extent);
+    let tail_elevation = plane.reference_elevation - Length::from_inches(overhang.inches() * ratio);
+    let rafter_slope = SlopedPlacement {
+        low_elevation: tail_elevation,
+        high_elevation: ridge_elevation,
+    };
+
+    // Common rafters: arrayed along the eave (layout) axis at o.c., each running
+    // up the slope. End rafters align with the rake edges.
+    let positions = stud_positions(geometry.eave_length, spacing, rafter_thickness);
+    for mark in &positions {
+        members.push(frame_member(
+            format!("rafter-{}", mark.ticks()),
+            &plane.id,
+            MemberKind::Rafter,
+            rafter,
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                *mark,
+                tail_v,
+                cut_length,
+                rafter_thickness,
+            )
+            .with_slope(rafter_slope),
+            band,
+            RuleProvenance::new(
+                "roof.rafters.on-center",
+                format!(
+                    "Common rafters span the {} plan run perpendicular to the eave; end rafters align with the rake edges and interior rafters fall on {} layout marks. The cut length is the true sloped length (plan run times the {}:{} pitch).",
+                    run_extent, spacing, plane.slope.rise, plane.slope.run
+                ),
+            ),
+        ));
+    }
+
+    // Plate blocking: one level piece in each clear gap between adjacent rafters
+    // at the eave bearing line (a starter rule).
+    let eave_slope = SlopedPlacement {
+        low_elevation: plane.reference_elevation,
+        high_elevation: plane.reference_elevation,
+    };
+    for pair in positions.windows(2) {
+        let start = pair[0] + rafter_thickness / 2;
+        let gap = pair[1] - pair[0] - rafter_thickness;
+        if gap <= Length::ZERO {
+            continue;
+        }
+        members.push(frame_member(
+            format!("roof-blocking-{}", start.ticks()),
+            &plane.id,
+            MemberKind::Blocking,
+            rafter,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                start,
+                Length::ZERO,
+                gap,
+                rafter_thickness,
+            )
+            .with_slope(eave_slope),
+            band,
+            RuleProvenance::new(
+                "roof.blocking.eave",
+                "Level blocking is generated between rafters at the eave bearing line (starter rule).",
+            ),
+        ));
+    }
+
+    // The ridge board runs level along the shared gable ridge; the opposing
+    // planes' rafters bear against it. Only the ridge-carrying plane emits it so
+    // a gable's single ridge is counted once.
+    if carries_ridge {
+        members.push(frame_member(
+            "ridge-board",
+            &plane.id,
+            MemberKind::RidgeBoard,
+            rafter,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                Length::ZERO,
+                run_extent,
+                geometry.eave_length,
+                rafter_thickness,
+            )
+            .with_slope(SlopedPlacement {
+                low_elevation: ridge_elevation,
+                high_elevation: ridge_elevation,
+            }),
+            band,
+            RuleProvenance::new(
+                "roof.ridge.gable",
+                "A ridge board runs level along the shared gable ridge using the system framing member; the opposing rafters bear against it.",
+            ),
+        ));
+        diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Warning,
+            "roof.ridge.no-tie",
+            Some(plane.id.clone()),
+            "A ridge board is generated without verifying a rafter tie or ceiling joist at the plate; a structural ridge beam may be required. v1 performs no tie/connection check.",
+        ));
+    }
+
+    // v1 surfaces structural judgment as a diagnostic, never an enforced span
+    // check (real rafter span tables arrive with M4 code profiles).
+    diagnostics.push(PlanDiagnostic::new(
+        DiagnosticSeverity::Info,
+        "roof.span.not-checked",
+        Some(plane.id.clone()),
+        format!(
+            "{} rafters are laid out geometrically; their span has not been checked against a code span table.",
+            plane.name
+        ),
+    ));
+
+    // The roof's per-layer takeoff uses the plan footprint area (v1 does not yet
+    // scale roofing goods by the slope to true surface area).
+    let layers = layers_takeoff(
+        system,
+        polygon_area_square_inches(&plane.outline).round() as i64,
+        materials,
+    );
+
+    Ok(RoofFramePlan {
+        roof: plane.id.clone(),
+        members,
+        layers,
+        diagnostics,
+    })
+}
+
+/// How a roof plane relates to a shared gable ridge, deciding whether it emits a
+/// ridge board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RidgeCondition {
+    /// No plane shares this plane's high edge (a shed / lone plane) — no ridge.
+    None,
+    /// This plane carries the single ridge board for a matched gable (it holds
+    /// the smallest id among the planes sharing the ridge at the same elevation).
+    Carries,
+    /// Shares a matched ridge but defers the single ridge board to a smaller-id
+    /// plane, so emits none itself.
+    Deferred,
+    /// Shares a high edge in plan but the sharing planes disagree on the ridge's
+    /// true elevation (different pitch or springing), so a single shared ridge is
+    /// geometrically invalid: each plane frames its own ridge and a diagnostic is
+    /// emitted.
+    Mismatched,
+}
+
+/// Classify the ridge condition of `planes[index]` by comparing its high (ridge)
+/// edge — and the true elevation of that ridge — against every other plane. Two
+/// planes that share the plan-projected edge but compute different ridge
+/// elevations cannot meet at one ridge, so the shared edge alone is not enough. A
+/// 1-tick tolerance absorbs rounding; matched gables produce identical ticks.
+///
+/// `geometries` holds each plane's precomputed [`RoofPlaneGeometry`] (aligned with
+/// `planes`), so the per-plane outline pass runs once rather than re-deriving on
+/// every comparison.
+fn ridge_condition(
+    index: usize,
+    planes: &[RoofPlane],
+    geometries: &[Option<RoofPlaneGeometry>],
+) -> RidgeCondition {
+    let plane = &planes[index];
+    let Some(geometry) = geometries[index].as_ref() else {
+        return RidgeCondition::None;
+    };
+    let my_ridge = ridge_elevation(plane, geometry.run_extent);
+    let mut shares = false;
+    let mut elevations_agree = true;
+    let mut defer = false;
+    for (other_index, other) in planes.iter().enumerate() {
+        if other_index == index {
+            continue;
+        }
+        let Some(other_geometry) = geometries[other_index].as_ref() else {
+            continue;
+        };
+        if !same_edge(geometry.high_edge, other_geometry.high_edge) {
+            continue;
+        }
+        shares = true;
+        let other_ridge = ridge_elevation(other, other_geometry.run_extent);
+        if (my_ridge - other_ridge).abs() > Length::from_ticks(1) {
+            elevations_agree = false;
+        } else if other.id < plane.id {
+            // A smaller-id, elevation-matched sharer carries the single ridge.
+            defer = true;
+        }
+    }
+
+    match (shares, elevations_agree, defer) {
+        (false, _, _) => RidgeCondition::None,
+        (true, false, _) => RidgeCondition::Mismatched,
+        (true, true, true) => RidgeCondition::Deferred,
+        (true, true, false) => RidgeCondition::Carries,
+    }
+}
+
+/// A varying-plate-height message when the walls on a roof plane's level have
+/// more than one distinct height. v1 assumes one plate height per roof and does
+/// not read per-level bearing elevations, so this is surfaced as `Unsupported`.
+fn varying_plate_height(model: &BuildingModel, plane: &RoofPlane) -> Option<String> {
+    let mut heights: Vec<Length> = model
+        .walls
+        .iter()
+        .filter(|wall| wall.level == plane.level)
+        .map(|wall| wall.height)
+        .collect();
+    heights.sort_unstable();
+    heights.dedup();
+    (heights.len() > 1).then(|| {
+        format!(
+            "Walls on this roof's level have {} distinct heights; v1 assumes one plate height per roof and frames rafters to a single bearing line.",
+            heights.len()
+        )
+    })
+}
+
+/// Generate the roof-plane rafter plans, one per authored plane. The plane that
+/// carries a matched gable ridge emits the single shared ridge board; a gable
+/// whose planes disagree on the ridge elevation frames a ridge per plane and is
+/// flagged. Varying plate heights under a roof are flagged as unsupported.
+fn generate_roof_plans(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+) -> Result<(), SolverError> {
+    // Derive each plane's plan geometry once; ridge classification then compares
+    // these rather than re-deriving an outline pass per pairwise check.
+    let geometries: Vec<Option<RoofPlaneGeometry>> =
+        model.roof_planes.iter().map(roof_plane_geometry).collect();
+    for (index, plane) in model.roof_planes.iter().enumerate() {
+        let system = system_by_id(model, &plane.system).ok_or_else(|| {
+            SolverError::MissingSystemForElement {
+                element: plane.id.clone(),
+                system: plane.system.clone(),
+            }
+        })?;
+        // A matched gable's ridge is carried by one plane; a mismatched gable
+        // frames a ridge on each plane (a single shared ridge would float away
+        // from one side's rafters).
+        let condition = ridge_condition(index, &model.roof_planes, &geometries);
+        let carries_ridge = matches!(
+            condition,
+            RidgeCondition::Carries | RidgeCondition::Mismatched
+        );
+        let mut roof_plan = generate_roof_plan(plane, system, &model.materials, carries_ridge)?;
+        if condition == RidgeCondition::Mismatched {
+            roof_plan.diagnostics.push(PlanDiagnostic::new(
+                DiagnosticSeverity::Unsupported,
+                "roof.ridge.mismatched-elevation",
+                Some(plane.id.clone()),
+                "This plane shares a ridge edge with another whose pitch or springing puts the ridge at a different height; a single shared ridge cannot be framed, so each plane is given its own ridge. A matched gable (equal pitch and bearing) frames one shared ridge.",
+            ));
+        }
+        if let Some(message) = varying_plate_height(model, plane) {
+            roof_plan.diagnostics.push(PlanDiagnostic::new(
+                DiagnosticSeverity::Unsupported,
+                "roof.plate-height.varying",
+                Some(plane.id.clone()),
+                message,
+            ));
+        }
+        plan.roof_plans.push(roof_plan);
+    }
+    Ok(())
+}
+
 /// Resolve every surface region to its closed plan outline in a single pass over
 /// the wall graph. `Polygon` regions are their own outline; `Room` regions are
 /// resolved through one [`room_boundaries`] call so the bounded faces are derived
@@ -1055,6 +1547,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
         wall_plans: Vec::with_capacity(model.walls.len()),
         floor_plans: Vec::with_capacity(model.floor_decks.len()),
         ceiling_plans: Vec::with_capacity(model.ceilings.len()),
+        roof_plans: Vec::with_capacity(model.roof_planes.len()),
         diagnostics: project_diagnostics(model),
         rooms: Vec::new(),
         layers: Vec::new(),
@@ -1077,6 +1570,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
 
     add_join_members(&mut plan, model)?;
     generate_surface_plans(&mut plan, model)?;
+    generate_roof_plans(&mut plan, model)?;
     plan.rooms = room_schedule(model, &mut plan.diagnostics);
     plan.layers = layer_bom_from(
         plan.wall_plans
@@ -1091,7 +1585,8 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
                 plan.ceiling_plans
                     .iter()
                     .flat_map(|ceiling| ceiling.layers.iter()),
-            ),
+            )
+            .chain(plan.roof_plans.iter().flat_map(|roof| roof.layers.iter())),
     );
 
     Ok(plan)
@@ -1579,6 +2074,7 @@ struct FrameMemberPlacement {
     elevation: Length,
     cut_length: Length,
     cross_section_depth: Length,
+    sloped: Option<SlopedPlacement>,
 }
 
 impl FrameMemberPlacement {
@@ -1595,7 +2091,15 @@ impl FrameMemberPlacement {
             elevation,
             cut_length,
             cross_section_depth,
+            sloped: None,
         }
+    }
+
+    /// Attach a sloped placement (the eave/ridge elevations) to a roof-plane
+    /// member; `cut_length` is the member's true sloped length.
+    fn with_slope(mut self, sloped: SlopedPlacement) -> Self {
+        self.sloped = Some(sloped);
+        self
     }
 }
 
@@ -1620,6 +2124,7 @@ fn frame_member(
         cross_section_depth: placement.cross_section_depth,
         side_offset: band.offset,
         side_depth: band.depth,
+        sloped: placement.sloped,
         provenance,
     }
 }
@@ -2127,6 +2632,8 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
         MemberKind::CeilingJoist => "#7f9c8f",
         MemberKind::RimJoist => "#6f5535",
         MemberKind::Blocking => "#b59a6a",
+        MemberKind::Rafter => "#8a6f4a",
+        MemberKind::RidgeBoard => "#5d4a32",
     }
 }
 
@@ -3383,6 +3890,7 @@ mod tests {
             wall_plans: Vec::new(),
             floor_plans: Vec::new(),
             ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
@@ -3672,6 +4180,423 @@ mod tests {
             diagnostic.code == "ceiling.boundary.open"
                 && diagnostic.severity == DiagnosticSeverity::Warning
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("ceiling-1")
+        }));
+    }
+
+    /// A roof system: fiber-cement roofing over plywood sheathing over 2x8
+    /// rafters at 16" o.c.
+    fn roof_system() -> ConstructionSystem {
+        ConstructionSystem {
+            id: ElementId::new("system-roof"),
+            name: "Roof".to_owned(),
+            kind: framer_core::SystemKind::Roof,
+            source: None,
+            layers: vec![
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Roofing,
+                    "mat-fiber-cement",
+                    Length::from_inches(0.25),
+                ),
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Sheathing,
+                    "mat-plywood",
+                    Length::from_inches(0.5),
+                ),
+                framer_core::ConstructionLayer::new(
+                    LayerFunction::Framing,
+                    "mat-spf",
+                    BoardProfile::TwoByEight.nominal_depth(),
+                )
+                .with_framing(FramingSpec {
+                    member: BoardProfile::TwoByEight,
+                    spacing: Length::from_whole_inches(16),
+                    pattern: framer_core::FramingPattern::Single,
+                    member_family: framer_core::MemberFamily::Rafter,
+                    cavity_material: None,
+                }),
+            ],
+        }
+    }
+
+    /// A counter-clockwise rectangular outline anchored at the origin (in feet).
+    fn rect_outline(w_ft: f64, d_ft: f64) -> Vec<Point2> {
+        let (w, d) = (Length::from_feet(w_ft), Length::from_feet(d_ft));
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(w, Length::ZERO),
+            Point2::new(w, d),
+            Point2::new(Length::ZERO, d),
+        ]
+    }
+
+    /// A single shed roof plane: a 24ft (eave) × 12ft (run) rectangle on the
+    /// world axes, eave along the bottom edge, springing at 8ft, `slope` pitch.
+    fn shed_plane(slope: Slope) -> RoofPlane {
+        RoofPlane::new(
+            "roof-shed",
+            "Shed",
+            "level-1",
+            "system-roof",
+            rect_outline(24.0, 12.0),
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+    }
+
+    /// The 9:12 pitch — a 3-4-5 triangle over a 12ft run (144in run, 108in rise,
+    /// 180in hypotenuse), so true sloped lengths land on exact ticks.
+    fn pitch_9_12() -> Slope {
+        Slope::new(Length::from_whole_inches(9), Length::from_whole_inches(12))
+    }
+
+    #[test]
+    fn roof_plane_arrays_rafters_at_true_sloped_length() {
+        let plane = shed_plane(pitch_9_12());
+        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false).unwrap();
+
+        let rafters: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::Rafter)
+            .collect();
+
+        // One rafter per layout mark along the 24ft eave at 16" o.c.
+        let expected = stud_positions(
+            Length::from_feet(24.0),
+            Length::from_whole_inches(16),
+            BoardProfile::TwoByEight.thickness(),
+        )
+        .len();
+        assert_eq!(rafters.len(), expected);
+        assert!(expected > 2, "an interior rafter array is laid out");
+
+        // Cut length is the true sloped length: a 12ft plan run at 9:12 is the
+        // 15ft hypotenuse of the 3-4-5 triangle (plan run < cut length).
+        assert!(
+            rafters
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(15.0)),
+            "rafters are cut to the true sloped 15ft length"
+        );
+        assert!(
+            rafters
+                .iter()
+                .all(|member| member.profile == BoardProfile::TwoByEight
+                    && member.orientation == MemberOrientation::Vertical),
+            "rafters use the system framing member and run up the slope"
+        );
+
+        // The sloped placement records the eave springing (8ft) and the ridge
+        // (8ft + 108in rise = 17ft), and recovers the 12ft plan run by Pythagoras.
+        let rafter = rafters[0];
+        let slope = rafter.sloped.expect("a rafter carries a sloped placement");
+        assert_eq!(slope.low_elevation, Length::from_feet(8.0));
+        assert_eq!(slope.high_elevation, Length::from_whole_inches(96 + 108));
+        assert_eq!(
+            rafter.elevation,
+            Length::ZERO,
+            "no overhang: tail at the eave"
+        );
+        let rise = slope.high_elevation - slope.low_elevation;
+        let plan_run = (rafter.cut_length.inches().powi(2) - rise.inches().powi(2)).sqrt();
+        assert!(
+            (plan_run - Length::from_feet(12.0).inches()).abs() < 0.01,
+            "the plan run recovers the 12ft horizontal extent"
+        );
+
+        // No ridge board for a plane that does not carry one; plate blocking is
+        // generated between rafters.
+        assert!(
+            plan.members
+                .iter()
+                .all(|member| member.kind != MemberKind::RidgeBoard)
+        );
+        assert!(
+            plan.members
+                .iter()
+                .any(|member| member.kind == MemberKind::Blocking)
+        );
+
+        // The span is laid out geometrically, surfaced as an Info diagnostic.
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "roof.span.not-checked"
+                && diagnostic.severity == DiagnosticSeverity::Info
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("roof-shed")
+        }));
+    }
+
+    #[test]
+    fn flat_roof_plane_rafter_cut_equals_plan_run() {
+        let plane = shed_plane(Slope::flat());
+        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false).unwrap();
+
+        let rafter = plan
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Rafter)
+            .expect("a rafter");
+        // A flat plane: cut length equals the 12ft plan run and the slope is level.
+        assert_eq!(rafter.cut_length, Length::from_feet(12.0));
+        let slope = rafter
+            .sloped
+            .expect("flat rafters still record their elevation");
+        assert_eq!(slope.low_elevation, Length::from_feet(8.0));
+        assert_eq!(slope.high_elevation, Length::from_feet(8.0));
+    }
+
+    #[test]
+    fn roof_eave_overhang_lengthens_rafter_and_drops_the_tail() {
+        let plane = shed_plane(pitch_9_12()).with_eave_overhang(Length::from_whole_inches(12));
+        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false).unwrap();
+
+        let rafter = plan
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Rafter)
+            .expect("a rafter");
+        // The 12in overhang adds a sloped tail: 156in plan run × 1.25 = 195in cut.
+        assert_eq!(rafter.cut_length, Length::from_whole_inches(195));
+        assert_eq!(
+            rafter.elevation,
+            Length::ZERO - Length::from_whole_inches(12)
+        );
+        let slope = rafter.sloped.expect("a sloped placement");
+        // The tail drops a 12in run × 0.75 = 9in below the 8ft springing.
+        assert_eq!(slope.low_elevation, Length::from_whole_inches(96 - 9));
+        assert_eq!(slope.high_elevation, Length::from_whole_inches(96 + 108));
+    }
+
+    /// A gable over a 24ft × 24ft footprint: two opposing 12ft-run planes sharing
+    /// a ridge at y = 12ft. `roof-a` (lower id) carries the shared ridge board.
+    fn gable_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(roof_system());
+        let (w, mid, far) = (
+            Length::from_feet(24.0),
+            Length::from_feet(12.0),
+            Length::from_feet(24.0),
+        );
+        model.roof_planes.push(RoofPlane::new(
+            "roof-a",
+            "South slope",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(w, Length::ZERO),
+                Point2::new(w, mid),
+                Point2::new(Length::ZERO, mid),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-b",
+            "North slope",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, far),
+                Point2::new(w, far),
+                Point2::new(w, mid),
+                Point2::new(Length::ZERO, mid),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        ));
+        model
+    }
+
+    #[test]
+    fn gable_emits_one_shared_ridge_board_with_no_tie_diagnostic() {
+        let plan = generate_project_plan(&gable_model()).unwrap();
+        assert_eq!(plan.roof_plans.len(), 2);
+
+        // Both slopes frame rafters running the 12ft half-span (15ft true length).
+        for id in ["roof-a", "roof-b"] {
+            let roof = plan.roof_plan(&ElementId::new(id)).unwrap();
+            assert!(
+                roof.members
+                    .iter()
+                    .filter(|member| member.kind == MemberKind::Rafter)
+                    .all(|member| member.cut_length == Length::from_feet(15.0)),
+                "{id} rafters are the 15ft true sloped length"
+            );
+        }
+
+        // Exactly one ridge board across the whole gable, on the lower-id plane,
+        // running the full 24ft ridge.
+        let ridges: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::RidgeBoard)
+            .collect();
+        assert_eq!(ridges.len(), 1, "a gable's shared ridge is counted once");
+        assert_eq!(ridges[0].cut_length, Length::from_feet(24.0));
+        assert!(
+            plan.roof_plan(&ElementId::new("roof-a"))
+                .unwrap()
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::RidgeBoard),
+            "the lower-id plane carries the ridge"
+        );
+
+        // The ridge-carrying plane warns that no tie was verified.
+        assert!(
+            plan.roof_plan(&ElementId::new("roof-a"))
+                .unwrap()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "roof.ridge.no-tie"
+                    && diagnostic.severity == DiagnosticSeverity::Warning)
+        );
+
+        // The project BOM and layer takeoff fold in the roof members and roofing.
+        let bom = plan.bom();
+        assert!(bom.iter().any(|item| item.kind == MemberKind::Rafter));
+        assert!(bom.iter().any(|item| item.kind == MemberKind::RidgeBoard));
+        // Each 24ft × 12ft slope contributes 288in × 144in of plan roofing area.
+        let roofing: i64 = plan
+            .layers
+            .iter()
+            .filter(|layer| layer.function == LayerFunction::Roofing)
+            .map(|layer| layer.area_sq_in)
+            .sum();
+        assert_eq!(roofing, 2 * 288 * 144);
+    }
+
+    #[test]
+    fn mismatched_gable_frames_a_ridge_per_plane_and_is_flagged() {
+        // Two planes share the plan ridge edge but disagree on the ridge height:
+        // roof-a at 9:12 ridges 108in above the plate, roof-b at 18:12 ridges
+        // 216in above. A single shared ridge would float away from one side, so
+        // each plane frames its own ridge and both are flagged.
+        let mut model = gable_model();
+        let north = model
+            .roof_planes
+            .iter_mut()
+            .find(|plane| plane.id.0 == "roof-b")
+            .unwrap();
+        north.slope = Slope::new(Length::from_whole_inches(18), Length::from_whole_inches(12));
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        // One ridge board per plane (not a single shared ridge), each at its own
+        // ridge elevation.
+        for (id, ridge_in) in [("roof-a", 96 + 108), ("roof-b", 96 + 216)] {
+            let roof = plan.roof_plan(&ElementId::new(id)).unwrap();
+            let ridges: Vec<_> = roof
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::RidgeBoard)
+                .collect();
+            assert_eq!(ridges.len(), 1, "{id} frames its own ridge");
+            let slope = ridges[0].sloped.expect("a ridge carries an elevation");
+            assert_eq!(slope.high_elevation, Length::from_whole_inches(ridge_in));
+            assert!(
+                roof.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "roof.ridge.mismatched-elevation"
+                        && diagnostic.severity == DiagnosticSeverity::Unsupported
+                }),
+                "{id} is flagged for the mismatched ridge"
+            );
+        }
+    }
+
+    #[test]
+    fn shed_roof_through_project_plan_has_no_ridge_board() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(roof_system());
+        model.roof_planes.push(shed_plane(pitch_9_12()));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let roof = plan.roof_plan(&ElementId::new("roof-shed")).unwrap();
+        assert!(
+            roof.members
+                .iter()
+                .all(|member| member.kind != MemberKind::RidgeBoard),
+            "a lone shed plane shares no ridge, so frames no ridge board"
+        );
+        assert!(
+            roof.diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "roof.ridge.no-tie")
+        );
+    }
+
+    #[test]
+    fn varying_plate_height_under_a_roof_is_flagged_unsupported() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.systems.push(roof_system());
+        // Two walls on the roof's level at different heights: the bearing plate
+        // height is ambiguous for v1.
+        let mut tall = placed(
+            "w-tall",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(12.0), Length::ZERO),
+            &code,
+        );
+        tall.height = Length::from_feet(9.0);
+        let mut short = placed(
+            "w-short",
+            Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            Point2::new(Length::from_feet(12.0), Length::from_feet(12.0)),
+            &code,
+        );
+        short.height = Length::from_feet(8.0);
+        model.walls.push(tall);
+        model.walls.push(short);
+        model.roof_planes.push(shed_plane(pitch_9_12()));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let roof = plan.roof_plan(&ElementId::new("roof-shed")).unwrap();
+        assert!(roof.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "roof.plate-height.varying"
+                && diagnostic.severity == DiagnosticSeverity::Unsupported
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("roof-shed")
+        }));
+    }
+
+    #[test]
+    fn degenerate_roof_outline_frames_nothing_and_warns() {
+        // A zero-length eave edge (coincident consecutive vertices) passes core
+        // geometry validation — which only rejects <3 points, self-intersection,
+        // an out-of-range eave edge, and slope.run <= 0 — but cannot lay out
+        // rafters. generate_roof_plan recovers with an empty plan and a Warning
+        // rather than dividing by a zero-length eave.
+        let plane = RoofPlane::new(
+            "roof-degenerate",
+            "Degenerate",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(24.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        );
+
+        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false).unwrap();
+        assert!(
+            plan.members.is_empty(),
+            "a degenerate outline frames no members"
+        );
+        assert!(plan.layers.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "roof.outline.degenerate"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("roof-degenerate")
         }));
     }
 }

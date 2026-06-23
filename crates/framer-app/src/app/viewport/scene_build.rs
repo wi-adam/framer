@@ -683,5 +683,7 @@ pub(super) fn member_color(kind: MemberKind) -> Color32 {
         MemberKind::CeilingJoist => Color32::from_rgb(127, 156, 143),
         MemberKind::RimJoist => Color32::from_rgb(111, 85, 53),
         MemberKind::Blocking => Color32::from_rgb(181, 154, 106),
+        MemberKind::Rafter => Color32::from_rgb(138, 111, 74),
+        MemberKind::RidgeBoard => Color32::from_rgb(93, 74, 50),
     }
 }
