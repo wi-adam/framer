@@ -1015,50 +1015,30 @@ struct RoofPlaneGeometry {
 /// direction is the eave-perpendicular oriented toward the outline centroid, so
 /// it is robust to the polygon's winding.
 fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
+    // The eave origin + up-slope unit normal (toward the outline centroid, so it is
+    // winding-independent) come from the shared `framer-core` frame, so the framing
+    // and the rendered surface cannot drift.
+    let frame = plane.frame()?;
     let n = plane.outline.len();
-    if n < 3 {
-        return None;
-    }
-    let i = plane.eave_edge as usize % n;
-    let a = plane.outline[i];
-    let b = plane.outline[(i + 1) % n];
-    let (ax, ay) = (a.x.inches(), a.y.inches());
-    let ex = b.x.inches() - ax;
-    let ey = b.y.inches() - ay;
-    let eave_len = (ex * ex + ey * ey).sqrt();
-    if eave_len <= f64::EPSILON {
-        return None;
-    }
-
-    // Up-slope unit normal: a perpendicular to the eave oriented toward the
-    // outline centroid (independent of winding order).
-    let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
-    let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
-    let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
-    let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
-    if nx * (cx - mx) + ny * (cy - my) < 0.0 {
-        nx = -nx;
-        ny = -ny;
-    }
 
     // Run extent: the farthest up-slope perpendicular distance to any vertex.
     let run_extent = plane
         .outline
         .iter()
-        .map(|p| (p.x.inches() - ax) * nx + (p.y.inches() - ay) * ny)
+        .map(|p| frame.up_slope_distance(p.x.inches(), p.y.inches()))
         .fold(0.0_f64, f64::max);
 
     // High (ridge) edge: the outline edge whose midpoint is farthest up-slope.
-    let mut high_edge = (a, b);
+    let i = plane.eave_edge as usize % n;
+    let mut high_edge = (plane.outline[i], plane.outline[(i + 1) % n]);
     let mut best = f64::MIN;
     for k in 0..n {
         let p = plane.outline[k];
         let q = plane.outline[(k + 1) % n];
-        let mid = (
+        let d = frame.up_slope_distance(
             (p.x.inches() + q.x.inches()) / 2.0,
             (p.y.inches() + q.y.inches()) / 2.0,
         );
-        let d = (mid.0 - ax) * nx + (mid.1 - ay) * ny;
         if d > best {
             best = d;
             high_edge = (p, q);
@@ -1066,7 +1046,7 @@ fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
     }
 
     Some(RoofPlaneGeometry {
-        eave_length: Length::from_inches(eave_len),
+        eave_length: Length::from_inches(frame.eave_length),
         run_extent: Length::from_inches(run_extent),
         high_edge,
     })
