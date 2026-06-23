@@ -3532,12 +3532,16 @@ mod tests {
             "system-floor",
             SurfaceRegion::Room(ElementId::new("room-1")),
         ));
+        // The ceiling covers a differently-proportioned region than the floor so
+        // a deck<->ceiling outline mix-up in the batch resolver would be caught:
+        // the floor (the 12ft x 8ft room) spans 8ft, the ceiling (a 20ft x 14ft
+        // polygon) spans 14ft.
         model.ceilings.push(Ceiling::new(
             "ceiling-1",
             "Ceiling",
             "level-1",
             "system-ceiling",
-            SurfaceRegion::Room(ElementId::new("room-1")),
+            rect_region(20.0, 14.0),
             Length::from_feet(8.0),
         ));
 
@@ -3553,11 +3557,25 @@ mod tests {
             .filter(|member| member.kind == MemberKind::FloorJoist)
             .collect();
         assert!(!floor_joists.is_empty());
-        // The room is 12ft × 8ft; joists span the shorter 8ft dimension.
+        // The room is 12ft × 8ft; floor joists span the shorter 8ft dimension.
         assert!(
             floor_joists
                 .iter()
                 .all(|member| member.cut_length == Length::from_feet(8.0))
+        );
+
+        // The ceiling joists span its own 14ft shorter dimension, not the floor's.
+        let ceiling = plan.ceiling_plan(&ElementId::new("ceiling-1")).unwrap();
+        let ceiling_joists: Vec<_> = ceiling
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::CeilingJoist)
+            .collect();
+        assert!(!ceiling_joists.is_empty());
+        assert!(
+            ceiling_joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(14.0))
         );
 
         // The project BOM folds in the new surfaces' members.
@@ -3614,6 +3632,46 @@ mod tests {
             diagnostic.code == "floor.boundary.open"
                 && diagnostic.severity == DiagnosticSeverity::Warning
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("deck-1")
+        }));
+    }
+
+    #[test]
+    fn ceiling_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
+        use framer_core::{Room, RoomUsage};
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        // A single wall never encloses a loop, so the room stays open.
+        model
+            .walls
+            .push(Wall::new("w-1", "Wall", Length::from_feet(12.0), &code));
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::Unspecified,
+            "level-1",
+            Point2::new(Length::from_feet(2.0), Length::from_feet(2.0)),
+        ));
+        model.systems.push(ceiling_system());
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+            Length::from_feet(8.0),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let ceiling = plan.ceiling_plan(&ElementId::new("ceiling-1")).unwrap();
+
+        assert!(
+            ceiling.members.is_empty(),
+            "an open region frames no joists"
+        );
+        assert!(ceiling.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ceiling.boundary.open"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("ceiling-1")
         }));
     }
 }
