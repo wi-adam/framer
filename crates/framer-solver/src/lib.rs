@@ -1302,24 +1302,33 @@ enum RidgeCondition {
     Mismatched,
 }
 
-/// Classify a roof plane's ridge condition by comparing its high (ridge) edge —
-/// and the true elevation of that ridge — against every other plane. Two planes
-/// that share the plan-projected edge but compute different ridge elevations
-/// cannot meet at one ridge, so the shared edge alone is not enough. A 1-tick
-/// tolerance absorbs rounding; matched gables produce identical ticks.
-fn ridge_condition(plane: &RoofPlane, planes: &[RoofPlane]) -> RidgeCondition {
-    let Some(geometry) = roof_plane_geometry(plane) else {
+/// Classify the ridge condition of `planes[index]` by comparing its high (ridge)
+/// edge — and the true elevation of that ridge — against every other plane. Two
+/// planes that share the plan-projected edge but compute different ridge
+/// elevations cannot meet at one ridge, so the shared edge alone is not enough. A
+/// 1-tick tolerance absorbs rounding; matched gables produce identical ticks.
+///
+/// `geometries` holds each plane's precomputed [`RoofPlaneGeometry`] (aligned with
+/// `planes`), so the per-plane outline pass runs once rather than re-deriving on
+/// every comparison.
+fn ridge_condition(
+    index: usize,
+    planes: &[RoofPlane],
+    geometries: &[Option<RoofPlaneGeometry>],
+) -> RidgeCondition {
+    let plane = &planes[index];
+    let Some(geometry) = geometries[index].as_ref() else {
         return RidgeCondition::None;
     };
     let my_ridge = ridge_elevation(plane, geometry.run_extent);
     let mut shares = false;
     let mut elevations_agree = true;
     let mut defer = false;
-    for other in planes {
-        if other.id == plane.id {
+    for (other_index, other) in planes.iter().enumerate() {
+        if other_index == index {
             continue;
         }
-        let Some(other_geometry) = roof_plane_geometry(other) else {
+        let Some(other_geometry) = geometries[other_index].as_ref() else {
             continue;
         };
         if !same_edge(geometry.high_edge, other_geometry.high_edge) {
@@ -1371,7 +1380,11 @@ fn generate_roof_plans(
     plan: &mut ProjectFramePlan,
     model: &BuildingModel,
 ) -> Result<(), SolverError> {
-    for plane in &model.roof_planes {
+    // Derive each plane's plan geometry once; ridge classification then compares
+    // these rather than re-deriving an outline pass per pairwise check.
+    let geometries: Vec<Option<RoofPlaneGeometry>> =
+        model.roof_planes.iter().map(roof_plane_geometry).collect();
+    for (index, plane) in model.roof_planes.iter().enumerate() {
         let system = system_by_id(model, &plane.system).ok_or_else(|| {
             SolverError::MissingSystemForElement {
                 element: plane.id.clone(),
@@ -1381,7 +1394,7 @@ fn generate_roof_plans(
         // A matched gable's ridge is carried by one plane; a mismatched gable
         // frames a ridge on each plane (a single shared ridge would float away
         // from one side's rafters).
-        let condition = ridge_condition(plane, &model.roof_planes);
+        let condition = ridge_condition(index, &model.roof_planes, &geometries);
         let carries_ridge = matches!(
             condition,
             RidgeCondition::Carries | RidgeCondition::Mismatched
