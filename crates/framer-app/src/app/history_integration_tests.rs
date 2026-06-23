@@ -428,6 +428,126 @@ fn add_roof_without_walls_is_a_no_op() {
 }
 
 #[test]
+fn surface_placed_in_a_room_attaches_to_that_room() {
+    let mut app = FramerApp::default();
+    let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
+    app.add_room(seed);
+    let room_id = match &app.selected {
+        Selection::Room(id) => id.clone(),
+        other => panic!("expected the new room selected, got {other:?}"),
+    };
+
+    // A ceiling/floor placed over a loop that already holds a room references
+    // that room (so the surface tracks the room as walls move), not a frozen
+    // polygon.
+    let region = app
+        .surface_region_at(seed)
+        .expect("the demo shell is an enclosed loop");
+    assert!(
+        matches!(&region, framer_core::SurfaceRegion::Room(id) if id.0 == room_id),
+        "region should reference the room, got {region:?}"
+    );
+    app.add_ceiling(region);
+    let ceiling = app.model.ceilings.last().unwrap();
+    assert!(
+        matches!(&ceiling.region, framer_core::SurfaceRegion::Room(id) if id.0 == room_id),
+        "ceiling should attach to the room"
+    );
+    assert!(app.model.validate().is_ok());
+}
+
+#[test]
+fn delete_floor_deck_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_floor(region);
+    let id = match &app.selected {
+        Selection::FloorDeck(id) => id.clone(),
+        other => panic!("expected the new floor deck selected, got {other:?}"),
+    };
+
+    app.delete_selected_floor_deck();
+    assert!(app.model.floor_decks.iter().all(|deck| deck.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete floor deck"));
+
+    app.undo();
+    assert_eq!(app.model.floor_decks.len(), 1, "undo restores the deck");
+}
+
+#[test]
+fn delete_roof_plane_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    app.add_roof(RoofForm::Gable);
+    let id = match &app.selected {
+        Selection::RoofPlane(id) => id.clone(),
+        other => panic!("expected the new roof plane selected, got {other:?}"),
+    };
+    let before = app.model.roof_planes.len();
+
+    app.delete_selected_roof_plane();
+    assert_eq!(app.model.roof_planes.len(), before - 1);
+    assert!(app.model.roof_planes.iter().all(|plane| plane.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete roof plane"));
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo restores the deleted roof plane"
+    );
+}
+
+#[test]
+fn referenced_surface_systems_cannot_be_deleted() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region.clone());
+    app.add_floor(region);
+    app.add_roof(RoofForm::Shed);
+
+    // Each surface's referenced system must be undeletable (deleting it would
+    // dangle the surface's `system`) — the widened deletion guard covers roofs,
+    // ceilings, and floors, not just walls.
+    let referenced: Vec<String> = [
+        app.model.ceilings.last().map(|c| c.system.0.clone()),
+        app.model.floor_decks.last().map(|d| d.system.0.clone()),
+        app.model.roof_planes.last().map(|p| p.system.0.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert_eq!(referenced.len(), 3, "all three surfaces were placed");
+
+    for system_id in referenced {
+        app.selected = Selection::System(system_id.clone());
+        let before = app.model.systems.len();
+        app.delete_selected_system();
+        assert_eq!(
+            app.model.systems.len(),
+            before,
+            "a referenced surface system must not be deleted"
+        );
+        assert!(
+            app.model
+                .systems
+                .iter()
+                .any(|system| system.id.0 == system_id),
+            "the referenced system {system_id} is still present"
+        );
+    }
+}
+
+#[test]
 fn delete_last_wall_leaves_consistent_state() {
     let mut app = FramerApp::default();
     // Delete every wall; this must not panic and must leave an empty model.
