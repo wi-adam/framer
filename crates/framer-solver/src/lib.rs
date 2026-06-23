@@ -183,7 +183,10 @@ fn wall_layer_bom(
             | LayerFunction::Sheathing
             | LayerFunction::Cladding
             | LayerFunction::WeatherBarrier
-            | LayerFunction::Masonry => {
+            | LayerFunction::Masonry
+            | LayerFunction::Roofing
+            | LayerFunction::Underlayment
+            | LayerFunction::CeilingFinish => {
                 items.push(LayerBomItem {
                     material: layer.material.clone(),
                     material_name: material_name(&layer.material),
@@ -1814,6 +1817,7 @@ mod tests {
                     member,
                     spacing: Length::from_whole_inches(16),
                     pattern: framer_core::FramingPattern::Single,
+                    member_family: framer_core::MemberFamily::Stud,
                     cavity_material: None,
                 }),
             ],

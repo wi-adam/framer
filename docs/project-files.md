@@ -5,7 +5,7 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v10 format stores only the canonical intent model. Generated framing plans,
+The v11 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 file.
@@ -28,12 +28,12 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V10 Shape
+## V11 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 10,
+  "schema_version": 11,
   "authored": {
     "code": {},
     "libraries": [],
@@ -46,24 +46,36 @@ for the single-wall example.
     "wall_joins": [],
     "rooms": [],
     "furnishing_instances": [],
-    "mep_instances": []
+    "mep_instances": [],
+    "roof_planes": [],
+    "ceilings": [],
+    "floor_decks": []
   }
 }
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `10` when saving from the current app.
+- `schema_version` must be `11` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `cache`, `exports`, or presentation data to project files.
 - `libraries`, `materials`, `systems`, `furnishings`, `mep_objects`, `rooms`,
-  `furnishing_instances`, and `mep_instances` are omitted when empty; `wall_joins`
-  defaults to an empty list; `levels` defaults to a single `level-1`.
+  `furnishing_instances`, `mep_instances`, `roof_planes`, `ceilings`, and
+  `floor_decks` are omitted when empty; `wall_joins` defaults to an empty list;
+  `levels` defaults to a single `level-1`.
+- `levels` carry an optional `height` (the top plane is `elevation + height`);
+  a zero height is omitted. `systems` carry a `kind` of `Wall`, `Floor`, `Roof`,
+  or `Ceiling`, each with exactly one framing layer. A framing layer's optional
+  `member_family` (`Stud`, `Rafter`, `CeilingJoist`, `FloorJoist`, `Truss`) is
+  omitted when it is the `Stud` default.
+- `roof_planes` are sloped/flat structural faces (outline, pitch `slope`, eave
+  edge, overhangs, and nested plane-local `openings`); `ceilings` and
+  `floor_decks` carry a `region` (an enclosed room id or an explicit polygon).
 
-### Schema versioning is v10-only
+### Schema versioning is v11-only
 
-The current build is **v10-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `10` with an explicit
+The current build is **v11-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `11` with an explicit
 `unsupported Framer project schema version N` error — older files are *not*
 migrated in place. Convert old files with an older Framer build, or re-author
 them.
@@ -131,7 +143,7 @@ project does not read any `.framerlib`; projects remain self-contained.
 Portable project packages use the `.framerpkg` extension. A package is a
 deterministic ZIP with stored entries, sorted paths, and zeroed timestamps:
 
-- `project.framer`: the canonical v10 project JSON.
+- `project.framer`: the canonical v11 project JSON.
 - `manifest.json`: `{ "format": "framer.package", "schema_version": 1, ... }`.
 - `assets/blake3-<hex>`: optional content-addressed binary assets referenced by
   material appearances.
@@ -142,7 +154,7 @@ back to the material's authored color and the project still opens.
 
 ## Authored Model
 
-The v10 authored model holds:
+The v11 authored model holds:
 
 - `code`: the prescriptive code profile (starter framing defaults).
 - `libraries`: optional descriptive stamps for library versions that supplied
@@ -157,6 +169,12 @@ The v10 authored model holds:
 - `rooms`: deterministic list of authored rooms (spaces).
 - `furnishing_instances`: level-owned placed furnishing instances.
 - `mep_instances`: level-owned placed MEP object instances.
+- `roof_planes`: level-owned sloped/flat structural roof faces (outline, pitch
+  `slope`, eave edge, overhangs, nested plane-local `openings`).
+- `ceilings`: level-owned finished ceiling surfaces over a `region` (room or
+  polygon) at an authored `height`.
+- `floor_decks`: level-owned structural floor decks over a `region` with a joist
+  `span` direction.
 - Per wall: `openings` (wall openings) and `dimensions` (wall-local dimension
   constraints).
 
@@ -568,7 +586,7 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`10`). The build is v10-only; do not
+3. Preserve `format` and `schema_version` (`11`). The build is v11-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,

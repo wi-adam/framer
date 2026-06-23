@@ -30,10 +30,12 @@ the layer stack is authored intent; the framing members and BOM are derived from
 - A **construction system** is an ordered stack of layers from **interior → exterior**. Layer
   order is **semantic and never sorted**.
 - Each **layer** has a `function` (interior finish, framing, sheathing, weather barrier,
-  continuous insulation, air gap, cladding, masonry, structure, other), a `material` (by id),
-  a `thickness`, and — **iff** `function == Framing` — a `FramingSpec` (member profile,
-  spacing, pattern, optional between-studs cavity material).
-- A **wall system has exactly one framing layer.** Validation rejects zero or multiple.
+  continuous insulation, air gap, cladding, masonry, structure, roofing, underlayment, ceiling
+  finish, other), a `material` (by id), a `thickness`, and — **iff** `function == Framing` — a
+  `FramingSpec` (member profile, spacing, pattern, member family, optional between-studs cavity
+  material).
+- **Every system has exactly one framing layer** (wall, floor, roof, ceiling). Validation
+  rejects zero or multiple.
 - **Materials are open/extensible.** Substance lives in a typed property map
   (`r_per_inch_milli`, cost, …), not in the enum, so external/shared libraries plug in via the
   same reference shape without schema churn. Appearance can be `SolidColor`, `Textured`
@@ -73,13 +75,13 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `ConstructionSystem { id, name, kind: SystemKind, layers: Vec<ConstructionLayer> }` with
   `framing_layer()`, `total_thickness()`, `exposure()`, `r_value_milli(materials)`.
 - `ConstructionLayer { function: LayerFunction, material: ElementId, thickness, framing:
-  Option<FramingSpec> }`; `FramingSpec { member: BoardProfile, spacing, pattern,
-  cavity_material: Option<ElementId> }`.
+  Option<FramingSpec> }`; `FramingSpec { member: BoardProfile, spacing, pattern, member_family:
+  MemberFamily, cavity_material: Option<ElementId> }`.
 - `Material { id, name, source: MaterialSource, appearance: Appearance, tags, properties }`;
   `PropertyValue`, `Appearance::{SolidColor, Textured, DepthMapped}`.
 - `Wall.system: ElementId`; `BuildingModel::system_for(wall)`, `material(&id)`.
-- Serialization: schema **v10** in [`project.rs`](../../crates/framer-core/src/project.rs)
-  (`systems`/`materials` are top-level authored keys; v10-only — older files are rejected). The
+- Serialization: schema **v11** in [`project.rs`](../../crates/framer-core/src/project.rs)
+  (`systems`/`materials` are top-level authored keys; v11-only — older files are rejected). The
   shape is documented in [project-files.md](../project-files.md).
 - Takeoff: `layer_bom()` / `LayerBomItem` and the layered rendering in
   [`framer-solver`](../../crates/framer-solver/src/lib.rs),
@@ -91,7 +93,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `framer-core`/`framer-solver` stay UI-free; the model stays deterministic and `Eq`.
 - Authored layer stack is the source of truth; thickness/exposure/R-value/members/BOM are all
   regenerated, never stored.
-- `.framer` is v10-only and canonical (see [project-files.md](../project-files.md#determinism)).
+- `.framer` is v11-only and canonical (see [project-files.md](../project-files.md#determinism)).
 
 ## Out of scope (YAGNI)
 

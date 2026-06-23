@@ -70,6 +70,12 @@ pub struct BuildingModel {
     pub furnishing_instances: Vec<FurnishingInstance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mep_instances: Vec<MepInstance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roof_planes: Vec<RoofPlane>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ceilings: Vec<Ceiling>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floor_decks: Vec<FloorDeck>,
 }
 
 impl BuildingModel {
@@ -88,6 +94,9 @@ impl BuildingModel {
             rooms: Vec::new(),
             furnishing_instances: Vec::new(),
             mep_instances: Vec::new(),
+            roof_planes: Vec::new(),
+            ceilings: Vec::new(),
+            floor_decks: Vec::new(),
         }
     }
 
@@ -134,6 +143,9 @@ impl BuildingModel {
             rooms: Vec::new(),
             furnishing_instances: Vec::new(),
             mep_instances: Vec::new(),
+            roof_planes: Vec::new(),
+            ceilings: Vec::new(),
+            floor_decks: Vec::new(),
         }
     }
 
@@ -260,6 +272,9 @@ impl BuildingModel {
             rooms: Vec::new(),
             furnishing_instances: Vec::new(),
             mep_instances: Vec::new(),
+            roof_planes: Vec::new(),
+            ceilings: Vec::new(),
+            floor_decks: Vec::new(),
         }
         .into_deterministic()
     }
@@ -431,6 +446,9 @@ impl BuildingModel {
             rooms,
             furnishing_instances: Vec::new(),
             mep_instances: Vec::new(),
+            roof_planes: Vec::new(),
+            ceilings: Vec::new(),
+            floor_decks: Vec::new(),
         }
         .into_deterministic()
     }
@@ -581,6 +599,7 @@ impl BuildingModel {
             }
         }
 
+        let mut room_ids = BTreeSet::new();
         for room in &self.rooms {
             validate_element_id(&room.id)?;
             insert_unique_id(&mut ids, &room.id)?;
@@ -590,7 +609,90 @@ impl BuildingModel {
                     level: room.level.clone(),
                 });
             }
+            room_ids.insert(room.id.clone());
         }
+
+        for roof in &self.roof_planes {
+            validate_element_id(&roof.id)?;
+            insert_unique_id(&mut ids, &roof.id)?;
+            if !level_ids.contains(&roof.level) {
+                return Err(ModelError::RoofPlaneReferencesUnknownLevel {
+                    roof_plane: roof.id.clone(),
+                    level: roof.level.clone(),
+                });
+            }
+            match system_lookup.get(&roof.system) {
+                Some(system) if system.kind == SystemKind::Roof => {}
+                Some(_) => {
+                    return Err(ModelError::RoofPlaneSystemWrongKind {
+                        roof_plane: roof.id.clone(),
+                        system: roof.system.clone(),
+                    });
+                }
+                None => {
+                    return Err(ModelError::RoofPlaneReferencesUnknownSystem {
+                        roof_plane: roof.id.clone(),
+                        system: roof.system.clone(),
+                    });
+                }
+            }
+            roof.validate_geometry(&mut ids)?;
+        }
+
+        for ceiling in &self.ceilings {
+            validate_element_id(&ceiling.id)?;
+            insert_unique_id(&mut ids, &ceiling.id)?;
+            if !level_ids.contains(&ceiling.level) {
+                return Err(ModelError::CeilingReferencesUnknownLevel {
+                    ceiling: ceiling.id.clone(),
+                    level: ceiling.level.clone(),
+                });
+            }
+            match system_lookup.get(&ceiling.system) {
+                Some(system) if system.kind == SystemKind::Ceiling => {}
+                Some(_) => {
+                    return Err(ModelError::CeilingSystemWrongKind {
+                        ceiling: ceiling.id.clone(),
+                        system: ceiling.system.clone(),
+                    });
+                }
+                None => {
+                    return Err(ModelError::CeilingReferencesUnknownSystem {
+                        ceiling: ceiling.id.clone(),
+                        system: ceiling.system.clone(),
+                    });
+                }
+            }
+            validate_surface_region(&ceiling.region, &room_ids, &ceiling.id)?;
+        }
+
+        for deck in &self.floor_decks {
+            validate_element_id(&deck.id)?;
+            insert_unique_id(&mut ids, &deck.id)?;
+            if !level_ids.contains(&deck.level) {
+                return Err(ModelError::FloorDeckReferencesUnknownLevel {
+                    floor_deck: deck.id.clone(),
+                    level: deck.level.clone(),
+                });
+            }
+            match system_lookup.get(&deck.system) {
+                Some(system) if system.kind == SystemKind::Floor => {}
+                Some(_) => {
+                    return Err(ModelError::FloorDeckSystemWrongKind {
+                        floor_deck: deck.id.clone(),
+                        system: deck.system.clone(),
+                    });
+                }
+                None => {
+                    return Err(ModelError::FloorDeckReferencesUnknownSystem {
+                        floor_deck: deck.id.clone(),
+                        system: deck.system.clone(),
+                    });
+                }
+            }
+            validate_surface_region(&deck.region, &room_ids, &deck.id)?;
+        }
+
         Ok(())
     }
 
@@ -619,6 +721,16 @@ impl BuildingModel {
         self.furnishing_instances
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.mep_instances
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.roof_planes
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        // Outline order is geometry-significant and must never be reordered; only
+        // the nested openings are id-keyed and canonicalized.
+        for roof in &mut self.roof_planes {
+            roof.openings.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        self.ceilings.sort_by(|left, right| left.id.cmp(&right.id));
+        self.floor_decks
             .sort_by(|left, right| left.id.cmp(&right.id));
     }
 
@@ -937,6 +1049,12 @@ pub struct Level {
     pub id: ElementId,
     pub name: String,
     pub elevation: Length,
+    /// Height from this level's `elevation` to its top plane. The top plane
+    /// (`elevation + height`) is the bearing/springing line for roofs and the
+    /// hang reference for ceilings. Defaults to zero (top datum not yet
+    /// authored); a zero height is omitted so existing fixtures stay byte-stable.
+    #[serde(default, skip_serializing_if = "length_is_zero")]
+    pub height: Length,
 }
 
 impl Level {
@@ -945,7 +1063,14 @@ impl Level {
             id: ElementId::new(id),
             name: name.into(),
             elevation,
+            height: Length::ZERO,
         }
+    }
+
+    /// Set the level's height; the top plane is `elevation + height`.
+    pub fn with_height(mut self, height: Length) -> Self {
+        self.height = height;
+        self
     }
 }
 
@@ -1059,23 +1184,25 @@ impl Sheathing {
     }
 }
 
-/// The structural class of a construction system. A closed enum: the app reasons
-/// about each kind (only `Wall` is wired now; `Floor`/`Roof` extend later).
+/// The structural class of a construction system. A closed enum: rendering, the
+/// BOM, and validation reason about each kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SystemKind {
     Wall,
     Floor,
     Roof,
+    Ceiling,
 }
 
 impl SystemKind {
-    pub const ALL: [Self; 3] = [Self::Wall, Self::Floor, Self::Roof];
+    pub const ALL: [Self; 4] = [Self::Wall, Self::Floor, Self::Roof, Self::Ceiling];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Wall => "Wall",
             Self::Floor => "Floor",
             Self::Roof => "Roof",
+            Self::Ceiling => "Ceiling",
         }
     }
 }
@@ -1093,11 +1220,17 @@ pub enum LayerFunction {
     Cladding,
     Masonry,
     Structure,
+    /// The weather face of a roof assembly (shingles, membrane, metal).
+    Roofing,
+    /// A water-resistive membrane beneath the roofing.
+    Underlayment,
+    /// The finished underside of a ceiling assembly.
+    CeilingFinish,
     Other,
 }
 
 impl LayerFunction {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::InteriorFinish,
         Self::Framing,
         Self::ContinuousInsulation,
@@ -1107,6 +1240,9 @@ impl LayerFunction {
         Self::Cladding,
         Self::Masonry,
         Self::Structure,
+        Self::Roofing,
+        Self::Underlayment,
+        Self::CeilingFinish,
         Self::Other,
     ];
 
@@ -1121,6 +1257,9 @@ impl LayerFunction {
             Self::Cladding => "Cladding",
             Self::Masonry => "Masonry",
             Self::Structure => "Structure",
+            Self::Roofing => "Roofing",
+            Self::Underlayment => "Underlayment",
+            Self::CeilingFinish => "Ceiling finish",
             Self::Other => "Other",
         }
     }
@@ -1159,6 +1298,12 @@ pub struct FramingSpec {
     pub spacing: Length,
     #[serde(default)]
     pub pattern: FramingPattern,
+    /// Which family of member this framing layer produces, so the solver can
+    /// dispatch member geometry (studs vs. rafters vs. joists). Defaults to
+    /// `Stud`; the default is omitted so existing wall systems (and the starter
+    /// library) stay byte-stable and their content hashes are unchanged.
+    #[serde(default, skip_serializing_if = "member_family_is_default")]
+    pub member_family: MemberFamily,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cavity_material: Option<ElementId>,
 }
@@ -1221,20 +1366,33 @@ impl ConstructionSystem {
             .fold(Length::ZERO, |total, layer| total + layer.thickness)
     }
 
-    /// Derived exposure: `Exterior` if any layer is an outboard envelope role
-    /// (weather barrier, cladding, masonry, continuous insulation), else
-    /// `Interior`.
+    /// Derived exposure: `Exterior` if any layer is a weather/outboard envelope
+    /// role, else `Interior`. Re-scoped per [`SystemKind`] — a wall's weather
+    /// face is its barrier/cladding/masonry/continuous-insulation, a roof's is
+    /// its roofing/underlayment; floors and ceilings have no weather face in v1.
     pub fn exposure(&self) -> WallExposure {
-        let exterior = self.layers.iter().any(|layer| {
-            matches!(
-                layer.function,
+        let weather_facing = |function: LayerFunction| match self.kind {
+            SystemKind::Wall => matches!(
+                function,
                 LayerFunction::WeatherBarrier
                     | LayerFunction::Cladding
                     | LayerFunction::Masonry
                     | LayerFunction::ContinuousInsulation
-            )
-        });
-        if exterior {
+            ),
+            SystemKind::Roof => matches!(
+                function,
+                LayerFunction::Roofing
+                    | LayerFunction::Underlayment
+                    | LayerFunction::WeatherBarrier
+                    | LayerFunction::ContinuousInsulation
+            ),
+            SystemKind::Floor | SystemKind::Ceiling => false,
+        };
+        if self
+            .layers
+            .iter()
+            .any(|layer| weather_facing(layer.function))
+        {
             WallExposure::Exterior
         } else {
             WallExposure::Interior
@@ -1318,8 +1476,10 @@ impl ConstructionSystem {
             }
         }
 
-        if self.kind == SystemKind::Wall && framing_layers != 1 {
-            return Err(ModelError::WallSystemFramingLayerCount {
+        // Every framed assembly — wall, floor, roof, or ceiling — must have
+        // exactly one framing layer, so the framing band is unambiguous.
+        if framing_layers != 1 {
+            return Err(ModelError::SystemFramingLayerCount {
                 system: self.id.clone(),
                 found: framing_layers,
             });
@@ -1327,6 +1487,406 @@ impl ConstructionSystem {
 
         Ok(())
     }
+}
+
+/// The family of framing member a `Framing` layer produces, so the solver can
+/// dispatch member geometry by family. A closed enum. Defaults to `Stud`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub enum MemberFamily {
+    #[default]
+    Stud,
+    Rafter,
+    CeilingJoist,
+    FloorJoist,
+    Truss,
+}
+
+impl MemberFamily {
+    pub const ALL: [Self; 5] = [
+        Self::Stud,
+        Self::Rafter,
+        Self::CeilingJoist,
+        Self::FloorJoist,
+        Self::Truss,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Stud => "Stud",
+            Self::Rafter => "Rafter",
+            Self::CeilingJoist => "Ceiling joist",
+            Self::FloorJoist => "Floor joist",
+            Self::Truss => "Truss",
+        }
+    }
+}
+
+/// A roof/ceiling pitch as an integer rise:run ratio of ticks (float-free, so it
+/// round-trips deterministically and keeps `Eq`). True sloped lengths are derived
+/// transiently in the solver/SVG boundary, never stored. Flat is `rise == 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Slope {
+    pub rise: Length,
+    pub run: Length,
+}
+
+impl Slope {
+    pub const fn new(rise: Length, run: Length) -> Self {
+        Self { rise, run }
+    }
+
+    /// A flat slope (zero rise over a conventional 12" run).
+    pub fn flat() -> Self {
+        Self {
+            rise: Length::ZERO,
+            run: Length::from_whole_inches(12),
+        }
+    }
+
+    /// Whether this slope is flat (zero rise).
+    pub fn is_flat(self) -> bool {
+        self.rise == Length::ZERO
+    }
+}
+
+/// The direction floor/ceiling joists span across a region. `Shorter` (the
+/// default) spans the shorter clear dimension; `Along`/`Across` follow the
+/// region's principal axes; `Explicit` carries an in-plane direction vector
+/// `(x, y)` in ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpanDirection {
+    #[default]
+    Shorter,
+    Along,
+    Across,
+    Explicit(Point2),
+}
+
+/// The plan-area a ceiling or floor deck covers: an enclosed room (by id) or an
+/// explicit polygon outline in plan ticks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SurfaceRegion {
+    Room(ElementId),
+    Polygon(Vec<Point2>),
+}
+
+/// A 2-D, plane-local opening hosted on a roof plane (e.g. a skylight). Distinct
+/// from the 1-D wall [`Opening`]: it carries a 2-D `center` in the roof plane's
+/// local basis. Nested in [`RoofPlane::openings`] by containment (no
+/// back-reference).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoofOpening {
+    pub id: ElementId,
+    pub kind: OpeningKind,
+    pub center: Point2,
+    pub width: Length,
+    pub height: Length,
+}
+
+impl RoofOpening {
+    pub fn new(
+        id: impl Into<String>,
+        kind: OpeningKind,
+        center: Point2,
+        width: Length,
+        height: Length,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            kind,
+            center,
+            width,
+            height,
+        }
+    }
+}
+
+/// A single planar (sloped or flat) structural roof face: a plan-projected
+/// polygon `outline`, a `slope` (rise:run), a designated `eave_edge` (the
+/// downslope bearing edge, indexed into `outline`), a `reference_elevation` (the
+/// bearing/springing line), and eave/rake overhangs. References a `Roof` system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoofPlane {
+    pub id: ElementId,
+    pub name: String,
+    pub level: ElementId,
+    pub system: ElementId,
+    pub outline: Vec<Point2>,
+    pub slope: Slope,
+    /// Index into `outline` of the eave (downslope) edge: edge `(i, i+1)`.
+    pub eave_edge: u32,
+    pub reference_elevation: Length,
+    #[serde(default)]
+    pub eave_overhang: Length,
+    #[serde(default)]
+    pub rake_overhang: Length,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openings: Vec<RoofOpening>,
+}
+
+impl RoofPlane {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        level: impl Into<String>,
+        system: impl Into<String>,
+        outline: Vec<Point2>,
+        slope: Slope,
+        eave_edge: u32,
+        reference_elevation: Length,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            level: ElementId::new(level),
+            system: ElementId::new(system),
+            outline,
+            slope,
+            eave_edge,
+            reference_elevation,
+            eave_overhang: Length::ZERO,
+            rake_overhang: Length::ZERO,
+            openings: Vec::new(),
+        }
+    }
+
+    pub fn with_eave_overhang(mut self, overhang: Length) -> Self {
+        self.eave_overhang = overhang;
+        self
+    }
+
+    pub fn with_rake_overhang(mut self, overhang: Length) -> Self {
+        self.rake_overhang = overhang;
+        self
+    }
+
+    /// Validate the plane's own geometry (outline, eave edge, slope) and its
+    /// nested openings, registering opening ids in the shared `ids` set. The
+    /// level/system references are checked by [`BuildingModel::validate`].
+    fn validate_geometry(&self, ids: &mut BTreeSet<ElementId>) -> Result<(), ModelError> {
+        if self.outline.len() < 3 {
+            return Err(ModelError::RoofPlaneOutlineTooFewPoints {
+                roof_plane: self.id.clone(),
+            });
+        }
+        if polygon_self_intersects(&self.outline) {
+            return Err(ModelError::RoofPlaneOutlineSelfIntersecting {
+                roof_plane: self.id.clone(),
+            });
+        }
+        if (self.eave_edge as usize) >= self.outline.len() {
+            return Err(ModelError::RoofPlaneEaveEdgeOutOfRange {
+                roof_plane: self.id.clone(),
+            });
+        }
+        if self.slope.run <= Length::ZERO {
+            return Err(ModelError::RoofPlaneInvalidSlope {
+                roof_plane: self.id.clone(),
+            });
+        }
+        for opening in &self.openings {
+            validate_element_id(&opening.id)?;
+            insert_unique_id(ids, &opening.id)?;
+            if opening.width <= Length::ZERO || opening.height <= Length::ZERO {
+                return Err(ModelError::InvalidOpeningSize {
+                    opening: opening.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A per-region finished ceiling surface at an authored `height` below the level
+/// top. Flat in v1 (`slope` is `None`); a region with no `Ceiling` is a cathedral
+/// condition. References a `Ceiling` system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ceiling {
+    pub id: ElementId,
+    pub name: String,
+    pub level: ElementId,
+    pub system: ElementId,
+    pub region: SurfaceRegion,
+    pub height: Length,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slope: Option<Slope>,
+}
+
+impl Ceiling {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        level: impl Into<String>,
+        system: impl Into<String>,
+        region: SurfaceRegion,
+        height: Length,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            level: ElementId::new(level),
+            system: ElementId::new(system),
+            region,
+            height,
+            slope: None,
+        }
+    }
+}
+
+/// The horizontal structural deck of a level: its `region` plus a joist `span`
+/// direction. A flat ceiling and a floor deck share the same joisting generator.
+/// References a `Floor` system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FloorDeck {
+    pub id: ElementId,
+    pub name: String,
+    pub level: ElementId,
+    pub system: ElementId,
+    pub region: SurfaceRegion,
+    #[serde(default)]
+    pub span: SpanDirection,
+}
+
+impl FloorDeck {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        level: impl Into<String>,
+        system: impl Into<String>,
+        region: SurfaceRegion,
+    ) -> Self {
+        Self {
+            id: ElementId::new(id),
+            name: name.into(),
+            level: ElementId::new(level),
+            system: ElementId::new(system),
+            region,
+            span: SpanDirection::Shorter,
+        }
+    }
+
+    pub fn with_span(mut self, span: SpanDirection) -> Self {
+        self.span = span;
+        self
+    }
+}
+
+/// Validate a [`SurfaceRegion`]: a `Room` reference must resolve to a known room;
+/// a `Polygon` must have at least three points and not self-intersect. `owner` is
+/// the id of the ceiling/floor deck carrying the region, for error reporting.
+fn validate_surface_region(
+    region: &SurfaceRegion,
+    room_ids: &BTreeSet<ElementId>,
+    owner: &ElementId,
+) -> Result<(), ModelError> {
+    match region {
+        SurfaceRegion::Room(room) => {
+            if !room_ids.contains(room) {
+                return Err(ModelError::SurfaceRegionReferencesUnknownRoom {
+                    element: owner.clone(),
+                    room: room.clone(),
+                });
+            }
+        }
+        SurfaceRegion::Polygon(points) => {
+            if points.len() < 3 {
+                return Err(ModelError::SurfaceRegionPolygonTooFewPoints {
+                    element: owner.clone(),
+                });
+            }
+            if polygon_self_intersects(points) {
+                return Err(ModelError::SurfaceRegionPolygonSelfIntersecting {
+                    element: owner.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a closed polygon (implicitly closing `points[n-1] -> points[0]`) has
+/// any pair of non-adjacent edges that cross or touch. Integer-tick orientation
+/// math in `i128`, so it is exact and deterministic.
+fn polygon_self_intersects(points: &[Point2]) -> bool {
+    // Tolerate an explicitly-closed ring (the last vertex repeats the first):
+    // closure is implicit here, so the duplicate would otherwise read as a
+    // zero-length edge touching the first edge and be mis-reported as a crossing.
+    let points = match points {
+        [first, .., last] if first == last => &points[..points.len() - 1],
+        _ => points,
+    };
+    let n = points.len();
+    if n < 4 {
+        return false;
+    }
+    for i in 0..n {
+        let a1 = points[i];
+        let a2 = points[(i + 1) % n];
+        for j in (i + 1)..n {
+            // Skip edges that share a vertex: the next edge, and the wrap-around
+            // adjacency between the last edge and the first.
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                continue;
+            }
+            let b1 = points[j];
+            let b2 = points[(j + 1) % n];
+            if segments_intersect(a1, a2, b1, b2) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether closed segments `p1p2` and `p3p4` intersect (proper crossing or
+/// collinear touch).
+fn segments_intersect(p1: Point2, p2: Point2, p3: Point2, p4: Point2) -> bool {
+    let d1 = orientation(p3, p4, p1);
+    let d2 = orientation(p3, p4, p2);
+    let d3 = orientation(p1, p2, p3);
+    let d4 = orientation(p1, p2, p4);
+
+    let proper =
+        ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    proper
+        || (d1 == 0 && on_segment(p3, p4, p1))
+        || (d2 == 0 && on_segment(p3, p4, p2))
+        || (d3 == 0 && on_segment(p1, p2, p3))
+        || (d4 == 0 && on_segment(p1, p2, p4))
+}
+
+/// Twice the signed area of triangle `abc` in `i128` ticks² (positive = CCW).
+fn orientation(a: Point2, b: Point2, c: Point2) -> i128 {
+    let abx = (b.x.ticks() - a.x.ticks()) as i128;
+    let aby = (b.y.ticks() - a.y.ticks()) as i128;
+    let acx = (c.x.ticks() - a.x.ticks()) as i128;
+    let acy = (c.y.ticks() - a.y.ticks()) as i128;
+    abx * acy - aby * acx
+}
+
+/// Whether point `p`, assumed collinear with `a`-`b`, lies within the segment's
+/// bounding box (i.e. on the segment).
+fn on_segment(a: Point2, b: Point2, p: Point2) -> bool {
+    let within = |v: i64, x: i64, y: i64| (x.min(y)..=x.max(y)).contains(&v);
+    within(p.x.ticks(), a.x.ticks(), b.x.ticks()) && within(p.y.ticks(), a.y.ticks(), b.y.ticks())
+}
+
+/// serde `skip_serializing_if` predicate: a zero length is the unset default.
+fn length_is_zero(value: &Length) -> bool {
+    *value == Length::ZERO
+}
+
+/// serde `skip_serializing_if` predicate: `Stud` is the framing default.
+fn member_family_is_default(value: &MemberFamily) -> bool {
+    *value == MemberFamily::Stud
 }
 
 /// Where a material is defined. `Project` materials are embedded first-party
@@ -2981,10 +3541,8 @@ pub enum ModelError {
     },
     #[error("asset-backed material appearances must use a positive scale")]
     InvalidAssetScale,
-    #[error(
-        "wall construction system {system:?} must have exactly one framing layer, found {found}"
-    )]
-    WallSystemFramingLayerCount { system: ElementId, found: usize },
+    #[error("construction system {system:?} must have exactly one framing layer, found {found}")]
+    SystemFramingLayerCount { system: ElementId, found: usize },
     #[error("wall {wall:?} references unknown construction system {system:?}")]
     WallReferencesUnknownSystem { wall: ElementId, system: ElementId },
     #[error("wall {wall:?} references construction system {system:?} which is not a Wall system")]
@@ -3011,6 +3569,71 @@ pub enum ModelError {
         instance: ElementId,
         family: ElementId,
     },
+    #[error("roof plane {roof_plane:?} references unknown level {level:?}")]
+    RoofPlaneReferencesUnknownLevel {
+        roof_plane: ElementId,
+        level: ElementId,
+    },
+    #[error("roof plane {roof_plane:?} references unknown construction system {system:?}")]
+    RoofPlaneReferencesUnknownSystem {
+        roof_plane: ElementId,
+        system: ElementId,
+    },
+    #[error(
+        "roof plane {roof_plane:?} references construction system {system:?} which is not a Roof system"
+    )]
+    RoofPlaneSystemWrongKind {
+        roof_plane: ElementId,
+        system: ElementId,
+    },
+    #[error("roof plane {roof_plane:?} outline must have at least three points")]
+    RoofPlaneOutlineTooFewPoints { roof_plane: ElementId },
+    #[error("roof plane {roof_plane:?} outline must not be self-intersecting")]
+    RoofPlaneOutlineSelfIntersecting { roof_plane: ElementId },
+    #[error("roof plane {roof_plane:?} eave-edge index is out of range for its outline")]
+    RoofPlaneEaveEdgeOutOfRange { roof_plane: ElementId },
+    #[error("roof plane {roof_plane:?} slope must have a positive run")]
+    RoofPlaneInvalidSlope { roof_plane: ElementId },
+    #[error("ceiling {ceiling:?} references unknown level {level:?}")]
+    CeilingReferencesUnknownLevel {
+        ceiling: ElementId,
+        level: ElementId,
+    },
+    #[error("ceiling {ceiling:?} references unknown construction system {system:?}")]
+    CeilingReferencesUnknownSystem {
+        ceiling: ElementId,
+        system: ElementId,
+    },
+    #[error(
+        "ceiling {ceiling:?} references construction system {system:?} which is not a Ceiling system"
+    )]
+    CeilingSystemWrongKind {
+        ceiling: ElementId,
+        system: ElementId,
+    },
+    #[error("floor deck {floor_deck:?} references unknown level {level:?}")]
+    FloorDeckReferencesUnknownLevel {
+        floor_deck: ElementId,
+        level: ElementId,
+    },
+    #[error("floor deck {floor_deck:?} references unknown construction system {system:?}")]
+    FloorDeckReferencesUnknownSystem {
+        floor_deck: ElementId,
+        system: ElementId,
+    },
+    #[error(
+        "floor deck {floor_deck:?} references construction system {system:?} which is not a Floor system"
+    )]
+    FloorDeckSystemWrongKind {
+        floor_deck: ElementId,
+        system: ElementId,
+    },
+    #[error("surface region of {element:?} references unknown room {room:?}")]
+    SurfaceRegionReferencesUnknownRoom { element: ElementId, room: ElementId },
+    #[error("surface region polygon of {element:?} must have at least three points")]
+    SurfaceRegionPolygonTooFewPoints { element: ElementId },
+    #[error("surface region polygon of {element:?} must not be self-intersecting")]
+    SurfaceRegionPolygonSelfIntersecting { element: ElementId },
 }
 
 fn default_levels() -> Vec<Level> {
@@ -3191,6 +3814,521 @@ mod tests {
         Left,
         Center,
         Right,
+    }
+
+    /// A model carrying one framing-correct system of each surface kind (roof,
+    /// floor, ceiling), referencing the starter library's `mat-spf`.
+    fn surface_systems_model() -> BuildingModel {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code);
+        for (id, kind, family) in [
+            ("system-roof", SystemKind::Roof, MemberFamily::Rafter),
+            ("system-floor", SystemKind::Floor, MemberFamily::FloorJoist),
+            (
+                "system-ceiling",
+                SystemKind::Ceiling,
+                MemberFamily::CeilingJoist,
+            ),
+        ] {
+            model.systems.push(ConstructionSystem {
+                id: ElementId::new(id),
+                name: id.to_owned(),
+                kind,
+                source: None,
+                layers: vec![
+                    ConstructionLayer::new(
+                        LayerFunction::Framing,
+                        "mat-spf",
+                        BoardProfile::TwoBySix.nominal_depth(),
+                    )
+                    .with_framing(FramingSpec {
+                        member: BoardProfile::TwoBySix,
+                        spacing: Length::from_whole_inches(16),
+                        pattern: FramingPattern::Single,
+                        member_family: family,
+                        cavity_material: None,
+                    }),
+                ],
+            });
+        }
+        model
+    }
+
+    fn rect_outline() -> Vec<Point2> {
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+            Point2::new(Length::ZERO, Length::from_feet(12.0)),
+        ]
+    }
+
+    fn sample_roof_plane() -> RoofPlane {
+        RoofPlane::new(
+            "roof-1",
+            "Roof",
+            "level-1",
+            "system-roof",
+            rect_outline(),
+            Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        )
+    }
+
+    #[test]
+    fn surface_objects_validate_when_well_formed() {
+        let mut model = surface_systems_model();
+        model
+            .roof_planes
+            .push(sample_roof_plane().with_eave_overhang(Length::from_whole_inches(12)));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect_outline()),
+            Length::from_feet(8.0),
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect_outline()),
+        ));
+
+        assert!(model.validate().is_ok());
+    }
+
+    #[test]
+    fn roof_plane_rejects_wrong_system_kind() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.system = ElementId::new("system-wall-exterior-1");
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneSystemWrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_unknown_system() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.system = ElementId::new("system-nope");
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneReferencesUnknownSystem { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_unknown_level() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.level = ElementId::new("level-nope");
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneReferencesUnknownLevel { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_too_few_outline_points() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.outline.truncate(2);
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneOutlineTooFewPoints { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_self_intersecting_outline() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        // A bow-tie quad: swap the last two vertices so opposite edges cross.
+        roof.outline = vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(20.0), Length::ZERO),
+            Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+        ];
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneOutlineSelfIntersecting { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_eave_edge_out_of_range() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.eave_edge = 4; // outline has 4 points → valid indices are 0..=3
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneEaveEdgeOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_nonpositive_slope_run() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.slope = Slope::new(Length::from_whole_inches(4), Length::ZERO);
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneInvalidSlope { .. })
+        ));
+    }
+
+    #[test]
+    fn roof_opening_rejects_nonpositive_size() {
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.openings.push(RoofOpening::new(
+            "skylight-1",
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+            Length::ZERO,
+            Length::from_feet(2.0),
+        ));
+        model.roof_planes.push(roof);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::InvalidOpeningSize { .. })
+        ));
+    }
+
+    #[test]
+    fn ceiling_rejects_wrong_system_kind() {
+        let mut model = surface_systems_model();
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-roof",
+            SurfaceRegion::Polygon(rect_outline()),
+            Length::from_feet(8.0),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingSystemWrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn ceiling_with_room_region_validates_and_rejects_unknown_room() {
+        let mut model = surface_systems_model();
+        model.rooms.push(Room::new(
+            "room-1",
+            "Living",
+            RoomUsage::Living,
+            "level-1",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+            Length::from_feet(8.0),
+        ));
+        assert!(model.validate().is_ok());
+
+        model.ceilings[0].region = SurfaceRegion::Room(ElementId::new("room-nope"));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::SurfaceRegionReferencesUnknownRoom { .. })
+        ));
+    }
+
+    #[test]
+    fn floor_deck_rejects_wrong_system_kind() {
+        let mut model = surface_systems_model();
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect_outline()),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::FloorDeckSystemWrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn floor_deck_polygon_region_rejects_too_few_points() {
+        let mut model = surface_systems_model();
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(vec![Point2::new(Length::ZERO, Length::ZERO)]),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::SurfaceRegionPolygonTooFewPoints { .. })
+        ));
+    }
+
+    #[test]
+    fn ceiling_rejects_unknown_level() {
+        let mut model = surface_systems_model();
+        let mut ceiling = Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-nope",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect_outline()),
+            Length::from_feet(8.0),
+        );
+        ceiling.level = ElementId::new("level-nope");
+        model.ceilings.push(ceiling);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingReferencesUnknownLevel { .. })
+        ));
+    }
+
+    #[test]
+    fn ceiling_rejects_unknown_system() {
+        let mut model = surface_systems_model();
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-nope",
+            SurfaceRegion::Polygon(rect_outline()),
+            Length::from_feet(8.0),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingReferencesUnknownSystem { .. })
+        ));
+    }
+
+    #[test]
+    fn floor_deck_rejects_unknown_level() {
+        let mut model = surface_systems_model();
+        let mut deck = FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect_outline()),
+        );
+        deck.level = ElementId::new("level-nope");
+        model.floor_decks.push(deck);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::FloorDeckReferencesUnknownLevel { .. })
+        ));
+    }
+
+    #[test]
+    fn floor_deck_rejects_unknown_system() {
+        let mut model = surface_systems_model();
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-nope",
+            SurfaceRegion::Polygon(rect_outline()),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::FloorDeckReferencesUnknownSystem { .. })
+        ));
+    }
+
+    #[test]
+    fn surface_region_polygon_rejects_self_intersection() {
+        let mut model = surface_systems_model();
+        let bowtie = vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::ZERO, Length::from_feet(10.0)),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+        ];
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(bowtie),
+        ));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::SurfaceRegionPolygonSelfIntersecting { .. })
+        ));
+    }
+
+    #[test]
+    fn framing_layer_count_rule_applies_to_every_system_kind() {
+        let mut model = surface_systems_model();
+        // Drop the roof system's only framing layer → zero framing layers.
+        let roof_system = model
+            .systems
+            .iter_mut()
+            .find(|system| system.id == ElementId::new("system-roof"))
+            .unwrap();
+        roof_system.layers = vec![ConstructionLayer::new(
+            LayerFunction::Roofing,
+            "mat-spf",
+            Length::from_whole_inches(1),
+        )];
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::SystemFramingLayerCount { found: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn surface_objects_enforce_global_id_uniqueness() {
+        // A nested roof-opening id colliding with a top-level id is rejected
+        // (openings share the one global id set).
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.openings.push(RoofOpening::new(
+            "roof-1", // collides with the roof plane's own id
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+        model.roof_planes.push(roof);
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { .. })
+        ));
+
+        // Two floor decks sharing an id is rejected.
+        let mut model = surface_systems_model();
+        for _ in 0..2 {
+            model.floor_decks.push(FloorDeck::new(
+                "deck-dup",
+                "Deck",
+                "level-1",
+                "system-floor",
+                SurfaceRegion::Polygon(rect_outline()),
+            ));
+        }
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { .. })
+        ));
+    }
+
+    #[test]
+    fn exposure_is_kind_aware() {
+        fn system_with(kind: SystemKind, functions: &[LayerFunction]) -> ConstructionSystem {
+            ConstructionSystem {
+                id: ElementId::new("system-exposure"),
+                name: "Exposure".to_owned(),
+                kind,
+                source: None,
+                layers: functions
+                    .iter()
+                    .map(|&function| {
+                        ConstructionLayer::new(function, "mat-x", Length::from_whole_inches(1))
+                    })
+                    .collect(),
+            }
+        }
+
+        // A roof's weather face is Roofing/Underlayment → Exterior.
+        assert_eq!(
+            system_with(
+                SystemKind::Roof,
+                &[LayerFunction::Roofing, LayerFunction::Sheathing]
+            )
+            .exposure(),
+            WallExposure::Exterior
+        );
+        // Floors and ceilings have no weather face in v1 → always Interior, even
+        // carrying outboard roles a wall would treat as exterior.
+        assert_eq!(
+            system_with(
+                SystemKind::Floor,
+                &[LayerFunction::Roofing, LayerFunction::Cladding]
+            )
+            .exposure(),
+            WallExposure::Interior
+        );
+        assert_eq!(
+            system_with(
+                SystemKind::Ceiling,
+                &[LayerFunction::CeilingFinish, LayerFunction::Sheathing]
+            )
+            .exposure(),
+            WallExposure::Interior
+        );
+        // Regression: the wall branch is unchanged — a cladding/barrier layer is
+        // Exterior, an all-interior stack is Interior.
+        assert_eq!(
+            system_with(
+                SystemKind::Wall,
+                &[LayerFunction::InteriorFinish, LayerFunction::Cladding]
+            )
+            .exposure(),
+            WallExposure::Exterior
+        );
+        assert_eq!(
+            system_with(SystemKind::Wall, &[LayerFunction::InteriorFinish]).exposure(),
+            WallExposure::Interior
+        );
+    }
+
+    #[test]
+    fn polygon_self_intersection_detects_bowtie_not_simple_rect() {
+        assert!(!polygon_self_intersects(&rect_outline()));
+        let bowtie = vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::ZERO, Length::from_feet(10.0)),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+        ];
+        assert!(polygon_self_intersects(&bowtie));
+    }
+
+    #[test]
+    fn polygon_self_intersection_tolerates_explicitly_closed_ring() {
+        // A ring whose last vertex repeats the first (explicit closure) is a
+        // simple rectangle, not a self-intersection.
+        let mut closed = rect_outline();
+        closed.push(closed[0]);
+        assert!(!polygon_self_intersects(&closed));
     }
 
     #[test]
@@ -4165,6 +5303,7 @@ mod tests {
                     member: BoardProfile::TwoByFour,
                     spacing: Length::from_whole_inches(16),
                     pattern: FramingPattern::Single,
+                    member_family: MemberFamily::Stud,
                     cavity_material: None,
                 }),
             ],

@@ -296,6 +296,11 @@ goals relate.
   (wall systems and materials now; textures/depth maps, furnishings, and MEP
   objects later) — vendor-on-use with provenance so projects stay self-contained
   and deterministic. See [specs/libraries.md](specs/libraries.md).
+- **G-014 Ceilings & Roofs:** cap the shell with authored roof planes, ceilings,
+  and floor decks (roof/ceiling modeled as two independent surfaces), deriving
+  rafters, joists, BOM, and 3D geometry — gable/shed roofs, flat ceilings, and
+  floor decks first, with structural judgment surfaced as diagnostics. Part of
+  M3 (Floors And Roofs). See [specs/ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
 
 ## Definition Of Done
 

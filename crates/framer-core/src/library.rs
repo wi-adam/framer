@@ -224,8 +224,9 @@ pub enum LibraryError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ConstructionLayer, ConstructionSystem, ElementId, Furnishing, LayerFunction, Length,
-        Material, MepObject, MepObjectKind, SystemKind,
+        BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
+        FramingSpec, Furnishing, LayerFunction, Length, Material, MemberFamily, MepObject,
+        MepObjectKind, SystemKind,
     };
 
     use super::*;
@@ -279,11 +280,20 @@ mod tests {
                 name: "Round-trip system".to_owned(),
                 kind: SystemKind::Floor,
                 source: None,
-                layers: vec![ConstructionLayer::new(
-                    LayerFunction::InteriorFinish,
-                    "mat-round-trip",
-                    Length::from_whole_inches(1),
-                )],
+                layers: vec![
+                    ConstructionLayer::new(
+                        LayerFunction::Framing,
+                        "mat-round-trip",
+                        BoardProfile::TwoBySix.nominal_depth(),
+                    )
+                    .with_framing(FramingSpec {
+                        member: BoardProfile::TwoBySix,
+                        spacing: Length::from_whole_inches(16),
+                        pattern: FramingPattern::Single,
+                        member_family: MemberFamily::FloorJoist,
+                        cavity_material: None,
+                    }),
+                ],
             }],
             furnishings: vec![Furnishing::new(
                 "furnishing-round-trip",
