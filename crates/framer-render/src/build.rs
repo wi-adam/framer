@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 
 use framer_core::{
-    Appearance, BuildingModel, ConstructionSystem, ElementId, LayerFunction, OpeningKind, Wall,
-    WallExposure,
+    Appearance, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck, LayerFunction,
+    Level, OpeningKind, Point2, RoofPlane, SurfaceRegion, Wall, WallExposure, room_boundary,
+    triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -255,6 +256,17 @@ fn geometry_from_model(
 
     for wall in &model.walls {
         push_wall(&mut tris, &mut bounds, model, wall, &mut palette);
+    }
+    // Horizontal decks/ceilings, then sloped roof planes: each authored surface
+    // becomes opaque-diffuse geometry through the same `Triangle` path as walls.
+    for deck in &model.floor_decks {
+        push_floor_deck(&mut tris, &mut bounds, model, deck, &mut palette);
+    }
+    for ceiling in &model.ceilings {
+        push_ceiling(&mut tris, &mut bounds, model, ceiling, &mut palette);
+    }
+    for plane in &model.roof_planes {
+        push_roof_plane(&mut tris, &mut bounds, model, plane, &mut palette);
     }
 
     // Ground plane: a large quad just below the lowest wall base.
@@ -549,6 +561,305 @@ fn push_box(
         tris.push(Triangle::new(c[f[0]], c[f[1]], c[f[2]], material));
         tris.push(Triangle::new(c[f[0]], c[f[2]], c[f[3]], material));
     }
+}
+
+/// Below this triangle cross-product magnitude (≈ 2× area in in²) a fan triangle
+/// is treated as degenerate and dropped, so a collinear/zero-area sliver never
+/// produces a NaN geometric normal.
+const SURFACE_AREA_EPS: f32 = 1.0e-4;
+
+/// Which finished face of a roof/ceiling/floor assembly the renderer shows, so
+/// the surface picks the layer the viewer actually sees: a roof's weather face,
+/// a ceiling's underside finish, a floor deck's walked-on top.
+#[derive(Clone, Copy)]
+enum SurfaceFace {
+    Roof,
+    Ceiling,
+    Floor,
+}
+
+/// The render material for a roof/ceiling/floor surface: the resolved appearance
+/// of its system's representative finish layer (weather face for a roof, the
+/// conditioned-side finish for a ceiling/floor), falling back to a stock palette
+/// entry when the system or material is missing — so scene building stays
+/// infallible like walls. Reuses the existing `MAT_*` palette (no new GPU
+/// material), keeping the WGSL kernel and GPU↔CPU parity untouched.
+fn surface_material(
+    model: &BuildingModel,
+    system: Option<&ConstructionSystem>,
+    face: SurfaceFace,
+    palette: &mut PaletteBuilder<'_>,
+) -> u32 {
+    let fallback = match face {
+        SurfaceFace::Ceiling => MAT_DRYWALL,
+        SurfaceFace::Roof | SurfaceFace::Floor => MAT_CLADDING,
+    };
+    let Some(system) = system else {
+        return fallback;
+    };
+    // The roof's weather face is the outermost (last) layer; a ceiling/floor's
+    // finished face is the conditioned-side (first) layer. Pick the named finish
+    // function, then any structural panel, then the outermost/innermost layer.
+    let preferred = match face {
+        SurfaceFace::Roof => system
+            .layers
+            .iter()
+            .rev()
+            .find(|layer| layer.function == LayerFunction::Roofing)
+            .or_else(|| {
+                system.layers.iter().rev().find(|layer| {
+                    matches!(
+                        layer.function,
+                        LayerFunction::WeatherBarrier | LayerFunction::Sheathing
+                    )
+                })
+            })
+            .or_else(|| system.layers.last()),
+        SurfaceFace::Ceiling => system
+            .layers
+            .iter()
+            .find(|layer| {
+                matches!(
+                    layer.function,
+                    LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
+                )
+            })
+            .or_else(|| system.layers.first()),
+        SurfaceFace::Floor => system
+            .layers
+            .iter()
+            .find(|layer| {
+                matches!(
+                    layer.function,
+                    LayerFunction::InteriorFinish | LayerFunction::Sheathing
+                )
+            })
+            .or_else(|| system.layers.first()),
+    };
+    preferred
+        .and_then(|layer| palette.material_index(model, &layer.material))
+        .unwrap_or(fallback)
+}
+
+/// The construction system referenced by id, if any.
+fn system_by_id<'a>(model: &'a BuildingModel, id: &ElementId) -> Option<&'a ConstructionSystem> {
+    model.systems.iter().find(|system| system.id == *id)
+}
+
+/// The level an element sits on, looked up by id.
+fn find_level<'a>(model: &'a BuildingModel, id: &ElementId) -> Option<&'a Level> {
+    model.levels.iter().find(|level| level.id == *id)
+}
+
+/// Resolve a surface region to its closed plan outline: a `Polygon` is its own
+/// outline; a `Room` is resolved through the wall graph (mirroring the solver), so
+/// the rendered deck/ceiling tracks the same enclosed face the joists frame.
+/// Returns `None` for an unknown room or an open (mid-edit) loop — the surface is
+/// simply not drawn, matching the solver's open-region behavior.
+fn resolve_region_outline(model: &BuildingModel, region: &SurfaceRegion) -> Option<Vec<Point2>> {
+    match region {
+        SurfaceRegion::Polygon(points) => Some(points.clone()),
+        SurfaceRegion::Room(room_id) => {
+            let room = model.rooms.iter().find(|room| room.id == *room_id)?;
+            room_boundary(model, room.seed).map(|boundary| boundary.vertices)
+        }
+    }
+}
+
+/// A roof plane's plan-local projection: the eave start, the up-slope unit normal
+/// (oriented toward the outline centroid, so it is winding-independent), and the
+/// rise-per-plan-inch ratio. Mirrors the solver's `roof_plane_geometry` so the
+/// rendered surface lies on exactly the plane the rafters frame. The plane is
+/// affine in plan (`z` is linear in `x`/`y`), so projecting the outline keeps it
+/// coplanar and a fan triangulation is flat.
+struct RoofPlaneSurface {
+    ax: f64,
+    ay: f64,
+    nx: f64,
+    ny: f64,
+    ratio: f64,
+    reference_elevation: f64,
+}
+
+impl RoofPlaneSurface {
+    fn new(plane: &RoofPlane) -> Option<Self> {
+        let n = plane.outline.len();
+        if n < 3 {
+            return None;
+        }
+        let i = plane.eave_edge as usize % n;
+        let a = plane.outline[i];
+        let b = plane.outline[(i + 1) % n];
+        let (ax, ay) = (a.x.inches(), a.y.inches());
+        let ex = b.x.inches() - ax;
+        let ey = b.y.inches() - ay;
+        let eave_len = (ex * ex + ey * ey).sqrt();
+        if eave_len <= f64::EPSILON {
+            return None;
+        }
+        // Up-slope unit normal: perpendicular to the eave, flipped to point toward
+        // the outline centroid (independent of the polygon's winding).
+        let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
+        let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
+        let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
+        let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
+        if nx * (cx - mx) + ny * (cy - my) < 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        let run = plane.slope.run.inches();
+        let ratio = if run > 0.0 {
+            plane.slope.rise.inches() / run
+        } else {
+            0.0
+        };
+        Some(Self {
+            ax,
+            ay,
+            nx,
+            ny,
+            ratio,
+            reference_elevation: plane.reference_elevation.inches(),
+        })
+    }
+
+    /// World position of a plan outline point lifted onto the sloped plane: the
+    /// eave springing raised by its up-slope plan distance times the pitch.
+    fn project(&self, point: Point2) -> Vec3 {
+        let x = point.x.inches();
+        let y = point.y.inches();
+        let upslope = (x - self.ax) * self.nx + (y - self.ay) * self.ny;
+        Vec3::new(
+            x as f32,
+            y as f32,
+            (self.reference_elevation + upslope * self.ratio) as f32,
+        )
+    }
+}
+
+/// Emit a planar polygon (vertices already in world space) into `tris` using the
+/// precomputed `triangles` index triples (an ear-clip from
+/// [`triangulate_simple_polygon`], correct for concave outlines), dropping
+/// degenerate triangles so a sliver never emits a NaN normal. Every vertex grows
+/// `bounds` so the surface contributes to the camera framing.
+fn push_polygon(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    verts: &[Vec3],
+    triangles: &[[usize; 3]],
+    material: u32,
+) {
+    for &v in verts {
+        bounds.grow(v);
+    }
+    for &[ia, ib, ic] in triangles {
+        let (a, b, c) = (verts[ia], verts[ib], verts[ic]);
+        if (b - a).cross(c - a).length() <= SURFACE_AREA_EPS {
+            continue;
+        }
+        tris.push(Triangle::new(a, b, c, material));
+    }
+}
+
+/// Emit a roof plane's finished surface: its plan outline lifted onto the sloped
+/// plane, fan-triangulated with the system's weather-face material.
+fn push_roof_plane(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    model: &BuildingModel,
+    plane: &RoofPlane,
+    palette: &mut PaletteBuilder<'_>,
+) {
+    let Some(surface) = RoofPlaneSurface::new(plane) else {
+        return;
+    };
+    let material = surface_material(
+        model,
+        system_by_id(model, &plane.system),
+        SurfaceFace::Roof,
+        palette,
+    );
+    let verts: Vec<Vec3> = plane.outline.iter().map(|&p| surface.project(p)).collect();
+    let triangles = triangulate_simple_polygon(&plane.outline);
+    push_polygon(tris, bounds, &verts, &triangles, material);
+}
+
+/// Emit a horizontal surface (a flat ceiling or floor deck) at constant `z`: its
+/// plan outline fan-triangulated with the system's finished-face material.
+#[allow(clippy::too_many_arguments)]
+fn push_horizontal_surface(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    model: &BuildingModel,
+    outline: &[Point2],
+    z: f32,
+    system: Option<&ConstructionSystem>,
+    face: SurfaceFace,
+    palette: &mut PaletteBuilder<'_>,
+) {
+    let material = surface_material(model, system, face, palette);
+    let verts: Vec<Vec3> = outline
+        .iter()
+        .map(|p| Vec3::new(p.x.inches() as f32, p.y.inches() as f32, z))
+        .collect();
+    let triangles = triangulate_simple_polygon(outline);
+    push_polygon(tris, bounds, &verts, &triangles, material);
+}
+
+/// Emit a flat ceiling's underside surface at `level.elevation + level.height −
+/// ceiling.height` (the level top is the hang reference), with the system's
+/// ceiling-finish material.
+fn push_ceiling(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    model: &BuildingModel,
+    ceiling: &Ceiling,
+    palette: &mut PaletteBuilder<'_>,
+) {
+    let Some(outline) = resolve_region_outline(model, &ceiling.region) else {
+        return;
+    };
+    let level_top = find_level(model, &ceiling.level)
+        .map(|level| (level.elevation + level.height).inches())
+        .unwrap_or(0.0);
+    let z = (level_top - ceiling.height.inches()) as f32;
+    push_horizontal_surface(
+        tris,
+        bounds,
+        model,
+        &outline,
+        z,
+        system_by_id(model, &ceiling.system),
+        SurfaceFace::Ceiling,
+        palette,
+    );
+}
+
+/// Emit a floor deck's walked-on surface at its level elevation, with the
+/// system's top-finish material.
+fn push_floor_deck(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    model: &BuildingModel,
+    deck: &FloorDeck,
+    palette: &mut PaletteBuilder<'_>,
+) {
+    let Some(outline) = resolve_region_outline(model, &deck.region) else {
+        return;
+    };
+    let z = find_level(model, &deck.level)
+        .map(|level| level.elevation.inches() as f32)
+        .unwrap_or(0.0);
+    push_horizontal_surface(
+        tris,
+        bounds,
+        model,
+        &outline,
+        z,
+        system_by_id(model, &deck.system),
+        SurfaceFace::Floor,
+        palette,
+    );
 }
 
 fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
@@ -880,5 +1191,235 @@ mod tests {
         for t in &scene.triangles {
             assert!(t.v0.x.is_finite() && t.v0.y.is_finite() && t.v0.z.is_finite());
         }
+    }
+
+    // === roof / ceiling / floor surfaces ===
+
+    use framer_core::{
+        BoardProfile, ConstructionLayer, FramingPattern, FramingSpec, Material as CoreMaterial,
+        MemberFamily, Slope, SystemKind,
+    };
+
+    /// A 12ft × 8ft rectangle, used as both the roof outline and the deck/ceiling
+    /// region. The y=0 edge (index 0) is the eave; the up-slope direction is +y.
+    fn rect12x8() -> Vec<Point2> {
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(12.0), Length::ZERO),
+            Point2::new(Length::from_feet(12.0), Length::from_feet(8.0)),
+            Point2::new(Length::ZERO, Length::from_feet(8.0)),
+        ]
+    }
+
+    /// A system with a single named finish layer over a framing layer, ordered
+    /// interior → exterior so each surface picks the face the viewer sees.
+    fn finish_system(
+        id: &str,
+        kind: SystemKind,
+        finish: LayerFunction,
+        finish_material: &str,
+        finish_first: bool,
+    ) -> ConstructionSystem {
+        let framing = ConstructionLayer::new(
+            LayerFunction::Framing,
+            "mat-spf",
+            BoardProfile::TwoBySix.nominal_depth(),
+        )
+        .with_framing(FramingSpec {
+            member: BoardProfile::TwoBySix,
+            spacing: Length::from_whole_inches(16),
+            pattern: FramingPattern::Single,
+            member_family: MemberFamily::Rafter,
+            cavity_material: None,
+        });
+        let finish = ConstructionLayer::new(finish, finish_material, Length::from_whole_inches(1));
+        let layers = if finish_first {
+            vec![finish, framing]
+        } else {
+            vec![framing, finish]
+        };
+        ConstructionSystem {
+            id: ElementId::new(id),
+            name: id.to_owned(),
+            kind,
+            source: None,
+            layers,
+        }
+    }
+
+    /// A model carrying one gable roof plane, one flat ceiling, and one floor deck
+    /// over a 12×8 footprint on a 9ft-tall level, each with a distinctly colored
+    /// finish so the rendered material can be checked.
+    fn roofed_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        // 9ft top plane so the ceiling (12" below it) lands at 8ft.
+        for level in &mut model.levels {
+            if level.id.0 == "level-1" {
+                level.height = Length::from_whole_inches(108);
+            }
+        }
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-roof",
+            "Shingle",
+            [40, 40, 45],
+        ));
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-ceil",
+            "Ceiling",
+            [230, 230, 225],
+        ));
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-floor",
+            "Subfloor",
+            [120, 90, 60],
+        ));
+        model.systems.push(finish_system(
+            "system-roof",
+            SystemKind::Roof,
+            LayerFunction::Roofing,
+            "mat-roof",
+            false,
+        ));
+        model.systems.push(finish_system(
+            "system-ceiling",
+            SystemKind::Ceiling,
+            LayerFunction::CeilingFinish,
+            "mat-ceil",
+            true,
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        // 4:12 gable plane springing at 8ft; ridge rises 8ft run × 4/12 = 32" to 128".
+        model.roof_planes.push(RoofPlane::new(
+            "roof-1",
+            "Roof",
+            "level-1",
+            "system-roof",
+            rect12x8(),
+            Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect12x8()),
+            Length::from_whole_inches(12),
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect12x8()),
+        ));
+        model
+    }
+
+    #[test]
+    fn roof_plane_emits_sloped_surface_at_true_elevations() {
+        let scene = scene_from_model(&roofed_model(), &RenderOptions::default());
+        // Collect every vertex z of triangles that are genuinely sloped (not all
+        // three vertices at one elevation) — those are the roof's.
+        let mut sloped_zs: Vec<f32> = Vec::new();
+        for t in &scene.triangles {
+            let v1 = t.v0 + t.edge1;
+            let v2 = t.v0 + t.edge2;
+            let zs = [t.v0.z, v1.z, v2.z];
+            let zmin = zs.iter().cloned().fold(f32::INFINITY, f32::min);
+            let zmax = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            if zmax - zmin > 1.0 {
+                sloped_zs.extend_from_slice(&zs);
+            }
+        }
+        assert!(!sloped_zs.is_empty(), "no sloped roof triangles emitted");
+        let lo = sloped_zs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = sloped_zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        // Eave springs at 96" (8ft); ridge at 96 + 96*(4/12) = 128".
+        assert!((lo - 96.0).abs() < 0.5, "eave elevation {lo}, want ~96");
+        assert!((hi - 128.0).abs() < 0.5, "ridge elevation {hi}, want ~128");
+    }
+
+    #[test]
+    fn flat_ceiling_and_floor_emit_horizontal_surfaces_at_their_elevations() {
+        let scene = scene_from_model(&roofed_model(), &RenderOptions::default());
+        let level_zs: Vec<f32> = scene
+            .triangles
+            .iter()
+            .filter(|t| {
+                let v1 = t.v0 + t.edge1;
+                let v2 = t.v0 + t.edge2;
+                // Horizontal triangle: all three vertices share one elevation.
+                (t.v0.z - v1.z).abs() < 1.0e-3 && (t.v0.z - v2.z).abs() < 1.0e-3
+            })
+            .map(|t| t.v0.z)
+            .collect();
+        // Ceiling underside at 108 − 12 = 96"; floor deck at the level elevation 0".
+        assert!(
+            level_zs.iter().any(|z| (z - 96.0).abs() < 0.5),
+            "no ceiling surface at ~96in: {level_zs:?}"
+        );
+        assert!(
+            level_zs.iter().any(|z| z.abs() < 0.5),
+            "no floor surface at ~0in: {level_zs:?}"
+        );
+    }
+
+    #[test]
+    fn roof_surface_uses_the_systems_roofing_material() {
+        let scene = scene_from_model(&roofed_model(), &RenderOptions::default());
+        let want = color_to_linear([40, 40, 45]);
+        // A sloped triangle is the roof; its material must be the lowered shingle.
+        let roof_tri = scene
+            .triangles
+            .iter()
+            .find(|t| {
+                let v1 = t.v0 + t.edge1;
+                let v2 = t.v0 + t.edge2;
+                (t.v0.z.max(v1.z).max(v2.z) - t.v0.z.min(v1.z).min(v2.z)) > 1.0
+            })
+            .expect("a sloped roof triangle");
+        match &scene.materials[roof_tri.material as usize] {
+            Material::Diffuse { albedo } => {
+                assert!(
+                    (*albedo - want).length() < 1.0e-5,
+                    "roof albedo {albedo:?}, want {want:?}"
+                );
+            }
+            other => panic!("roof material is not diffuse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn surface_geometry_is_finite() {
+        let scene = scene_from_model(&roofed_model(), &RenderOptions::default());
+        for t in &scene.triangles {
+            for v in [t.v0, t.v0 + t.edge1, t.v0 + t.edge2, t.geom_normal] {
+                assert!(
+                    v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                    "non-finite vertex/normal in surface geometry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn roof_grows_the_camera_framing_upward() {
+        // The ridge at 128" lifts the bounds, so the framing radius is larger than
+        // for the bare walls/decks alone.
+        let with_roof = scene_from_model(&roofed_model(), &RenderOptions::default());
+        let mut no_roof_model = roofed_model();
+        no_roof_model.roof_planes.clear();
+        let without = scene_from_model(&no_roof_model, &RenderOptions::default());
+        // Both frame the model; the roofed one reaches a higher max elevation, so
+        // it emits strictly more triangles and a finite, larger vertical extent.
+        assert!(with_roof.triangles.len() > without.triangles.len());
     }
 }

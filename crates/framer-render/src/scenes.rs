@@ -3,6 +3,13 @@
 //! the single source of truth for both the CPU golden-image regression test and
 //! the app's GPU↔CPU parity test, so the two validate the *same* scene.
 
+use framer_core::{
+    BoardProfile, BuildingModel, Ceiling, ConstructionLayer, ConstructionSystem, FloorDeck,
+    FramingPattern, FramingSpec, LayerFunction, Length, Material as CoreMaterial, MemberFamily,
+    Point2, RoofPlane, Slope, SurfaceRegion, SystemKind,
+};
+
+use crate::build::{RenderOptions, scene_from_model};
 use crate::camera::Camera;
 use crate::geom::Triangle;
 use crate::material::Material;
@@ -114,6 +121,163 @@ pub fn reference_scene() -> Scene {
     Scene::new(tris, materials, sun, sky, camera, 1.0)
 }
 
+/// A single named finish layer over a framing layer, ordered interior →
+/// exterior (so `finish_first` places a roof's weather face last and a
+/// ceiling/floor's finished face first).
+fn finish_system(
+    id: &str,
+    kind: SystemKind,
+    finish: LayerFunction,
+    finish_material: &str,
+    finish_first: bool,
+) -> ConstructionSystem {
+    let framing = ConstructionLayer::new(
+        LayerFunction::Framing,
+        "mat-spf",
+        BoardProfile::TwoBySix.nominal_depth(),
+    )
+    .with_framing(FramingSpec {
+        member: BoardProfile::TwoBySix,
+        spacing: Length::from_whole_inches(16),
+        pattern: FramingPattern::Single,
+        member_family: MemberFamily::Rafter,
+        cavity_material: None,
+    });
+    let finish = ConstructionLayer::new(finish, finish_material, Length::from_whole_inches(1));
+    ConstructionSystem {
+        id: framer_core::ElementId::new(id),
+        name: id.to_owned(),
+        kind,
+        source: None,
+        layers: if finish_first {
+            vec![finish, framing]
+        } else {
+            vec![framing, finish]
+        },
+    }
+}
+
+/// The demo shell capped with a gable roof, plus a flat ceiling and a floor deck
+/// over its 28ft × 20ft footprint. Distinctly colored finishes (charcoal roof,
+/// white ceiling, wood subfloor) so the sloped + horizontal surfaces read in the
+/// render.
+fn roofed_model() -> BuildingModel {
+    let ft = Length::from_feet;
+    let mut model = BuildingModel::demo_shell();
+    // A 9ft top plane so the 12"-below-top ceiling lands at the 8ft wall top.
+    for level in &mut model.levels {
+        if level.id.0 == "level-1" {
+            level.height = Length::from_whole_inches(108);
+        }
+    }
+    model.materials.push(CoreMaterial::solid_color(
+        "mat-roof",
+        "Shingle",
+        [44, 46, 52],
+    ));
+    model.materials.push(CoreMaterial::solid_color(
+        "mat-ceil",
+        "Ceiling",
+        [232, 232, 228],
+    ));
+    model.materials.push(CoreMaterial::solid_color(
+        "mat-floor",
+        "Subfloor",
+        [150, 116, 78],
+    ));
+    model.systems.push(finish_system(
+        "system-roof",
+        SystemKind::Roof,
+        LayerFunction::Roofing,
+        "mat-roof",
+        false,
+    ));
+    model.systems.push(finish_system(
+        "system-ceiling",
+        SystemKind::Ceiling,
+        LayerFunction::CeilingFinish,
+        "mat-ceil",
+        true,
+    ));
+    model.systems.push(finish_system(
+        "system-floor",
+        SystemKind::Floor,
+        LayerFunction::InteriorFinish,
+        "mat-floor",
+        true,
+    ));
+
+    // A 6:12 gable: two opposing planes springing at the 8ft wall top, sharing a
+    // ridge along the long axis at y = 10ft (ridge rises 120in × 6/12 = 60" to
+    // 156"). The south plane's eave is the y=0 edge; the north plane's is y=20.
+    let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+    model.roof_planes.push(RoofPlane::new(
+        "roof-south",
+        "South roof",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(28.0), Length::ZERO),
+            Point2::new(ft(28.0), ft(10.0)),
+            Point2::new(Length::ZERO, ft(10.0)),
+        ],
+        slope,
+        0,
+        ft(8.0),
+    ));
+    model.roof_planes.push(RoofPlane::new(
+        "roof-north",
+        "North roof",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(Length::ZERO, ft(20.0)),
+            Point2::new(ft(28.0), ft(20.0)),
+            Point2::new(ft(28.0), ft(10.0)),
+            Point2::new(Length::ZERO, ft(10.0)),
+        ],
+        slope,
+        0,
+        ft(8.0),
+    ));
+
+    let footprint = vec![
+        Point2::new(Length::ZERO, Length::ZERO),
+        Point2::new(ft(28.0), Length::ZERO),
+        Point2::new(ft(28.0), ft(20.0)),
+        Point2::new(Length::ZERO, ft(20.0)),
+    ];
+    model.ceilings.push(Ceiling::new(
+        "ceiling-1",
+        "Ceiling",
+        "level-1",
+        "system-ceiling",
+        SurfaceRegion::Polygon(footprint.clone()),
+        Length::from_whole_inches(12),
+    ));
+    model.floor_decks.push(FloorDeck::new(
+        "deck-1",
+        "Deck",
+        "level-1",
+        "system-floor",
+        SurfaceRegion::Polygon(footprint),
+    ));
+    model
+}
+
+/// A model-derived scene: the [`roofed_model`] rendered through the production
+/// `scene_from_model` path. The single source of truth for the roofed golden
+/// image and the sloped-surface GPU↔CPU parity test, so both validate the same
+/// sloped + horizontal geometry the app emits.
+pub fn roofed_scene() -> Scene {
+    let opts = RenderOptions {
+        aspect: REFERENCE_WIDTH as f32 / REFERENCE_HEIGHT as f32,
+        ..RenderOptions::default()
+    };
+    scene_from_model(&roofed_model(), &opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +288,31 @@ mod tests {
         // Ground (2) + three cubes (12 each) = 38 triangles, four materials.
         assert_eq!(scene.triangles.len(), 38);
         assert_eq!(scene.materials.len(), 4);
+        assert!(!scene.bvh.nodes.is_empty());
+    }
+
+    #[test]
+    fn roofed_scene_has_sloped_roof_geometry() {
+        let scene = roofed_scene();
+        // Demo-shell walls + decks + ground + a gable roof: plenty of triangles,
+        // all finite, with at least one genuinely sloped roof triangle.
+        assert!(
+            scene.triangles.len() > 60,
+            "roofed scene too small: {}",
+            scene.triangles.len()
+        );
+        let sloped = scene.triangles.iter().any(|t| {
+            let v1 = t.v0 + t.edge1;
+            let v2 = t.v0 + t.edge2;
+            (t.v0.z.max(v1.z).max(v2.z) - t.v0.z.min(v1.z).min(v2.z)) > 1.0
+        });
+        assert!(sloped, "no sloped roof triangle in roofed_scene");
+        for t in &scene.triangles {
+            assert!(
+                t.v0.x.is_finite() && t.geom_normal.x.is_finite() && t.geom_normal.y.is_finite(),
+                "non-finite geometry in roofed_scene"
+            );
+        }
         assert!(!scene.bvh.nodes.is_empty());
     }
 }

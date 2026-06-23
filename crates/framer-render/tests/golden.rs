@@ -11,21 +11,24 @@
 //! ```
 
 use framer_render::render;
+use framer_render::scene::Scene;
 use framer_render::scenes::{
     REFERENCE_HEIGHT as HEIGHT, REFERENCE_SEED as SEED, REFERENCE_SPP as SPP,
-    REFERENCE_WIDTH as WIDTH, reference_scene,
+    REFERENCE_WIDTH as WIDTH, reference_scene, roofed_scene,
 };
 
-fn golden_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/reference.rgba")
+fn golden_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/golden/{name}.rgba"))
 }
 
-#[test]
-fn reference_render_matches_golden() {
-    let image = render(&reference_scene(), WIDTH, HEIGHT, SPP, SEED);
+/// Render `scene` and compare it byte-for-byte (within an f32-rounding tolerance)
+/// to the committed golden `name`. Regenerate any golden with
+/// `UPDATE_GOLDEN=1 cargo test -p framer-render --test golden`.
+fn assert_matches_golden(name: &str, scene: &Scene) {
+    let image = render(scene, WIDTH, HEIGHT, SPP, SEED);
     assert_eq!(image.len(), (WIDTH * HEIGHT * 4) as usize);
 
-    let path = golden_path();
+    let path = golden_path(name);
     if std::env::var("UPDATE_GOLDEN").is_ok() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &image).unwrap();
@@ -42,7 +45,7 @@ fn reference_render_matches_golden() {
     assert_eq!(
         image.len(),
         golden.len(),
-        "golden image has a different size"
+        "golden image {name} has a different size"
     );
 
     // Mean absolute error tolerates cross-architecture f32 rounding; max error
@@ -55,6 +58,24 @@ fn reference_render_matches_golden() {
         max = max.max(d);
     }
     let mae = total as f64 / image.len() as f64;
-    assert!(mae < 1.0, "mean abs error {mae} too high (regression?)");
-    assert!(max < 12, "max pixel error {max} too high (regression?)");
+    assert!(
+        mae < 1.0,
+        "{name}: mean abs error {mae} too high (regression?)"
+    );
+    assert!(
+        max < 12,
+        "{name}: max pixel error {max} too high (regression?)"
+    );
+}
+
+#[test]
+fn reference_render_matches_golden() {
+    assert_matches_golden("reference", &reference_scene());
+}
+
+/// Locks the sloped roof + horizontal ceiling/floor surfaces: a model-derived
+/// gable-roofed shell rendered through the production scene-extraction path.
+#[test]
+fn roofed_render_matches_golden() {
+    assert_matches_golden("roofed", &roofed_scene());
 }
