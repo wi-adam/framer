@@ -1399,6 +1399,54 @@ impl ConstructionSystem {
         }
     }
 
+    /// The material of the finished face a viewer sees on a roof/ceiling/floor
+    /// surface: a roof's weather face (outermost), a ceiling/floor's conditioned-side
+    /// finish (innermost). The single definition of this rule so the path-traced
+    /// render and the 3-D viewport pick the same face and cannot drift; each caller
+    /// applies its own fallback (a stock palette entry / neutral color) when this is
+    /// `None`. Returns `None` for a `Wall` (walls pick their face by exposure) or an
+    /// empty system.
+    pub fn surface_finish_material(&self) -> Option<&ElementId> {
+        let layer = match self.kind {
+            SystemKind::Roof => self
+                .layers
+                .iter()
+                .rev()
+                .find(|layer| layer.function == LayerFunction::Roofing)
+                .or_else(|| {
+                    self.layers.iter().rev().find(|layer| {
+                        matches!(
+                            layer.function,
+                            LayerFunction::WeatherBarrier | LayerFunction::Sheathing
+                        )
+                    })
+                })
+                .or_else(|| self.layers.last()),
+            SystemKind::Ceiling => self
+                .layers
+                .iter()
+                .find(|layer| {
+                    matches!(
+                        layer.function,
+                        LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
+                    )
+                })
+                .or_else(|| self.layers.first()),
+            SystemKind::Floor => self
+                .layers
+                .iter()
+                .find(|layer| {
+                    matches!(
+                        layer.function,
+                        LayerFunction::InteriorFinish | LayerFunction::Sheathing
+                    )
+                })
+                .or_else(|| self.layers.first()),
+            SystemKind::Wall => None,
+        };
+        layer.map(|layer| &layer.material)
+    }
+
     /// Clear-wall R-value in milli-R (R × 1000), exact integer math: the sum over
     /// layers of each layer material's [`Material::r_value_milli`] across the
     /// layer thickness (no inch rounding, so a 5/8" layer counts as 5/8"). The
@@ -1666,6 +1714,53 @@ impl RoofPlane {
         self
     }
 
+    /// The plane's affine elevation field: its eave origin, up-slope unit normal,
+    /// eave length, rise-per-plan-run ratio, and springing elevation — the single
+    /// definition of "where a roof plane sits in 3-D", shared by the solver's
+    /// framing geometry and the renderers' surface emission so they cannot drift.
+    /// Float-valued but purely derived (never stored), like
+    /// [`polygon_area_square_inches`](crate::polygon_area_square_inches). `None` for
+    /// a degenerate outline (fewer than 3 points or a zero-length eave edge).
+    pub fn frame(&self) -> Option<RoofPlaneFrame> {
+        let n = self.outline.len();
+        if n < 3 {
+            return None;
+        }
+        let i = self.eave_edge as usize % n;
+        let a = self.outline[i];
+        let b = self.outline[(i + 1) % n];
+        let (ax, ay) = (a.x.inches(), a.y.inches());
+        let ex = b.x.inches() - ax;
+        let ey = b.y.inches() - ay;
+        let eave_length = (ex * ex + ey * ey).sqrt();
+        if eave_length <= f64::EPSILON {
+            return None;
+        }
+        // Up-slope unit normal: perpendicular to the eave, flipped to point toward
+        // the outline centroid (so it is independent of the polygon's winding).
+        let (mut nx, mut ny) = (-ey / eave_length, ex / eave_length);
+        let cx = self.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
+        let cy = self.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
+        let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
+        if nx * (cx - mx) + ny * (cy - my) < 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        let run = self.slope.run.inches();
+        let rise_over_run = if run > 0.0 {
+            self.slope.rise.inches() / run
+        } else {
+            0.0
+        };
+        Some(RoofPlaneFrame {
+            eave_origin: (ax, ay),
+            up_slope: (nx, ny),
+            eave_length,
+            rise_over_run,
+            reference_elevation: self.reference_elevation.inches(),
+        })
+    }
+
     /// Validate the plane's own geometry (outline, eave edge, slope) and its
     /// nested openings, registering opening ids in the shared `ids` set. The
     /// level/system references are checked by [`BuildingModel::validate`].
@@ -1700,6 +1795,60 @@ impl RoofPlane {
             }
         }
         Ok(())
+    }
+}
+
+/// A roof plane's plan-local elevation field (all lengths in inches), from
+/// [`RoofPlane::frame`]. The plane is affine in plan — `z` is linear in `x`/`y` —
+/// so projecting any plan point keeps it coplanar. Fields are private and the type
+/// is constructed only by [`RoofPlane::frame`], so [`Self::up_slope`] is always a
+/// true unit vector; read it (and the rest) through the accessors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoofPlaneFrame {
+    eave_origin: (f64, f64),
+    up_slope: (f64, f64),
+    eave_length: f64,
+    rise_over_run: f64,
+    reference_elevation: f64,
+}
+
+impl RoofPlaneFrame {
+    /// The eave edge's first endpoint (the up-slope distance origin), inches.
+    pub fn eave_origin(&self) -> (f64, f64) {
+        self.eave_origin
+    }
+
+    /// Up-slope direction in plan (toward the outline centroid): a dimensionless
+    /// unit vector.
+    pub fn up_slope(&self) -> (f64, f64) {
+        self.up_slope
+    }
+
+    /// Eave-edge length, inches — the axis rafters array along.
+    pub fn eave_length(&self) -> f64 {
+        self.eave_length
+    }
+
+    /// Rise per unit plan run (`slope.rise / slope.run`); 0 when flat.
+    pub fn rise_over_run(&self) -> f64 {
+        self.rise_over_run
+    }
+
+    /// Springing (reference/bearing) elevation, inches.
+    pub fn reference_elevation(&self) -> f64 {
+        self.reference_elevation
+    }
+
+    /// Up-slope plan distance of a plan point from the eave line, inches (negative
+    /// down-slope of the eave, e.g. on an overhang tail).
+    pub fn up_slope_distance(&self, x: f64, y: f64) -> f64 {
+        (x - self.eave_origin.0) * self.up_slope.0 + (y - self.eave_origin.1) * self.up_slope.1
+    }
+
+    /// The plane's true building elevation at a plan point, inches: the eave
+    /// springing raised by the up-slope distance times the pitch.
+    pub fn elevation_at(&self, x: f64, y: f64) -> f64 {
+        self.reference_elevation + self.up_slope_distance(x, y) * self.rise_over_run
     }
 }
 
@@ -3874,6 +4023,107 @@ mod tests {
             0,
             Length::from_feet(8.0),
         )
+    }
+
+    #[test]
+    fn roof_plane_frame_projects_eave_and_ridge_elevations() {
+        // rect_outline is 20ft × 12ft with eave edge 0 (the y=0 side), so the
+        // up-slope normal points toward the centroid (+y) and the plane rises 4:12
+        // from the 8ft springing over the 12ft (144") run to 96 + 48 = 144".
+        let frame = sample_roof_plane().frame().expect("a non-degenerate frame");
+        assert!(frame.up_slope().1 > 0.99, "up-slope should point +y");
+        assert!(
+            (frame.elevation_at(120.0, 0.0) - 96.0).abs() < 1.0e-9,
+            "eave at 96\""
+        );
+        assert!(
+            (frame.elevation_at(120.0, 144.0) - 144.0).abs() < 1.0e-9,
+            "ridge at 144\""
+        );
+    }
+
+    #[test]
+    fn roof_plane_frame_none_for_degenerate_outline() {
+        let mut plane = sample_roof_plane();
+        plane.outline = vec![Point2::new(Length::ZERO, Length::ZERO)];
+        assert!(plane.frame().is_none());
+    }
+
+    #[test]
+    fn surface_finish_material_picks_the_viewer_facing_layer() {
+        let spf = || {
+            ConstructionLayer::new(
+                LayerFunction::Framing,
+                "mat-spf",
+                BoardProfile::TwoBySix.nominal_depth(),
+            )
+        };
+        let finish = |function, material: &str| {
+            ConstructionLayer::new(function, material, Length::from_whole_inches(1))
+        };
+        let system = |kind, layers| ConstructionSystem {
+            id: ElementId::new("s"),
+            name: "s".to_owned(),
+            kind,
+            source: None,
+            layers,
+        };
+        let material_of =
+            |s: &ConstructionSystem| s.surface_finish_material().map(|id| id.0.clone()).unwrap();
+
+        // Roof: the weather face (the outermost Roofing layer).
+        let roof = system(
+            SystemKind::Roof,
+            vec![spf(), finish(LayerFunction::Roofing, "mat-shingle")],
+        );
+        assert_eq!(material_of(&roof), "mat-shingle");
+        // Ceiling: the conditioned-side finish (the innermost CeilingFinish).
+        let ceiling = system(
+            SystemKind::Ceiling,
+            vec![finish(LayerFunction::CeilingFinish, "mat-gwb"), spf()],
+        );
+        assert_eq!(material_of(&ceiling), "mat-gwb");
+        // Floor: the conditioned-side finish (the innermost InteriorFinish).
+        let floor = system(
+            SystemKind::Floor,
+            vec![finish(LayerFunction::InteriorFinish, "mat-oak"), spf()],
+        );
+        assert_eq!(material_of(&floor), "mat-oak");
+
+        // Roof without a Roofing layer falls back to the outermost weather/sheathing
+        // layer before resorting to the last layer.
+        let roof_sheathed = system(
+            SystemKind::Roof,
+            vec![spf(), finish(LayerFunction::Sheathing, "mat-osb")],
+        );
+        assert_eq!(material_of(&roof_sheathed), "mat-osb");
+        let roof_wrb = system(
+            SystemKind::Roof,
+            vec![spf(), finish(LayerFunction::WeatherBarrier, "mat-felt")],
+        );
+        assert_eq!(material_of(&roof_wrb), "mat-felt");
+        // A floor whose only finish is structural sheathing (a bare subfloor).
+        let floor_deck = system(
+            SystemKind::Floor,
+            vec![finish(LayerFunction::Sheathing, "mat-ply"), spf()],
+        );
+        assert_eq!(material_of(&floor_deck), "mat-ply");
+
+        // Fallback: a roof with only framing falls back to its outermost layer.
+        let bare = system(SystemKind::Roof, vec![spf()]);
+        assert_eq!(material_of(&bare), "mat-spf");
+        // An empty system resolves to nothing (the caller applies its fallback).
+        assert!(
+            system(SystemKind::Roof, vec![])
+                .surface_finish_material()
+                .is_none()
+        );
+        // Walls pick their face by exposure, not this rule.
+        assert!(
+            system(SystemKind::Wall, vec![spf()])
+                .surface_finish_material()
+                .is_none()
+        );
     }
 
     #[test]

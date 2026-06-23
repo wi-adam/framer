@@ -315,6 +315,36 @@ fn wgsl_pathtracer_matches_cpu_reference() {
     );
 }
 
+/// The sloped roof + horizontal ceiling/floor surfaces (Slice 4) ride the same
+/// `Triangle`/`Scene`/`to_gpu` path as walls, so the GPU kernel must match the CPU
+/// reference on a model-derived gable-roofed shell too — pinning that the new
+/// geometry stays opaque-diffuse and parity-clean.
+#[test]
+fn wgsl_pathtracer_matches_cpu_roofed() {
+    use framer_render::scenes::{
+        REFERENCE_HEIGHT as H, REFERENCE_SEED as SEED, REFERENCE_WIDTH as W, roofed_scene,
+    };
+
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no GPU adapter available; skipping wgsl_pathtracer_matches_cpu_roofed");
+        return;
+    };
+
+    let scene = roofed_scene();
+    assert_gpu_kernel_matches_cpu(
+        &device,
+        &queue,
+        &scene,
+        KernelParityCase {
+            width: W,
+            height: H,
+            spp: PARITY_SPP,
+            seed: SEED,
+            label: "roofed",
+        },
+    );
+}
+
 #[test]
 fn wgsl_pathtracer_matches_cpu_asset_materials() {
     use framer_render::camera::Camera;
