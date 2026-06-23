@@ -972,50 +972,19 @@ fn lift_outline(outline: &[Point2], z: f32) -> Vec<Point3> {
         .collect()
 }
 
-/// A roof plane's plan outline lifted onto its sloped plane: each point's
-/// elevation is the springing elevation raised by its up-slope plan distance times
-/// the pitch. Mirrors the solver's `roof_plane_geometry` and the render path so the
-/// rendered surface lies on exactly the plane the rafters frame. The up-slope
-/// normal is oriented toward the outline centroid, so it is winding-independent.
-/// `None` for a degenerate outline (no eave length).
+/// A roof plane's plan outline lifted onto its sloped plane via the shared
+/// [`framer_core::RoofPlaneFrame`] — the same affine elevation field the solver's
+/// framing and the path-traced render use, so the slab lies on exactly the plane
+/// the rafters frame. `None` for a degenerate outline (no eave length).
 fn roof_plane_outline_world(plane: &RoofPlane) -> Option<Vec<Point3>> {
-    let n = plane.outline.len();
-    if n < 3 {
-        return None;
-    }
-    let i = plane.eave_edge as usize % n;
-    let a = plane.outline[i];
-    let b = plane.outline[(i + 1) % n];
-    let (ax, ay) = (a.x.inches(), a.y.inches());
-    let ex = b.x.inches() - ax;
-    let ey = b.y.inches() - ay;
-    let eave_len = (ex * ex + ey * ey).sqrt();
-    if eave_len <= f64::EPSILON {
-        return None;
-    }
-    let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
-    let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
-    let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
-    let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
-    if nx * (cx - mx) + ny * (cy - my) < 0.0 {
-        nx = -nx;
-        ny = -ny;
-    }
-    let run = plane.slope.run.inches();
-    let ratio = if run > 0.0 {
-        plane.slope.rise.inches() / run
-    } else {
-        0.0
-    };
-    let reference = plane.reference_elevation.inches();
+    let frame = plane.frame()?;
     Some(
         plane
             .outline
             .iter()
             .map(|p| {
                 let (x, y) = (p.x.inches(), p.y.inches());
-                let upslope = (x - ax) * nx + (y - ay) * ny;
-                Point3::vector(x as f32, y as f32, (reference + upslope * ratio) as f32)
+                Point3::vector(x as f32, y as f32, frame.elevation_at(x, y) as f32)
             })
             .collect(),
     )
@@ -1047,7 +1016,7 @@ mod surface_tests {
     use eframe::egui::Rect;
     use framer_core::{
         BoardProfile, Ceiling, CodeProfile, ConstructionLayer, FloorDeck, FramingPattern,
-        FramingSpec, MemberFamily, Point2, Slope, SystemKind,
+        FramingSpec, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
     };
     use framer_solver::ProjectFramePlan;
 
@@ -1263,5 +1232,89 @@ mod surface_tests {
             Some(ViewClick::RoofPlane { id }) => assert_eq!(id, "roof-1"),
             _ => panic!("expected to pick the roof plane at its centroid"),
         }
+    }
+
+    /// Six corner-joined walls enclosing a concave L-shaped room with a floor deck
+    /// attached via `SurfaceRegion::Room`.
+    fn l_shaped_room_model() -> BuildingModel {
+        let ft = Length::from_feet;
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let pts = [
+            Point2::new(ft(0.0), ft(0.0)),
+            Point2::new(ft(12.0), ft(0.0)),
+            Point2::new(ft(12.0), ft(6.0)),
+            Point2::new(ft(6.0), ft(6.0)),
+            Point2::new(ft(6.0), ft(12.0)),
+            Point2::new(ft(0.0), ft(12.0)),
+        ];
+        for i in 0..pts.len() {
+            let next = (i + 1) % pts.len();
+            model.walls.push(
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                    .with_placement("level-1", pts[i], pts[next]),
+            );
+        }
+        model.rooms.push(Room::new(
+            "room-1",
+            "L room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(ft(3.0), ft(3.0)),
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+        ));
+        model
+    }
+
+    #[test]
+    fn room_region_surface_resolves_concave_loop_and_tiles_it() {
+        // The 3D mesher's Room arm: SurfaceRegion::Room -> room_boundary (a concave
+        // L) -> ear-clip -> surface. The deck's pick volume must carry the full
+        // 6-vertex L outline (not a convex hull), and its triangulation must tile
+        // the L's plan area (no fan spill into the notch).
+        let scene = build(&l_shaped_room_model(), &Selection::Wall);
+        let deck = scene
+            .picks
+            .iter()
+            .find(|p| matches!(&p.click, ViewClick::FloorDeck { id } if id == "deck-1"))
+            .expect("a floor-deck pick volume");
+        let PickShape::Surface(outline) = &deck.shape else {
+            panic!("a floor deck must pick as a surface polygon, not a cuboid");
+        };
+        assert_eq!(outline.len(), 6, "the concave L room loop has six vertices");
+
+        // Tile the resolved outline through the same ear-clip the mesher used.
+        let plan: Vec<Point2> = outline
+            .iter()
+            .map(|p| {
+                Point2::new(
+                    Length::from_inches(p.x as f64),
+                    Length::from_inches(p.y as f64),
+                )
+            })
+            .collect();
+        let tris = framer_core::triangulate_simple_polygon(&plan);
+        assert_eq!(tris.len(), 4, "an L (6-gon) ear-clips to four triangles");
+        let area: f64 = tris
+            .iter()
+            .map(|&[a, b, c]| framer_core::polygon_area_square_inches(&[plan[a], plan[b], plan[c]]))
+            .sum();
+        // 12×12 − 6×6 = 108 sq ft = 15552 sq in.
+        assert!(
+            (area - 15552.0).abs() < 5.0,
+            "L deck triangles cover {area} sq in, expected 15552"
+        );
     }
 }

@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use framer_core::{
     Appearance, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck, LayerFunction,
-    Level, OpeningKind, Point2, RoofPlane, SurfaceRegion, Wall, WallExposure, room_boundary,
-    triangulate_simple_polygon,
+    Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion, Wall, WallExposure,
+    room_boundary, triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -666,75 +666,13 @@ fn resolve_region_outline(model: &BuildingModel, region: &SurfaceRegion) -> Opti
     }
 }
 
-/// A roof plane's plan-local projection: the eave start, the up-slope unit normal
-/// (oriented toward the outline centroid, so it is winding-independent), and the
-/// rise-per-plan-inch ratio. Mirrors the solver's `roof_plane_geometry` so the
-/// rendered surface lies on exactly the plane the rafters frame. The plane is
-/// affine in plan (`z` is linear in `x`/`y`), so projecting the outline keeps it
-/// coplanar and a fan triangulation is flat.
-struct RoofPlaneSurface {
-    ax: f64,
-    ay: f64,
-    nx: f64,
-    ny: f64,
-    ratio: f64,
-    reference_elevation: f64,
-}
-
-impl RoofPlaneSurface {
-    fn new(plane: &RoofPlane) -> Option<Self> {
-        let n = plane.outline.len();
-        if n < 3 {
-            return None;
-        }
-        let i = plane.eave_edge as usize % n;
-        let a = plane.outline[i];
-        let b = plane.outline[(i + 1) % n];
-        let (ax, ay) = (a.x.inches(), a.y.inches());
-        let ex = b.x.inches() - ax;
-        let ey = b.y.inches() - ay;
-        let eave_len = (ex * ex + ey * ey).sqrt();
-        if eave_len <= f64::EPSILON {
-            return None;
-        }
-        // Up-slope unit normal: perpendicular to the eave, flipped to point toward
-        // the outline centroid (independent of the polygon's winding).
-        let (mut nx, mut ny) = (-ey / eave_len, ex / eave_len);
-        let cx = plane.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
-        let cy = plane.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
-        let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
-        if nx * (cx - mx) + ny * (cy - my) < 0.0 {
-            nx = -nx;
-            ny = -ny;
-        }
-        let run = plane.slope.run.inches();
-        let ratio = if run > 0.0 {
-            plane.slope.rise.inches() / run
-        } else {
-            0.0
-        };
-        Some(Self {
-            ax,
-            ay,
-            nx,
-            ny,
-            ratio,
-            reference_elevation: plane.reference_elevation.inches(),
-        })
-    }
-
-    /// World position of a plan outline point lifted onto the sloped plane: the
-    /// eave springing raised by its up-slope plan distance times the pitch.
-    fn project(&self, point: Point2) -> Vec3 {
-        let x = point.x.inches();
-        let y = point.y.inches();
-        let upslope = (x - self.ax) * self.nx + (y - self.ay) * self.ny;
-        Vec3::new(
-            x as f32,
-            y as f32,
-            (self.reference_elevation + upslope * self.ratio) as f32,
-        )
-    }
+/// World position of a roof plane's plan outline point lifted onto its sloped
+/// plane, using the shared [`RoofPlaneFrame`] (so the rendered surface lies on
+/// exactly the plane the rafters frame). The plane is affine in plan (`z` is
+/// linear in `x`/`y`), so projecting the outline keeps it coplanar.
+fn project_onto_plane(frame: &RoofPlaneFrame, point: Point2) -> Vec3 {
+    let (x, y) = (point.x.inches(), point.y.inches());
+    Vec3::new(x as f32, y as f32, frame.elevation_at(x, y) as f32)
 }
 
 /// Emit a planar polygon (vertices already in world space) into `tris` using the
@@ -762,7 +700,7 @@ fn push_polygon(
 }
 
 /// Emit a roof plane's finished surface: its plan outline lifted onto the sloped
-/// plane, fan-triangulated with the system's weather-face material.
+/// plane, ear-clip triangulated with the system's weather-face material.
 fn push_roof_plane(
     tris: &mut Vec<Triangle>,
     bounds: &mut Aabb,
@@ -770,7 +708,7 @@ fn push_roof_plane(
     plane: &RoofPlane,
     palette: &mut PaletteBuilder<'_>,
 ) {
-    let Some(surface) = RoofPlaneSurface::new(plane) else {
+    let Some(frame) = plane.frame() else {
         return;
     };
     let material = surface_material(
@@ -779,7 +717,11 @@ fn push_roof_plane(
         SurfaceFace::Roof,
         palette,
     );
-    let verts: Vec<Vec3> = plane.outline.iter().map(|&p| surface.project(p)).collect();
+    let verts: Vec<Vec3> = plane
+        .outline
+        .iter()
+        .map(|&p| project_onto_plane(&frame, p))
+        .collect();
     let triangles = triangulate_simple_polygon(&plane.outline);
     push_polygon(tris, bounds, &verts, &triangles, material);
 }
@@ -1197,7 +1139,7 @@ mod tests {
 
     use framer_core::{
         BoardProfile, ConstructionLayer, FramingPattern, FramingSpec, Material as CoreMaterial,
-        MemberFamily, Slope, SystemKind,
+        MemberFamily, Room, RoomUsage, Slope, SystemKind,
     };
 
     /// A 12ft × 8ft rectangle, used as both the roof outline and the deck/ceiling
@@ -1408,6 +1350,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Six corner-joined walls enclosing a concave L-shaped room (a 12×12 ft square
+    /// with a 6×6 ft bite out of the top-right; 108 sq ft), a room seeded inside it,
+    /// and a floor deck attached to that room via `SurfaceRegion::Room`.
+    fn l_shaped_room_model() -> BuildingModel {
+        let ft = Length::from_feet;
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let pts = [
+            Point2::new(ft(0.0), ft(0.0)),
+            Point2::new(ft(12.0), ft(0.0)),
+            Point2::new(ft(12.0), ft(6.0)),
+            Point2::new(ft(6.0), ft(6.0)),
+            Point2::new(ft(6.0), ft(12.0)),
+            Point2::new(ft(0.0), ft(12.0)),
+        ];
+        for i in 0..pts.len() {
+            let next = (i + 1) % pts.len();
+            model.walls.push(
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                    .with_placement("level-1", pts[i], pts[next]),
+            );
+        }
+        model.rooms.push(Room::new(
+            "room-1",
+            "L room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(ft(3.0), ft(3.0)),
+        ));
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-floor",
+            "Subfloor",
+            [150, 116, 78],
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+        ));
+        model
+    }
+
+    #[test]
+    fn room_region_surface_tiles_a_concave_outline() {
+        // Drives the production path the concave triangulator was added for:
+        // SurfaceRegion::Room -> room_boundary (a concave L loop) ->
+        // triangulate_simple_polygon -> emitted floor triangles. A naive vertex-0
+        // fan would spill outside the L's notch, inflating the covered area.
+        let scene = scene_from_model(&l_shaped_room_model(), &RenderOptions::default());
+        let floor_mat = scene
+            .materials
+            .iter()
+            .position(|m| {
+                matches!(m, Material::Diffuse { albedo }
+                if (*albedo - color_to_linear([150, 116, 78])).length() < 1.0e-5)
+            })
+            .expect("floor material lowered into the scene") as u32;
+
+        let floor: Vec<&Triangle> = scene
+            .triangles
+            .iter()
+            .filter(|t| t.material == floor_mat)
+            .collect();
+        // An L (6-gon) triangulates to 4 triangles, all at the floor elevation (0).
+        assert_eq!(floor.len(), 4, "L floor should be 4 triangles");
+
+        let mut area = 0.0_f64;
+        for t in &floor {
+            let v1 = t.v0 + t.edge1;
+            let v2 = t.v0 + t.edge2;
+            for v in [t.v0, v1, v2] {
+                assert!(v.z.abs() < 0.5, "floor triangle not at the deck elevation");
+            }
+            // Plan area of a horizontal triangle = ½|edge1 × edge2| (z component).
+            let cross_z = t.edge1.x * t.edge2.y - t.edge1.y * t.edge2.x;
+            area += 0.5 * cross_z.abs() as f64;
+            // Centroid must lie inside the L (outside the 6×12 .. 12×6 notch).
+            let cx = (t.v0.x + v1.x + v2.x) / 3.0;
+            let cy = (t.v0.y + v1.y + v2.y) / 3.0;
+            let in_l = (0.0..=144.0).contains(&cx)
+                && (0.0..=144.0).contains(&cy)
+                && !(cx > 72.0 && cy > 72.0);
+            assert!(
+                in_l,
+                "floor triangle centroid ({cx},{cy}) spilled outside the L"
+            );
+        }
+        // 12×12 − 6×6 = 108 sq ft = 15552 sq in; a spilling fan would exceed this.
+        assert!(
+            (area - 15552.0).abs() < 5.0,
+            "L floor triangles cover {area} sq in, expected 15552"
+        );
     }
 
     #[test]
