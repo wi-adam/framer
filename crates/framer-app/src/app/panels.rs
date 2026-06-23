@@ -799,12 +799,21 @@ impl FramerApp {
                     }
                 }
                 if can_edit {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("+ Wall system").clicked() {
                             self.add_wall_system(true);
                         }
                         if ui.button("+ Interior system").clicked() {
                             self.add_wall_system(false);
+                        }
+                        if ui.button("+ Roof system").clicked() {
+                            self.add_surface_system(framer_core::SystemKind::Roof);
+                        }
+                        if ui.button("+ Floor system").clicked() {
+                            self.add_surface_system(framer_core::SystemKind::Floor);
+                        }
+                        if ui.button("+ Ceiling system").clicked() {
+                            self.add_surface_system(framer_core::SystemKind::Ceiling);
                         }
                     });
                 }
@@ -1301,11 +1310,27 @@ impl FramerApp {
         } else {
             None
         };
-        // Whether the selected system is applied to any wall. A referenced
-        // Wall-kind system must keep `kind == Wall` (switching it to Floor/Roof
-        // would invalidate every wall that uses it), so its Kind row is locked.
+        // Whether the selected system is applied to any wall, roof plane, ceiling,
+        // or floor deck. A referenced system must keep its kind (switching, say, a
+        // Wall system to Floor would invalidate every wall that uses it), so its
+        // Kind row is locked while anything references it.
         let selected_system_referenced = if let Selection::System(id) = &selection {
             self.model.walls.iter().any(|wall| wall.system.0 == *id)
+                || self
+                    .model
+                    .roof_planes
+                    .iter()
+                    .any(|plane| plane.system.0 == *id)
+                || self
+                    .model
+                    .ceilings
+                    .iter()
+                    .any(|ceiling| ceiling.system.0 == *id)
+                || self
+                    .model
+                    .floor_decks
+                    .iter()
+                    .any(|deck| deck.system.0 == *id)
         } else {
             false
         };
@@ -1761,11 +1786,12 @@ impl FramerApp {
 
                         widgets::section(ui, "system-layers", "Layers", true, |ui| {
                             let layer_count = system.layers.len();
-                            // Wall systems require exactly one positive-thickness
-                            // framing layer; the editor uses this count to keep the
-                            // sole framing layer un-removable and block adding a
-                            // second one.
-                            let is_wall = system.kind == framer_core::SystemKind::Wall;
+                            // Every framed assembly — wall, roof, floor, or ceiling —
+                            // requires exactly one positive-thickness framing layer;
+                            // the editor uses this count to keep the sole framing
+                            // layer un-removable and block adding a second one. The
+                            // kind also seeds a newly-framing layer's member family.
+                            let system_kind = system.kind;
                             let framing_count = system
                                 .layers
                                 .iter()
@@ -1779,7 +1805,7 @@ impl FramerApp {
                                     &id,
                                     index,
                                     layer_count,
-                                    is_wall,
+                                    system_kind,
                                     framing_count,
                                     layer,
                                     &material_options,
@@ -3117,13 +3143,26 @@ fn material_name(material_options: &[(String, String)], id: &str) -> String {
 
 /// Inline editor for one construction layer (interior -> exterior). Returns
 /// whether the layer's data changed; reorder/remove are deferred to the caller.
+/// The framing member family a system of `kind` produces, used to seed a layer's
+/// `FramingSpec` when it first becomes a framing layer so the solver dispatches
+/// the right member geometry (studs vs. rafters vs. joists).
+fn default_member_family(kind: framer_core::SystemKind) -> framer_core::MemberFamily {
+    use framer_core::{MemberFamily, SystemKind};
+    match kind {
+        SystemKind::Wall => MemberFamily::Stud,
+        SystemKind::Roof => MemberFamily::Rafter,
+        SystemKind::Floor => MemberFamily::FloorJoist,
+        SystemKind::Ceiling => MemberFamily::CeilingJoist,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn system_layer_editor(
     ui: &mut Ui,
     system_id: &str,
     index: usize,
     layer_count: usize,
-    is_wall: bool,
+    system_kind: framer_core::SystemKind,
     framing_count: usize,
     layer: &mut framer_core::ConstructionLayer,
     material_options: &[(String, String)],
@@ -3135,10 +3174,10 @@ fn system_layer_editor(
 
     let mut changed = false;
     let is_framing = layer.function == LayerFunction::Framing;
-    // A Wall system must keep exactly one framing layer, so its sole framing
-    // layer cannot be removed (in addition to the general "keep one layer"
-    // guard) and the Function picker may not introduce a second one.
-    let is_only_framing = is_framing && is_wall && framing_count <= 1;
+    // Every framed assembly must keep exactly one framing layer, so its sole
+    // framing layer cannot be removed (in addition to the general "keep one
+    // layer" guard) and the Function picker may not introduce a second one.
+    let is_only_framing = is_framing && framing_count <= 1;
     Frame::new()
         .fill(design::active().control)
         .stroke(theme::soft_stroke())
@@ -3219,11 +3258,11 @@ fn system_layer_editor(
             }
 
             // Function. Switching to/from Framing keeps `framing` consistent so the
-            // model stays valid (framing.is_some() iff function == Framing). A Wall
-            // system must keep exactly one framing layer, so the picker never offers
-            // a SECOND Framing layer (`another_layer_is_framing`) and never lets the
-            // SOLE framing layer drop Framing (`is_only_framing`) — either would
-            // leave a Wall system with the wrong framing-layer count.
+            // model stays valid (framing.is_some() iff function == Framing). Every
+            // framed system must keep exactly one framing layer, so the picker never
+            // offers a SECOND Framing layer (`another_layer_is_framing`) and never
+            // lets the SOLE framing layer drop Framing (`is_only_framing`) — either
+            // would leave the system with the wrong framing-layer count.
             let another_layer_is_framing = !is_framing && framing_count >= 1;
             changed |= property_row(ui, "Function", |ui| {
                 let before = layer.function;
@@ -3250,7 +3289,7 @@ fn system_layer_editor(
                             member,
                             spacing: Length::from_whole_inches(16),
                             pattern: FramingPattern::Single,
-                            member_family: framer_core::MemberFamily::Stud,
+                            member_family: default_member_family(system_kind),
                             cavity_material: None,
                         });
                         // Depth follows the member so geometry and BOM agree.

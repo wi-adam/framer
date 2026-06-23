@@ -733,7 +733,8 @@ impl FramerApp {
     }
 
     /// Delete the selected construction system as one undo step, refusing when any
-    /// wall still references it (deleting it would dangle `wall.system`).
+    /// wall, roof plane, ceiling, or floor deck still references it (deleting it
+    /// would dangle that object's `system`).
     fn delete_selected_system(&mut self) {
         if !self.workspace_mode.allows_design_edits() {
             return;
@@ -741,9 +742,26 @@ impl FramerApp {
         let Selection::System(id) = self.selected.clone() else {
             return;
         };
-        if self.model.walls.iter().any(|wall| wall.system.0 == id) {
+        let referenced = self.model.walls.iter().any(|wall| wall.system.0 == id)
+            || self
+                .model
+                .roof_planes
+                .iter()
+                .any(|plane| plane.system.0 == id)
+            || self
+                .model
+                .ceilings
+                .iter()
+                .any(|ceiling| ceiling.system.0 == id)
+            || self
+                .model
+                .floor_decks
+                .iter()
+                .any(|deck| deck.system.0 == id);
+        if referenced {
             self.error = Some(format!(
-                "Cannot delete system '{id}': it is still applied to one or more walls"
+                "Cannot delete system '{id}': it is still applied to one or more \
+                 walls, roofs, ceilings, or floors"
             ));
             return;
         }
@@ -1217,6 +1235,101 @@ impl FramerApp {
         });
     }
 
+    /// Add a new roof/floor/ceiling construction system as one undo step, seeded
+    /// with a minimal valid stack (exactly one framing layer, the right member
+    /// family) so it passes validation immediately and frames sensibly. Materials
+    /// resolve from the project library by tag, falling back when absent. Selects
+    /// the new system. Walls keep their dedicated [`add_wall_system`] (which adds
+    /// the exterior/interior cladding choice).
+    fn add_surface_system(&mut self, kind: framer_core::SystemKind) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        use framer_core::{
+            BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
+            FramingSpec, LayerFunction, MemberFamily, SystemKind,
+        };
+        debug_assert!(
+            !matches!(kind, SystemKind::Wall),
+            "walls use add_wall_system"
+        );
+        self.edit("Add system", |app| {
+            let (id, index) = next_system_id(&app.model);
+            let framing_material = app.first_material_with_tag("framing", "mat-spf");
+            let sheathing_material = app.first_material_with_tag("sheathing", "mat-plywood");
+            let finish_material = app.first_material_with_tag("finish", "mat-drywall");
+
+            // Each framed surface assembly: the sole framing layer (member sized and
+            // named for its family) plus one finish/skin layer, ordered
+            // conditioned-side -> weather-side like a wall stack.
+            let (member, family, name) = match kind {
+                SystemKind::Roof => (BoardProfile::TwoByEight, MemberFamily::Rafter, "Roof"),
+                SystemKind::Floor => (BoardProfile::TwoByTen, MemberFamily::FloorJoist, "Floor"),
+                SystemKind::Ceiling => (
+                    BoardProfile::TwoBySix,
+                    MemberFamily::CeilingJoist,
+                    "Ceiling",
+                ),
+                SystemKind::Wall => (BoardProfile::TwoByFour, MemberFamily::Stud, "Wall"),
+            };
+            let framing_layer = ConstructionLayer::new(
+                LayerFunction::Framing,
+                framing_material,
+                member.nominal_depth(),
+            )
+            .with_framing(FramingSpec {
+                member,
+                spacing: Length::from_whole_inches(16),
+                pattern: FramingPattern::Single,
+                member_family: family,
+                cavity_material: None,
+            });
+            let layers = match kind {
+                // Roof: rafters under the deck, then the weather skin.
+                SystemKind::Roof => vec![
+                    framing_layer,
+                    ConstructionLayer::new(
+                        LayerFunction::Sheathing,
+                        sheathing_material,
+                        Length::from_inches(0.5),
+                    ),
+                    ConstructionLayer::new(
+                        LayerFunction::Roofing,
+                        app.first_material_with_tag("roofing", "mat-asphalt-shingle"),
+                        Length::from_inches(0.25),
+                    ),
+                ],
+                // Floor: subfloor deck over the joists.
+                SystemKind::Floor => vec![
+                    ConstructionLayer::new(
+                        LayerFunction::Sheathing,
+                        sheathing_material,
+                        Length::from_inches(0.75),
+                    ),
+                    framing_layer,
+                ],
+                // Ceiling: finished underside below the joists.
+                SystemKind::Ceiling | SystemKind::Wall => vec![
+                    ConstructionLayer::new(
+                        LayerFunction::CeilingFinish,
+                        finish_material,
+                        Length::from_inches(0.625),
+                    ),
+                    framing_layer,
+                ],
+            };
+
+            app.model.systems.push(ConstructionSystem {
+                id: ElementId::new(id.clone()),
+                name: format!("{name} {index}"),
+                kind,
+                source: None,
+                layers,
+            });
+            app.selected = Selection::System(id);
+        });
+    }
+
     /// The id of the first material carrying `tag`, or `fallback` if none does
     /// (e.g. an empty library). Used to seed new systems with sensible materials.
     fn first_material_with_tag(&self, tag: &str, fallback: &str) -> String {
@@ -1394,7 +1507,7 @@ impl FramerApp {
                     )
                     .with_kind(OpeningKind::GarageDoor)
                 }
-                OpeningKind::Window | OpeningKind::Skylight | OpeningKind::Stair => {
+                OpeningKind::Window => {
                     let (id, index) = next_opening_id(wall, "opening-window");
                     Opening::window(
                         id,
@@ -1404,6 +1517,34 @@ impl FramerApp {
                         Length::from_inches(42.0),
                         Length::from_inches(36.0),
                     )
+                }
+                // Skylight and stair openings are window-shaped on a wall but keep
+                // their own kind (rather than being coerced to a window): a skylight
+                // hosted on a wall reads as a skylight, and the BOM/render see the
+                // true kind. Roof-hosted skylights are a separate RoofOpening.
+                OpeningKind::Skylight => {
+                    let (id, index) = next_opening_id(wall, "opening-skylight");
+                    Opening::window(
+                        id,
+                        format!("Skylight {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(42.0),
+                        Length::from_inches(36.0),
+                    )
+                    .with_kind(OpeningKind::Skylight)
+                }
+                OpeningKind::Stair => {
+                    let (id, index) = next_opening_id(wall, "opening-stair");
+                    Opening::window(
+                        id,
+                        format!("Stair {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(42.0),
+                        Length::from_inches(36.0),
+                    )
+                    .with_kind(OpeningKind::Stair)
                 }
             };
 
