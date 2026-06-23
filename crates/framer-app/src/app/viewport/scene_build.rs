@@ -1205,11 +1205,81 @@ mod surface_tests {
             (hi - 144.0).abs() < 0.5,
             "highest surface z {hi}, want ~144"
         );
+        // Pin the flat ceiling at level top (108") − height (12") = 96". It shares
+        // the roof's eave elevation, so check a fully-horizontal triangle (which the
+        // sloped roof never produces) rather than the raw z range — otherwise a
+        // regression in the ceiling formula anywhere in (0, 144) would slip through.
+        let flat_zs: Vec<f32> = horizontal_triangle_elevations(&scene);
+        assert!(
+            flat_zs.iter().any(|z| (z - 96.0).abs() < 0.5),
+            "no horizontal ceiling surface at ~96in: {flat_zs:?}"
+        );
+        assert!(
+            flat_zs.iter().any(|z| z.abs() < 0.5),
+            "no horizontal floor surface at ~0in: {flat_zs:?}"
+        );
         // The geometry is finite (no NaN normals from a degenerate fan).
         for v in &scene.vertices {
             assert!(v.position.iter().all(|c| c.is_finite()));
             assert!(v.normal.iter().all(|c| c.is_finite()));
         }
+    }
+
+    /// The elevations of every fully-horizontal triangle (all three vertices at one
+    /// z) in the mesh — the flat ceiling/floor surfaces, never the sloped roof.
+    fn horizontal_triangle_elevations(scene: &Scene3d) -> Vec<f32> {
+        scene
+            .indices
+            .chunks_exact(3)
+            .filter_map(|tri| {
+                let z = |i: u32| scene.vertices[i as usize].position[2];
+                let (a, b, c) = (z(tri[0]), z(tri[1]), z(tri[2]));
+                ((a - b).abs() < 1.0e-3 && (a - c).abs() < 1.0e-3).then_some(a)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn surface_is_two_faced_with_opposite_normals() {
+        // push_surface deliberately emits the outline twice with opposite normals so
+        // the un-culled axonometric pipeline lights it from both sides. Pin that: the
+        // flat floor deck's horizontal triangles must include both an up- and a
+        // down-facing normal at its elevation.
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect()),
+        ));
+        let scene = build(&model, &Selection::Wall);
+        let normals_z: Vec<f32> = scene
+            .indices
+            .chunks_exact(3)
+            .filter_map(|tri| {
+                let v = |i: u32| scene.vertices[i as usize];
+                let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
+                let flat = (a.position[2] - b.position[2]).abs() < 1.0e-3
+                    && (a.position[2] - c.position[2]).abs() < 1.0e-3;
+                flat.then_some(a.normal[2])
+            })
+            .collect();
+        assert!(
+            normals_z.iter().any(|n| *n > 0.5),
+            "no up-facing floor triangle"
+        );
+        assert!(
+            normals_z.iter().any(|n| *n < -0.5),
+            "no down-facing floor triangle (surface is not two-faced)"
+        );
     }
 
     #[test]

@@ -1757,7 +1757,8 @@ impl RoofPlane {
 pub struct RoofPlaneFrame {
     /// The eave edge's first endpoint (the up-slope distance origin), inches.
     pub eave_origin: (f64, f64),
-    /// Up-slope unit normal in plan (toward the outline centroid), inches-space.
+    /// Up-slope direction in plan (toward the outline centroid): a dimensionless
+    /// unit vector.
     pub up_slope: (f64, f64),
     /// Eave-edge length, inches — the axis rafters array along.
     pub eave_length: f64,
