@@ -4,10 +4,12 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Proposed · **Linked milestone:** M3 (Floors And Roofs) ·
+> **Status:** Partial (Slices 1–4 of 6 landed: core types + schema v11, floor/ceiling
+> joisting, roof rafters, and render + 3-D viewport; authoring UX and the example/docs
+> remain) · **Linked milestone:** M3 (Floors And Roofs) ·
 > **Proposed goal:** G-014 (Ceilings & Roofs) ·
 > **Plan:** [2026-06-20-ceilings-and-roofs.md](../plans/2026-06-20-ceilings-and-roofs.md) ·
-> **Last reviewed:** 2026-06-22
+> **Last reviewed:** 2026-06-23
 
 ## Intent / Purpose
 

@@ -4089,9 +4089,35 @@ mod tests {
             vec![finish(LayerFunction::InteriorFinish, "mat-oak"), spf()],
         );
         assert_eq!(material_of(&floor), "mat-oak");
+
+        // Roof without a Roofing layer falls back to the outermost weather/sheathing
+        // layer before resorting to the last layer.
+        let roof_sheathed = system(
+            SystemKind::Roof,
+            vec![spf(), finish(LayerFunction::Sheathing, "mat-osb")],
+        );
+        assert_eq!(material_of(&roof_sheathed), "mat-osb");
+        let roof_wrb = system(
+            SystemKind::Roof,
+            vec![spf(), finish(LayerFunction::WeatherBarrier, "mat-felt")],
+        );
+        assert_eq!(material_of(&roof_wrb), "mat-felt");
+        // A floor whose only finish is structural sheathing (a bare subfloor).
+        let floor_deck = system(
+            SystemKind::Floor,
+            vec![finish(LayerFunction::Sheathing, "mat-ply"), spf()],
+        );
+        assert_eq!(material_of(&floor_deck), "mat-ply");
+
         // Fallback: a roof with only framing falls back to its outermost layer.
         let bare = system(SystemKind::Roof, vec![spf()]);
         assert_eq!(material_of(&bare), "mat-spf");
+        // An empty system resolves to nothing (the caller applies its fallback).
+        assert!(
+            system(SystemKind::Roof, vec![])
+                .surface_finish_material()
+                .is_none()
+        );
         // Walls pick their face by exposure, not this rule.
         assert!(
             system(SystemKind::Wall, vec![spf()])
