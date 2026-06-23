@@ -4215,6 +4215,42 @@ mod tests {
     }
 
     #[test]
+    fn surface_objects_enforce_global_id_uniqueness() {
+        // A nested roof-opening id colliding with a top-level id is rejected
+        // (openings share the one global id set).
+        let mut model = surface_systems_model();
+        let mut roof = sample_roof_plane();
+        roof.openings.push(RoofOpening::new(
+            "roof-1", // collides with the roof plane's own id
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+        model.roof_planes.push(roof);
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { .. })
+        ));
+
+        // Two floor decks sharing an id is rejected.
+        let mut model = surface_systems_model();
+        for _ in 0..2 {
+            model.floor_decks.push(FloorDeck::new(
+                "deck-dup",
+                "Deck",
+                "level-1",
+                "system-floor",
+                SurfaceRegion::Polygon(rect_outline()),
+            ));
+        }
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { .. })
+        ));
+    }
+
+    #[test]
     fn exposure_is_kind_aware() {
         fn system_with(kind: SystemKind, functions: &[LayerFunction]) -> ConstructionSystem {
             ConstructionSystem {

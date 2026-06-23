@@ -873,14 +873,21 @@ mod tests {
         ));
         model.roof_planes.push(roof);
 
-        model.ceilings.push(Ceiling::new(
+        let mut ceiling = Ceiling::new(
             "ceiling-1",
             "Ceiling",
             "level-1",
             "system-ceiling",
             SurfaceRegion::Polygon(outline.clone()),
             Length::from_feet(8.0),
+        );
+        // Exercise the Option<Slope> serde path (reserved for later vault work,
+        // but it must round-trip when present).
+        ceiling.slope = Some(Slope::new(
+            Length::from_whole_inches(3),
+            Length::from_whole_inches(12),
         ));
+        model.ceilings.push(ceiling);
         model.floor_decks.push(
             FloorDeck::new(
                 "deck-1",
@@ -889,7 +896,11 @@ mod tests {
                 "system-floor",
                 SurfaceRegion::Polygon(outline),
             )
-            .with_span(SpanDirection::Across),
+            // Exercise the SpanDirection::Explicit serde path (an in-plane vector).
+            .with_span(SpanDirection::Explicit(Point2::new(
+                Length::from_feet(1.0),
+                Length::ZERO,
+            ))),
         );
 
         let json = save_project(&model).unwrap();
@@ -910,7 +921,17 @@ mod tests {
             .map(|opening| opening.id.0.as_str())
             .collect();
         assert_eq!(opening_ids, vec!["skylight-1", "skylight-2"]);
-        assert_eq!(reloaded.floor_decks[0].span, SpanDirection::Across);
+        assert_eq!(
+            reloaded.floor_decks[0].span,
+            SpanDirection::Explicit(Point2::new(Length::from_feet(1.0), Length::ZERO))
+        );
+        assert_eq!(
+            reloaded.ceilings[0].slope,
+            Some(Slope::new(
+                Length::from_whole_inches(3),
+                Length::from_whole_inches(12)
+            ))
+        );
         // Re-saving the reloaded model yields byte-identical canonical JSON, and the
         // model matches its canonical (sorted) form.
         assert_eq!(save_project(&reloaded).unwrap(), json);

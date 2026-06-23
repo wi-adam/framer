@@ -52,12 +52,13 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   `code: CodeProfile`, `libraries: Vec<LibraryStamp>`, `materials: Vec<Material>`,
   `systems: Vec<ConstructionSystem>`, `furnishings: Vec<Furnishing>`,
   `mep_objects: Vec<MepObject>`, `levels`, `walls`, `wall_joins`, `rooms`,
-  `furnishing_instances: Vec<FurnishingInstance>`, `mep_instances: Vec<MepInstance>`.
+  `furnishing_instances: Vec<FurnishingInstance>`, `mep_instances: Vec<MepInstance>`,
+  `roof_planes: Vec<RoofPlane>`, `ceilings: Vec<Ceiling>`, `floor_decks: Vec<FloorDeck>`.
   This is the only thing persisted.
 - **`Wall`** — `id, name, level, start, end, length, height, system: ElementId, openings,
   dimensions, tags`. A wall references a construction system **by id** (it does not embed its
   assembly). `Wall::new` defaults `system` to `"system-wall-exterior-1"`.
-- **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof},
+- **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof,Ceiling},
   source: Option<Provenance>, layers: Vec<ConstructionLayer>`. Layers are ordered
   **interior → exterior** and are *never sorted* (order is semantic). Helpers:
   `framing_layer()`, `total_thickness()`, `exposure()`, `r_value_milli(materials)`. Only
