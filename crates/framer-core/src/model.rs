@@ -4215,6 +4215,66 @@ mod tests {
     }
 
     #[test]
+    fn exposure_is_kind_aware() {
+        fn system_with(kind: SystemKind, functions: &[LayerFunction]) -> ConstructionSystem {
+            ConstructionSystem {
+                id: ElementId::new("system-exposure"),
+                name: "Exposure".to_owned(),
+                kind,
+                source: None,
+                layers: functions
+                    .iter()
+                    .map(|&function| {
+                        ConstructionLayer::new(function, "mat-x", Length::from_whole_inches(1))
+                    })
+                    .collect(),
+            }
+        }
+
+        // A roof's weather face is Roofing/Underlayment → Exterior.
+        assert_eq!(
+            system_with(
+                SystemKind::Roof,
+                &[LayerFunction::Roofing, LayerFunction::Sheathing]
+            )
+            .exposure(),
+            WallExposure::Exterior
+        );
+        // Floors and ceilings have no weather face in v1 → always Interior, even
+        // carrying outboard roles a wall would treat as exterior.
+        assert_eq!(
+            system_with(
+                SystemKind::Floor,
+                &[LayerFunction::Roofing, LayerFunction::Cladding]
+            )
+            .exposure(),
+            WallExposure::Interior
+        );
+        assert_eq!(
+            system_with(
+                SystemKind::Ceiling,
+                &[LayerFunction::CeilingFinish, LayerFunction::Sheathing]
+            )
+            .exposure(),
+            WallExposure::Interior
+        );
+        // Regression: the wall branch is unchanged — a cladding/barrier layer is
+        // Exterior, an all-interior stack is Interior.
+        assert_eq!(
+            system_with(
+                SystemKind::Wall,
+                &[LayerFunction::InteriorFinish, LayerFunction::Cladding]
+            )
+            .exposure(),
+            WallExposure::Exterior
+        );
+        assert_eq!(
+            system_with(SystemKind::Wall, &[LayerFunction::InteriorFinish]).exposure(),
+            WallExposure::Interior
+        );
+    }
+
+    #[test]
     fn polygon_self_intersection_detects_bowtie_not_simple_rect() {
         assert!(!polygon_self_intersects(&rect_outline()));
         let bowtie = vec![
