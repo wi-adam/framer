@@ -124,6 +124,8 @@ impl FramerApp {
                         layers: self.layers,
                         draw_tool: &draw_tool,
                         room_tool_active: self.room_tool_active,
+                        ceiling_tool_active: self.ceiling_tool_active,
+                        floor_tool_active: self.floor_tool_active,
                         active_wall_drag,
                     },
                     &mut self.plan_view,

@@ -61,6 +61,8 @@ pub(super) struct PlanView<'a> {
     pub(super) layers: ViewLayers,
     pub(super) draw_tool: &'a DrawWallPlanInput,
     pub(super) room_tool_active: bool,
+    pub(super) ceiling_tool_active: bool,
+    pub(super) floor_tool_active: bool,
     pub(super) active_wall_drag: Option<(usize, WallEditHandle)>,
 }
 
@@ -396,8 +398,14 @@ pub(super) fn draw_project_plan(
         layers,
         draw_tool,
         room_tool_active,
+        ceiling_tool_active,
+        floor_tool_active,
         active_wall_drag,
     } = plan;
+    // The room, ceiling, and floor tools are all region-gated placement tools:
+    // while any is active, a click drops its object rather than selecting or
+    // editing, so the wall-handle/selection interactions are all suppressed.
+    let region_tool_active = room_tool_active || ceiling_tool_active || floor_tool_active;
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -446,7 +454,7 @@ pub(super) fn draw_project_plan(
 
     // Which selected-wall handle the cursor is over (for hover emphasis + cursor),
     // only in selection mode.
-    let hovered_wall_handle = (!draw_tool.active && !room_tool_active)
+    let hovered_wall_handle = (!draw_tool.active && !region_tool_active)
         .then(|| {
             response.hover_pos().and_then(|hover| {
                 hit_selected_wall_handle(
@@ -512,7 +520,7 @@ pub(super) fn draw_project_plan(
         // Selecting a room by click is the lowest-priority hit (walls/openings win),
         // and only when no tool is active.
         if !draw_tool.active
-            && !room_tool_active
+            && !region_tool_active
             && response.clicked()
             && pointer.is_some_and(|position| point_in_screen_polygon(position, &screen))
         {
@@ -551,7 +559,7 @@ pub(super) fn draw_project_plan(
             hovered,
             Color32::from_rgb(190, 172, 132),
         );
-        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+        if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_furnishing = Some(ViewClick::FurnishingInstance {
                 instance_id: instance.id.0.clone(),
             });
@@ -586,7 +594,7 @@ pub(super) fn draw_project_plan(
             hovered,
             Color32::from_rgb(124, 162, 186),
         );
-        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+        if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_mep = Some(ViewClick::MepInstance {
                 instance_id: instance.id.0.clone(),
             });
@@ -642,7 +650,7 @@ pub(super) fn draw_project_plan(
         if selected {
             draw_selected_wall_handles(&painter, start, end, hovered_wall_handle);
         }
-        if hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+        if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_wall = Some(ViewClick::Wall(index));
         }
 
@@ -705,7 +713,7 @@ pub(super) fn draw_project_plan(
                     },
                 ),
             );
-            if opening_hovered && response.clicked() && !draw_tool.active && !room_tool_active {
+            if opening_hovered && response.clicked() && !draw_tool.active && !region_tool_active {
                 clicked_opening = Some(ViewClick::Opening {
                     wall_index: index,
                     opening_id: opening.id.0.clone(),
@@ -720,7 +728,7 @@ pub(super) fn draw_project_plan(
 
     // Wall-endpoint editing (selection mode only): drag the selected wall's
     // start/end handles. The app owns the drag state and applies the events.
-    if !draw_tool.active && !room_tool_active {
+    if !draw_tool.active && !region_tool_active {
         if let Some((wall_index, handle)) = active_wall_drag {
             if response.drag_stopped() {
                 *wall_drag_out = Some(WallDragEvent::Stopped);
@@ -790,7 +798,7 @@ pub(super) fn draw_project_plan(
 
     // Skip double-click-to-refit while a placement tool is active, so a quick
     // second click that places a point/room doesn't also reset the camera.
-    if !draw_tool.active && !room_tool_active {
+    if !draw_tool.active && !region_tool_active {
         reset_view_on_empty_double_click(&response, camera, over_element);
     }
 
@@ -802,15 +810,23 @@ pub(super) fn draw_project_plan(
         return Some(click);
     }
 
-    if room_tool_active
+    if region_tool_active
         && response.clicked()
         && let Some(cursor) = response
             .interact_pointer_pos()
             .filter(|c| drawing.contains(*c))
     {
-        return Some(ViewClick::PlaceRoom {
-            point: plan_inverse_point(cursor, bounds, drawing, camera),
-        });
+        let point = plan_inverse_point(cursor, bounds, drawing, camera);
+        // Exactly one region tool is active at a time (activating one cancels the
+        // others), so dispatch to whichever placed the click.
+        let click = if ceiling_tool_active {
+            ViewClick::PlaceCeiling { point }
+        } else if floor_tool_active {
+            ViewClick::PlaceFloor { point }
+        } else {
+            ViewClick::PlaceRoom { point }
+        };
+        return Some(click);
     }
 
     clicked_opening

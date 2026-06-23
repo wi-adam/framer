@@ -245,12 +245,41 @@ impl FramerApp {
                     {
                         self.toggle_room_tool();
                     }
+                    if widgets::tool_button(
+                        ui,
+                        Icon::PanelRight,
+                        "Ceiling",
+                        self.ceiling_tool_active,
+                        true,
+                    )
+                    .on_hover_text("Place a flat ceiling inside an enclosed area (C)")
+                    .clicked()
+                    {
+                        self.toggle_ceiling_tool();
+                    }
+                    if widgets::tool_button(
+                        ui,
+                        Icon::LayoutGrid,
+                        "Floor",
+                        self.floor_tool_active,
+                        true,
+                    )
+                    .on_hover_text("Place a floor deck inside an enclosed area (F)")
+                    .clicked()
+                    {
+                        self.toggle_floor_tool();
+                    }
                     let can_delete = matches!(
                         self.selected,
-                        Selection::Wall | Selection::Opening(_) | Selection::Room(_)
+                        Selection::Wall
+                            | Selection::Opening(_)
+                            | Selection::Room(_)
+                            | Selection::RoofPlane(_)
+                            | Selection::Ceiling(_)
+                            | Selection::FloorDeck(_)
                     );
                     if widgets::tool_button(ui, Icon::Delete, "Delete", false, can_delete)
-                        .on_hover_text("Delete the selected wall or opening (Del)")
+                        .on_hover_text("Delete the selected object (Del)")
                         .clicked()
                     {
                         self.delete_selected();
@@ -436,6 +465,38 @@ impl FramerApp {
                         .iter()
                         .map(|room| (room.id.0.clone(), room.name.clone(), room.level.0.clone()))
                         .collect();
+                    // Roof planes, ceilings, and floor decks are level-owned surfaces,
+                    // listed as siblings of rooms under each level: (id, name, level).
+                    let roof_planes: Vec<_> = self
+                        .model
+                        .roof_planes
+                        .iter()
+                        .map(|plane| {
+                            (
+                                plane.id.0.clone(),
+                                plane.name.clone(),
+                                plane.level.0.clone(),
+                            )
+                        })
+                        .collect();
+                    let ceilings: Vec<_> = self
+                        .model
+                        .ceilings
+                        .iter()
+                        .map(|ceiling| {
+                            (
+                                ceiling.id.0.clone(),
+                                ceiling.name.clone(),
+                                ceiling.level.0.clone(),
+                            )
+                        })
+                        .collect();
+                    let floor_decks: Vec<_> = self
+                        .model
+                        .floor_decks
+                        .iter()
+                        .map(|deck| (deck.id.0.clone(), deck.name.clone(), deck.level.0.clone()))
+                        .collect();
 
                     for (level_id, level_name) in levels {
                         let level_selected =
@@ -530,6 +591,54 @@ impl FramerApp {
                                     .clicked()
                                 {
                                     self.selected = Selection::Room(room_id.clone());
+                                }
+                            }
+
+                            for (plane_id, plane_name, plane_level) in &roof_planes {
+                                if plane_level != &level_id {
+                                    continue;
+                                }
+                                let selected = matches!(
+                                    &self.selected,
+                                    Selection::RoofPlane(id) if id == plane_id
+                                );
+                                if ui
+                                    .selectable_label(selected, format!("Roof plane: {plane_name}"))
+                                    .clicked()
+                                {
+                                    self.selected = Selection::RoofPlane(plane_id.clone());
+                                }
+                            }
+
+                            for (ceiling_id, ceiling_name, ceiling_level) in &ceilings {
+                                if ceiling_level != &level_id {
+                                    continue;
+                                }
+                                let selected = matches!(
+                                    &self.selected,
+                                    Selection::Ceiling(id) if id == ceiling_id
+                                );
+                                if ui
+                                    .selectable_label(selected, format!("Ceiling: {ceiling_name}"))
+                                    .clicked()
+                                {
+                                    self.selected = Selection::Ceiling(ceiling_id.clone());
+                                }
+                            }
+
+                            for (deck_id, deck_name, deck_level) in &floor_decks {
+                                if deck_level != &level_id {
+                                    continue;
+                                }
+                                let selected = matches!(
+                                    &self.selected,
+                                    Selection::FloorDeck(id) if id == deck_id
+                                );
+                                if ui
+                                    .selectable_label(selected, format!("Floor deck: {deck_name}"))
+                                    .clicked()
+                                {
+                                    self.selected = Selection::FloorDeck(deck_id.clone());
                                 }
                             }
                         });
@@ -1247,32 +1356,40 @@ impl FramerApp {
             .iter()
             .map(|wall| (wall.id.0.clone(), wall.name.clone()))
             .collect::<Vec<_>>();
-        // Snapshot of the wall-kind construction systems for the System picker,
-        // collected before the mutable wall borrow: (id, name, thickness, exposure).
-        let wall_systems = self
-            .model
-            .systems
-            .iter()
-            .filter(|system| system.kind == framer_core::SystemKind::Wall)
-            .map(|system| {
-                (
-                    system.id.0.clone(),
-                    system.name.clone(),
-                    system.total_thickness().to_string(),
-                    system.exposure().label().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        // Richer per-wall-system summaries (stacked swatch, R-value, layer count)
-        // for the Wall inspector's read-only System block, collected before the
-        // mutable wall borrow.
-        let wall_system_summaries = self
-            .model
-            .systems
-            .iter()
-            .filter(|system| system.kind == framer_core::SystemKind::Wall)
-            .map(|system| WallSystemSummary::from_system(system, &self.model))
-            .collect::<Vec<_>>();
+        // Construction-system picklists and richer summaries (stacked swatch,
+        // R-value, layer count) per system kind, collected before the mutable
+        // element borrow below so each object's System picker only offers (and
+        // summarizes) systems of its own kind. The model member of each summary is
+        // borrowed only here.
+        let systems_of = |kind: framer_core::SystemKind| {
+            self.model
+                .systems
+                .iter()
+                .filter(move |system| system.kind == kind)
+                .map(|system| {
+                    (
+                        system.id.0.clone(),
+                        system.name.clone(),
+                        system.total_thickness().to_string(),
+                        system.exposure().label().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let summaries_of = |kind: framer_core::SystemKind| {
+            self.model
+                .systems
+                .iter()
+                .filter(move |system| system.kind == kind)
+                .map(|system| WallSystemSummary::from_system(system, &self.model))
+                .collect::<Vec<_>>()
+        };
+        let wall_systems = systems_of(framer_core::SystemKind::Wall);
+        let ceiling_systems = systems_of(framer_core::SystemKind::Ceiling);
+        let floor_systems = systems_of(framer_core::SystemKind::Floor);
+        let wall_system_summaries = summaries_of(framer_core::SystemKind::Wall);
+        let ceiling_system_summaries = summaries_of(framer_core::SystemKind::Ceiling);
+        let floor_system_summaries = summaries_of(framer_core::SystemKind::Floor);
         // Material picklist + swatch colors, collected before any `&mut system`
         // borrow so layer ComboBoxes/swatches don't alias the system iter_mut().
         let material_options = self
@@ -2062,30 +2179,119 @@ impl FramerApp {
                 }
             }
             Selection::Ceiling(id) => {
-                if let Some(ceiling) = self.model.ceilings.iter().find(|c| c.id.0 == id) {
+                if let Some(ceiling) = self.model.ceilings.iter_mut().find(|c| c.id.0 == id) {
                     inspector_object_id(ui, &ceiling.id.0);
-                    ui.label(&ceiling.name);
-                    ui.label(format!("System: {}", ceiling.system.0));
-                    ui.label(format!("Height below level top: {}", ceiling.height));
-                    ui.label(format!(
-                        "Region: {}",
-                        surface_region_summary(&ceiling.region)
-                    ));
-                    ui.label(match ceiling.slope {
-                        Some(slope) => format!("Slope: {}:{}", slope.rise, slope.run),
-                        None => "Slope: flat".to_owned(),
-                    });
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut ceiling.name);
+
+                        let mut level_id = ceiling.level.0.clone();
+                        ComboBox::from_label("Level")
+                            .selected_text(level_display_name(&level_options, &level_id))
+                            .show_ui(ui, |ui| {
+                                for (lid, name) in &level_options {
+                                    ui.selectable_value(&mut level_id, lid.clone(), name);
+                                }
+                            });
+                        if level_id != ceiling.level.0 {
+                            ceiling.level = ElementId::new(level_id);
+                            changed = true;
+                        }
+
+                        widgets::section(ui, "ceiling-dimensions", "Geometry", true, |ui| {
+                            changed |= length_drag(
+                                ui,
+                                "Height below top",
+                                &mut ceiling.height,
+                                0.0,
+                                480.0,
+                                "ft",
+                            );
+                            summary_row(ui, "Region", surface_region_summary(&ceiling.region));
+                            // v1 ceilings are flat; the slope fork lands with the
+                            // vault/scissor phase.
+                            summary_row(ui, "Slope", "flat");
+                        });
+
+                        changed |= surface_system_picker(
+                            ui,
+                            "ceiling-system",
+                            &mut ceiling.system,
+                            &ceiling_systems,
+                            &ceiling_system_summaries,
+                            &mut deferred_select_system,
+                        );
+                    } else {
+                        ui.label(&ceiling.name);
+                        ui.label(format!("System: {}", ceiling.system.0));
+                        ui.label(format!("Height below level top: {}", ceiling.height));
+                        ui.label(format!(
+                            "Region: {}",
+                            surface_region_summary(&ceiling.region)
+                        ));
+                        ui.label("Slope: flat");
+                    }
                 } else {
                     ui.label("Ceiling no longer exists");
                 }
             }
             Selection::FloorDeck(id) => {
-                if let Some(deck) = self.model.floor_decks.iter().find(|d| d.id.0 == id) {
+                if let Some(deck) = self.model.floor_decks.iter_mut().find(|d| d.id.0 == id) {
                     inspector_object_id(ui, &deck.id.0);
-                    ui.label(&deck.name);
-                    ui.label(format!("System: {}", deck.system.0));
-                    ui.label(format!("Region: {}", surface_region_summary(&deck.region)));
-                    ui.label(format!("Span: {}", span_direction_label(deck.span)));
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut deck.name);
+
+                        let mut level_id = deck.level.0.clone();
+                        ComboBox::from_label("Level")
+                            .selected_text(level_display_name(&level_options, &level_id))
+                            .show_ui(ui, |ui| {
+                                for (lid, name) in &level_options {
+                                    ui.selectable_value(&mut level_id, lid.clone(), name);
+                                }
+                            });
+                        if level_id != deck.level.0 {
+                            deck.level = ElementId::new(level_id);
+                            changed = true;
+                        }
+
+                        widgets::section(ui, "floor-dimensions", "Geometry", true, |ui| {
+                            summary_row(ui, "Region", surface_region_summary(&deck.region));
+                            // The joist span direction. `Explicit(..)` is authored
+                            // elsewhere; the picker offers the three presets.
+                            property_row(ui, "Joist span", |ui| {
+                                ComboBox::from_id_salt("floor-span")
+                                    .selected_text(span_direction_label(deck.span))
+                                    .show_ui(ui, |ui| {
+                                        for span in [
+                                            framer_core::SpanDirection::Shorter,
+                                            framer_core::SpanDirection::Along,
+                                            framer_core::SpanDirection::Across,
+                                        ] {
+                                            changed |= ui
+                                                .selectable_value(
+                                                    &mut deck.span,
+                                                    span,
+                                                    span_direction_label(span),
+                                                )
+                                                .changed();
+                                        }
+                                    });
+                            });
+                        });
+
+                        changed |= surface_system_picker(
+                            ui,
+                            "floor-system",
+                            &mut deck.system,
+                            &floor_systems,
+                            &floor_system_summaries,
+                            &mut deferred_select_system,
+                        );
+                    } else {
+                        ui.label(&deck.name);
+                        ui.label(format!("System: {}", deck.system.0));
+                        ui.label(format!("Region: {}", surface_region_summary(&deck.region)));
+                        ui.label(format!("Span: {}", span_direction_label(deck.span)));
+                    }
                 } else {
                     ui.label("Floor deck no longer exists");
                 }
@@ -3143,6 +3349,74 @@ fn material_name(material_options: &[(String, String)], id: &str) -> String {
 
 /// Inline editor for one construction layer (interior -> exterior). Returns
 /// whether the layer's data changed; reorder/remove are deferred to the caller.
+/// A "System" inspector section for a roof/ceiling/floor object: a kind-filtered
+/// system ComboBox plus the selected system's stacked swatch and summary, and an
+/// "Edit system" jump. Mirrors the Wall inspector's System block. `salt` keys the
+/// egui ids (so each object kind's widgets stay distinct). Returns whether the
+/// system reference changed. The candidate `systems` / `summaries` lists are
+/// already filtered to the object's kind, so picking from them keeps the model
+/// valid.
+fn surface_system_picker(
+    ui: &mut Ui,
+    salt: &str,
+    current: &mut framer_core::ElementId,
+    systems: &[(String, String, String, String)],
+    summaries: &[WallSystemSummary],
+    deferred_select: &mut Option<String>,
+) -> bool {
+    widgets::section(ui, salt, "System", true, |ui| {
+        let mut changed = false;
+        let selected_text = systems
+            .iter()
+            .find(|(id, ..)| *id == current.0)
+            .map(|(_, name, ..)| name.clone())
+            .unwrap_or_else(|| current.0.clone());
+        changed |= property_row(ui, "System", |ui| {
+            let before = current.0.clone();
+            ComboBox::from_id_salt(salt)
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for (id, name, _, _) in systems {
+                        ui.selectable_value(current, ElementId::new(id.clone()), name);
+                    }
+                });
+            current.0 != before
+        });
+        ui.add_space(design::space::XS);
+        if let Some(summary) = summaries.iter().find(|summary| summary.id == current.0) {
+            stacked_swatch(ui, &summary.bands);
+            ui.add_space(design::space::XS);
+            egui::Grid::new(format!("{salt}-summary"))
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    summary_row(ui, "Name", &summary.name);
+                    summary_row(ui, "Layers", summary.layer_count);
+                    summary_row(ui, "Total thickness", &summary.total_thickness);
+                    summary_row(ui, "Exposure", summary.exposure);
+                    summary_row(ui, "R-value", format_r_value(summary.r_value_milli));
+                });
+            if ui.button("Edit system").clicked() {
+                *deferred_select = Some(summary.id.clone());
+            }
+        } else if systems.is_empty() {
+            ui.label(
+                RichText::new("No matching system yet — add one in the Library.")
+                    .size(design::text_size::LABEL)
+                    .color(design::active().text_muted),
+            );
+        } else {
+            ui.label(
+                RichText::new("System not found in the model library.")
+                    .size(design::text_size::LABEL)
+                    .color(design::active().text_muted),
+            );
+        }
+        changed
+    })
+    .unwrap_or(false)
+}
+
 /// The framing member family a system of `kind` produces, used to seed a layer's
 /// `FramingSpec` when it first becomes a framing layer so the solver dispatches
 /// the right member geometry (studs vs. rafters vs. joists).

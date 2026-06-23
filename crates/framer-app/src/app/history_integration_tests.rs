@@ -244,6 +244,117 @@ fn delete_room_is_a_single_undoable_step() {
 }
 
 #[test]
+fn add_ceiling_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    let systems_before = app.model.systems.len();
+
+    // Seed inside the demo shell (28ft × 20ft); the region resolves to the
+    // enclosed wall loop.
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+
+    assert_eq!(app.model.ceilings.len(), before + 1);
+    // The whole change is one undo step, the ceiling references a Ceiling-kind
+    // system (reused if present, else seeded), and the model validates.
+    let ceiling = app.model.ceilings.last().unwrap();
+    let system = app
+        .model
+        .systems
+        .iter()
+        .find(|system| system.id == ceiling.system)
+        .expect("the ceiling references an existing system");
+    assert_eq!(system.kind, framer_core::SystemKind::Ceiling);
+    assert!(
+        app.model.validate().is_ok(),
+        "authored ceiling must validate"
+    );
+    assert_eq!(app.history.undo_label(), Some("Add ceiling"));
+
+    app.undo();
+    assert_eq!(app.model.ceilings.len(), before, "undo removes the ceiling");
+    assert_eq!(
+        app.model.systems.len(),
+        systems_before,
+        "undo restores the system list"
+    );
+}
+
+#[test]
+fn add_ceiling_seeds_a_ceiling_system_when_absent() {
+    let mut app = FramerApp::default();
+    // Drop every ceiling system so the next placement must seed one.
+    app.model
+        .systems
+        .retain(|system| system.kind != framer_core::SystemKind::Ceiling);
+    let systems_before = app.model.systems.len();
+
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+
+    assert_eq!(
+        app.model.systems.len(),
+        systems_before + 1,
+        "a Ceiling system is seeded in the same step"
+    );
+    assert!(app.model.validate().is_ok(), "seeded ceiling must validate");
+}
+
+#[test]
+fn add_floor_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.floor_decks.len();
+
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_floor(region);
+
+    assert_eq!(app.model.floor_decks.len(), before + 1);
+    assert!(app.model.validate().is_ok(), "authored floor must validate");
+    assert_eq!(app.history.undo_label(), Some("Add floor"));
+
+    app.undo();
+    assert_eq!(app.model.floor_decks.len(), before, "undo removes the deck");
+}
+
+#[test]
+fn delete_ceiling_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+    let id = match &app.selected {
+        Selection::Ceiling(id) => id.clone(),
+        other => panic!("expected the new ceiling selected, got {other:?}"),
+    };
+
+    app.delete_selected_ceiling();
+    assert!(app.model.ceilings.iter().all(|ceiling| ceiling.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete ceiling"));
+
+    app.undo();
+    assert_eq!(app.model.ceilings.len(), 1, "undo restores the ceiling");
+}
+
+#[test]
 fn delete_last_wall_leaves_consistent_state() {
     let mut app = FramerApp::default();
     // Delete every wall; this must not panic and must leave an empty model.
