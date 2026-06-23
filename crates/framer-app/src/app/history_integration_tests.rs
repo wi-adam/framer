@@ -548,6 +548,123 @@ fn referenced_surface_systems_cannot_be_deleted() {
 }
 
 #[test]
+fn roof_springing_falls_back_to_tallest_wall_without_level_height() {
+    let mut app = FramerApp::default();
+    // The demo level has no authored height, so the springing line falls back to
+    // the tallest wall top (elevation + max wall height), never `Length::ZERO`.
+    assert_eq!(app.model.levels[0].height, Length::ZERO);
+    let elevation = app.model.levels[0].elevation;
+    app.model.walls[0].height = Length::from_feet(12.0); // make one wall clearly tallest
+
+    app.add_roof(RoofForm::Shed);
+
+    let plane = app.model.roof_planes.last().unwrap();
+    assert_eq!(
+        plane.reference_elevation,
+        elevation + Length::from_feet(12.0),
+        "springing follows the tallest wall when the level has no height"
+    );
+    assert!(plane.reference_elevation > Length::ZERO);
+}
+
+#[test]
+fn roof_springing_uses_level_top_when_height_authored() {
+    let mut app = FramerApp::default();
+    // An authored level height defines the top plane directly, taking precedence
+    // over the wall-height fallback.
+    app.model.levels[0].height = Length::from_feet(10.0);
+    let elevation = app.model.levels[0].elevation;
+
+    app.add_roof(RoofForm::Shed);
+
+    let plane = app.model.roof_planes.last().unwrap();
+    assert_eq!(
+        plane.reference_elevation,
+        elevation + Length::from_feet(10.0),
+        "springing is the authored level top"
+    );
+}
+
+#[test]
+fn gable_over_a_tall_footprint_uses_the_y_longer_branch() {
+    let mut app = FramerApp::default();
+    // Clear the wider-than-tall demo shell and lay a footprint that is taller than
+    // it is wide (10ft × 30ft), so the ridge runs along x and the eave edges are
+    // 3 and 1 (the branch the demo shell never exercises).
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let corners = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 30.0),
+        (0.0, 30.0),
+        (0.0, 0.0),
+    ];
+    for pair in corners.windows(2) {
+        app.add_wall(
+            Point2::new(Length::from_feet(pair[0].0), Length::from_feet(pair[0].1)),
+            Point2::new(Length::from_feet(pair[1].0), Length::from_feet(pair[1].1)),
+        );
+    }
+
+    app.add_roof(RoofForm::Gable);
+
+    assert_eq!(app.model.roof_planes.len(), 2, "a gable is two planes");
+    let mut eaves: Vec<u32> = app
+        .model
+        .roof_planes
+        .iter()
+        .map(|plane| plane.eave_edge)
+        .collect();
+    eaves.sort_unstable();
+    assert_eq!(
+        eaves,
+        vec![1, 3],
+        "a y-longer gable's planes eave on edges 1 and 3"
+    );
+    assert!(app.model.validate().is_ok());
+    for plane in &app.model.roof_planes {
+        assert!(
+            (plane.eave_edge as usize) < plane.outline.len(),
+            "eave edge in range"
+        );
+        assert!(plane.frame().is_some(), "plane geometry is non-degenerate");
+    }
+}
+
+#[test]
+fn add_opening_preserves_skylight_and_stair_kinds() {
+    // The un-fork: Skylight/Stair openings keep their kind instead of being
+    // coerced to Window (BOM and render dispatch on opening.kind). A fresh app +
+    // free wall per kind keeps the single opening clear of the demo openings.
+    for kind in [OpeningKind::Skylight, OpeningKind::Stair] {
+        let mut app = FramerApp::default();
+        app.add_wall(
+            Point2::new(Length::from_feet(0.0), Length::from_feet(40.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(40.0)),
+        );
+        app.selected_wall = app.model.walls.len() - 1;
+        app.selected = Selection::Wall;
+
+        app.add_opening(kind);
+        let id = match &app.selected {
+            Selection::Opening(id) => id.clone(),
+            other => panic!("expected the new opening selected, got {other:?}"),
+        };
+        let opening = app.model.walls[app.selected_wall]
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == id)
+            .expect("the new opening exists");
+        assert_eq!(opening.kind, kind, "{kind:?} opening keeps its kind");
+        assert!(app.model.validate().is_ok(), "{kind:?} opening validates");
+    }
+}
+
+#[test]
 fn delete_last_wall_leaves_consistent_state() {
     let mut app = FramerApp::default();
     // Delete every wall; this must not panic and must leave an empty model.

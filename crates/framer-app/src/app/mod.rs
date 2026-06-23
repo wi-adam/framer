@@ -1683,12 +1683,22 @@ impl FramerApp {
     fn surface_region_at(&self, point: Point2) -> Option<framer_core::SurfaceRegion> {
         use framer_core::SurfaceRegion;
         let boundary = framer_core::room_boundary(&self.model, point)?;
-        let room = self.model.rooms.iter().find(|room| {
-            framer_core::room_boundary(&self.model, room.seed)
-                .is_some_and(|other| other.vertices == boundary.vertices)
-        });
+        // Resolve every room's loop in one batched graph pass (room_boundaries
+        // derives the bounded faces once) rather than calling room_boundary per
+        // room, then match the one whose loop is the loop under `point`.
+        let seeds: Vec<Point2> = self.model.rooms.iter().map(|room| room.seed).collect();
+        let room = self
+            .model
+            .rooms
+            .iter()
+            .zip(framer_core::room_boundaries(&self.model, &seeds))
+            .find_map(|(room, other)| {
+                other
+                    .filter(|other| other.vertices == boundary.vertices)
+                    .map(|_| room.id.clone())
+            });
         Some(match room {
-            Some(room) => SurfaceRegion::Room(room.id.clone()),
+            Some(id) => SurfaceRegion::Room(id),
             None => SurfaceRegion::Polygon(boundary.vertices),
         })
     }
