@@ -210,8 +210,11 @@ non-axis-aligned framing member**.
 
 - The path tracer's `Triangle` already computes `geom_normal = edge1.cross(edge2)` with no axis
   assumption and no backface cull, so **sloped surfaces need new triangle-emitting functions,
-  not a new primitive**: add a `push_quad` / fan-triangulator beside the wall-specific
-  `push_box` in `build.rs::geometry_from_model`, with a roof-plane-local basis. Route
+  not a new primitive**: a polygon emitter beside the wall-specific `push_box` in
+  `build.rs::geometry_from_model` lifts each surface outline (roof planes via the shared
+  `RoofPlane::frame()` — the one up-slope projection the solver also uses; ceilings/floors flat)
+  and triangulates it with `framer_core::triangulate_simple_polygon`, an exact-integer ear-clip
+  that is correct for the concave loops `room_boundary` produces (a naive fan is not). Route
   roof/ceiling layers through the existing `PaletteBuilder` so **no WGSL or GPU-parity change**
   is needed (opaque diffuse only in v1). New geometry must grow the same bounds `Aabb` feeding
   `SceneFraming`, and emit well-formed winding (degenerate tris are dropped at `PARALLEL_EPS`).
@@ -266,7 +269,9 @@ non-axis-aligned framing member**.
   ridge-beam-vs-board structural fork) — next phase.
 - **Hips, valleys, multi-wing footprints, dormers** — the hard geometry (straight-skeleton
   auto-roof, unequal-pitch valleys that don't bisect at 45°, a multi-plane member post-pass
-  analogous to `add_join_members`, a non-convex integer-tick triangulator).
+  analogous to `add_join_members`). *(The Slice-4 render already ships an exact-integer ear-clip
+  `triangulate_simple_polygon` that handles concave simple polygons, e.g. an L-shaped room's
+  ceiling/floor; only the multi-plane straight-skeleton geometry above remains out of scope.)*
 - **Manufactured trusses** (profile + spacing + bearing, web design deferred to "the plant").
 - **Engineered members** (I-joist / LVL / open-web): `BoardProfile` is capped at 2×12 with a
   hardcoded 1.5″ thickness and nominal depths — a richer `MemberProfile` comes with them.
