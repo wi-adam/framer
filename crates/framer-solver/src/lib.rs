@@ -4562,4 +4562,41 @@ mod tests {
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("roof-shed")
         }));
     }
+
+    #[test]
+    fn degenerate_roof_outline_frames_nothing_and_warns() {
+        // A zero-length eave edge (coincident consecutive vertices) passes core
+        // geometry validation — which only rejects <3 points, self-intersection,
+        // an out-of-range eave edge, and slope.run <= 0 — but cannot lay out
+        // rafters. generate_roof_plan recovers with an empty plan and a Warning
+        // rather than dividing by a zero-length eave.
+        let plane = RoofPlane::new(
+            "roof-degenerate",
+            "Degenerate",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(24.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        );
+
+        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false).unwrap();
+        assert!(
+            plan.members.is_empty(),
+            "a degenerate outline frames no members"
+        );
+        assert!(plan.layers.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "roof.outline.degenerate"
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("roof-degenerate")
+        }));
+    }
 }
