@@ -35,7 +35,7 @@ use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
     next_ceiling_id, next_dimension_id, next_floor_id, next_material_id, next_opening_id,
-    next_room_id, next_system_id, next_wall_id, translate_keeps_ortho,
+    next_roof_id, next_room_id, next_system_id, next_wall_id, translate_keeps_ortho,
     translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
@@ -150,10 +150,26 @@ impl WorkspaceMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewportMode {
     Plan,
+    /// A top-down roof authoring view: the plan footprint with the authored roof
+    /// planes drawn and selectable on top. Reuses the 2-D plan machinery.
+    RoofPlan,
     Elevation,
     Axonometric,
     Render,
 }
+
+/// The roof form the auto-from-footprint roof tool generates. v1 authors a single
+/// shed plane or two opposing gable planes; hips/valleys are a later phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoofForm {
+    Gable,
+    Shed,
+}
+
+/// One generated roof-plane outline: its plan-projected polygon and the index of
+/// its eave (downslope) edge. The rest of a [`framer_core::RoofPlane`] (id, name,
+/// level, system, pitch, springing) is filled in by `add_roof`.
+type RoofPlaneSpec = (Vec<Point2>, u32);
 
 /// How walls are drawn in the Plan and 3D views. A single shared presentation
 /// setting (not per-view) so toggling it reads consistently across both. The
@@ -1731,6 +1747,170 @@ impl FramerApp {
             .first()
             .map(|level| level.id.0.clone())
             .unwrap_or_else(|| "level-1".to_owned())
+    }
+
+    /// Auto-generate a roof of `form` over the project's wall footprint as one undo
+    /// step (the hybrid roof tool: generate planes, then store them as editable
+    /// objects), seeding a Roof system if the project has none. Switches to the
+    /// roof-plan view so the result is visible. No-ops with a status hint when
+    /// there is no footprint yet.
+    fn add_roof(&mut self, form: RoofForm) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let level = self.first_level_id();
+        let Some((specs, springing)) = self.footprint_roof_specs(&level, form) else {
+            self.dimension_status =
+                Some("Draw walls to enclose a footprint before adding a roof".to_owned());
+            return;
+        };
+        // A default 4:12 pitch with modest overhangs; all editable per plane.
+        let slope =
+            framer_core::Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12));
+        let eave_overhang = Length::from_whole_inches(12);
+        let rake_overhang = Length::from_whole_inches(8);
+        self.edit("Add roof", |app| {
+            let system = app.ensure_surface_system(framer_core::SystemKind::Roof);
+            let mut last_id = None;
+            for (outline, eave_edge) in specs {
+                let (id, index) = next_roof_id(&app.model);
+                let plane = framer_core::RoofPlane::new(
+                    id.clone(),
+                    format!("Roof plane {index}"),
+                    level.clone(),
+                    system.clone(),
+                    outline,
+                    slope,
+                    eave_edge,
+                    springing,
+                )
+                .with_eave_overhang(eave_overhang)
+                .with_rake_overhang(rake_overhang);
+                app.model.roof_planes.push(plane);
+                last_id = Some(id);
+            }
+            if let Some(id) = last_id {
+                app.selected = Selection::RoofPlane(id);
+            }
+        });
+        self.viewport_mode = ViewportMode::RoofPlan;
+    }
+
+    /// The plane outlines (plan polygon + eave-edge index) for an auto-generated
+    /// `form` roof over the footprint of the walls on `level`, plus the springing
+    /// elevation (the bearing line). `None` when the level has no walls. The
+    /// springing prefers the authored level top (`elevation + height`) and falls
+    /// back to the tallest wall on the level when the level has no authored height,
+    /// so a one-click roof on a fresh shell still sits on top of the walls.
+    fn footprint_roof_specs(
+        &self,
+        level: &str,
+        form: RoofForm,
+    ) -> Option<(Vec<RoofPlaneSpec>, Length)> {
+        let walls: Vec<&Wall> = self
+            .model
+            .walls
+            .iter()
+            .filter(|wall| wall.level.0 == level)
+            .collect();
+        if walls.is_empty() {
+            return None;
+        }
+        let mut min_x = i64::MAX;
+        let mut min_y = i64::MAX;
+        let mut max_x = i64::MIN;
+        let mut max_y = i64::MIN;
+        for wall in &walls {
+            for point in [wall.start, wall.end] {
+                min_x = min_x.min(point.x.ticks());
+                min_y = min_y.min(point.y.ticks());
+                max_x = max_x.max(point.x.ticks());
+                max_y = max_y.max(point.y.ticks());
+            }
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return None;
+        }
+        let p = |x: i64, y: i64| Point2::new(Length::from_ticks(x), Length::from_ticks(y));
+
+        let specs = match form {
+            // A shed roof is one plane over the whole footprint, sloping up from the
+            // low (min-y) eave to the opposite ridge.
+            RoofForm::Shed => vec![(
+                vec![
+                    p(min_x, min_y),
+                    p(max_x, min_y),
+                    p(max_x, max_y),
+                    p(min_x, max_y),
+                ],
+                0,
+            )],
+            // A gable is two opposing planes meeting at a ridge along the longer
+            // axis; each plane's eave is its outer footprint edge (the up-slope
+            // direction toward the ridge is derived by RoofPlane::frame()).
+            RoofForm::Gable => {
+                if max_x - min_x >= max_y - min_y {
+                    let mid = (min_y + max_y) / 2;
+                    vec![
+                        (
+                            vec![
+                                p(min_x, min_y),
+                                p(max_x, min_y),
+                                p(max_x, mid),
+                                p(min_x, mid),
+                            ],
+                            0,
+                        ),
+                        (
+                            vec![
+                                p(min_x, mid),
+                                p(max_x, mid),
+                                p(max_x, max_y),
+                                p(min_x, max_y),
+                            ],
+                            2,
+                        ),
+                    ]
+                } else {
+                    let mid = (min_x + max_x) / 2;
+                    vec![
+                        (
+                            vec![
+                                p(min_x, min_y),
+                                p(mid, min_y),
+                                p(mid, max_y),
+                                p(min_x, max_y),
+                            ],
+                            3,
+                        ),
+                        (
+                            vec![
+                                p(mid, min_y),
+                                p(max_x, min_y),
+                                p(max_x, max_y),
+                                p(mid, max_y),
+                            ],
+                            1,
+                        ),
+                    ]
+                }
+            }
+        };
+
+        let level_def = self.model.levels.iter().find(|lvl| lvl.id.0 == level);
+        let elevation = level_def.map(|lvl| lvl.elevation).unwrap_or(Length::ZERO);
+        let height = level_def.map(|lvl| lvl.height).unwrap_or(Length::ZERO);
+        let springing = if height > Length::ZERO {
+            elevation + height
+        } else {
+            let tallest = walls
+                .iter()
+                .map(|wall| wall.height)
+                .max()
+                .unwrap_or(Length::ZERO);
+            elevation + tallest
+        };
+        Some((specs, springing))
     }
 
     fn add_opening(&mut self, kind: OpeningKind) {

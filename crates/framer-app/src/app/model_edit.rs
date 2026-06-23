@@ -489,6 +489,18 @@ pub(super) fn next_floor_id(model: &BuildingModel) -> (String, usize) {
     }
 }
 
+/// Generate the next free roof-plane id (`roof-N`) and its display index.
+pub(super) fn next_roof_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.roof_planes.len() + 1;
+    loop {
+        let id = format!("roof-{index}");
+        if model.roof_planes.iter().all(|plane| plane.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
 /// Generate the next free placed-furnishing id.
 pub(super) fn next_furnishing_instance_id(model: &BuildingModel) -> (String, usize) {
     let mut index = model.furnishing_instances.len() + 1;

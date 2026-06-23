@@ -63,6 +63,9 @@ pub(super) struct PlanView<'a> {
     pub(super) room_tool_active: bool,
     pub(super) ceiling_tool_active: bool,
     pub(super) floor_tool_active: bool,
+    /// The top-down roof authoring view: overlay the authored roof-plane outlines
+    /// and let clicks select them.
+    pub(super) roof_plan_mode: bool,
     pub(super) active_wall_drag: Option<(usize, WallEditHandle)>,
 }
 
@@ -400,6 +403,7 @@ pub(super) fn draw_project_plan(
         room_tool_active,
         ceiling_tool_active,
         floor_tool_active,
+        roof_plan_mode,
         active_wall_drag,
     } = plan;
     // The room, ceiling, and floor tools are all region-gated placement tools:
@@ -450,6 +454,7 @@ pub(super) fn draw_project_plan(
     let mut clicked_furnishing = None;
     let mut clicked_mep = None;
     let mut clicked_room = None;
+    let mut clicked_roof = None;
     let mut over_element = false;
 
     // Which selected-wall handle the cursor is over (for hover emphasis + cursor),
@@ -792,8 +797,72 @@ pub(super) fn draw_project_plan(
         }
     }
 
+    // Roof authoring overlay: draw each roof plane's plan outline on top of the
+    // footprint and let a click select it. Only in the roof-plan view, so the
+    // normal plan stays uncluttered (roofs always render in 3D regardless).
+    if roof_plan_mode {
+        for plane in &model.roof_planes {
+            if plane.outline.len() < 3 {
+                continue;
+            }
+            let screen: Vec<Pos2> = plane
+                .outline
+                .iter()
+                .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
+                .collect();
+            let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
+            let fill = if selected {
+                theme::active_blue().gamma_multiply(0.20)
+            } else {
+                theme::framing_line().gamma_multiply(0.08)
+            };
+            painter.add(egui::Shape::convex_polygon(
+                screen.clone(),
+                fill,
+                Stroke::new(
+                    if selected { 2.0 } else { 1.0 },
+                    if selected {
+                        theme::active_blue()
+                    } else {
+                        theme::framing_line()
+                    },
+                ),
+            ));
+            // Mark the eave edge so the slope direction reads at a glance.
+            let i = plane.eave_edge as usize % screen.len();
+            painter.line_segment(
+                [screen[i], screen[(i + 1) % screen.len()]],
+                Stroke::new(2.5, theme::framing_line_dark()),
+            );
+            if let Some(centroid) = polygon_centroid(&screen) {
+                painter.text(
+                    centroid,
+                    Align2::CENTER_CENTER,
+                    &plane.name,
+                    FontId::proportional(11.0),
+                    theme::framing_line_dark(),
+                );
+            }
+            if response.clicked()
+                && pointer.is_some_and(|position| point_in_screen_polygon(position, &screen))
+            {
+                clicked_roof = Some(ViewClick::RoofPlane {
+                    id: plane.id.0.clone(),
+                });
+            }
+        }
+    }
+
     draw_scale_bar(&painter, drawing, scale);
-    draw_view_title(&painter, drawing, "Whole-project plan");
+    draw_view_title(
+        &painter,
+        drawing,
+        if roof_plan_mode {
+            "Roof plan"
+        } else {
+            "Whole-project plan"
+        },
+    );
     draw_plan_axis_indicator(&painter, drawing);
 
     // Skip double-click-to-refit while a placement tool is active, so a quick
@@ -829,11 +898,26 @@ pub(super) fn draw_project_plan(
         return Some(click);
     }
 
-    clicked_opening
+    // In the roof-plan view a roof outline is the top-priority hit; elsewhere the
+    // ordinary wall/opening/room priority applies (clicked_roof is always None).
+    clicked_roof
+        .or(clicked_opening)
         .or(clicked_furnishing)
         .or(clicked_mep)
         .or(clicked_wall)
         .or(clicked_room)
+}
+
+/// The average of `vertices` (a screen-space polygon's label anchor). `None` for
+/// an empty polygon.
+fn polygon_centroid(vertices: &[Pos2]) -> Option<Pos2> {
+    if vertices.is_empty() {
+        return None;
+    }
+    let sum = vertices
+        .iter()
+        .fold(Vec2::ZERO, |acc, vertex| acc + vertex.to_vec2());
+    Some((sum / vertices.len() as f32).to_pos2())
 }
 
 #[allow(clippy::too_many_arguments)]

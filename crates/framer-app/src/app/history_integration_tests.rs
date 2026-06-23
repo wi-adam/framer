@@ -10,7 +10,7 @@ use framer_core::{CodeProfile, Length, OpeningKind, Point2, Wall};
 
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
-use super::{FramerApp, Selection};
+use super::{FramerApp, RoofForm, Selection, ViewportMode};
 
 /// Feed a single key-press through a real egui frame so `handle_keyboard_shortcuts`
 /// sees it via `consume_key` exactly as it would at runtime.
@@ -352,6 +352,79 @@ fn delete_ceiling_is_a_single_undoable_step() {
 
     app.undo();
     assert_eq!(app.model.ceilings.len(), 1, "undo restores the ceiling");
+}
+
+#[test]
+fn add_gable_roof_generates_two_valid_planes_in_one_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.roof_planes.len();
+
+    app.add_roof(RoofForm::Gable);
+
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before + 2,
+        "a gable is two opposing planes"
+    );
+    assert!(app.model.validate().is_ok(), "generated roof must validate");
+    // Each plane references a Roof system, has a positive run, and an in-range
+    // eave edge.
+    for plane in &app.model.roof_planes {
+        let system = app
+            .model
+            .systems
+            .iter()
+            .find(|system| system.id == plane.system)
+            .expect("plane references an existing system");
+        assert_eq!(system.kind, framer_core::SystemKind::Roof);
+        assert!(plane.slope.run > Length::ZERO);
+        assert!((plane.eave_edge as usize) < plane.outline.len());
+        assert!(plane.frame().is_some(), "plane geometry is non-degenerate");
+    }
+    assert_eq!(app.history.undo_label(), Some("Add roof"));
+    assert_eq!(
+        app.viewport_mode,
+        ViewportMode::RoofPlan,
+        "adding a roof switches to the roof-plan view"
+    );
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo removes both planes in one step"
+    );
+}
+
+#[test]
+fn add_shed_roof_generates_one_plane() {
+    let mut app = FramerApp::default();
+    app.add_roof(RoofForm::Shed);
+    assert_eq!(app.model.roof_planes.len(), 1, "a shed is a single plane");
+    assert!(app.model.validate().is_ok(), "generated roof must validate");
+}
+
+#[test]
+fn add_roof_without_walls_is_a_no_op() {
+    let mut app = FramerApp::default();
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let undo_before = app.history.can_undo();
+
+    app.add_roof(RoofForm::Gable);
+
+    assert!(
+        app.model.roof_planes.is_empty(),
+        "no footprint -> no roof planes"
+    );
+    assert_eq!(
+        app.history.can_undo(),
+        undo_before,
+        "a no-op roof records no undo step"
+    );
 }
 
 #[test]

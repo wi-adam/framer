@@ -22,8 +22,8 @@ use super::model_edit::{
     set_wall_length_keep_direction,
 };
 use super::{
-    DrawWallToolState, FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design,
-    theme,
+    DrawWallToolState, FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode,
+    design, theme,
 };
 
 impl FramerApp {
@@ -202,6 +202,18 @@ impl FramerApp {
                 }
                 if widgets::tool_button(
                     ui,
+                    Icon::Angular,
+                    "Roof",
+                    self.viewport_mode == ViewportMode::RoofPlan,
+                    true,
+                )
+                .on_hover_text("Top-down roof plan: view and select roof planes")
+                .clicked()
+                {
+                    self.viewport_mode = ViewportMode::RoofPlan;
+                }
+                if widgets::tool_button(
+                    ui,
                     Icon::View3d,
                     "3D",
                     self.viewport_mode == ViewportMode::Axonometric,
@@ -301,6 +313,18 @@ impl FramerApp {
                         .clicked()
                     {
                         self.add_opening(OpeningKind::GarageDoor);
+                    }
+                    if widgets::tool_button(ui, Icon::Angular, "Gable", false, true)
+                        .on_hover_text("Generate a gable roof over the wall footprint")
+                        .clicked()
+                    {
+                        self.add_roof(RoofForm::Gable);
+                    }
+                    if widgets::tool_button(ui, Icon::Angular, "Shed", false, true)
+                        .on_hover_text("Generate a shed (mono-pitch) roof over the footprint")
+                        .clicked()
+                    {
+                        self.add_roof(RoofForm::Shed);
                     }
                 });
                 widgets::tool_divider(ui);
@@ -1385,9 +1409,11 @@ impl FramerApp {
                 .collect::<Vec<_>>()
         };
         let wall_systems = systems_of(framer_core::SystemKind::Wall);
+        let roof_systems = systems_of(framer_core::SystemKind::Roof);
         let ceiling_systems = systems_of(framer_core::SystemKind::Ceiling);
         let floor_systems = systems_of(framer_core::SystemKind::Floor);
         let wall_system_summaries = summaries_of(framer_core::SystemKind::Wall);
+        let roof_system_summaries = summaries_of(framer_core::SystemKind::Roof);
         let ceiling_system_summaries = summaries_of(framer_core::SystemKind::Ceiling);
         let floor_system_summaries = summaries_of(framer_core::SystemKind::Floor);
         // Material picklist + swatch colors, collected before any `&mut system`
@@ -2160,20 +2186,102 @@ impl FramerApp {
             // makes them selectable (in the 3D view); editable inspectors (pitch,
             // height, span, system) land with the authoring tools in a later slice.
             Selection::RoofPlane(id) => {
-                if let Some(plane) = self.model.roof_planes.iter().find(|p| p.id.0 == id) {
+                if let Some(plane) = self.model.roof_planes.iter_mut().find(|p| p.id.0 == id) {
                     inspector_object_id(ui, &plane.id.0);
-                    ui.label(&plane.name);
-                    ui.label(format!("System: {}", plane.system.0));
-                    ui.label(format!("Pitch: {}:{}", plane.slope.rise, plane.slope.run));
-                    ui.label(format!("Eave edge: {}", plane.eave_edge));
-                    ui.label(format!(
-                        "Springing elevation: {}",
-                        plane.reference_elevation
-                    ));
-                    ui.label(format!(
-                        "Overhangs: eave {}, rake {}",
-                        plane.eave_overhang, plane.rake_overhang
-                    ));
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut plane.name);
+
+                        let mut level_id = plane.level.0.clone();
+                        ComboBox::from_label("Level")
+                            .selected_text(level_display_name(&level_options, &level_id))
+                            .show_ui(ui, |ui| {
+                                for (lid, name) in &level_options {
+                                    ui.selectable_value(&mut level_id, lid.clone(), name);
+                                }
+                            });
+                        if level_id != plane.level.0 {
+                            plane.level = ElementId::new(level_id);
+                            changed = true;
+                        }
+
+                        widgets::section(ui, "roof-geometry", "Geometry", true, |ui| {
+                            // Pitch as an explicit rise:run; the run is clamped above
+                            // zero (validation requires it) and the ratio is echoed.
+                            changed |= length_drag(
+                                ui,
+                                "Pitch rise",
+                                &mut plane.slope.rise,
+                                0.0,
+                                144.0,
+                                "in",
+                            );
+                            changed |= length_drag(
+                                ui,
+                                "Pitch run",
+                                &mut plane.slope.run,
+                                1.0,
+                                144.0,
+                                "in",
+                            );
+                            summary_row(
+                                ui,
+                                "Pitch",
+                                format!("{}:{}", plane.slope.rise, plane.slope.run),
+                            );
+                            property_row(ui, "Eave edge", |ui| {
+                                let max = plane.outline.len().saturating_sub(1) as u32;
+                                let before = plane.eave_edge;
+                                ui.add(egui::DragValue::new(&mut plane.eave_edge).range(0..=max));
+                                if plane.eave_edge != before {
+                                    changed = true;
+                                }
+                            });
+                            summary_row(ui, "Outline", format!("{} pts", plane.outline.len()));
+                            changed |= coordinate_drag(
+                                ui,
+                                "Springing elevation",
+                                &mut plane.reference_elevation,
+                            );
+                            changed |= length_drag(
+                                ui,
+                                "Eave overhang",
+                                &mut plane.eave_overhang,
+                                0.0,
+                                48.0,
+                                "in",
+                            );
+                            changed |= length_drag(
+                                ui,
+                                "Rake overhang",
+                                &mut plane.rake_overhang,
+                                0.0,
+                                48.0,
+                                "in",
+                            );
+                        });
+
+                        changed |= surface_system_picker(
+                            ui,
+                            "roof-system",
+                            &mut plane.system,
+                            &roof_systems,
+                            &roof_system_summaries,
+                            &mut deferred_select_system,
+                        );
+                    } else {
+                        ui.label(&plane.name);
+                        ui.label(format!("System: {}", plane.system.0));
+                        ui.label(format!("Pitch: {}:{}", plane.slope.rise, plane.slope.run));
+                        ui.label(format!("Eave edge: {}", plane.eave_edge));
+                        ui.label(format!(
+                            "Springing elevation: {}",
+                            plane.reference_elevation
+                        ));
+                        ui.label(format!(
+                            "Overhangs: eave {}, rake {}",
+                            plane.eave_overhang, plane.rake_overhang
+                        ));
+                    }
                 } else {
                     ui.label("Roof plane no longer exists");
                 }
