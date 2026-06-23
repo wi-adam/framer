@@ -7,7 +7,7 @@
 > **Status:** Proposed · **Linked milestone:** M3 (Floors And Roofs) ·
 > **Proposed goal:** G-014 (Ceilings & Roofs) ·
 > **Plan:** [2026-06-20-ceilings-and-roofs.md](../plans/2026-06-20-ceilings-and-roofs.md) ·
-> **Last reviewed:** 2026-06-20
+> **Last reviewed:** 2026-06-22
 
 ## Intent / Purpose
 
