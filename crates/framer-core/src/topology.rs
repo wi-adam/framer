@@ -284,6 +284,99 @@ fn polygon_perimeter(vertices: &[Point2]) -> Length {
     total
 }
 
+/// Triangulate a simple (non-self-intersecting) polygon by ear clipping, returning
+/// index triples into `points`. Correct for **convex and concave** outlines — the
+/// single source of triangulation so the renderer and the 3-D viewport do not split
+/// a roof/ceiling/floor surface differently (a naive vertex-0 fan is wrong for the
+/// concave loops `room_boundary` produces, e.g. an L-shaped room). Winding-agnostic:
+/// callers assign their own face normal, so the emitted triangle order is not
+/// orientation-constrained. Exact integer-tick math (no float) keeps it
+/// deterministic. Returns empty for fewer than 3 points; a degenerate (over-collinear)
+/// remainder falls back to a fan so the routine always terminates.
+pub fn triangulate_simple_polygon(points: &[Point2]) -> Vec<[usize; 3]> {
+    let n = points.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    if n == 3 {
+        return vec![[0, 1, 2]];
+    }
+
+    // Remaining original-index ring, normalized to counterclockwise so the ear test
+    // (a convex corner has a positive cross product) is consistent.
+    let mut ring: Vec<usize> = (0..n).collect();
+    if polygon_signed_area2(points) < 0 {
+        ring.reverse();
+    }
+
+    let mut triangles = Vec::with_capacity(n - 2);
+    while ring.len() > 3 {
+        let m = ring.len();
+        let mut clipped = false;
+        for i in 0..m {
+            let prev = ring[(i + m - 1) % m];
+            let cur = ring[i];
+            let next = ring[(i + 1) % m];
+            let (a, b, c) = (points[prev], points[cur], points[next]);
+            // A convex corner of a CCW ring; a reflex corner cannot be an ear.
+            if cross2(a, b, c) <= 0 {
+                continue;
+            }
+            // It is an ear only if no other remaining vertex lies in triangle abc.
+            let blocked = ring.iter().any(|&j| {
+                j != prev && j != cur && j != next && point_in_triangle_ccw(points[j], a, b, c)
+            });
+            if blocked {
+                continue;
+            }
+            triangles.push([prev, cur, next]);
+            ring.remove(i);
+            clipped = true;
+            break;
+        }
+        if !clipped {
+            // No ear found (a degenerate, over-collinear remainder): fan what's left
+            // so the routine terminates rather than looping forever.
+            for k in 1..ring.len() - 1 {
+                triangles.push([ring[0], ring[k], ring[k + 1]]);
+            }
+            return triangles;
+        }
+    }
+    triangles.push([ring[0], ring[1], ring[2]]);
+    triangles
+}
+
+/// Twice the shoelace signed area in ticks² (counterclockwise positive). `i128`
+/// keeps the products exact for any reachable tick coordinate.
+fn polygon_signed_area2(points: &[Point2]) -> i128 {
+    let n = points.len();
+    let mut sum: i128 = 0;
+    for i in 0..n {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        sum +=
+            a.x.ticks() as i128 * b.y.ticks() as i128 - b.x.ticks() as i128 * a.y.ticks() as i128;
+    }
+    sum
+}
+
+/// `(b - a) × (c - a)` in ticks² (positive when `a→b→c` turns counterclockwise).
+fn cross2(a: Point2, b: Point2, c: Point2) -> i128 {
+    let abx = b.x.ticks() as i128 - a.x.ticks() as i128;
+    let aby = b.y.ticks() as i128 - a.y.ticks() as i128;
+    let acx = c.x.ticks() as i128 - a.x.ticks() as i128;
+    let acy = c.y.ticks() as i128 - a.y.ticks() as i128;
+    abx * acy - aby * acx
+}
+
+/// Whether `p` lies inside (or on the boundary of) the counterclockwise triangle
+/// `abc`. Boundary inclusion is conservative so a vertex touching an ear's edge
+/// still blocks the clip.
+fn point_in_triangle_ccw(p: Point2, a: Point2, b: Point2, c: Point2) -> bool {
+    cross2(a, b, p) >= 0 && cross2(b, c, p) >= 0 && cross2(c, a, p) >= 0
+}
+
 /// Even-odd ray-casting point-in-polygon test (boundary inclusion unspecified).
 fn point_in_polygon(point: Point2, vertices: &[Point2]) -> bool {
     let (px, py) = (point.x.inches(), point.y.inches());
@@ -505,6 +598,72 @@ mod tests {
             faces
                 .iter()
                 .any(|face| point_in_polygon(toward_interior, face))
+        );
+    }
+
+    /// Every emitted triangle must lie inside the polygon (centroid test) and the
+    /// triangles must exactly tile its area — the property a naive vertex-0 fan
+    /// violates for a concave outline.
+    fn assert_triangulation_tiles(poly: &[Point2], tris: &[[usize; 3]]) {
+        let expected = polygon_area_square_inches(poly);
+        let mut total = 0.0;
+        for &[a, b, c] in tris {
+            let (pa, pb, pc) = (poly[a], poly[b], poly[c]);
+            let area = polygon_area_square_inches(&[pa, pb, pc]);
+            assert!(area > 0.5, "degenerate triangle {a},{b},{c}");
+            total += area;
+            let cx = (pa.x.inches() + pb.x.inches() + pc.x.inches()) / 3.0;
+            let cy = (pa.y.inches() + pb.y.inches() + pc.y.inches()) / 3.0;
+            assert!(
+                point_in_polygon(p(cx, cy), poly),
+                "triangle [{a},{b},{c}] centroid lies outside the polygon (fan spill)"
+            );
+        }
+        assert!(
+            (total - expected).abs() < 1.0,
+            "triangles cover {total} sq in, polygon is {expected} sq in"
+        );
+    }
+
+    #[test]
+    fn triangulates_convex_rectangle() {
+        let rect = vec![p(0.0, 0.0), p(40.0, 0.0), p(40.0, 20.0), p(0.0, 20.0)];
+        let tris = triangulate_simple_polygon(&rect);
+        assert_eq!(tris.len(), 2);
+        assert_triangulation_tiles(&rect, &tris);
+    }
+
+    #[test]
+    fn triangulates_concave_l_shape_in_both_windings() {
+        // An L: a 40×40 square with a 20×20 notch removed at the top-right corner.
+        // Vertex 3 (20,20) is reflex, so a vertex-0 fan would spill outside.
+        let ccw = vec![
+            p(0.0, 0.0),
+            p(40.0, 0.0),
+            p(40.0, 20.0),
+            p(20.0, 20.0),
+            p(20.0, 40.0),
+            p(0.0, 40.0),
+        ];
+        let cw: Vec<Point2> = ccw.iter().rev().copied().collect();
+        for poly in [ccw, cw] {
+            let tris = triangulate_simple_polygon(&poly);
+            assert_eq!(
+                tris.len(),
+                poly.len() - 2,
+                "a simple n-gon yields n-2 triangles"
+            );
+            assert_triangulation_tiles(&poly, &tris);
+        }
+    }
+
+    #[test]
+    fn triangulate_rejects_degenerate_vertex_counts() {
+        assert!(triangulate_simple_polygon(&[]).is_empty());
+        assert!(triangulate_simple_polygon(&[p(0.0, 0.0), p(1.0, 0.0)]).is_empty());
+        assert_eq!(
+            triangulate_simple_polygon(&[p(0.0, 0.0), p(1.0, 0.0), p(0.0, 1.0)]),
+            vec![[0, 1, 2]]
         );
     }
 }
