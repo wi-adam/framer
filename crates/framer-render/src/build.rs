@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use framer_core::{
     Appearance, AssemblyFace, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck,
-    LayerFunction, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion, Wall,
-    WallExposure, room_boundary, triangulate_simple_polygon,
+    LayerFunction, Length, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion,
+    Wall, WallExposure, room_boundary, triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -753,9 +753,12 @@ fn push_horizontal_surface(
     push_polygon(tris, bounds, &verts, &triangles, material);
 }
 
-/// Emit a flat ceiling's underside surface at `level.elevation + level.height −
-/// ceiling.height` (the level top is the hang reference), with the system's
-/// ceiling-finish material.
+/// Emit a ceiling's underside surface. The low edge sits at `level.elevation +
+/// level.height − ceiling.height` (the level top is the hang reference). A **flat**
+/// ceiling is a constant-elevation polygon; a **sloped** (scissor/vault) ceiling
+/// lifts each outline vertex onto its sloped plane via the shared [`Ceiling::frame`]
+/// — exactly like a roof plane — so the framing and the rendered surface cannot
+/// drift. Both use the system's ceiling-finish material.
 fn push_ceiling(
     tris: &mut Vec<Triangle>,
     bounds: &mut Aabb,
@@ -767,19 +770,31 @@ fn push_ceiling(
         return;
     };
     let level_top = find_level(model, &ceiling.level)
-        .map(|level| (level.elevation + level.height).inches())
-        .unwrap_or(0.0);
-    let z = (level_top - ceiling.height.inches()) as f32;
-    push_horizontal_surface(
-        tris,
-        bounds,
-        model,
-        &outline,
-        z,
-        system_by_id(model, &ceiling.system),
-        SurfaceFace::Ceiling,
-        palette,
-    );
+        .map(|level| level.elevation + level.height)
+        .unwrap_or(Length::ZERO);
+    let reference_elevation = level_top - ceiling.height;
+    let system = system_by_id(model, &ceiling.system);
+    match ceiling.frame(reference_elevation) {
+        Some(frame) => {
+            let material = surface_material(model, system, SurfaceFace::Ceiling, palette);
+            let verts: Vec<Vec3> = outline
+                .iter()
+                .map(|&p| project_onto_plane(&frame, p))
+                .collect();
+            let triangles = triangulate_simple_polygon(&outline);
+            push_polygon(tris, bounds, &verts, &triangles, material);
+        }
+        None => push_horizontal_surface(
+            tris,
+            bounds,
+            model,
+            &outline,
+            reference_elevation.inches() as f32,
+            system,
+            SurfaceFace::Ceiling,
+            palette,
+        ),
+    }
 }
 
 /// Emit a floor deck's walked-on surface at its level elevation, with the
