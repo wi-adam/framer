@@ -1773,7 +1773,7 @@ impl FramerApp {
             return;
         }
         match framer_core::room_boundary(&self.model, point) {
-            Some(boundary) => self.add_vault(boundary.vertices),
+            Some(boundary) => self.add_vault(&boundary.vertices),
             None => {
                 self.dimension_status =
                     Some("No enclosed area here — close a wall loop first".to_owned());
@@ -1786,11 +1786,11 @@ impl FramerApp {
     /// shared ridge along the region's longer span), at a default 4:12 pitch, both
     /// editable in the inspector. The cathedral case is just "no ceiling", so this
     /// tool only authors the scissor form.
-    fn add_vault(&mut self, outline: Vec<Point2>) {
+    fn add_vault(&mut self, outline: &[Point2]) {
         if !self.workspace_mode.allows_design_edits() {
             return;
         }
-        let Some((low_half, high_half)) = scissor_halves(&outline) else {
+        let Some((low_half, high_half)) = scissor_halves(outline) else {
             self.dimension_status = Some("This area is too small to vault".to_owned());
             return;
         };

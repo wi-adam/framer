@@ -710,6 +710,49 @@ fn c_and_f_keys_toggle_ceiling_and_floor_tools() {
 }
 
 #[test]
+fn v_key_toggles_the_vault_tool() {
+    let mut app = FramerApp::default();
+
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(app.vault_tool_active, "V routes through to the vault tool");
+
+    // A sibling region-tool key cancels it, and V again deactivates.
+    press_key(&mut app, egui::Key::C, egui::Modifiers::NONE);
+    assert!(!app.vault_tool_active, "C cancels the vault tool");
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(app.vault_tool_active);
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(!app.vault_tool_active, "V again deactivates the vault tool");
+}
+
+#[test]
+fn scissor_halves_rejects_a_degenerate_region() {
+    // A zero-area region (collinear points → zero depth) cannot be vaulted; the guard
+    // returns None so add_vault's "too small to vault" early-return fires instead of
+    // authoring a degenerate ceiling.
+    let degenerate = vec![
+        Point2::new(Length::ZERO, Length::ZERO),
+        Point2::new(Length::from_feet(10.0), Length::ZERO),
+        Point2::new(Length::from_feet(20.0), Length::ZERO),
+    ];
+    assert!(super::scissor_halves(&degenerate).is_none());
+
+    // add_vault on a degenerate outline authors nothing and records no undo step.
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    app.add_vault(&degenerate);
+    assert_eq!(
+        app.model.ceilings.len(),
+        before,
+        "a degenerate region is not vaulted"
+    );
+    assert!(
+        !app.history.can_undo(),
+        "a rejected vault records no undo step"
+    );
+}
+
+#[test]
 fn place_ceiling_and_floor_clicks_route_and_gate_on_the_tool() {
     let mut app = FramerApp::default();
     let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
@@ -956,7 +999,7 @@ fn add_vault_authors_two_opposing_sloped_ceilings() {
     )
     .expect("the demo shell is an enclosed loop")
     .vertices;
-    app.add_vault(outline);
+    app.add_vault(&outline);
 
     assert_eq!(
         app.model.ceilings.len(),
