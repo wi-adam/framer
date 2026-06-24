@@ -750,6 +750,62 @@ impl BuildingModel {
         self.materials.iter().find(|material| material.id == *id)
     }
 
+    /// Whether a roof plane is a **cathedral** condition: no authored ceiling on the
+    /// plane's level encloses its footprint, so the room below sees the roof
+    /// assembly's conditioned-side finish on the underside rather than a ceiling.
+    /// A ceiling of any pitch (flat or sloped) that covers the footprint disqualifies
+    /// it — distinct from the solver's structural thrust-tie check, which counts only
+    /// a *flat* ceiling at the plate. Coverage uses the same centroid-in-region
+    /// containment the tie check uses; a degenerate (un-frameable) plane is reported
+    /// as not-cathedral since it emits no underside.
+    ///
+    /// Resolving a `Room`-attached ceiling rebuilds the wall graph, so classifying
+    /// *many* planes (the render/mesher hot path, run every repaint) should use
+    /// [`Self::roof_cathedral_flags`] — one graph pass for all planes — not this
+    /// per-plane form in a loop.
+    pub fn roof_plane_is_cathedral(&self, plane: &RoofPlane) -> bool {
+        plane_is_cathedral(plane, &self.resolve_ceiling_outlines())
+    }
+
+    /// Classify every roof plane as cathedral (no covering ceiling), aligned to
+    /// `self.roof_planes`. The batched form of [`Self::roof_plane_is_cathedral`]:
+    /// each ceiling's outline (and any wall-graph rebuild for a `Room` region) is
+    /// resolved **once**, then every plane centroid is tested against the cached
+    /// set — so the per-plane scan does not re-derive the graph per plane.
+    pub fn roof_cathedral_flags(&self) -> Vec<bool> {
+        let ceilings = self.resolve_ceiling_outlines();
+        self.roof_planes
+            .iter()
+            .map(|plane| plane_is_cathedral(plane, &ceilings))
+            .collect()
+    }
+
+    /// Each ceiling's level paired with its resolved plan outline (`Room` regions
+    /// through the wall graph), skipping any that fail to resolve (unknown room or
+    /// an open mid-edit loop). Computed once and reused across all roof planes.
+    fn resolve_ceiling_outlines(&self) -> Vec<(ElementId, Vec<Point2>)> {
+        self.ceilings
+            .iter()
+            .filter_map(|ceiling| {
+                self.surface_region_outline(&ceiling.region)
+                    .map(|outline| (ceiling.level.clone(), outline))
+            })
+            .collect()
+    }
+
+    /// Resolve a [`SurfaceRegion`] to its closed plan outline: a `Polygon` is its own
+    /// outline; a `Room` is resolved through the wall graph (mirroring the solver and
+    /// the renderers). `None` for an unknown room or an open (mid-edit) loop.
+    fn surface_region_outline(&self, region: &SurfaceRegion) -> Option<Vec<Point2>> {
+        match region {
+            SurfaceRegion::Polygon(points) => Some(points.clone()),
+            SurfaceRegion::Room(room_id) => {
+                let room = self.rooms.iter().find(|room| room.id == *room_id)?;
+                crate::topology::room_boundary(self, room.seed).map(|boundary| boundary.vertices)
+            }
+        }
+    }
+
     /// The seeded material catalog and construction systems for a new project.
     /// Deterministic (id-sorted on output); shared by `new`, the `demo_*`
     /// constructors, and the app's `new_project`.
@@ -1144,6 +1200,39 @@ impl BoardProfile {
     }
 }
 
+/// Whether `plane` is a cathedral against pre-resolved ceiling outlines (each
+/// paired with its level): no same-level ceiling encloses the plane's footprint
+/// centroid. A degenerate (un-frameable) plane is not-cathedral — it emits no
+/// underside. Shared by the per-plane and batched [`BuildingModel`] entry points.
+fn plane_is_cathedral(plane: &RoofPlane, ceiling_outlines: &[(ElementId, Vec<Point2>)]) -> bool {
+    let Some(sample) = polygon_vertex_centroid(&plane.outline) else {
+        return false;
+    };
+    !ceiling_outlines.iter().any(|(level, outline)| {
+        *level == plane.level && crate::topology::point_in_polygon(sample, outline)
+    })
+}
+
+/// The vertex centroid of a plan polygon — an interior sample point for a convex
+/// footprint (a gable half, a hip trapezoid/triangle). Integer (i128) accumulation
+/// keeps it exact; `None` for an empty outline. Mirrors the solver's tie-check
+/// sample so cathedral detection and thrust-tie detection agree on the point.
+fn polygon_vertex_centroid(points: &[Point2]) -> Option<Point2> {
+    if points.is_empty() {
+        return None;
+    }
+    let (mut sx, mut sy) = (0i128, 0i128);
+    for point in points {
+        sx += point.x.ticks() as i128;
+        sy += point.y.ticks() as i128;
+    }
+    let n = points.len() as i128;
+    Some(Point2::new(
+        Length::from_ticks((sx / n) as i64),
+        Length::from_ticks((sy / n) as i64),
+    ))
+}
+
 /// Whether a wall faces the weather (drives sheathing intent and, later,
 /// generated sheathing zones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1160,6 +1249,19 @@ impl WallExposure {
             Self::Interior => "Interior",
         }
     }
+}
+
+/// Which face of a roof/ceiling/floor assembly a finish lookup resolves — see
+/// [`ConstructionSystem::surface_finish_material`]. Not persisted; a transient
+/// render/UI input only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyFace {
+    /// The face a viewer sees by default: a roof's weather (outermost) face, a
+    /// ceiling/floor's conditioned-side (innermost) finish.
+    Finished,
+    /// The conditioned-side (innermost) finish — a roof's cathedral underside,
+    /// where a room with no ceiling sees the assembly's interior finish.
+    Underside,
 }
 
 /// Authored sheathing intent for a wall. Quantities are not yet generated; this
@@ -1402,17 +1504,23 @@ impl ConstructionSystem {
         }
     }
 
-    /// The material of the finished face a viewer sees on a roof/ceiling/floor
-    /// surface: a roof's weather face (outermost), a ceiling/floor's conditioned-side
-    /// finish (innermost). The single definition of this rule so the path-traced
-    /// render and the 3-D viewport pick the same face and cannot drift; each caller
-    /// applies its own fallback (a stock palette entry / neutral color) when this is
-    /// `None`. Returns `None` for a `Wall` (walls pick their face by exposure) or an
-    /// empty system.
-    pub fn surface_finish_material(&self) -> Option<&ElementId> {
-        let layer = match self.kind {
-            SystemKind::Roof => self
-                .layers
+    /// The material of a finished face on a roof/ceiling/floor surface. The single
+    /// definition of this rule so the path-traced render and the 3-D viewport pick
+    /// the same face and cannot drift; each caller applies its own fallback (a stock
+    /// palette entry / neutral color) when this is `None`. Returns `None` for a
+    /// `Wall` (walls pick their face by exposure) or an empty system.
+    ///
+    /// [`AssemblyFace::Finished`] is the face a viewer sees by default: a roof's
+    /// weather face (outermost), a ceiling/floor's conditioned-side finish
+    /// (innermost). [`AssemblyFace::Underside`] is the conditioned-side (innermost)
+    /// finish — a roof's **cathedral underside**, where a room with no ceiling sees
+    /// the assembly's interior finish rather than the weather face; for a
+    /// ceiling/floor (already viewed from the conditioned side) it resolves the same
+    /// innermost finish as `Finished`.
+    pub fn surface_finish_material(&self, face: AssemblyFace) -> Option<&ElementId> {
+        // Weather-side (outermost) finish of a roof.
+        let roof_weather = || {
+            self.layers
                 .iter()
                 .rev()
                 .find(|layer| layer.function == LayerFunction::Roofing)
@@ -1424,9 +1532,12 @@ impl ConstructionSystem {
                         )
                     })
                 })
-                .or_else(|| self.layers.last()),
-            SystemKind::Ceiling => self
-                .layers
+                .or_else(|| self.layers.last())
+        };
+        // Conditioned-side (innermost) drywall/finish — a ceiling's underside and a
+        // roof's cathedral underside resolve identically.
+        let conditioned_finish = || {
+            self.layers
                 .iter()
                 .find(|layer| {
                     matches!(
@@ -1434,9 +1545,11 @@ impl ConstructionSystem {
                         LayerFunction::CeilingFinish | LayerFunction::InteriorFinish
                     )
                 })
-                .or_else(|| self.layers.first()),
-            SystemKind::Floor => self
-                .layers
+                .or_else(|| self.layers.first())
+        };
+        // A floor's walked-on top (a bare subfloor falls back to its sheathing).
+        let floor_finish = || {
+            self.layers
                 .iter()
                 .find(|layer| {
                     matches!(
@@ -1444,8 +1557,14 @@ impl ConstructionSystem {
                         LayerFunction::InteriorFinish | LayerFunction::Sheathing
                     )
                 })
-                .or_else(|| self.layers.first()),
-            SystemKind::Wall => None,
+                .or_else(|| self.layers.first())
+        };
+        let layer = match (self.kind, face) {
+            (SystemKind::Roof, AssemblyFace::Finished) => roof_weather(),
+            (SystemKind::Roof, AssemblyFace::Underside) => conditioned_finish(),
+            (SystemKind::Ceiling, _) => conditioned_finish(),
+            (SystemKind::Floor, _) => floor_finish(),
+            (SystemKind::Wall, _) => None,
         };
         layer.map(|layer| &layer.material)
     }
@@ -4071,27 +4190,54 @@ mod tests {
             source: None,
             layers,
         };
-        let material_of =
-            |s: &ConstructionSystem| s.surface_finish_material().map(|id| id.0.clone()).unwrap();
+        let material_of = |s: &ConstructionSystem, face| {
+            s.surface_finish_material(face)
+                .map(|id| id.0.clone())
+                .unwrap()
+        };
+        let finished = |s: &ConstructionSystem| material_of(s, AssemblyFace::Finished);
 
         // Roof: the weather face (the outermost Roofing layer).
         let roof = system(
             SystemKind::Roof,
             vec![spf(), finish(LayerFunction::Roofing, "mat-shingle")],
         );
-        assert_eq!(material_of(&roof), "mat-shingle");
+        assert_eq!(finished(&roof), "mat-shingle");
         // Ceiling: the conditioned-side finish (the innermost CeilingFinish).
         let ceiling = system(
             SystemKind::Ceiling,
             vec![finish(LayerFunction::CeilingFinish, "mat-gwb"), spf()],
         );
-        assert_eq!(material_of(&ceiling), "mat-gwb");
+        assert_eq!(finished(&ceiling), "mat-gwb");
         // Floor: the conditioned-side finish (the innermost InteriorFinish).
         let floor = system(
             SystemKind::Floor,
             vec![finish(LayerFunction::InteriorFinish, "mat-oak"), spf()],
         );
-        assert_eq!(material_of(&floor), "mat-oak");
+        assert_eq!(finished(&floor), "mat-oak");
+
+        // Cathedral underside: a roof's *conditioned-side* finish (the innermost
+        // CeilingFinish/InteriorFinish), not its weather face. The same system
+        // resolves the shingle outward and the drywall on the underside.
+        let cathedral_roof = system(
+            SystemKind::Roof,
+            vec![
+                finish(LayerFunction::CeilingFinish, "mat-gwb"),
+                spf(),
+                finish(LayerFunction::Roofing, "mat-shingle"),
+            ],
+        );
+        assert_eq!(finished(&cathedral_roof), "mat-shingle");
+        assert_eq!(
+            material_of(&cathedral_roof, AssemblyFace::Underside),
+            "mat-gwb"
+        );
+        // A ceiling/floor is viewed from the conditioned side, so its underside
+        // resolves the same innermost finish as its finished face.
+        assert_eq!(material_of(&ceiling, AssemblyFace::Underside), "mat-gwb");
+        assert_eq!(material_of(&floor, AssemblyFace::Underside), "mat-oak");
+        // A roof with no interior finish layer falls back to its innermost layer.
+        assert_eq!(material_of(&roof, AssemblyFace::Underside), "mat-spf");
 
         // Roof without a Roofing layer falls back to the outermost weather/sheathing
         // layer before resorting to the last layer.
@@ -4099,34 +4245,138 @@ mod tests {
             SystemKind::Roof,
             vec![spf(), finish(LayerFunction::Sheathing, "mat-osb")],
         );
-        assert_eq!(material_of(&roof_sheathed), "mat-osb");
+        assert_eq!(finished(&roof_sheathed), "mat-osb");
         let roof_wrb = system(
             SystemKind::Roof,
             vec![spf(), finish(LayerFunction::WeatherBarrier, "mat-felt")],
         );
-        assert_eq!(material_of(&roof_wrb), "mat-felt");
+        assert_eq!(finished(&roof_wrb), "mat-felt");
         // A floor whose only finish is structural sheathing (a bare subfloor).
         let floor_deck = system(
             SystemKind::Floor,
             vec![finish(LayerFunction::Sheathing, "mat-ply"), spf()],
         );
-        assert_eq!(material_of(&floor_deck), "mat-ply");
+        assert_eq!(finished(&floor_deck), "mat-ply");
 
         // Fallback: a roof with only framing falls back to its outermost layer.
         let bare = system(SystemKind::Roof, vec![spf()]);
-        assert_eq!(material_of(&bare), "mat-spf");
+        assert_eq!(finished(&bare), "mat-spf");
         // An empty system resolves to nothing (the caller applies its fallback).
         assert!(
             system(SystemKind::Roof, vec![])
-                .surface_finish_material()
+                .surface_finish_material(AssemblyFace::Finished)
                 .is_none()
         );
-        // Walls pick their face by exposure, not this rule.
+        // Walls pick their face by exposure, not this rule (either face).
         assert!(
             system(SystemKind::Wall, vec![spf()])
-                .surface_finish_material()
+                .surface_finish_material(AssemblyFace::Finished)
                 .is_none()
         );
+        assert!(
+            system(SystemKind::Wall, vec![spf()])
+                .surface_finish_material(AssemblyFace::Underside)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn roof_plane_is_cathedral_tracks_ceiling_coverage() {
+        let plane = sample_roof_plane(); // level-1, 20×12 ft footprint, centroid (10,6)ft
+        let ceiling = |region| {
+            Ceiling::new(
+                "ceiling-1",
+                "Ceiling",
+                "level-1",
+                "system-ceiling",
+                region,
+                Length::from_whole_inches(12),
+            )
+        };
+
+        // No ceiling anywhere → cathedral.
+        let mut model = surface_systems_model();
+        model.roof_planes.push(plane.clone());
+        assert!(model.roof_plane_is_cathedral(&plane));
+
+        // A flat ceiling whose region encloses the footprint → not cathedral.
+        let mut covered = model.clone();
+        covered
+            .ceilings
+            .push(ceiling(SurfaceRegion::Polygon(rect_outline())));
+        assert!(!covered.roof_plane_is_cathedral(&plane));
+
+        // A sloped ceiling that covers the footprint also hides the underside
+        // (distinct from the structural tie check, which counts only flat ties).
+        let mut sloped = model.clone();
+        let mut scissor = ceiling(SurfaceRegion::Polygon(rect_outline()));
+        scissor.slope = Some(Slope::new(
+            Length::from_whole_inches(3),
+            Length::from_whole_inches(12),
+        ));
+        sloped.ceilings.push(scissor);
+        assert!(!sloped.roof_plane_is_cathedral(&plane));
+
+        // A ceiling whose region misses the footprint centroid → still cathedral.
+        let mut elsewhere = model.clone();
+        let far = vec![
+            Point2::new(Length::from_feet(50.0), Length::from_feet(50.0)),
+            Point2::new(Length::from_feet(60.0), Length::from_feet(50.0)),
+            Point2::new(Length::from_feet(60.0), Length::from_feet(60.0)),
+            Point2::new(Length::from_feet(50.0), Length::from_feet(60.0)),
+        ];
+        elsewhere
+            .ceilings
+            .push(ceiling(SurfaceRegion::Polygon(far)));
+        assert!(elsewhere.roof_plane_is_cathedral(&plane));
+
+        // A covering ceiling on a different level does not tie this plane's level.
+        let mut other_level = model.clone();
+        let mut wrong_level = ceiling(SurfaceRegion::Polygon(rect_outline()));
+        wrong_level.level = ElementId::new("level-2");
+        other_level.ceilings.push(wrong_level);
+        assert!(other_level.roof_plane_is_cathedral(&plane));
+
+        // A room-attached ceiling — the common authored path — resolves its outline
+        // through the wall graph. Build the 20×12 ft footprint as four walls with a
+        // room seeded inside, then cover it via SurfaceRegion::Room.
+        let mut roomed = model.clone();
+        let corners = rect_outline();
+        for i in 0..corners.len() {
+            let next = (i + 1) % corners.len();
+            roomed.walls.push(
+                Wall::new(
+                    format!("w-{i}"),
+                    "Wall",
+                    Length::from_whole_inches(6),
+                    &roomed.code,
+                )
+                .with_placement("level-1", corners[i], corners[next]),
+            );
+        }
+        roomed.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+        ));
+        let mut covered_room = roomed.clone();
+        covered_room
+            .ceilings
+            .push(ceiling(SurfaceRegion::Room(ElementId::new("room-1"))));
+        assert!(!covered_room.roof_plane_is_cathedral(&plane));
+        // The batched classifier agrees with the per-plane form.
+        assert_eq!(covered_room.roof_cathedral_flags(), vec![false]);
+
+        // A ceiling pointing at a non-existent room resolves to no outline, so it
+        // covers nothing and the plane stays a cathedral.
+        let mut dangling = roomed;
+        dangling
+            .ceilings
+            .push(ceiling(SurfaceRegion::Room(ElementId::new("ghost-room"))));
+        assert!(dangling.roof_plane_is_cathedral(&plane));
+        assert_eq!(dangling.roof_cathedral_flags(), vec![true]);
     }
 
     #[test]
