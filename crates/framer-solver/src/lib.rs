@@ -1373,44 +1373,70 @@ fn varying_plate_height(model: &BuildingModel, plane: &RoofPlane) -> Option<Stri
     })
 }
 
-/// A flat ceiling that can act as a rafter-thrust tie: the level it bears on, its
-/// true elevation, and its resolved plan outline.
-struct CeilingTie {
+/// A horizontal surface that can tie rafter thrust at a plate: the level it bears
+/// on, its true elevation, and its resolved plan outline. Both flat ceilings and
+/// floor decks are gathered; whether one actually ties a given roof is an
+/// *elevation* decision (see [`roof_has_thrust_tie`]), not a type decision — a
+/// floor deck at the level base sits far below the plate, a flat ceiling at the
+/// plate does not.
+struct ThrustTie {
     level: ElementId,
     elevation: Length,
     outline: Vec<Point2>,
 }
 
-/// Collect the flat ceilings that can tie rafter thrust, resolving each region's
-/// outline once. A sloped (scissor/vault) ceiling is not a full tie, and a
-/// `FloorDeck` is excluded entirely — it bears at the floor (`level.elevation`),
-/// not at the roof plate — so neither is gathered here.
-fn collect_ceiling_ties(model: &BuildingModel) -> Vec<CeilingTie> {
+/// Collect the horizontal surfaces that can tie rafter thrust, resolving each
+/// region outline once. A flat ceiling hangs `height` below the level top; a floor
+/// deck bears at the level elevation. A sloped (scissor/vault) ceiling is excluded
+/// — it is not a full tie. A floor deck is gathered (per spec Decision #10), but it
+/// only ties when its elevation reaches a roof's plate; in v2's single-level models
+/// a same-level deck is at the floor and is filtered out by the elevation gate, so
+/// the cross-level floor-of-N+1 = ceiling-of-N case stays correctly deferred.
+fn collect_thrust_ties(model: &BuildingModel) -> Vec<ThrustTie> {
+    let level_of = |id: &ElementId| model.levels.iter().find(|level| level.id == *id);
+    let mut ties = Vec::new();
+
+    // Flat ceilings hang `height` below the level top (`elevation + height`).
     let flats: Vec<&Ceiling> = model
         .ceilings
         .iter()
         .filter(|ceiling| ceiling.slope.is_none())
         .collect();
-    let regions: Vec<&SurfaceRegion> = flats.iter().map(|ceiling| &ceiling.region).collect();
-    let outlines = resolve_surface_regions(model, &regions);
-    flats
-        .into_iter()
-        .zip(outlines)
-        .filter_map(|(ceiling, outline)| {
-            let outline = outline?;
-            let level = model
-                .levels
-                .iter()
-                .find(|level| level.id == ceiling.level)?;
-            // A ceiling hangs `height` below the level top (`elevation + height`).
-            let elevation = level.elevation + level.height - ceiling.height;
-            Some(CeilingTie {
-                level: ceiling.level.clone(),
-                elevation,
-                outline,
-            })
-        })
-        .collect()
+    let ceiling_regions: Vec<&SurfaceRegion> =
+        flats.iter().map(|ceiling| &ceiling.region).collect();
+    for (ceiling, outline) in flats
+        .iter()
+        .zip(resolve_surface_regions(model, &ceiling_regions))
+    {
+        let (Some(outline), Some(level)) = (outline, level_of(&ceiling.level)) else {
+            continue;
+        };
+        ties.push(ThrustTie {
+            level: ceiling.level.clone(),
+            elevation: level.elevation + level.height - ceiling.height,
+            outline,
+        });
+    }
+
+    // Floor decks bear at the level elevation.
+    let deck_regions: Vec<&SurfaceRegion> =
+        model.floor_decks.iter().map(|deck| &deck.region).collect();
+    for (deck, outline) in model
+        .floor_decks
+        .iter()
+        .zip(resolve_surface_regions(model, &deck_regions))
+    {
+        let (Some(outline), Some(level)) = (outline, level_of(&deck.level)) else {
+            continue;
+        };
+        ties.push(ThrustTie {
+            level: deck.level.clone(),
+            elevation: level.elevation,
+            outline,
+        });
+    }
+
+    ties
 }
 
 /// Slack below the bearing line within which a flat ceiling still counts as a tie
@@ -1419,11 +1445,12 @@ fn collect_ceiling_ties(model: &BuildingModel) -> Vec<CeilingTie> {
 const TIE_PLATE_SLACK: Length = Length::from_ticks(16 * 6); // 6 inches
 
 /// Whether a rafter-thrust tie sits at this roof plane's bearing line: a gathered
-/// flat ceiling on the same level whose plan region encloses the plane footprint
-/// (centroid test) and whose elevation is at or above the plane's bearing line
-/// (`reference_elevation`, less the plate slack). Without such a tie a gable's
+/// flat ceiling or floor deck on the same level whose plan region encloses the
+/// plane footprint (centroid test) and whose elevation is at or above the plane's
+/// bearing line (`reference_elevation`, less the plate slack). The elevation gate
+/// is what excludes a floor deck at the level base. Without such a tie a gable's
 /// ridge needs a structural beam.
-fn roof_has_ceiling_tie(plane: &RoofPlane, ties: &[CeilingTie]) -> bool {
+fn roof_has_thrust_tie(plane: &RoofPlane, ties: &[ThrustTie]) -> bool {
     let Some(sample) = polygon_centroid(&plane.outline) else {
         return false;
     };
@@ -1467,7 +1494,7 @@ fn generate_roof_plans(
         model.roof_planes.iter().map(roof_plane_geometry).collect();
     // Gather the flat-ceiling ties once so each ridge plane can ask whether a tie
     // resists its rafter thrust (ridge board vs. structural ridge beam).
-    let ties = collect_ceiling_ties(model);
+    let ties = collect_thrust_ties(model);
     for (index, plane) in model.roof_planes.iter().enumerate() {
         let system = system_by_id(model, &plane.system).ok_or_else(|| {
             SolverError::MissingSystemForElement {
@@ -1483,7 +1510,7 @@ fn generate_roof_plans(
             condition,
             RidgeCondition::Carries | RidgeCondition::Mismatched
         );
-        let ridge_tie = if roof_has_ceiling_tie(plane, &ties) {
+        let ridge_tie = if roof_has_thrust_tie(plane, &ties) {
             RidgeTie::Tied
         } else {
             RidgeTie::Untied
@@ -4755,10 +4782,10 @@ mod tests {
     }
 
     #[test]
-    fn a_floor_deck_covering_the_footprint_does_not_tie_a_cathedral() {
-        // The PR #41 fix: a floor deck bears at the floor (`level.elevation`), not
-        // the plate, so even a deck spanning the whole footprint leaves a cathedral
-        // roof needing a ridge beam.
+    fn a_floor_deck_below_the_plate_does_not_tie_a_cathedral() {
+        // The PR #41 fix, by the *elevation gate* (not a type exclusion): a deck
+        // bears at the floor (`level.elevation` = 0), 96in below the springing, so
+        // even a deck spanning the whole footprint leaves a cathedral roof untied.
         let mut model = gable_model();
         model.levels[0].height = Length::from_feet(8.0);
         model.systems.push(floor_system());
@@ -4770,6 +4797,28 @@ mod tests {
             SurfaceRegion::Polygon(rect_outline(24.0, 24.0)),
         ));
         assert!(!roof_a_ridge_is_tied(&model));
+    }
+
+    #[test]
+    fn a_floor_deck_at_the_bearing_line_ties_like_a_ceiling() {
+        // Spec Decision #10: a floor deck *does* tie when its elevation reaches the
+        // plate (the floor-of-N+1 = ceiling-of-N case). Pinning that the exclusion is
+        // by elevation, not by type: a deck whose level elevation equals the roof
+        // springing, with no ceiling, ties the rafters. Reverting to a categorical
+        // `FloorDeck` exclusion fails here.
+        let mut model = gable_model();
+        for plane in &mut model.roof_planes {
+            plane.reference_elevation = Length::ZERO; // springing at the deck elevation
+        }
+        model.systems.push(floor_system());
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Floor deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect_outline(24.0, 24.0)),
+        ));
+        assert!(roof_a_ridge_is_tied(&model));
     }
 
     #[test]
