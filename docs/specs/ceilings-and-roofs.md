@@ -4,11 +4,13 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented (v1 — core types + schema v11, floor/ceiling joisting, roof
-> rafters, render + 3-D viewport, authoring UX, and the roofed example + docs) ·
+> **Status:** v1 Implemented (core types + schema v11, floor/ceiling joisting, roof rafters,
+> render + 3-D viewport, authoring UX, roofed example) · v2 Proposed (sloped/cathedral/scissor
+> ceilings + the ridge structural fork; then hip/valley roofs) ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
-> **Plan:** [2026-06-20-ceilings-and-roofs.md](../plans/2026-06-20-ceilings-and-roofs.md) ·
+> **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
+> [2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md) ·
 > **Last reviewed:** 2026-06-23
 
 ## Intent / Purpose
@@ -105,6 +107,57 @@ The observable contract. Testable statements; edge cases are explicit.
   a ceiling/deck whose enclosing loop is open reports "boundary open" and recovers when the
   loop closes.
 
+### v2 — Sloped ceilings & the ridge structural fork (planned, Phase A)
+
+Deepens the v1 surfaces so a roof and its ceiling describe the *space between them* honestly.
+Sequenced and tracked in
+[2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md).
+
+- **Cathedral regions render their interior finish.** A roof region with **no** `Ceiling` is a
+  cathedral: the room sees the roof assembly's *conditioned-side* (interior) finish on the
+  underside, not the weather face. v1 renders both faces with the roofing material; v2 resolves
+  the underside through the roof system's interior layer.
+- **`Ceiling.slope` becomes live.** A ceiling may carry a `Some(Slope)` with a downslope
+  reference; the solver frames its joists on that plane (true sloped cut length, plan length for
+  spacing/area — the rafter math), and both meshers lift the surface via the shared
+  `RoofPlaneFrame` projection rather than a constant elevation. `slope == None` stays flat and
+  byte-identical. A **scissor/vault** ceiling is two opposing sloped ceilings, mirroring how a
+  gable roof is two opposing planes.
+- **The ridge is framed from a real tie check, not an unconditional warning.** v1 always emits a
+  `RidgeBoard` plus a fixed `roof.ridge.no-tie` warning. v2 detects whether a horizontal tie
+  resists rafter thrust **at the bearing/plate line** (`level.elevation + level.height`): a
+  **flat** ceiling enclosing the footprint at/near that elevation (later, explicit collar/rafter
+  ties). A `FloorDeck` does **not** qualify by default — it resolves at `level.elevation` (the
+  floor), not the plate — so it counts only if its elevation matches the bearing line; a dropped
+  or sloped ceiling is not a full tie either. **Tied** ⇒ keep the ridge board, emit an `Info`
+  note; **untied** (cathedral / scissor / no plate-line tie) ⇒ emit an `Unsupported` "structural
+  ridge beam required" note.
+  Geometry is unchanged (beam sizing is M4); the *judgment* becomes correct.
+- **Validation extends to sloped ceilings** (fail closed): when `slope` is `Some`, `slope.run > 0`
+  and the downslope reference is in range, mirroring `RoofPlane` checks. Flat ceilings keep
+  today's rules.
+- **A vault tool authors scissor/cathedral ceilings in one gesture.** Mirroring the room and roof
+  tools, it is region-gated (an enclosed wall loop) and, given a ridge axis + pitch, generates the
+  **two opposing sloped `Ceiling` planes** of a scissor/vault — written into the model as editable
+  objects (hybrid generate-then-store, decision #4). The inspector also exposes per-ceiling slope
+  (rise/run + downslope) for hand-editing a single plane. A cathedral is still authored by leaving
+  the region ceiling-less.
+
+### v2 — Hip & valley roofs (planned, Phase B)
+
+The first non-opposing-plane roof geometry, built on Phase A. Tracked in the same v2 plan.
+
+- **Hip roofs on a rectangular footprint.** The roof tool gains a per-edge **gable/hip** flag; a
+  hip footprint emits four planes (two trapezoids + two triangles) meeting at a central ridge
+  with four hip lines, stored as editable `RoofPlane`s.
+- **New member kinds:** `HipRafter`, `ValleyRafter`, `JackRafter`. A multi-plane post-pass
+  (sibling of `add_join_members`) emits the hip/valley members between adjacent planes with true
+  sloped placement; common rafters shorten into **jack rafters** that die into each hip/valley.
+- **Valleys for equal-pitch L/T (multi-wing) footprints.** Where two right-angle wings of equal
+  pitch meet, the valley bisects in plan; v2 frames that case. **Unequal-pitch valleys, dormers,
+  and full straight-skeleton multi-wing auto-roofs are diagnosed as unsupported** and left to a
+  later phase.
+
 ## Decisions (locked)
 
 1. **Ceiling↔roof relationship is the primitive.** Model roof and ceiling as two independent
@@ -141,6 +194,22 @@ The observable contract. Testable statements; edge cases are explicit.
 8. **Reuse the layered `ConstructionSystem` wholesale.** A roof/floor/ceiling assembly is the
    same interior→exterior layer stack, reinterpreted as **conditioned-side → weather-side**;
    no parallel assembly model.
+9. **(v2) A sloped ceiling is a single planar surface, like a roof plane.** It carries a `Slope`
+   plus a downslope reference and reuses the `RoofPlaneFrame` lift; a scissor/vault is two
+   opposing sloped ceilings, exactly as a gable is two opposing roof planes — generated as a pair
+   by the vault tool (generate-then-store, decision #4) but stored as two independently editable
+   `Ceiling`s. *Rejected: a ceiling with an internal ridge (a mini-roof object) — it forks the
+   surface model and the joist generator for no expressive gain over two planes.*
+10. **(v2) The ridge member follows a tie check; v1's blanket warning is replaced.** A flat
+    ceiling or floor deck enclosing the footprint counts as a thrust tie (ridge board adequate);
+    its absence (cathedral/scissor) means a ridge **beam** is required, surfaced as an
+    `Unsupported` diagnostic. Geometry stays a ridge board in v2 (beam sizing is M4). *Rejected:
+    auto-switching the framed member to a beam — sizing it needs the span tables that are M4.*
+11. **(v2) Hips/valleys stay the hybrid "generate planes, store planes" model (decision 4).** The
+    hip/jack/valley *members* are derived by a multi-plane post-pass over stored `RoofPlane`s;
+    no new authored roof-assembly type. v2 limits the auto-generator to rectangular hips and
+    equal-pitch right-angle valleys and **diagnoses** the rest, rather than shipping a
+    general straight-skeleton solver that fights the integer-tick/canonical-JSON invariants.
 
 ## Architecture (grounded in the codebase)
 
@@ -270,13 +339,15 @@ non-axis-aligned framing member**.
 
 ## Out of scope (YAGNI — architecturally open)
 
-- **Cathedral / scissor / sloped ceilings** (just `Ceiling.slope = Some(..)` + the
-  ridge-beam-vs-board structural fork) — next phase.
-- **Hips, valleys, multi-wing footprints, dormers** — the hard geometry (straight-skeleton
-  auto-roof, unequal-pitch valleys that don't bisect at 45°, a multi-plane member post-pass
-  analogous to `add_join_members`). *(The Slice-4 render already ships an exact-integer ear-clip
-  `triangulate_simple_polygon` that handles concave simple polygons, e.g. an L-shaped room's
-  ceiling/floor; only the multi-plane straight-skeleton geometry above remains out of scope.)*
+> Cathedral/scissor/sloped ceilings and rectangular hips + equal-pitch L/T valleys move **into
+> scope** with v2 (see the v2 requirements above). What remains out:
+
+- **Unequal-pitch valleys, dormers, and full straight-skeleton multi-wing auto-roofs** — the
+  geometry v2 deliberately diagnoses rather than frames (unequal-pitch valleys don't bisect at
+  45°; a general multi-wing skeleton fights the integer-tick/canonical-JSON invariants). v2 ships
+  rectangular hips and equal-pitch right-angle valleys; the rest is a later phase.
+- **A structural ridge beam as a framed/sized member** — v2's tie check *diagnoses* when a
+  beam is required but still frames a ridge board; sizing the beam needs M4 span tables.
 - **Manufactured trusses** (profile + spacing + bearing, web design deferred to "the plant").
 - **Engineered members** (I-joist / LVL / open-web): `BoardProfile` is capped at 2×12 with a
   hardcoded 1.5″ thickness and nominal depths — a richer `MemberProfile` comes with them.
@@ -298,6 +369,12 @@ non-axis-aligned framing member**.
   defaults to shorter with an override on the element; confirm the heuristic on L/T regions.
 - **Whether the derived `ProjectFramePlan` shape change** (new member kinds / sloped placement)
   warrants a versioned plan type, given the plan is round-tripped/compared in solver tests.
-- **Vision/backlog:** add **G-014 (Ceilings & Roofs)** to [vision.md](../vision.md#goal-backlog)
-  and confirm M3's roof/ceiling bullets against this scope before implementation (per the
-  vision's "update the vision before implementing conflicting behavior" rule).
+- **(v2) The downslope-reference field shape on `Ceiling`.** A bare `Slope` is ambiguous without
+  a low edge. Options: a `low_edge: u32` indexing the region polygon (mirrors `RoofPlane.eave_edge`,
+  but a `Room` region has no stable outline order), a `SpanDirection`-style downslope vector, or a
+  small `CeilingSlope { slope, reference }` struct. Resolve at the start of v2 Slice A2; it drives
+  the v11 → v12 schema bump.
+- **(v2) Tie-detection containment test.** A1.1 must decide whether a ceiling/deck region
+  "encloses" a roof plane's footprint to count as a thrust tie — exact polygon containment vs. a
+  cheaper bbox/centroid test. Start with centroid-in-region (reuse `point_in_polygon`) and
+  tighten if it misclassifies partial coverage.
