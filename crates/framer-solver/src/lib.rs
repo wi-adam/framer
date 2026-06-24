@@ -1495,6 +1495,10 @@ fn generate_roof_plans(
     // Gather the flat-ceiling ties once so each ridge plane can ask whether a tie
     // resists its rafter thrust (ridge board vs. structural ridge beam).
     let ties = collect_thrust_ties(model);
+    // Classify each region cathedral (no ceiling) vs. attic (a ceiling encloses it)
+    // in one wall-graph pass — the same classifier the renderers use, so the
+    // diagnostic agrees with the rendered cathedral underside.
+    let cathedral_flags = model.roof_cathedral_flags();
     for (index, plane) in model.roof_planes.iter().enumerate() {
         let system = system_by_id(model, &plane.system).ok_or_else(|| {
             SolverError::MissingSystemForElement {
@@ -1529,6 +1533,37 @@ fn generate_roof_plans(
             roof_plan.diagnostics.push(PlanDiagnostic::new(
                 DiagnosticSeverity::Unsupported,
                 "roof.plate-height.varying",
+                Some(plane.id.clone()),
+                message,
+            ));
+        }
+        // Cathedral vs. attic: a derived region classification (Info) so Plan Mode
+        // can explain the space between the roof and any ceiling below, making
+        // A1.1's ridge-board-vs-beam fork legible. Skipped for a degenerate plane
+        // (it frames nothing). v2 Phase A treats any covering ceiling as an attic;
+        // distinguishing a scissor/vaulted ceiling is deferred to the sloped-ceiling
+        // slice (A3.2).
+        if geometries[index].is_some() {
+            let (code, message) = if cathedral_flags[index] {
+                (
+                    "roof.ceiling.cathedral",
+                    format!(
+                        "No ceiling encloses {}, so it is a cathedral region: the roof underside is the finished ceiling surface.",
+                        plane.name
+                    ),
+                )
+            } else {
+                (
+                    "roof.ceiling.attic",
+                    format!(
+                        "A ceiling encloses {}, so the space between it and the roof is an attic.",
+                        plane.name
+                    ),
+                )
+            };
+            roof_plan.diagnostics.push(PlanDiagnostic::new(
+                DiagnosticSeverity::Info,
+                code,
                 Some(plane.id.clone()),
                 message,
             ));
@@ -4744,6 +4779,112 @@ mod tests {
                 .iter()
                 .any(|member| member.kind == MemberKind::RidgeBoard)
         );
+    }
+
+    /// Whether `roof` carries the cathedral region diagnostic (`true`) or the attic
+    /// one (`false`); asserts exactly one of the two Info diagnostics is present so a
+    /// silently dropped or duplicated classification fails loudly.
+    fn roof_region_is_cathedral(plan: &ProjectFramePlan, id: &str) -> bool {
+        let roof = plan.roof_plan(&ElementId::new(id)).unwrap();
+        let cathedral = roof
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "roof.ceiling.cathedral" && d.severity == DiagnosticSeverity::Info);
+        let attic = roof
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "roof.ceiling.attic" && d.severity == DiagnosticSeverity::Info);
+        assert!(
+            cathedral ^ attic,
+            "exactly one cathedral/attic region diagnostic is emitted for {id}"
+        );
+        cathedral
+    }
+
+    #[test]
+    fn cathedral_roof_region_emits_cathedral_diagnostic() {
+        // No ceiling anywhere → each gable plane is a cathedral region, and the
+        // classification agrees with the renderer's cathedral flag.
+        let model = gable_model();
+        let plan = generate_project_plan(&model).unwrap();
+        for (index, id) in ["roof-a", "roof-b"].iter().enumerate() {
+            assert!(
+                roof_region_is_cathedral(&plan, id),
+                "{id} should be cathedral"
+            );
+            assert!(model.roof_cathedral_flags()[index], "{id} core flag agrees");
+        }
+    }
+
+    #[test]
+    fn attic_roof_region_emits_attic_diagnostic() {
+        // A flat ceiling enclosing the footprint makes the space above each plane an
+        // attic (the inverse classification of the cathedral case).
+        let plan = generate_project_plan(&tied_gable_model()).unwrap();
+        for id in ["roof-a", "roof-b"] {
+            assert!(
+                !roof_region_is_cathedral(&plan, id),
+                "{id} should be an attic"
+            );
+        }
+    }
+
+    #[test]
+    fn degenerate_roof_plane_is_not_classified_cathedral_or_attic() {
+        // The classification is skipped for a plane that frames nothing, so a
+        // degenerate plane carries only its `roof.outline.degenerate` warning, never a
+        // misleading attic/cathedral Info. A degenerate outline is rejected by model
+        // validation, so it reaches the classifier only by calling `generate_roof_plans`
+        // directly (the guard is defensive). `roof_cathedral_flags` still returns a flag
+        // for the plane (its centroid is testable), so the geometry guard is what
+        // suppresses the diagnostic: without it this plane would emit
+        // `roof.ceiling.cathedral` (the model has no ceiling), and an inverted guard
+        // would instead drop the well-formed planes' classification.
+        let mut model = gable_model();
+        model.roof_planes.push(RoofPlane::new(
+            "roof-degenerate",
+            "Degenerate",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(24.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        ));
+
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+        generate_roof_plans(&mut plan, &model).unwrap();
+
+        let degenerate = plan.roof_plan(&ElementId::new("roof-degenerate")).unwrap();
+        assert!(
+            degenerate
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "roof.outline.degenerate"),
+            "the degenerate plane keeps its outline warning"
+        );
+        assert!(
+            degenerate
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "roof.ceiling.cathedral" && d.code != "roof.ceiling.attic"),
+            "a plane that frames nothing is not classified cathedral or attic"
+        );
+        // The guard did not over-suppress: the well-formed planes stay classified.
+        assert!(roof_region_is_cathedral(&plan, "roof-a"));
     }
 
     #[test]
