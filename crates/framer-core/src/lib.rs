@@ -20,6 +20,7 @@ pub use model::{
     PrescriptiveCode, PropertyValue, Provenance, QuarterTurn, RoofOpening, RoofPlane,
     RoofPlaneFrame, Room, RoomUsage, Sheathing, Slope, SpanDirection, SurfaceRegion, SystemKind,
     TextureRole, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind, is_blake3_hash,
+    surface_frame,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,

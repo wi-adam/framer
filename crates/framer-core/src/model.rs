@@ -1888,43 +1888,12 @@ impl RoofPlane {
     /// [`polygon_area_square_inches`](crate::polygon_area_square_inches). `None` for
     /// a degenerate outline (fewer than 3 points or a zero-length eave edge).
     pub fn frame(&self) -> Option<RoofPlaneFrame> {
-        let n = self.outline.len();
-        if n < 3 {
-            return None;
-        }
-        let i = self.eave_edge as usize % n;
-        let a = self.outline[i];
-        let b = self.outline[(i + 1) % n];
-        let (ax, ay) = (a.x.inches(), a.y.inches());
-        let ex = b.x.inches() - ax;
-        let ey = b.y.inches() - ay;
-        let eave_length = (ex * ex + ey * ey).sqrt();
-        if eave_length <= f64::EPSILON {
-            return None;
-        }
-        // Up-slope unit normal: perpendicular to the eave, flipped to point toward
-        // the outline centroid (so it is independent of the polygon's winding).
-        let (mut nx, mut ny) = (-ey / eave_length, ex / eave_length);
-        let cx = self.outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
-        let cy = self.outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
-        let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
-        if nx * (cx - mx) + ny * (cy - my) < 0.0 {
-            nx = -nx;
-            ny = -ny;
-        }
-        let run = self.slope.run.inches();
-        let rise_over_run = if run > 0.0 {
-            self.slope.rise.inches() / run
-        } else {
-            0.0
-        };
-        Some(RoofPlaneFrame {
-            eave_origin: (ax, ay),
-            up_slope: (nx, ny),
-            eave_length,
-            rise_over_run,
-            reference_elevation: self.reference_elevation.inches(),
-        })
+        surface_frame(
+            &self.outline,
+            self.slope,
+            self.eave_edge,
+            self.reference_elevation,
+        )
     }
 
     /// Validate the plane's own geometry (outline, eave edge, slope) and its
@@ -1964,11 +1933,62 @@ impl RoofPlane {
     }
 }
 
+/// Build a planar surface's affine elevation field from its plan outline, pitch,
+/// low (eave/spring) edge, and the building elevation at that low edge. The single
+/// definition of the lift shared by [`RoofPlane::frame`] and [`Ceiling::frame`], so
+/// a roof plane and a sloped ceiling project identically. `None` for a degenerate
+/// outline (fewer than three points or a zero-length low edge).
+pub fn surface_frame(
+    outline: &[Point2],
+    slope: Slope,
+    low_edge: u32,
+    reference_elevation: Length,
+) -> Option<RoofPlaneFrame> {
+    let n = outline.len();
+    if n < 3 {
+        return None;
+    }
+    let i = low_edge as usize % n;
+    let a = outline[i];
+    let b = outline[(i + 1) % n];
+    let (ax, ay) = (a.x.inches(), a.y.inches());
+    let ex = b.x.inches() - ax;
+    let ey = b.y.inches() - ay;
+    let eave_length = (ex * ex + ey * ey).sqrt();
+    if eave_length <= f64::EPSILON {
+        return None;
+    }
+    // Up-slope unit normal: perpendicular to the low edge, flipped to point toward
+    // the outline centroid (so it is independent of the polygon's winding).
+    let (mut nx, mut ny) = (-ey / eave_length, ex / eave_length);
+    let cx = outline.iter().map(|p| p.x.inches()).sum::<f64>() / n as f64;
+    let cy = outline.iter().map(|p| p.y.inches()).sum::<f64>() / n as f64;
+    let (mx, my) = (ax + ex / 2.0, ay + ey / 2.0);
+    if nx * (cx - mx) + ny * (cy - my) < 0.0 {
+        nx = -nx;
+        ny = -ny;
+    }
+    let run = slope.run.inches();
+    let rise_over_run = if run > 0.0 {
+        slope.rise.inches() / run
+    } else {
+        0.0
+    };
+    Some(RoofPlaneFrame {
+        eave_origin: (ax, ay),
+        up_slope: (nx, ny),
+        eave_length,
+        rise_over_run,
+        reference_elevation: reference_elevation.inches(),
+    })
+}
+
 /// A roof plane's plan-local elevation field (all lengths in inches), from
-/// [`RoofPlane::frame`]. The plane is affine in plan — `z` is linear in `x`/`y` —
-/// so projecting any plan point keeps it coplanar. Fields are private and the type
-/// is constructed only by [`RoofPlane::frame`], so [`Self::up_slope`] is always a
-/// true unit vector; read it (and the rest) through the accessors.
+/// [`RoofPlane::frame`] / [`Ceiling::frame`] via [`surface_frame`]. The plane is
+/// affine in plan — `z` is linear in `x`/`y` — so projecting any plan point keeps
+/// it coplanar. Fields are private and the type is constructed only by
+/// [`surface_frame`], so [`Self::up_slope`] is always a true unit vector; read it
+/// (and the rest) through the accessors.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoofPlaneFrame {
     eave_origin: (f64, f64),
@@ -2054,6 +2074,20 @@ impl Ceiling {
             height,
             slope: None,
         }
+    }
+
+    /// The sloped surface's affine lift, if this ceiling carries a slope: the joists,
+    /// mesh, and render all project through it, exactly as a roof plane does. `None`
+    /// for a flat ceiling, a non-polygon region (validation forbids a sloped one), or
+    /// a degenerate outline. `reference_elevation` is the building elevation at the
+    /// low edge — the caller derives it from the level top and `height`
+    /// (`level.elevation + level.height − ceiling.height`).
+    pub fn frame(&self, reference_elevation: Length) -> Option<RoofPlaneFrame> {
+        let slope = self.slope?;
+        let SurfaceRegion::Polygon(outline) = &self.region else {
+            return None;
+        };
+        surface_frame(outline, slope.pitch, slope.low_edge, reference_elevation)
     }
 }
 
@@ -4221,6 +4255,67 @@ mod tests {
         let mut plane = sample_roof_plane();
         plane.outline = vec![Point2::new(Length::ZERO, Length::ZERO)];
         assert!(plane.frame().is_none());
+    }
+
+    #[test]
+    fn ceiling_frame_lifts_a_sloped_polygon_and_is_none_otherwise() {
+        // The shared lift A4's meshers will call directly. A sloped polygon ceiling
+        // projects exactly like a roof plane; everything else has no frame.
+        let sloped = |region| {
+            let mut ceiling = Ceiling::new(
+                "ceiling-1",
+                "Ceiling",
+                "level-1",
+                "system-ceiling",
+                region,
+                Length::from_feet(8.0),
+            );
+            ceiling.slope = Some(CeilingSlope::new(
+                Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+                0,
+            ));
+            ceiling
+        };
+
+        // rect_outline is 20ft × 12ft, low edge 0 (the y=0 side): the surface springs
+        // at the 8ft (96") reference and rises 4:12 over the 12ft (144") run to 144".
+        let frame = sloped(SurfaceRegion::Polygon(rect_outline()))
+            .frame(Length::from_feet(8.0))
+            .expect("a sloped polygon ceiling has a frame");
+        assert!(
+            frame.up_slope().1 > 0.99,
+            "up-slope points +y toward the centroid"
+        );
+        assert!(
+            (frame.elevation_at(120.0, 0.0) - 96.0).abs() < 1.0e-9,
+            "low edge at the 96\" reference"
+        );
+        assert!(
+            (frame.elevation_at(120.0, 144.0) - 144.0).abs() < 1.0e-9,
+            "high edge risen to 144\""
+        );
+
+        // A flat ceiling (slope None) has no frame.
+        let mut flat = sloped(SurfaceRegion::Polygon(rect_outline()));
+        flat.slope = None;
+        assert!(flat.frame(Length::from_feet(8.0)).is_none());
+
+        // A sloped ceiling over a Room region (no stable edge order) has no frame.
+        assert!(
+            sloped(SurfaceRegion::Room(ElementId::new("room-1")))
+                .frame(Length::from_feet(8.0))
+                .is_none()
+        );
+
+        // A degenerate (<3-point) outline has no frame.
+        assert!(
+            sloped(SurfaceRegion::Polygon(vec![Point2::new(
+                Length::ZERO,
+                Length::ZERO
+            )]))
+            .frame(Length::from_feet(8.0))
+            .is_none()
+        );
     }
 
     #[test]
