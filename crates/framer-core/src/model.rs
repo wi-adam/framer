@@ -664,6 +664,27 @@ impl BuildingModel {
                 }
             }
             validate_surface_region(&ceiling.region, &room_ids, &ceiling.id)?;
+            // A sloped ceiling is a planar surface like a roof plane: it needs an
+            // explicit polygon outline (a Room boundary has no stable edge order)
+            // whose `low_edge` it springs from, and a positive run. Flat ceilings
+            // (`slope == None`) keep today's checks. Mirrors `RoofPlane` validation.
+            if let Some(slope) = &ceiling.slope {
+                let SurfaceRegion::Polygon(points) = &ceiling.region else {
+                    return Err(ModelError::CeilingSlopeRequiresPolygonRegion {
+                        ceiling: ceiling.id.clone(),
+                    });
+                };
+                if (slope.low_edge as usize) >= points.len() {
+                    return Err(ModelError::CeilingSlopeLowEdgeOutOfRange {
+                        ceiling: ceiling.id.clone(),
+                    });
+                }
+                if slope.pitch.run <= Length::ZERO {
+                    return Err(ModelError::CeilingInvalidSlope {
+                        ceiling: ceiling.id.clone(),
+                    });
+                }
+            }
         }
 
         for deck in &self.floor_decks {
@@ -1722,6 +1743,29 @@ impl Slope {
     }
 }
 
+/// A sloped ceiling's pitch plus the low (spring) edge it falls to — the downslope
+/// reference that makes a bare [`Slope`] unambiguous. It mirrors a roof plane's
+/// `(slope, eave_edge)`: the surface lies at the ceiling's `height` along `low_edge`
+/// and rises across the region at `pitch`, reusing the [`RoofPlaneFrame`] affine
+/// lift. Because `low_edge` indexes an explicit outline, a sloped ceiling needs a
+/// [`SurfaceRegion::Polygon`] region (a `Room` boundary has no stable edge order);
+/// validation enforces this. A `None` slope on a [`Ceiling`] stays flat and
+/// byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CeilingSlope {
+    pub pitch: Slope,
+    /// Index into the ceiling's polygon outline of the low (spring) edge `(i, i+1)`,
+    /// mirroring [`RoofPlane::eave_edge`].
+    pub low_edge: u32,
+}
+
+impl CeilingSlope {
+    pub const fn new(pitch: Slope, low_edge: u32) -> Self {
+        Self { pitch, low_edge }
+    }
+}
+
 /// The direction floor/ceiling joists span across a region. `Shorter` (the
 /// default) spans the shorter clear dimension; `Along`/`Across` follow the
 /// region's principal axes; `Explicit` carries an in-plane direction vector
@@ -1986,8 +2030,10 @@ pub struct Ceiling {
     pub system: ElementId,
     pub region: SurfaceRegion,
     pub height: Length,
+    /// `None` keeps the ceiling flat (and byte-identical); `Some` makes it a planar
+    /// sloped (scissor/vault) surface — see [`CeilingSlope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slope: Option<Slope>,
+    pub slope: Option<CeilingSlope>,
 }
 
 impl Ceiling {
@@ -3882,6 +3928,12 @@ pub enum ModelError {
         ceiling: ElementId,
         system: ElementId,
     },
+    #[error("ceiling {ceiling:?} is sloped, which requires an explicit polygon region")]
+    CeilingSlopeRequiresPolygonRegion { ceiling: ElementId },
+    #[error("ceiling {ceiling:?} slope low-edge index is out of range for its outline")]
+    CeilingSlopeLowEdgeOutOfRange { ceiling: ElementId },
+    #[error("ceiling {ceiling:?} slope must have a positive run")]
+    CeilingInvalidSlope { ceiling: ElementId },
     #[error("floor deck {floor_deck:?} references unknown level {level:?}")]
     FloorDeckReferencesUnknownLevel {
         floor_deck: ElementId,
@@ -4310,9 +4362,9 @@ mod tests {
         // (distinct from the structural tie check, which counts only flat ties).
         let mut sloped = model.clone();
         let mut scissor = ceiling(SurfaceRegion::Polygon(rect_outline()));
-        scissor.slope = Some(Slope::new(
-            Length::from_whole_inches(3),
-            Length::from_whole_inches(12),
+        scissor.slope = Some(CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+            0,
         ));
         sloped.ceilings.push(scissor);
         assert!(!sloped.roof_plane_is_cathedral(&plane));
@@ -4552,6 +4604,110 @@ mod tests {
             model.validate(),
             Err(ModelError::RoofPlaneInvalidSlope { .. })
         ));
+    }
+
+    /// A ceiling over the standard 20×12 ft polygon with a slope (`low_edge` + run).
+    fn sloped_ceiling(region: SurfaceRegion, low_edge: u32, run: Length) -> Ceiling {
+        let mut ceiling = Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            region,
+            Length::from_feet(8.0),
+        );
+        ceiling.slope = Some(CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(4), run),
+            low_edge,
+        ));
+        ceiling
+    }
+
+    #[test]
+    fn sloped_ceiling_validates_with_polygon_region_and_in_range_low_edge() {
+        let mut model = surface_systems_model();
+        model.ceilings.push(sloped_ceiling(
+            SurfaceRegion::Polygon(rect_outline()),
+            0,
+            Length::from_whole_inches(12),
+        ));
+        assert!(model.validate().is_ok());
+    }
+
+    #[test]
+    fn sloped_ceiling_rejects_room_region() {
+        // A Room boundary has no stable edge order, so a sloped ceiling needs an
+        // explicit polygon. The room exists (so the region reference resolves), and
+        // the slope rule — not the unknown-room rule — is what rejects it.
+        let mut model = surface_systems_model();
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+        ));
+        model.ceilings.push(sloped_ceiling(
+            SurfaceRegion::Room(ElementId::new("room-1")),
+            0,
+            Length::from_whole_inches(12),
+        ));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingSlopeRequiresPolygonRegion { .. })
+        ));
+    }
+
+    #[test]
+    fn sloped_ceiling_rejects_low_edge_out_of_range() {
+        // rect_outline has 4 points → valid low-edge indices are 0..=3.
+        let mut model = surface_systems_model();
+        model.ceilings.push(sloped_ceiling(
+            SurfaceRegion::Polygon(rect_outline()),
+            4,
+            Length::from_whole_inches(12),
+        ));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingSlopeLowEdgeOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn sloped_ceiling_rejects_nonpositive_run() {
+        let mut model = surface_systems_model();
+        model.ceilings.push(sloped_ceiling(
+            SurfaceRegion::Polygon(rect_outline()),
+            0,
+            Length::ZERO,
+        ));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::CeilingInvalidSlope { .. })
+        ));
+    }
+
+    #[test]
+    fn flat_ceiling_keeps_validating_with_a_room_region() {
+        // A flat ceiling (slope == None) is unaffected by the new rules: a Room
+        // region stays valid (the ceiling tool's common case).
+        let mut model = surface_systems_model();
+        model.rooms.push(Room::new(
+            "room-1",
+            "Room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(Length::from_feet(10.0), Length::from_feet(6.0)),
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Room(ElementId::new("room-1")),
+            Length::from_feet(8.0),
+        ));
+        assert!(model.validate().is_ok());
     }
 
     #[test]

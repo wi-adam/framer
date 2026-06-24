@@ -4913,9 +4913,9 @@ mod tests {
         // A scissor/vault ceiling (sloped) is not a full thrust tie, so the ridge
         // still needs a beam — the `slope.is_none()` filter in `collect_ceiling_ties`.
         let mut model = tied_gable_model();
-        model.ceilings[0].slope = Some(Slope::new(
-            Length::from_whole_inches(3),
-            Length::from_whole_inches(12),
+        model.ceilings[0].slope = Some(framer_core::CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+            0,
         ));
         assert!(!roof_a_ridge_is_tied(&model));
     }

@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 11;
-/// The model is v11-only — older on-disk shapes and pre-provenance schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 12;
+/// The model is v12-only — older on-disk shapes and pre-provenance schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v11-only model,
+    // Peek the format/version header before deserializing into the v12-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v11-only) deserialization.
+/// and schema versions before attempting the full (v12-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -126,7 +126,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 11,\n"));
+        assert!(json.contains("  \"schema_version\": 12,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -383,7 +383,7 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 11,
+  "schema_version": 12,
   "authored": {
     "code": {
       "code": "Irc2021",
@@ -407,8 +407,8 @@ mod tests {
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
         // A v9 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v11 model.
-        // The pre-v11 body remains self-contained, but schema support is v11-only.
+        // unsupported-schema error, NOT serde errors from the current v12 model.
+        // The pre-v12 body remains self-contained, but schema support is v12-only.
         let source = r#"{
   "format": "framer.project",
   "schema_version": 9,
@@ -438,12 +438,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_immediately_previous_schema_version() {
-        // The immediately-previous schema (v10) is no longer loadable: the bump
-        // to v11 is a hard cutover, not migrated in place. The header peek rejects
+        // The immediately-previous schema (v11) is no longer loadable: the bump
+        // to v12 is a hard cutover, not migrated in place. The header peek rejects
         // it before the body is deserialized, so a minimal body suffices.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 10,
+  "schema_version": 11,
   "authored": {
     "walls": []
   }
@@ -452,7 +452,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 10,
+                found: 11,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -781,7 +781,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 11,"));
+        assert!(json.contains("\"schema_version\": 12,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 
@@ -797,9 +797,9 @@ mod tests {
     #[test]
     fn roof_ceiling_floor_round_trip_through_save_and_load() {
         use crate::{
-            BoardProfile, Ceiling, ConstructionLayer, ConstructionSystem, ElementId, FloorDeck,
-            FramingPattern, FramingSpec, LayerFunction, MemberFamily, OpeningKind, Point2,
-            RoofOpening, RoofPlane, Slope, SpanDirection, SurfaceRegion, SystemKind,
+            BoardProfile, Ceiling, CeilingSlope, ConstructionLayer, ConstructionSystem, ElementId,
+            FloorDeck, FramingPattern, FramingSpec, LayerFunction, MemberFamily, OpeningKind,
+            Point2, RoofOpening, RoofPlane, Slope, SpanDirection, SurfaceRegion, SystemKind,
         };
 
         let code = CodeProfile::irc_2021_prescriptive();
@@ -885,11 +885,11 @@ mod tests {
             SurfaceRegion::Polygon(outline.clone()),
             Length::from_feet(8.0),
         );
-        // Exercise the Option<Slope> serde path (reserved for later vault work,
-        // but it must round-trip when present).
-        ceiling.slope = Some(Slope::new(
-            Length::from_whole_inches(3),
-            Length::from_whole_inches(12),
+        // Exercise the Option<CeilingSlope> serde path (a sloped/scissor ceiling):
+        // pitch + low-edge reference must round-trip when present.
+        ceiling.slope = Some(CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+            0,
         ));
         model.ceilings.push(ceiling);
         model.floor_decks.push(
@@ -931,9 +931,9 @@ mod tests {
         );
         assert_eq!(
             reloaded.ceilings[0].slope,
-            Some(Slope::new(
-                Length::from_whole_inches(3),
-                Length::from_whole_inches(12)
+            Some(CeilingSlope::new(
+                Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+                0
             ))
         );
         // Re-saving the reloaded model yields byte-identical canonical JSON, and the
