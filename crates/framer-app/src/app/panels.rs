@@ -6,10 +6,10 @@ use eframe::egui::{
     containers::menu::{MenuButton, MenuConfig},
 };
 use framer_core::{
-    DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionHorizontalReference,
-    DimensionKind, DimensionVerticalReference, ElementId, FurnishingInstance, Length, Level,
-    MaterialSource, MepInstance, Opening, OpeningKind, Point2, Provenance, QuarterTurn, Wall,
-    WallJoin, WallJoinKind,
+    CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
+    FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
+    Provenance, QuarterTurn, Slope, SurfaceRegion, Wall, WallJoin, WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -512,6 +512,7 @@ impl FramerApp {
                                 ceiling.id.0.clone(),
                                 ceiling.name.clone(),
                                 ceiling.level.0.clone(),
+                                ceiling.slope.is_some(),
                             )
                         })
                         .collect();
@@ -634,7 +635,7 @@ impl FramerApp {
                                 }
                             }
 
-                            for (ceiling_id, ceiling_name, ceiling_level) in &ceilings {
+                            for (ceiling_id, ceiling_name, ceiling_level, sloped) in &ceilings {
                                 if ceiling_level != &level_id {
                                     continue;
                                 }
@@ -642,8 +643,14 @@ impl FramerApp {
                                     &self.selected,
                                     Selection::Ceiling(id) if id == ceiling_id
                                 );
+                                // Distinguish a sloped (scissor/vault) ceiling from a
+                                // flat one in the tree.
+                                let kind = if *sloped { "sloped" } else { "flat" };
                                 if ui
-                                    .selectable_label(selected, format!("Ceiling: {ceiling_name}"))
+                                    .selectable_label(
+                                        selected,
+                                        format!("Ceiling: {ceiling_name} ({kind})"),
+                                    )
                                     .clicked()
                                 {
                                     self.selected = Selection::Ceiling(ceiling_id.clone());
@@ -2287,6 +2294,25 @@ impl FramerApp {
                 }
             }
             Selection::Ceiling(id) => {
+                // Resolve this ceiling's plan outline (a `Room` region through the wall
+                // graph) before the mutable borrow below, so enabling a slope can
+                // convert a room-attached ceiling to a fixed polygon — a sloped ceiling
+                // needs an explicit outline (validation requires it).
+                let ceiling_outline: Option<Vec<Point2>> = self
+                    .model
+                    .ceilings
+                    .iter()
+                    .find(|c| c.id.0 == id)
+                    .and_then(|c| match &c.region {
+                        SurfaceRegion::Polygon(points) => Some(points.clone()),
+                        SurfaceRegion::Room(room_id) => self
+                            .model
+                            .rooms
+                            .iter()
+                            .find(|room| room.id == *room_id)
+                            .and_then(|room| framer_core::room_boundary(&self.model, room.seed))
+                            .map(|boundary| boundary.vertices),
+                    });
                 if let Some(ceiling) = self.model.ceilings.iter_mut().find(|c| c.id.0 == id) {
                     inspector_object_id(ui, &ceiling.id.0);
                     if can_edit {
@@ -2315,9 +2341,74 @@ impl FramerApp {
                                 "ft",
                             );
                             summary_row(ui, "Region", surface_region_summary(&ceiling.region));
-                            // v1 ceilings are flat; the slope fork lands with the
-                            // vault/scissor phase.
-                            summary_row(ui, "Slope", "flat");
+                            // Slope editor. Flat stays the default; enabling a slope on
+                            // a room-attached ceiling converts its region to the fixed
+                            // polygon resolved above (a sloped ceiling needs one). The
+                            // pitch + low (spring) edge mirror a roof plane.
+                            let outline_len = ceiling_outline.as_ref().map_or(0, Vec::len);
+                            let can_slope = outline_len >= 3;
+                            let mut sloped = ceiling.slope.is_some();
+                            let toggle = ui
+                                .add_enabled(can_slope, egui::Checkbox::new(&mut sloped, "Sloped"));
+                            let toggle_changed = toggle.changed();
+                            if !can_slope {
+                                toggle.on_hover_text(
+                                    "A sloped ceiling needs an enclosed region; close the room loop first.",
+                                );
+                            }
+                            if toggle_changed {
+                                if sloped {
+                                    if let Some(outline) = &ceiling_outline {
+                                        if matches!(ceiling.region, SurfaceRegion::Room(_)) {
+                                            ceiling.region =
+                                                SurfaceRegion::Polygon(outline.clone());
+                                        }
+                                        ceiling.slope = Some(CeilingSlope::new(
+                                            Slope::new(
+                                                Length::from_whole_inches(4),
+                                                Length::from_whole_inches(12),
+                                            ),
+                                            0,
+                                        ));
+                                    }
+                                } else {
+                                    ceiling.slope = None;
+                                }
+                                changed = true;
+                            }
+                            if let Some(slope) = &mut ceiling.slope {
+                                changed |= length_drag(
+                                    ui,
+                                    "Pitch rise",
+                                    &mut slope.pitch.rise,
+                                    0.0,
+                                    144.0,
+                                    "in",
+                                );
+                                changed |= length_drag(
+                                    ui,
+                                    "Pitch run",
+                                    &mut slope.pitch.run,
+                                    1.0,
+                                    144.0,
+                                    "in",
+                                );
+                                summary_row(
+                                    ui,
+                                    "Pitch",
+                                    format!("{}:{}", slope.pitch.rise, slope.pitch.run),
+                                );
+                                property_row(ui, "Low edge", |ui| {
+                                    let max = outline_len.saturating_sub(1) as u32;
+                                    let before = slope.low_edge;
+                                    ui.add(
+                                        egui::DragValue::new(&mut slope.low_edge).range(0..=max),
+                                    );
+                                    if slope.low_edge != before {
+                                        changed = true;
+                                    }
+                                });
+                            }
                         });
 
                         changed |= surface_system_picker(
@@ -2336,7 +2427,13 @@ impl FramerApp {
                             "Region: {}",
                             surface_region_summary(&ceiling.region)
                         ));
-                        ui.label("Slope: flat");
+                        match &ceiling.slope {
+                            Some(slope) => ui.label(format!(
+                                "Slope: {}:{} (low edge {})",
+                                slope.pitch.rise, slope.pitch.run, slope.low_edge
+                            )),
+                            None => ui.label("Slope: flat"),
+                        };
                     }
                 } else {
                     ui.label("Ceiling no longer exists");
