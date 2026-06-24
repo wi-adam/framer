@@ -1083,10 +1083,22 @@ fn ridge_elevation(plane: &RoofPlane, run_extent: Length) -> Length {
     plane.reference_elevation + Length::from_inches(run_extent.inches() * slope_ratio(plane.slope))
 }
 
+/// Whether a roof plane's ridge is restrained by a rafter-thrust tie. Encoding the
+/// ridge-board-vs-beam decision as a type (rather than a bare `bool`) keeps it from
+/// being silently transposed with the adjacent `carries_ridge` flag at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RidgeTie {
+    /// A tie (a flat ceiling at the plate) resists thrust — a ridge board suffices.
+    Tied,
+    /// No tie (a cathedral / scissor condition) — a structural ridge beam is required.
+    Untied,
+}
+
 /// Generate the framing plan for one roof plane: common rafters arrayed along the
 /// eave at on-center spacing (running up the slope to the ridge, cut to their
 /// true sloped length), level plate blocking between rafters at the eave, and —
-/// when `carries_ridge` — a ridge board along the high edge. A sibling of
+/// when `carries_ridge` — a ridge board along the high edge plus the `ridge_tie`
+/// structural judgment (ridge board adequate vs. ridge beam required). A sibling of
 /// [`generate_wall_plan`]. Spacing and area use plan (horizontal) length; only
 /// the rafter cut length is the true sloped length, rounded to integer ticks at
 /// this f64 boundary.
@@ -1095,7 +1107,7 @@ pub fn generate_roof_plan(
     system: &ConstructionSystem,
     materials: &[Material],
     carries_ridge: bool,
-    has_tie: bool,
+    ridge_tie: RidgeTie,
 ) -> Result<RoofFramePlan, SolverError> {
     let framing = system_framing(system)?;
     let band = FramingBand::for_system(system)?;
@@ -1228,20 +1240,19 @@ pub fn generate_roof_plan(
                 "A ridge board runs level along the shared gable ridge using the system framing member; the opposing rafters bear against it.",
             ),
         ));
-        if has_tie {
-            diagnostics.push(PlanDiagnostic::new(
+        match ridge_tie {
+            RidgeTie::Tied => diagnostics.push(PlanDiagnostic::new(
                 DiagnosticSeverity::Info,
                 "roof.ridge.tied",
                 Some(plane.id.clone()),
                 "A ridge board is adequate here: a flat ceiling at the plate ties the opposing rafters against outward thrust.",
-            ));
-        } else {
-            diagnostics.push(PlanDiagnostic::new(
+            )),
+            RidgeTie::Untied => diagnostics.push(PlanDiagnostic::new(
                 DiagnosticSeverity::Unsupported,
                 "roof.ridge.beam-required",
                 Some(plane.id.clone()),
                 "No ceiling tie resists rafter thrust at the plate (a cathedral or scissor condition), so a structural ridge beam is required. v1 frames a ridge board and does not size the beam.",
-            ));
+            )),
         }
     }
 
@@ -1472,9 +1483,13 @@ fn generate_roof_plans(
             condition,
             RidgeCondition::Carries | RidgeCondition::Mismatched
         );
-        let has_tie = roof_has_ceiling_tie(plane, &ties);
+        let ridge_tie = if roof_has_ceiling_tie(plane, &ties) {
+            RidgeTie::Tied
+        } else {
+            RidgeTie::Untied
+        };
         let mut roof_plan =
-            generate_roof_plan(plane, system, &model.materials, carries_ridge, has_tie)?;
+            generate_roof_plan(plane, system, &model.materials, carries_ridge, ridge_tie)?;
         if condition == RidgeCondition::Mismatched {
             roof_plan.diagnostics.push(PlanDiagnostic::new(
                 DiagnosticSeverity::Unsupported,
@@ -4388,7 +4403,14 @@ mod tests {
     #[test]
     fn roof_plane_arrays_rafters_at_true_sloped_length() {
         let plane = shed_plane(pitch_9_12());
-        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false, false).unwrap();
+        let plan = generate_roof_plan(
+            &plane,
+            &roof_system(),
+            &materials(),
+            false,
+            RidgeTie::Untied,
+        )
+        .unwrap();
 
         let rafters: Vec<_> = plan
             .members
@@ -4464,7 +4486,14 @@ mod tests {
     #[test]
     fn flat_roof_plane_rafter_cut_equals_plan_run() {
         let plane = shed_plane(Slope::flat());
-        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false, false).unwrap();
+        let plan = generate_roof_plan(
+            &plane,
+            &roof_system(),
+            &materials(),
+            false,
+            RidgeTie::Untied,
+        )
+        .unwrap();
 
         let rafter = plan
             .members
@@ -4483,7 +4512,14 @@ mod tests {
     #[test]
     fn roof_eave_overhang_lengthens_rafter_and_drops_the_tail() {
         let plane = shed_plane(pitch_9_12()).with_eave_overhang(Length::from_whole_inches(12));
-        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false, false).unwrap();
+        let plan = generate_roof_plan(
+            &plane,
+            &roof_system(),
+            &materials(),
+            false,
+            RidgeTie::Untied,
+        )
+        .unwrap();
 
         let rafter = plan
             .members
@@ -4613,13 +4649,11 @@ mod tests {
         assert_eq!(roofing, 2 * 288 * 144);
     }
 
-    #[test]
-    fn gable_with_a_flat_ceiling_tie_emits_ridge_tied() {
-        // A flat ceiling enclosing the footprint at the plate (springing) line
-        // ties the opposing rafters, so a ridge board is adequate.
+    /// The tied-gable fixture: `gable_model` with the level top raised to the roof
+    /// springing (8ft) and a flat ceiling covering the whole 24ft × 24ft footprint
+    /// at the plate, so `roof-a`/`roof-b` are tied. Tests vary one field off this.
+    fn tied_gable_model() -> BuildingModel {
         let mut model = gable_model();
-        // Put the level top at the roof springing (8ft) so a ceiling hung tight to
-        // the plate (height 0) lands on the bearing line.
         model.levels[0].height = Length::from_feet(8.0);
         model.systems.push(ceiling_system());
         model.ceilings.push(Ceiling::new(
@@ -4630,31 +4664,112 @@ mod tests {
             SurfaceRegion::Polygon(rect_outline(24.0, 24.0)),
             Length::ZERO,
         ));
+        model
+    }
 
-        let plan = generate_project_plan(&model).unwrap();
+    /// Whether `roof-a` reports a ridge tie: `true` on `roof.ridge.tied` (Info),
+    /// `false` on `roof.ridge.beam-required` (Unsupported). Asserts exactly one of
+    /// the two judgments is present, so a silently dropped diagnostic fails loudly.
+    fn roof_a_ridge_is_tied(model: &BuildingModel) -> bool {
+        let plan = generate_project_plan(model).unwrap();
         let roof_a = plan.roof_plan(&ElementId::new("roof-a")).unwrap();
+        let tied = roof_a
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "roof.ridge.tied" && d.severity == DiagnosticSeverity::Info);
+        let beam = roof_a.diagnostics.iter().any(|d| {
+            d.code == "roof.ridge.beam-required" && d.severity == DiagnosticSeverity::Unsupported
+        });
+        assert!(tied ^ beam, "exactly one ridge-tie judgment is emitted");
+        tied
+    }
+
+    #[test]
+    fn gable_with_a_flat_ceiling_tie_emits_ridge_tied() {
+        // A flat ceiling enclosing the footprint at the plate ties the opposing
+        // rafters, so a ridge board is adequate — and still framed.
+        let model = tied_gable_model();
+        assert!(roof_a_ridge_is_tied(&model));
+        let plan = generate_project_plan(&model).unwrap();
         assert!(
-            roof_a
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "roof.ridge.tied"
-                    && diagnostic.severity == DiagnosticSeverity::Info),
-            "a flat ceiling at the plate ties the gable, so a ridge board is adequate"
-        );
-        assert!(
-            roof_a
-                .diagnostics
-                .iter()
-                .all(|diagnostic| diagnostic.code != "roof.ridge.beam-required"),
-            "a tied gable does not also require a beam"
-        );
-        // The ridge board is still framed in either case.
-        assert!(
-            roof_a
+            plan.roof_plan(&ElementId::new("roof-a"))
+                .unwrap()
                 .members
                 .iter()
                 .any(|member| member.kind == MemberKind::RidgeBoard)
         );
+    }
+
+    #[test]
+    fn ceiling_tie_respects_the_plate_slack_threshold() {
+        // The ceiling sits `height` below the 96in level top, and the springing is
+        // 96in, so it ties only while `height <= TIE_PLATE_SLACK` (6in). This pins
+        // both the constant and the `>=` direction — a 0in or 60in slack would flip
+        // one of these cases (the equal-elevation fixture alone cannot).
+        let mut within = tied_gable_model();
+        within.ceilings[0].height = Length::from_whole_inches(6); // at the slack
+        assert!(
+            roof_a_ridge_is_tied(&within),
+            "a ceiling within the plate slack ties the rafters"
+        );
+
+        let mut beyond = tied_gable_model();
+        beyond.ceilings[0].height = Length::from_whole_inches(7); // just past the slack
+        assert!(
+            !roof_a_ridge_is_tied(&beyond),
+            "a ceiling dropped past the plate slack needs a ridge beam"
+        );
+    }
+
+    #[test]
+    fn a_sloped_ceiling_is_not_a_rafter_tie() {
+        // A scissor/vault ceiling (sloped) is not a full thrust tie, so the ridge
+        // still needs a beam — the `slope.is_none()` filter in `collect_ceiling_ties`.
+        let mut model = tied_gable_model();
+        model.ceilings[0].slope = Some(Slope::new(
+            Length::from_whole_inches(3),
+            Length::from_whole_inches(12),
+        ));
+        assert!(!roof_a_ridge_is_tied(&model));
+    }
+
+    #[test]
+    fn a_ceiling_on_another_level_does_not_tie_the_roof() {
+        // A flat ceiling on a different level is not a tie at this roof's plate.
+        let mut model = tied_gable_model();
+        model.levels.push(
+            framer_core::Level::new("level-2", "Level 2", Length::from_feet(9.0))
+                .with_height(Length::from_feet(8.0)),
+        );
+        model.ceilings[0].level = ElementId::new("level-2");
+        assert!(!roof_a_ridge_is_tied(&model));
+    }
+
+    #[test]
+    fn a_ceiling_not_covering_the_plane_does_not_tie() {
+        // A flat ceiling whose region excludes the plane footprint (centroid at
+        // 12ft, 6ft) does not tie the rafters — the `point_in_polygon` conjunct.
+        let mut model = tied_gable_model();
+        model.ceilings[0].region = SurfaceRegion::Polygon(rect_outline(4.0, 4.0));
+        assert!(!roof_a_ridge_is_tied(&model));
+    }
+
+    #[test]
+    fn a_floor_deck_covering_the_footprint_does_not_tie_a_cathedral() {
+        // The PR #41 fix: a floor deck bears at the floor (`level.elevation`), not
+        // the plate, so even a deck spanning the whole footprint leaves a cathedral
+        // roof needing a ridge beam.
+        let mut model = gable_model();
+        model.levels[0].height = Length::from_feet(8.0);
+        model.systems.push(floor_system());
+        model.floor_decks.push(FloorDeck::new(
+            "deck-1",
+            "Floor deck",
+            "level-1",
+            "system-floor",
+            SurfaceRegion::Polygon(rect_outline(24.0, 24.0)),
+        ));
+        assert!(!roof_a_ridge_is_tied(&model));
     }
 
     #[test]
@@ -4772,7 +4887,14 @@ mod tests {
             Length::from_feet(8.0),
         );
 
-        let plan = generate_roof_plan(&plane, &roof_system(), &materials(), false, false).unwrap();
+        let plan = generate_roof_plan(
+            &plane,
+            &roof_system(),
+            &materials(),
+            false,
+            RidgeTie::Untied,
+        )
+        .unwrap();
         assert!(
             plan.members.is_empty(),
             "a degenerate outline frames no members"

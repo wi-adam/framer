@@ -378,7 +378,12 @@ fn point_in_triangle_ccw(p: Point2, a: Point2, b: Point2, c: Point2) -> bool {
 }
 
 /// Even-odd ray-casting point-in-polygon test (boundary inclusion unspecified).
+/// A polygon needs at least three vertices; fewer encloses no area, so the point
+/// is never inside (and this guards the `len() - 1` seed against underflow).
 pub fn point_in_polygon(point: Point2, vertices: &[Point2]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
     let (px, py) = (point.x.inches(), point.y.inches());
     let mut inside = false;
     let mut j = vertices.len() - 1;
