@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 
 use framer_core::{
-    Appearance, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck, LayerFunction,
-    Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion, Wall, WallExposure,
-    room_boundary, triangulate_simple_polygon,
+    Appearance, AssemblyFace, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck,
+    LayerFunction, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion, Wall,
+    WallExposure, room_boundary, triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -265,8 +265,19 @@ fn geometry_from_model(
     for ceiling in &model.ceilings {
         push_ceiling(&mut tris, &mut bounds, model, ceiling, &mut palette);
     }
-    for plane in &model.roof_planes {
-        push_roof_plane(&mut tris, &mut bounds, model, plane, &mut palette);
+    // Cathedral classification for every plane in one wall-graph pass (cheaper than
+    // re-resolving each Room ceiling per plane).
+    let cathedral = model.roof_cathedral_flags();
+    for (index, plane) in model.roof_planes.iter().enumerate() {
+        let is_cathedral = cathedral.get(index).copied().unwrap_or(false);
+        push_roof_plane(
+            &mut tris,
+            &mut bounds,
+            model,
+            plane,
+            is_cathedral,
+            &mut palette,
+        );
     }
 
     // Ground plane: a large quad just below the lowest wall base.
@@ -570,34 +581,39 @@ const SURFACE_AREA_EPS: f32 = 1.0e-4;
 
 /// Which finished face of a roof/ceiling/floor assembly the renderer shows, so
 /// the surface picks the layer the viewer actually sees: a roof's weather face,
-/// a ceiling's underside finish, a floor deck's walked-on top.
+/// a cathedral roof's interior-finish underside, a ceiling's underside finish, a
+/// floor deck's walked-on top.
 #[derive(Clone, Copy)]
 enum SurfaceFace {
     Roof,
+    /// A cathedral roof plane's underside — the assembly's conditioned-side finish.
+    RoofUnderside,
     Ceiling,
     Floor,
 }
 
 /// The render material for a roof/ceiling/floor surface: the resolved appearance
 /// of its system's representative finish layer (weather face for a roof, the
-/// conditioned-side finish for a ceiling/floor), falling back to a stock palette
-/// entry when the system or material is missing — so scene building stays
-/// infallible like walls. Reuses the existing `MAT_*` palette (no new GPU
-/// material), keeping the WGSL kernel and GPU↔CPU parity untouched.
+/// conditioned-side finish for a ceiling/floor or a cathedral roof underside),
+/// falling back to a stock palette entry when the system or material is missing —
+/// so scene building stays infallible like walls. Reuses the existing `MAT_*`
+/// palette (no new GPU material), keeping the WGSL kernel and GPU↔CPU parity
+/// untouched.
 fn surface_material(
     model: &BuildingModel,
     system: Option<&ConstructionSystem>,
     face: SurfaceFace,
     palette: &mut PaletteBuilder<'_>,
 ) -> u32 {
-    let fallback = match face {
-        SurfaceFace::Ceiling => MAT_DRYWALL,
-        SurfaceFace::Roof | SurfaceFace::Floor => MAT_CLADDING,
+    let (fallback, assembly_face) = match face {
+        SurfaceFace::Ceiling => (MAT_DRYWALL, AssemblyFace::Finished),
+        SurfaceFace::RoofUnderside => (MAT_DRYWALL, AssemblyFace::Underside),
+        SurfaceFace::Roof | SurfaceFace::Floor => (MAT_CLADDING, AssemblyFace::Finished),
     };
     // The finished-face layer selection lives in `framer-core` so this render path
     // and the 3-D viewport pick the same face.
     system
-        .and_then(ConstructionSystem::surface_finish_material)
+        .and_then(|system| system.surface_finish_material(assembly_face))
         .and_then(|material| palette.material_index(model, material))
         .unwrap_or(fallback)
 }
@@ -660,24 +676,38 @@ fn push_polygon(
     }
 }
 
+/// Vertical drop from a roof plane's structural face to its conditioned-side
+/// underside: the assembly's through-thickness (a default when the system is
+/// missing). Enough to separate the two coplanar faces so the tracer never sees a
+/// coincident-triangle tie between the weather face and the cathedral underside.
+fn roof_assembly_drop(system: Option<&ConstructionSystem>) -> f32 {
+    /// Nominal drop when no system resolves a real thickness (≈ a 2×6 roof).
+    const DEFAULT_DROP_IN: f32 = 6.0;
+    system
+        .map(|system| system.total_thickness().inches() as f32)
+        .filter(|drop| *drop > 0.0)
+        .unwrap_or(DEFAULT_DROP_IN)
+}
+
 /// Emit a roof plane's finished surface: its plan outline lifted onto the sloped
-/// plane, ear-clip triangulated with the system's weather-face material.
+/// plane, ear-clip triangulated with the system's weather-face material. A
+/// **cathedral** plane (`is_cathedral`, no ceiling below) additionally emits a
+/// downward underside at the assembly's interior finish, dropped one
+/// assembly-thickness below the weather face so a room with no ceiling sees the
+/// interior finish, not roofing.
 fn push_roof_plane(
     tris: &mut Vec<Triangle>,
     bounds: &mut Aabb,
     model: &BuildingModel,
     plane: &RoofPlane,
+    is_cathedral: bool,
     palette: &mut PaletteBuilder<'_>,
 ) {
     let Some(frame) = plane.frame() else {
         return;
     };
-    let material = surface_material(
-        model,
-        system_by_id(model, &plane.system),
-        SurfaceFace::Roof,
-        palette,
-    );
+    let system = system_by_id(model, &plane.system);
+    let material = surface_material(model, system, SurfaceFace::Roof, palette);
     let verts: Vec<Vec3> = plane
         .outline
         .iter()
@@ -685,6 +715,20 @@ fn push_roof_plane(
         .collect();
     let triangles = triangulate_simple_polygon(&plane.outline);
     push_polygon(tris, bounds, &verts, &triangles, material);
+
+    if is_cathedral {
+        let underside_material =
+            surface_material(model, system, SurfaceFace::RoofUnderside, palette);
+        let drop = roof_assembly_drop(system);
+        // Same winding (the tracer flips the shading normal toward the ray, so a
+        // diffuse underside lights correctly from below); a parallel vertical drop
+        // keeps the plane coplanar with the weather face, just lower.
+        let underside: Vec<Vec3> = verts
+            .iter()
+            .map(|v| Vec3::new(v.x, v.y, v.z - drop))
+            .collect();
+        push_polygon(tris, bounds, &underside, &triangles, underside_material);
+    }
 }
 
 /// Emit a horizontal surface (a flat ceiling or floor deck) at constant `z`: its
@@ -1412,6 +1456,148 @@ mod tests {
         assert!(
             (area - 15552.0).abs() < 5.0,
             "L floor triangles cover {area} sq in, expected 15552"
+        );
+    }
+
+    /// A 9ft-tall level with one gable roof plane over a 12×8 footprint and **no
+    /// ceiling** — a cathedral. The roof system stacks a conditioned-side finish
+    /// (soffit), a framing layer, and roofing, so its weather face and its interior
+    /// underside resolve to distinct colors.
+    fn cathedral_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        for level in &mut model.levels {
+            if level.id.0 == "level-1" {
+                level.height = Length::from_whole_inches(108);
+            }
+        }
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-roof",
+            "Shingle",
+            [40, 40, 45],
+        ));
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-soffit",
+            "Soffit",
+            [205, 180, 140],
+        ));
+        // Roof assembly ordered conditioned-side → weather-side: interior finish,
+        // framing, roofing. Surfaces select the weather face outward, the soffit
+        // on the cathedral underside.
+        let framing = ConstructionLayer::new(
+            LayerFunction::Framing,
+            "mat-spf",
+            BoardProfile::TwoBySix.nominal_depth(),
+        )
+        .with_framing(FramingSpec {
+            member: BoardProfile::TwoBySix,
+            spacing: Length::from_whole_inches(16),
+            pattern: FramingPattern::Single,
+            member_family: MemberFamily::Rafter,
+            cavity_material: None,
+        });
+        model.systems.push(ConstructionSystem {
+            id: ElementId::new("system-roof"),
+            name: "Roof".to_owned(),
+            kind: SystemKind::Roof,
+            source: None,
+            layers: vec![
+                ConstructionLayer::new(
+                    LayerFunction::CeilingFinish,
+                    "mat-soffit",
+                    Length::from_whole_inches(1),
+                ),
+                framing,
+                ConstructionLayer::new(
+                    LayerFunction::Roofing,
+                    "mat-roof",
+                    Length::from_whole_inches(1),
+                ),
+            ],
+        });
+        model.roof_planes.push(RoofPlane::new(
+            "roof-1",
+            "Roof",
+            "level-1",
+            "system-roof",
+            rect12x8(),
+            Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        ));
+        model
+    }
+
+    /// Collect the sloped (roof) triangles whose albedo matches `color`.
+    fn sloped_triangles_with_color(scene: &Scene, color: [u8; 3]) -> Vec<&Triangle> {
+        let want = color_to_linear(color);
+        scene
+            .triangles
+            .iter()
+            .filter(|t| {
+                let v1 = t.v0 + t.edge1;
+                let v2 = t.v0 + t.edge2;
+                let sloped = (t.v0.z.max(v1.z).max(v2.z) - t.v0.z.min(v1.z).min(v2.z)) > 1.0;
+                let matches_color = matches!(
+                    &scene.materials[t.material as usize],
+                    Material::Diffuse { albedo } if (*albedo - want).length() < 1.0e-5
+                );
+                sloped && matches_color
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cathedral_roof_emits_an_interior_finish_underside() {
+        let scene = scene_from_model(&cathedral_model(), &RenderOptions::default());
+        // The weather face (shingle) is present...
+        let weather = sloped_triangles_with_color(&scene, [40, 40, 45]);
+        assert!(!weather.is_empty(), "no weather-face roof triangles");
+        // ...and so is a distinct interior-finish (soffit) underside.
+        let underside = sloped_triangles_with_color(&scene, [205, 180, 140]);
+        assert!(
+            !underside.is_empty(),
+            "cathedral roof emitted no interior-finish underside"
+        );
+        // The underside sits below the weather face by ~the assembly thickness
+        // (1in finish + 6in nominal 2×6 + 1in roofing = 8in), so a room with no
+        // ceiling sees it from below.
+        let max_z = |tris: &[&Triangle]| {
+            tris.iter()
+                .flat_map(|t| [t.v0.z, (t.v0 + t.edge1).z, (t.v0 + t.edge2).z])
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let drop = max_z(&weather) - max_z(&underside);
+        assert!(
+            (drop - 8.0).abs() < 0.5,
+            "underside dropped {drop}in below the weather face, want ~8"
+        );
+    }
+
+    #[test]
+    fn roof_with_a_ceiling_below_shows_no_cathedral_underside() {
+        // Add a flat ceiling covering the footprint: the plane is no longer a
+        // cathedral, so no interior-finish underside is emitted under the roof.
+        let mut model = cathedral_model();
+        model.systems.push(finish_system(
+            "system-ceiling",
+            SystemKind::Ceiling,
+            LayerFunction::CeilingFinish,
+            "mat-soffit",
+            true,
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(rect12x8()),
+            Length::from_whole_inches(12),
+        ));
+        let scene = scene_from_model(&model, &RenderOptions::default());
+        // The only soffit-colored triangles are the flat ceiling (not sloped).
+        assert!(
+            sloped_triangles_with_color(&scene, [205, 180, 140]).is_empty(),
+            "a roof with a ceiling below should emit no sloped underside"
         );
     }
 
