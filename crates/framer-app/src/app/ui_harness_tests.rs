@@ -16,7 +16,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
-use super::{FramerApp, ViewportMode, WallDisplay, design};
+use super::{FramerApp, Selection, ViewportMode, WallDisplay, design};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
 ///
@@ -185,6 +185,139 @@ fn axonometric_view_lays_out_in_every_wall_display_mode() {
             "3D view in {mode:?} mode should lay out without panicking"
         );
     }
+}
+
+/// Drive the ceiling inspector's slope editor through the real UI: select the demo
+/// shell's flat (polygon) ceiling, toggle the "Sloped" checkbox, and confirm the
+/// model gains then loses a slope — proving the editor is wired through the inspector
+/// edit path (Slice A5.1). The ceiling is a `Polygon` region, so the toggle is
+/// enabled.
+#[test]
+fn ceiling_inspector_toggles_slope_through_the_ui() {
+    use framer_core::{Ceiling, Length, Point2, SurfaceRegion};
+
+    let mut harness = demo_harness();
+    harness.run();
+    // The default demo-shell model carries no ceiling, so add a polygon-region one
+    // (a sloped ceiling needs an explicit outline anyway) over the 28×20ft footprint,
+    // referencing the starter ceiling system so the model stays valid, and select it.
+    {
+        let ft = Length::from_feet;
+        harness.state_mut().model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling-1",
+            SurfaceRegion::Polygon(vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(ft(28.0), Length::ZERO),
+                Point2::new(ft(28.0), ft(20.0)),
+                Point2::new(Length::ZERO, ft(20.0)),
+            ]),
+            ft(8.0),
+        ));
+        harness.state_mut().selected = Selection::Ceiling("ceiling-1".to_owned());
+    }
+    harness.run();
+    let slope_of = |h: &Harness<FramerApp>| {
+        h.state()
+            .model
+            .ceilings
+            .iter()
+            .find(|c| c.id.0 == "ceiling-1")
+            .and_then(|c| c.slope)
+    };
+    assert!(slope_of(&harness).is_none(), "the ceiling starts flat");
+    assert!(harness.state().error.is_none(), "the flat ceiling is valid");
+
+    // Enable the slope.
+    harness.get_by_label("Sloped").click();
+    harness.run();
+    assert!(
+        slope_of(&harness).is_some(),
+        "toggling Sloped on makes the ceiling sloped"
+    );
+    // The authored slope produces a model that still validates (the framing plan
+    // regenerates without error).
+    assert!(
+        harness.state().error.is_none() && harness.state().project_plan.is_some(),
+        "a sloped polygon ceiling is a valid model: {:?}",
+        harness.state().error
+    );
+
+    // Disable it again.
+    harness.get_by_label("Sloped").click();
+    harness.run();
+    assert!(
+        slope_of(&harness).is_none(),
+        "toggling Sloped off makes the ceiling flat again"
+    );
+}
+
+/// Enabling a slope on a **room-attached** ceiling converts its region to an explicit
+/// polygon (the resolved wall-loop boundary) — the load-bearing A5.1 logic, since a
+/// sloped ceiling needs a fixed outline. Driven through the real inspector.
+#[test]
+fn ceiling_inspector_slope_converts_a_room_region_to_a_polygon() {
+    use framer_core::{Ceiling, ElementId, Length, Point2, Room, RoomUsage, SurfaceRegion};
+
+    let mut harness = demo_harness();
+    harness.run();
+    {
+        let model = &mut harness.state_mut().model;
+        // A room seeded inside the demo shell's closed 28×20ft wall loop, plus a
+        // room-attached (flat) ceiling over it.
+        model.rooms.push(Room::new(
+            "room-test",
+            "Room",
+            RoomUsage::default(),
+            "level-1",
+            Point2::new(Length::from_feet(14.0), Length::from_feet(10.0)),
+        ));
+        model.ceilings.push(Ceiling::new(
+            "ceiling-room",
+            "Room ceiling",
+            "level-1",
+            "system-ceiling-1",
+            SurfaceRegion::Room(ElementId::new("room-test")),
+            Length::from_feet(8.0),
+        ));
+    }
+    harness.state_mut().selected = Selection::Ceiling("ceiling-room".to_owned());
+    harness.run();
+    let ceiling = |h: &Harness<FramerApp>| {
+        h.state()
+            .model
+            .ceilings
+            .iter()
+            .find(|c| c.id.0 == "ceiling-room")
+            .cloned()
+            .expect("the room ceiling exists")
+    };
+    assert!(
+        matches!(ceiling(&harness).region, SurfaceRegion::Room(_)),
+        "starts as a room region"
+    );
+    assert!(
+        harness.state().error.is_none(),
+        "the flat room ceiling is valid"
+    );
+
+    // Enable the slope: the region must become an explicit polygon, and the model
+    // must still validate (a sloped Room region would be rejected).
+    harness.get_by_label("Sloped").click();
+    harness.run();
+    let after = ceiling(&harness);
+    assert!(after.slope.is_some(), "the ceiling became sloped");
+    assert!(
+        matches!(after.region, SurfaceRegion::Polygon(_)),
+        "sloping a room ceiling converts its region to a polygon"
+    );
+    assert!(
+        harness.state().error.is_none() && harness.state().project_plan.is_some(),
+        "the converted sloped ceiling is a valid model: {:?}",
+        harness.state().error
+    );
 }
 
 /// Drive the Layers popover through the real UI: open it and pick a wall display
