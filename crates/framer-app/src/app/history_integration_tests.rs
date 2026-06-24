@@ -1049,6 +1049,50 @@ fn add_vault_authors_two_opposing_sloped_ceilings() {
     );
 }
 
+/// The vault frames a *rising tent*: each half rises from its spring wall to a
+/// shared, higher ridge — not an inverted vault. Pinned through the solver, since
+/// validation only checks `low_edge` bounds and would pass an inverted half.
+#[test]
+fn a_vault_frames_a_rising_tent() {
+    let mut app = FramerApp::default();
+    let outline = framer_core::room_boundary(
+        &app.model,
+        Point2::new(Length::from_feet(14.0), Length::from_feet(10.0)),
+    )
+    .expect("the demo shell is an enclosed loop")
+    .vertices;
+    app.add_vault(&outline);
+    let plan = app.project_plan.as_ref().expect("the vault re-solves");
+
+    let mut ridge_elevations = Vec::new();
+    for ceiling in &app.model.ceilings {
+        let ceiling_plan = plan
+            .ceiling_plan(&framer_core::ElementId::new(ceiling.id.0.clone()))
+            .expect("each vault half has a ceiling plan");
+        // The common ceiling joists run up the slope (the band joists/blocking are
+        // level at their edge, so they are excluded).
+        let joists: Vec<_> = ceiling_plan
+            .members
+            .iter()
+            .filter(|member| member.kind == framer_solver::MemberKind::CeilingJoist)
+            .filter_map(|member| member.sloped)
+            .collect();
+        assert!(!joists.is_empty(), "a sloped vault half frames joists");
+        // Every joist rises: its ridge (high) end is above its spring (low) end.
+        assert!(
+            joists.iter().all(|s| s.high_elevation > s.low_elevation),
+            "the vault rises from its spring wall; it does not invert"
+        );
+        ridge_elevations.push(joists[0].high_elevation);
+    }
+    // The two opposing halves meet at one shared ridge elevation.
+    assert_eq!(ridge_elevations.len(), 2);
+    assert_eq!(
+        ridge_elevations[0], ridge_elevations[1],
+        "the two halves meet at the same ridge elevation"
+    );
+}
+
 /// A vault click does nothing unless the tool is active and the point is inside a
 /// closed wall loop.
 #[test]
