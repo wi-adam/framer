@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, Ceiling, CodeProfile, ConstructionSystem, ElementId, FloorDeck,
-    FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2, RoofPlane, Slope,
-    SpanDirection, SurfaceRegion, Wall, WallJoin, WallJoinKind, point_in_polygon,
-    polygon_area_square_inches, room_boundaries,
+    BoardProfile, BuildingModel, Ceiling, CeilingSlope, CodeProfile, ConstructionSystem, ElementId,
+    FloorDeck, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
+    RoofPlane, RoofPlaneFrame, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin, WallJoinKind,
+    point_in_polygon, polygon_area_square_inches, room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -967,10 +967,55 @@ pub fn generate_floor_plan(
     })
 }
 
-/// Generate the framing plan for one flat ceiling from its resolved plan outline.
-/// A flat ceiling is a floor deck viewed from below, so it reuses the joisting
-/// generator; v1 ceilings always span the shorter clear dimension.
+/// Generate the framing plan for one ceiling from its resolved plan outline and the
+/// building elevation at its low edge (`reference_elevation = level.elevation +
+/// level.height − ceiling.height`). A **flat** ceiling is a floor deck viewed from
+/// below, so it reuses the horizontal joisting generator (v1 spans the shorter clear
+/// dimension); a **sloped** (scissor/vault) ceiling is framed like a roof plane —
+/// its joists run up the slope at true sloped length.
 pub fn generate_ceiling_plan(
+    ceiling: &Ceiling,
+    system: &ConstructionSystem,
+    outline: &[Point2],
+    reference_elevation: Length,
+    materials: &[Material],
+) -> Result<CeilingFramePlan, SolverError> {
+    // A sloped (scissor/vault) ceiling frames like a roof plane when its low edge
+    // yields a valid frame.
+    if let Some(slope) = ceiling.slope
+        && let Some(frame) = ceiling.frame(reference_elevation)
+    {
+        return generate_sloped_ceiling_plan(
+            ceiling,
+            system,
+            outline,
+            slope,
+            frame,
+            reference_elevation,
+            materials,
+        );
+    }
+    // Flat ceiling — or a sloped ceiling whose low edge is degenerate (a zero-length
+    // edge passes validation but frames no slope): the horizontal joist plan, plus a
+    // warning if a slope was dropped (mirroring the roof's degenerate-outline path).
+    let mut plan = flat_ceiling_plan(ceiling, system, outline, materials)?;
+    if ceiling.slope.is_some() {
+        plan.diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Warning,
+            "ceiling.outline.degenerate",
+            Some(ceiling.id.clone()),
+            format!(
+                "{} is sloped but its low edge is degenerate (zero length), so the slope was dropped and it was framed flat.",
+                ceiling.name
+            ),
+        ));
+    }
+    Ok(plan)
+}
+
+/// The flat horizontal joist plan for a ceiling — a floor deck viewed from below, so
+/// it reuses the joisting generator; v1 spans the shorter clear dimension.
+fn flat_ceiling_plan(
     ceiling: &Ceiling,
     system: &ConstructionSystem,
     outline: &[Point2],
@@ -991,6 +1036,174 @@ pub fn generate_ceiling_plan(
         members: joists.members,
         layers: joists.layers,
         diagnostics: joists.diagnostics,
+    })
+}
+
+/// Frame a sloped (scissor/vault) ceiling like a roof plane: ceiling joists arrayed
+/// along the low (spring) edge at on-center spacing, each running up the slope to the
+/// high edge cut to its **true sloped length** (plan run × the pitch factor); band
+/// joists close the low and high edges; one mid-slope blocking row sits between
+/// joists. Spacing and the per-layer takeoff use plan length. The joists carry a
+/// [`SlopedPlacement`] (true building elevations) so the BOM and section read the
+/// real geometry, mirroring `generate_roof_plan`'s rafters. `slope`/`frame` are the
+/// caller's already-resolved `ceiling.slope` / `ceiling.frame(reference_elevation)`.
+fn generate_sloped_ceiling_plan(
+    ceiling: &Ceiling,
+    system: &ConstructionSystem,
+    outline: &[Point2],
+    slope: CeilingSlope,
+    frame: RoofPlaneFrame,
+    reference_elevation: Length,
+    materials: &[Material],
+) -> Result<CeilingFramePlan, SolverError> {
+    let framing = system_framing(system)?;
+    let band = FramingBand::for_system(system)?;
+    let joist = framing.member;
+    let spacing = framing.spacing;
+    let joist_thickness = joist.thickness();
+
+    let geometry = surface_geometry(outline, slope.low_edge, &frame);
+    let factor = slope_factor(slope.pitch);
+    let ratio = slope_ratio(slope.pitch);
+    let run_extent = geometry.run_extent;
+    let high_elevation = reference_elevation + Length::from_inches(run_extent.inches() * ratio);
+    // Each joist's true sloped cut and its low/high building elevations.
+    let cut_length = Length::from_inches(run_extent.inches() * factor);
+    let joist_slope = SlopedPlacement {
+        low_elevation: reference_elevation,
+        high_elevation,
+    };
+
+    let mut members = Vec::new();
+
+    // Common ceiling joists: arrayed along the low edge at o.c., each running up the
+    // slope to the high edge. End joists align with the rake edges.
+    let positions = stud_positions(geometry.eave_length, spacing, joist_thickness);
+    for mark in &positions {
+        members.push(frame_member(
+            format!("ceiling-joist-{}", mark.ticks()),
+            &ceiling.id,
+            MemberKind::CeilingJoist,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Vertical,
+                *mark,
+                Length::ZERO,
+                cut_length,
+                joist_thickness,
+            )
+            .with_slope(joist_slope),
+            band,
+            RuleProvenance::new(
+                "ceiling.joists.on-slope",
+                format!(
+                    "Sloped ceiling joists span the {} plan run perpendicular to the low edge; end joists align with the rake edges and interior joists fall on {} layout marks. The cut length is the true sloped length (plan run times the {}:{} pitch).",
+                    run_extent, spacing, slope.pitch.rise, slope.pitch.run
+                ),
+            ),
+        ));
+    }
+
+    // Band joists close the joist ends at the low and high edges, running the full
+    // eave length perpendicular to the joists; each is level at its edge's elevation.
+    for (index, v, at_elevation) in [
+        (1usize, Length::ZERO, reference_elevation),
+        (2, run_extent, high_elevation),
+    ] {
+        members.push(frame_member(
+            format!("ceiling-rim-{index}"),
+            &ceiling.id,
+            MemberKind::RimJoist,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                Length::ZERO,
+                v,
+                geometry.eave_length,
+                joist_thickness,
+            )
+            .with_slope(SlopedPlacement {
+                low_elevation: at_elevation,
+                high_elevation: at_elevation,
+            }),
+            band,
+            RuleProvenance::new(
+                "ceiling.rim.sloped-ends",
+                "A band joist closes the joist ends at each bearing edge of the sloped ceiling.",
+            ),
+        ));
+    }
+
+    // A single mid-slope blocking row: one level piece in each clear gap between
+    // adjacent joists, on the sloped surface (a starter rule).
+    let mid_v = (run_extent / 2).max(Length::ZERO);
+    let mid_elevation = reference_elevation + Length::from_inches(mid_v.inches() * ratio);
+    let mid_slope = SlopedPlacement {
+        low_elevation: mid_elevation,
+        high_elevation: mid_elevation,
+    };
+    for pair in positions.windows(2) {
+        let start = pair[0] + joist_thickness / 2;
+        let gap = pair[1] - pair[0] - joist_thickness;
+        if gap <= Length::ZERO {
+            continue;
+        }
+        members.push(frame_member(
+            format!("ceiling-blocking-{}", start.ticks()),
+            &ceiling.id,
+            MemberKind::Blocking,
+            joist,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                start,
+                mid_v,
+                gap,
+                joist_thickness,
+            )
+            .with_slope(mid_slope),
+            band,
+            RuleProvenance::new(
+                "ceiling.blocking.mid-slope",
+                "A single mid-slope blocking row is generated between sloped ceiling joists (starter rule).",
+            ),
+        ));
+    }
+
+    // Plan footprint area for the per-layer takeoff (plan, not true surface area).
+    let layers = layers_takeoff(
+        system,
+        polygon_area_square_inches(outline).round() as i64,
+        materials,
+    );
+
+    // v2 surfaces structural judgment as a diagnostic: a scissor/vault ceiling is not
+    // a full rafter tie, so the ridge fork (A1.1) flags a beam — see the project pass.
+    let diagnostics = vec![
+        PlanDiagnostic::new(
+            DiagnosticSeverity::Info,
+            "ceiling.span.not-checked",
+            Some(ceiling.id.clone()),
+            format!(
+                "{} sloped joists are laid out geometrically; their span has not been checked against a code span table.",
+                ceiling.name
+            ),
+        ),
+        PlanDiagnostic::new(
+            DiagnosticSeverity::Info,
+            "ceiling.slope.scissor",
+            Some(ceiling.id.clone()),
+            format!(
+                "{} is a sloped (scissor/vault) ceiling: it is not a flat rafter tie at the plate, so a roof over it relies on a structural ridge beam (see the roof's ridge diagnostic).",
+                ceiling.name
+            ),
+        ),
+    ];
+
+    Ok(CeilingFramePlan {
+        ceiling: ceiling.id.clone(),
+        members,
+        layers,
+        diagnostics,
     })
 }
 
@@ -1019,22 +1232,33 @@ fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
     // winding-independent) come from the shared `framer-core` frame, so the framing
     // and the rendered surface cannot drift.
     let frame = plane.frame()?;
-    let n = plane.outline.len();
+    Some(surface_geometry(&plane.outline, plane.eave_edge, &frame))
+}
+
+/// The plan-projected geometry of a sloped surface (a roof plane or a sloped
+/// ceiling) from its outline, low (eave) edge, and shared [`RoofPlaneFrame`]: the
+/// eave (layout) length, the up-slope plan run extent, and the high edge. Shared by
+/// roof planes and sloped ceilings so they frame identically.
+fn surface_geometry(
+    outline: &[Point2],
+    low_edge: u32,
+    frame: &RoofPlaneFrame,
+) -> RoofPlaneGeometry {
+    let n = outline.len();
 
     // Run extent: the farthest up-slope perpendicular distance to any vertex.
-    let run_extent = plane
-        .outline
+    let run_extent = outline
         .iter()
         .map(|p| frame.up_slope_distance(p.x.inches(), p.y.inches()))
         .fold(0.0_f64, f64::max);
 
     // High (ridge) edge: the outline edge whose midpoint is farthest up-slope.
-    let i = plane.eave_edge as usize % n;
-    let mut high_edge = (plane.outline[i], plane.outline[(i + 1) % n]);
+    let i = low_edge as usize % n;
+    let mut high_edge = (outline[i], outline[(i + 1) % n]);
     let mut best = f64::MIN;
     for k in 0..n {
-        let p = plane.outline[k];
-        let q = plane.outline[(k + 1) % n];
+        let p = outline[k];
+        let q = outline[(k + 1) % n];
         let d = frame.up_slope_distance(
             (p.x.inches() + q.x.inches()) / 2.0,
             (p.y.inches() + q.y.inches()) / 2.0,
@@ -1045,11 +1269,11 @@ fn roof_plane_geometry(plane: &RoofPlane) -> Option<RoofPlaneGeometry> {
         }
     }
 
-    Some(RoofPlaneGeometry {
+    RoofPlaneGeometry {
         eave_length: Length::from_inches(frame.eave_length()),
         run_extent: Length::from_inches(run_extent),
         high_edge,
-    })
+    }
 }
 
 /// True sloped length per unit plan run for a pitch (1 when flat, ≥ 1 otherwise).
@@ -1673,8 +1897,28 @@ fn generate_surface_plans(
                 system: ceiling.system.clone(),
             }
         })?;
+        // The ceiling's low-edge building elevation: it hangs `height` below the
+        // level top (`elevation + height`). Used by sloped ceilings to place their
+        // joists in true elevation; ignored by flat ceilings. Fails loudly on a
+        // dangling level (parallel to the system lookup above), rather than silently
+        // framing at a wrong elevation.
+        let level = model
+            .levels
+            .iter()
+            .find(|level| level.id == ceiling.level)
+            .ok_or_else(|| SolverError::MissingLevelForElement {
+                element: ceiling.id.clone(),
+                level: ceiling.level.clone(),
+            })?;
+        let reference_elevation = level.elevation + level.height - ceiling.height;
         let ceiling_plan = match outlines.next().expect("one outline per ceiling") {
-            Some(outline) => generate_ceiling_plan(ceiling, system, &outline, &model.materials)?,
+            Some(outline) => generate_ceiling_plan(
+                ceiling,
+                system,
+                &outline,
+                reference_elevation,
+                &model.materials,
+            )?,
             None => CeilingFramePlan {
                 ceiling: ceiling.id.clone(),
                 members: Vec::new(),
@@ -2895,6 +3139,11 @@ pub enum SolverError {
         element: ElementId,
         system: ElementId,
     },
+    #[error("element {element:?} references level {level:?} which was not found")]
+    MissingLevelForElement {
+        element: ElementId,
+        level: ElementId,
+    },
     #[error("construction system {system:?} has no framing layer")]
     SystemHasNoFramingLayer { system: ElementId },
 }
@@ -4057,6 +4306,40 @@ mod tests {
     }
 
     #[test]
+    fn surface_plan_reports_missing_level_for_a_dangling_ceiling_level() {
+        // generate_surface_plans fails loudly on a ceiling whose level does not
+        // resolve (model validation normally catches this first), rather than framing
+        // it at a silently-wrong elevation. The system resolves, so the level lookup
+        // is reached.
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(ceiling_system());
+        model.ceilings.push(Ceiling::new(
+            "clg",
+            "Ceiling",
+            "level-absent",
+            "system-ceiling",
+            rect_region(10.0, 8.0),
+            Length::from_feet(8.0),
+        ));
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+
+        let error = generate_surface_plans(&mut plan, &model).unwrap_err();
+        assert!(matches!(
+            error,
+            SolverError::MissingLevelForElement { element, level }
+                if element.0 == "clg" && level.0 == "level-absent"
+        ));
+    }
+
+    #[test]
     fn ceiling_generates_ceiling_joists_spanning_the_shorter_dimension() {
         let ceiling = Ceiling::new(
             "clg",
@@ -4070,6 +4353,7 @@ mod tests {
             &ceiling,
             &ceiling_system(),
             region_points(&ceiling.region),
+            Length::from_feet(8.0),
             &materials(),
         )
         .unwrap();
@@ -4095,6 +4379,143 @@ mod tests {
             joists
                 .iter()
                 .all(|member| member.profile == BoardProfile::TwoBySix)
+        );
+    }
+
+    #[test]
+    fn sloped_ceiling_frames_joists_at_true_sloped_length() {
+        // A 20ft-eave × 12ft-run scissor ceiling at a 9:12 pitch (factor 1.25, ratio
+        // 0.75), springing at 8ft. low_edge 0 is the y=0 side (the 20ft eave), so the
+        // joists run the 12ft plan run up-slope.
+        let mut ceiling = Ceiling::new(
+            "clg",
+            "Scissor",
+            "level-1",
+            "system-ceiling",
+            rect_region(20.0, 12.0),
+            Length::from_feet(8.0),
+        );
+        ceiling.slope = Some(framer_core::CeilingSlope::new(pitch_9_12(), 0));
+        let plan = generate_ceiling_plan(
+            &ceiling,
+            &ceiling_system(),
+            region_points(&ceiling.region),
+            Length::from_feet(8.0),
+            &materials(),
+        )
+        .unwrap();
+
+        let joists: Vec<_> = plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::CeilingJoist)
+            .collect();
+        // Joists array along the 20ft (240in) low edge at 16in o.c. → 16 (plan spacing).
+        assert_eq!(joists.len(), 16, "joist count uses the plan eave length");
+        // True sloped cut: 144in plan run × 1.25 = 180in = 15ft (plan run is only 12ft).
+        assert!(
+            joists
+                .iter()
+                .all(|member| member.cut_length == Length::from_feet(15.0)),
+            "joists are cut to true sloped length, not the 12ft plan run"
+        );
+        // Building elevations: springs at 8ft (96in), rises 144×0.75 = 108in to 204in.
+        for joist in &joists {
+            let sloped = joist
+                .sloped
+                .expect("a sloped ceiling joist carries a sloped placement");
+            assert_eq!(sloped.low_elevation, Length::from_feet(8.0));
+            assert_eq!(sloped.high_elevation, Length::from_inches(204.0));
+        }
+        // Band joists close both sloped ends; mid-slope blocking sits between joists.
+        assert_eq!(
+            plan.members
+                .iter()
+                .filter(|member| member.kind == MemberKind::RimJoist)
+                .count(),
+            2,
+            "a band joist at the low and high edge"
+        );
+        assert!(
+            plan.members
+                .iter()
+                .any(|member| member.kind == MemberKind::Blocking)
+        );
+        // The per-layer takeoff uses the plan footprint area (20ft × 12ft), not the
+        // larger true sloped surface area.
+        let finish_area: i64 = plan
+            .layers
+            .iter()
+            .filter(|layer| layer.function == LayerFunction::CeilingFinish)
+            .map(|layer| layer.area_sq_in)
+            .sum();
+        assert_eq!(finish_area, 240 * 144);
+    }
+
+    #[test]
+    fn scissor_ceiling_emits_a_scissor_diagnostic_and_leaves_the_ridge_untied() {
+        // A scissor/vault ceiling under a gable is not a flat rafter tie: the ceiling
+        // carries a scissor note, and (consistent with A1.1's fork) the roof reverts
+        // to a structural ridge beam.
+        let mut model = tied_gable_model();
+        model.ceilings[0].slope = Some(framer_core::CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+            0,
+        ));
+        let plan = generate_project_plan(&model).unwrap();
+
+        let ceiling = plan.ceiling_plan(&ElementId::new("ceiling-1")).unwrap();
+        assert!(
+            ceiling.diagnostics.iter().any(|d| {
+                d.code == "ceiling.slope.scissor" && d.severity == DiagnosticSeverity::Info
+            }),
+            "a sloped ceiling reports that it is a scissor/vault, not a flat tie"
+        );
+        // The A1.1 fork reads the sloped ceiling as not a flat tie → ridge beam.
+        assert!(!roof_a_ridge_is_tied(&model));
+    }
+
+    #[test]
+    fn degenerate_sloped_ceiling_falls_back_to_flat_with_a_warning() {
+        // A sloped ceiling whose low edge is zero-length frames no slope: rather than
+        // silently dropping it, the generator falls back to a flat joist plan and
+        // warns (mirroring the roof's degenerate-outline path). Driven directly since
+        // a zero-length edge frames nothing.
+        let mut ceiling = Ceiling::new(
+            "clg",
+            "Bad scissor",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO), // coincident → zero-length low edge
+                Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ]),
+            Length::from_feet(8.0),
+        );
+        ceiling.slope = Some(framer_core::CeilingSlope::new(pitch_9_12(), 0));
+        let plan = generate_ceiling_plan(
+            &ceiling,
+            &ceiling_system(),
+            region_points(&ceiling.region),
+            Length::from_feet(8.0),
+            &materials(),
+        )
+        .unwrap();
+
+        assert!(
+            plan.members
+                .iter()
+                .filter(|member| member.kind == MemberKind::CeilingJoist)
+                .all(|member| member.sloped.is_none()),
+            "the fallback frames flat ceiling joists (no sloped placement)"
+        );
+        assert!(
+            plan.diagnostics.iter().any(|d| {
+                d.code == "ceiling.outline.degenerate" && d.severity == DiagnosticSeverity::Warning
+            }),
+            "the dropped slope is surfaced as a warning, not silent"
         );
     }
 
