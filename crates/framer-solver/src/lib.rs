@@ -4255,6 +4255,25 @@ mod tests {
             .count();
         assert_eq!(ridges, 1, "a gable shares one ridge board");
 
+        // The authored flat ceiling sits exactly at the roof's bearing line, so the
+        // gable's ridge is tied and a ridge board is adequate. Pins the product-
+        // visible tie flip through the real load_project + region-resolution +
+        // elevation-derivation path (the synthetic tests hand-set those inputs).
+        let roof_diagnostics = || {
+            plan.roof_plans
+                .iter()
+                .flat_map(|roof| roof.diagnostics.iter())
+        };
+        assert!(
+            roof_diagnostics().any(|diagnostic| diagnostic.code == "roof.ridge.tied"
+                && diagnostic.severity == DiagnosticSeverity::Info),
+            "demo-shell's plate-line ceiling ties the ridge (ridge board adequate)"
+        );
+        assert!(
+            roof_diagnostics().all(|diagnostic| diagnostic.code != "roof.ridge.beam-required"),
+            "demo-shell does not require a ridge beam"
+        );
+
         assert!(
             plan.ceiling_plan(&ElementId::new("ceiling-1"))
                 .unwrap()
