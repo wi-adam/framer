@@ -4306,6 +4306,40 @@ mod tests {
     }
 
     #[test]
+    fn surface_plan_reports_missing_level_for_a_dangling_ceiling_level() {
+        // generate_surface_plans fails loudly on a ceiling whose level does not
+        // resolve (model validation normally catches this first), rather than framing
+        // it at a silently-wrong elevation. The system resolves, so the level lookup
+        // is reached.
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(ceiling_system());
+        model.ceilings.push(Ceiling::new(
+            "clg",
+            "Ceiling",
+            "level-absent",
+            "system-ceiling",
+            rect_region(10.0, 8.0),
+            Length::from_feet(8.0),
+        ));
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+
+        let error = generate_surface_plans(&mut plan, &model).unwrap_err();
+        assert!(matches!(
+            error,
+            SolverError::MissingLevelForElement { element, level }
+                if element.0 == "clg" && level.0 == "level-absent"
+        ));
+    }
+
+    #[test]
     fn ceiling_generates_ceiling_joists_spanning_the_shorter_dimension() {
         let ceiling = Ceiling::new(
             "clg",
