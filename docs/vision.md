@@ -235,10 +235,22 @@ plan/elevation drawing output.
 
 Goal: cover the main framing systems of small wood structures.
 
+Status: roofs and ceilings are implemented (G-014). Framer now authors gable/shed roof
+planes, flat ceilings, and floor decks as level-owned objects and derives common
+rafters with a shared ridge board, ceiling/floor joists with rim boards and end
+blocking, the BOM/per-layer takeoff, and the 3-D + path-traced geometry — with
+structural judgment (ridge-without-tie, unchecked spans) surfaced as diagnostics.
+Stick-framed, rectangular, and diagnostics-only in v1.
+
 - Add floor framing with joists, rim boards, blocking, and stair openings.
 - Add roof planes, rafters/trusses as data, overhangs, skylights, and roof
   openings.
 - Generate section/elevation callouts for floor and roof assemblies.
+
+Remaining M3 work: cathedral/scissor (sloped) ceilings, hips/valleys and
+multi-wing footprints, dormers, manufactured trusses and engineered (I-joist/LVL)
+members, stair-opening headers in decks, projected section/elevation drawings for
+these assemblies, and real IRC span/tie/connection checks (M4 code profiles).
 
 ### M4: Code Profiles And Diagnostics
 

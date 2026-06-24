@@ -1298,10 +1298,13 @@ pub struct FramingSpec {
     pub spacing: Length,
     #[serde(default)]
     pub pattern: FramingPattern,
-    /// Which family of member this framing layer produces, so the solver can
-    /// dispatch member geometry (studs vs. rafters vs. joists). Defaults to
-    /// `Stud`; the default is omitted so existing wall systems (and the starter
-    /// library) stay byte-stable and their content hashes are unchanged.
+    /// Which family of member this framing layer produces (studs vs. rafters vs.
+    /// joists) — authored metadata. The v1 solver selects the generator and the
+    /// concrete `MemberKind` from the framed object (`Wall`/`RoofPlane`/`Ceiling`/
+    /// `FloorDeck`), so it does not yet branch on `member_family`; the tag records
+    /// the system's framing method for later family-based dispatch (e.g. trusses).
+    /// Defaults to `Stud`; the default is omitted so existing wall systems (and the
+    /// starter library) stay byte-stable and their content hashes are unchanged.
     #[serde(default, skip_serializing_if = "member_family_is_default")]
     pub member_family: MemberFamily,
     #[serde(default, skip_serializing_if = "Option::is_none")]
