@@ -14,7 +14,7 @@ use framer_render::render;
 use framer_render::scene::Scene;
 use framer_render::scenes::{
     REFERENCE_HEIGHT as HEIGHT, REFERENCE_SEED as SEED, REFERENCE_SPP as SPP,
-    REFERENCE_WIDTH as WIDTH, reference_scene, roofed_scene,
+    REFERENCE_WIDTH as WIDTH, reference_scene, roofed_scene, scissor_scene,
 };
 
 fn golden_path(name: &str) -> std::path::PathBuf {
@@ -71,6 +71,14 @@ fn assert_matches_golden(name: &str, scene: &Scene) {
 #[test]
 fn reference_render_matches_golden() {
     assert_matches_golden("reference", &reference_scene());
+}
+
+/// Locks the sloped *ceiling* surfaces: a model-derived scissor-vault shell (two
+/// opposing sloped ceilings meeting at a ridge) rendered through the production
+/// scene-extraction path — the same frame lift the app's mesher uses.
+#[test]
+fn scissor_render_matches_golden() {
+    assert_matches_golden("scissor", &scissor_scene());
 }
 
 /// Locks the sloped roof + horizontal ceiling/floor surfaces: a model-derived

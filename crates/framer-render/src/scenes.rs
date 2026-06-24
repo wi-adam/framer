@@ -4,9 +4,9 @@
 //! the app's GPU↔CPU parity test, so the two validate the *same* scene.
 
 use framer_core::{
-    BoardProfile, BuildingModel, Ceiling, ConstructionLayer, ConstructionSystem, FloorDeck,
-    FramingPattern, FramingSpec, LayerFunction, Length, Material as CoreMaterial, MemberFamily,
-    Point2, RoofPlane, Slope, SurfaceRegion, SystemKind,
+    BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConstructionLayer, ConstructionSystem,
+    FloorDeck, FramingPattern, FramingSpec, LayerFunction, Length, Material as CoreMaterial,
+    MemberFamily, Point2, RoofPlane, Slope, SurfaceRegion, SystemKind,
 };
 
 use crate::build::{RenderOptions, scene_from_model};
@@ -278,6 +278,108 @@ pub fn roofed_scene() -> Scene {
     scene_from_model(&roofed_model(), &opts)
 }
 
+/// The demo shell with a **scissor vault** ceiling — two opposing 6:12 sloped
+/// ceilings springing at the 8ft wall top and meeting at a ridge along y = 10ft
+/// (rising 120in × 6/12 = 60" to 156") — plus a floor deck, and no roof so the
+/// vaulted ceiling reads from above in the render. The source of truth for the
+/// scissor golden image and its GPU↔CPU parity test, locking the sloped-ceiling
+/// frame lift the app's mesher also uses.
+fn scissor_model() -> BuildingModel {
+    let ft = Length::from_feet;
+    let mut model = BuildingModel::demo_shell();
+    for level in &mut model.levels {
+        if level.id.0 == "level-1" {
+            level.height = Length::from_whole_inches(108);
+        }
+    }
+    model.materials.push(CoreMaterial::solid_color(
+        "mat-ceil",
+        "Ceiling",
+        [232, 232, 228],
+    ));
+    model.materials.push(CoreMaterial::solid_color(
+        "mat-floor",
+        "Subfloor",
+        [150, 116, 78],
+    ));
+    model.systems.push(finish_system(
+        "system-ceiling",
+        SystemKind::Ceiling,
+        LayerFunction::CeilingFinish,
+        "mat-ceil",
+        true,
+    ));
+    model.systems.push(finish_system(
+        "system-floor",
+        SystemKind::Floor,
+        LayerFunction::InteriorFinish,
+        "mat-floor",
+        true,
+    ));
+
+    // Two opposing sloped ceilings, each springing at the 8ft wall top (12" below the
+    // 9ft level top) and rising 6:12 over its 10ft half to the shared ridge at y=10ft.
+    let slope = CeilingSlope::new(
+        Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+        0,
+    );
+    let mut south = Ceiling::new(
+        "ceiling-south",
+        "South vault",
+        "level-1",
+        "system-ceiling",
+        SurfaceRegion::Polygon(vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(28.0), Length::ZERO),
+            Point2::new(ft(28.0), ft(10.0)),
+            Point2::new(Length::ZERO, ft(10.0)),
+        ]),
+        Length::from_whole_inches(12),
+    );
+    south.slope = Some(slope);
+    model.ceilings.push(south);
+    let mut north = Ceiling::new(
+        "ceiling-north",
+        "North vault",
+        "level-1",
+        "system-ceiling",
+        SurfaceRegion::Polygon(vec![
+            Point2::new(Length::ZERO, ft(20.0)),
+            Point2::new(ft(28.0), ft(20.0)),
+            Point2::new(ft(28.0), ft(10.0)),
+            Point2::new(Length::ZERO, ft(10.0)),
+        ]),
+        Length::from_whole_inches(12),
+    );
+    north.slope = Some(slope);
+    model.ceilings.push(north);
+
+    model.floor_decks.push(FloorDeck::new(
+        "deck-1",
+        "Deck",
+        "level-1",
+        "system-floor",
+        SurfaceRegion::Polygon(vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(28.0), Length::ZERO),
+            Point2::new(ft(28.0), ft(20.0)),
+            Point2::new(Length::ZERO, ft(20.0)),
+        ]),
+    ));
+    model
+}
+
+/// The [`scissor_model`] rendered through the production `scene_from_model` path —
+/// the single source of truth for the scissor golden image and its GPU↔CPU parity
+/// test.
+pub fn scissor_scene() -> Scene {
+    let opts = RenderOptions {
+        aspect: REFERENCE_WIDTH as f32 / REFERENCE_HEIGHT as f32,
+        ..RenderOptions::default()
+    };
+    scene_from_model(&scissor_model(), &opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +413,43 @@ mod tests {
             assert!(
                 t.v0.x.is_finite() && t.geom_normal.x.is_finite() && t.geom_normal.y.is_finite(),
                 "non-finite geometry in roofed_scene"
+            );
+        }
+        assert!(!scene.bvh.nodes.is_empty());
+    }
+
+    #[test]
+    fn scissor_scene_lifts_the_vault_ceiling_via_the_frame() {
+        let scene = scissor_scene();
+        // The scissor vault is the only *tilted* geometry (walls are vertical, the
+        // floor is horizontal): a triangle whose normal has both a vertical and a
+        // horizontal component. It springs at the 8ft (96in) wall top and rises to
+        // the 13ft (156in) ridge — pinning the sloped-ceiling frame lift.
+        let vault: Vec<&Triangle> = scene
+            .triangles
+            .iter()
+            .filter(|t| {
+                let nz = t.geom_normal.z.abs();
+                nz > 0.1 && nz < 0.99
+            })
+            .collect();
+        assert!(
+            !vault.is_empty(),
+            "no tilted vault-ceiling triangle in scissor_scene"
+        );
+        let zs = || {
+            vault
+                .iter()
+                .flat_map(|t| [t.v0.z, (t.v0 + t.edge1).z, (t.v0 + t.edge2).z])
+        };
+        let lo = zs().fold(f32::INFINITY, f32::min);
+        let hi = zs().fold(f32::NEG_INFINITY, f32::max);
+        assert!((lo - 96.0).abs() < 0.5, "vault eave at {lo}, want ~96in");
+        assert!((hi - 156.0).abs() < 0.5, "vault ridge at {hi}, want ~156in");
+        for t in &scene.triangles {
+            assert!(
+                t.v0.x.is_finite() && t.geom_normal.x.is_finite() && t.geom_normal.y.is_finite(),
+                "non-finite geometry in scissor_scene"
             );
         }
         assert!(!scene.bvh.nodes.is_empty());

@@ -166,11 +166,29 @@ impl Scene3d {
             );
         }
         for ceiling in &model.ceilings {
-            let z = level_top(model, &ceiling.level) - ceiling.height.inches() as f32;
             let Some(plan) = region_outline_plan(model, &ceiling.region) else {
                 continue;
             };
-            let verts = lift_outline(&plan, z);
+            // The ceiling's low-edge building elevation: it hangs `height` below the
+            // level top. A sloped (scissor/vault) ceiling lifts each plan vertex onto
+            // its sloped plane via the shared frame, exactly like a roof plane; a flat
+            // ceiling stays at a constant elevation.
+            let reference_elevation = model
+                .levels
+                .iter()
+                .find(|level| level.id == ceiling.level)
+                .map(|level| level.elevation + level.height - ceiling.height)
+                .unwrap_or(Length::ZERO);
+            let verts = match ceiling.frame(reference_elevation) {
+                Some(frame) => plan
+                    .iter()
+                    .map(|p| {
+                        let (x, y) = (p.x.inches(), p.y.inches());
+                        Point3::vector(x as f32, y as f32, frame.elevation_at(x, y) as f32)
+                    })
+                    .collect(),
+                None => lift_outline(&plan, reference_elevation.inches() as f32),
+            };
             let triangles = framer_core::triangulate_simple_polygon(&plan);
             let color = surface_color(model, &ceiling.system, SurfaceFace::Ceiling);
             let selected = matches!(selection, Selection::Ceiling(id) if id == &ceiling.id.0);
@@ -950,17 +968,6 @@ fn level_elevation(model: &BuildingModel, level_id: &ElementId) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// A level's top plane elevation (`elevation + height`, inches) — the hang
-/// reference a ceiling drops below — or 0 when the level is missing.
-fn level_top(model: &BuildingModel, level_id: &ElementId) -> f32 {
-    model
-        .levels
-        .iter()
-        .find(|level| level.id == *level_id)
-        .map(|level| (level.elevation + level.height).inches() as f32)
-        .unwrap_or(0.0)
-}
-
 /// A ceiling/floor-deck region's closed plan outline. `Room` regions resolve
 /// through the wall graph (mirroring the solver), so the drawn surface tracks the
 /// same enclosed face the joists frame; an unknown room or an open (mid-edit) loop
@@ -1391,6 +1398,42 @@ mod surface_tests {
             underside.iter().all(|f| f.0 == weather[0].0),
             "a roof with a ceiling below should not recolor its underside"
         );
+    }
+
+    #[test]
+    fn sloped_ceiling_is_lifted_via_the_frame_in_the_mesher() {
+        // Slice A4: the app mesher lifts a sloped ceiling onto its plane via the
+        // shared frame, instead of drawing it at a constant elevation. Isolate the
+        // ceiling as the only tilted geometry (the surface_model roof is removed; the
+        // floor stays horizontal), then a 6:12 slope over the 8ft run rises the
+        // ceiling from its 96" springing to 144".
+        let mut model = surface_model();
+        model.roof_planes.clear();
+        model.ceilings[0].slope = Some(framer_core::CeilingSlope::new(
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            0,
+        ));
+        let scene = build(&model, &Selection::Wall);
+
+        // Tilted triangles (normal has both a vertical and a horizontal component) are
+        // the lifted ceiling; a flat ceiling would have purely vertical normals. Span
+        // all three vertices of each tilted triangle so the elevation range does not
+        // depend on the triangulator's vertex order.
+        let mut tilted_zs: Vec<f32> = Vec::new();
+        for tri in scene.indices.chunks_exact(3) {
+            let nz = scene.vertices[tri[0] as usize].normal[2].abs();
+            if nz > 0.1 && nz < 0.99 {
+                tilted_zs.extend(tri.iter().map(|&i| scene.vertices[i as usize].position[2]));
+            }
+        }
+        assert!(
+            !tilted_zs.is_empty(),
+            "the sloped ceiling is lifted via the frame, not drawn flat"
+        );
+        let lo = tilted_zs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = tilted_zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!((lo - 96.0).abs() < 0.5, "ceiling springs at 96in, got {lo}");
+        assert!((hi - 144.0).abs() < 0.5, "ceiling rises to 144in, got {hi}");
     }
 
     #[test]
