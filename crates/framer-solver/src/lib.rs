@@ -4087,6 +4087,66 @@ mod tests {
         assert!(project_plywood >= 144 * 96);
     }
 
+    /// The shipped `demo-shell` example (capped with a gable roof, a flat ceiling,
+    /// and a floor deck in Slice 6) frames end-to-end: both slopes rafter, the
+    /// gable shares one ridge board, the ceiling and deck joist, and every new
+    /// member family folds into the project BOM.
+    #[test]
+    fn roofed_demo_shell_example_frames_every_surface() {
+        let example = include_str!("../../../examples/projects/demo-shell.framer");
+        let model = load_project(example).unwrap();
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert_eq!(plan.roof_plans.len(), 2);
+        assert_eq!(plan.ceiling_plans.len(), 1);
+        assert_eq!(plan.floor_plans.len(), 1);
+
+        for id in ["roof-north", "roof-south"] {
+            let roof = plan.roof_plan(&ElementId::new(id)).unwrap();
+            assert!(
+                roof.members
+                    .iter()
+                    .any(|member| member.kind == MemberKind::Rafter),
+                "{id} frames rafters"
+            );
+        }
+        let ridges = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::RidgeBoard)
+            .count();
+        assert_eq!(ridges, 1, "a gable shares one ridge board");
+
+        assert!(
+            plan.ceiling_plan(&ElementId::new("ceiling-1"))
+                .unwrap()
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::CeilingJoist)
+        );
+        assert!(
+            plan.floor_plan(&ElementId::new("deck-1"))
+                .unwrap()
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::FloorJoist)
+        );
+
+        let bom = plan.bom();
+        for kind in [
+            MemberKind::Rafter,
+            MemberKind::RidgeBoard,
+            MemberKind::CeilingJoist,
+            MemberKind::FloorJoist,
+        ] {
+            assert!(
+                bom.iter().any(|item| item.kind == kind),
+                "{kind:?} appears in the project BOM"
+            );
+        }
+    }
+
     #[test]
     fn floor_deck_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
         use framer_core::{Room, RoomUsage};

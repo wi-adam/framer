@@ -494,6 +494,10 @@ mod tests {
 
         assert_eq!(model.walls.len(), 4);
         assert_eq!(model.wall_joins.len(), 4);
+        // Capped with a gable roof (two planes), a flat ceiling, and a floor deck.
+        assert_eq!(model.roof_planes.len(), 2);
+        assert_eq!(model.ceilings.len(), 1);
+        assert_eq!(model.floor_decks.len(), 1);
         assert_eq!(save_project(&model).unwrap(), example);
     }
 
