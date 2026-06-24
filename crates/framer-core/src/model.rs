@@ -4380,6 +4380,59 @@ mod tests {
     }
 
     #[test]
+    fn roof_cathedral_flags_align_per_plane() {
+        // Two roof planes with disjoint footprints, one covered by a ceiling and one
+        // not, pin that `roof_cathedral_flags` is positional (aligned to
+        // `roof_planes`) — the index contract both renderers depend on. A single
+        // shared/aliased flag would pass the single-plane tests but fail here.
+        let ft = Length::from_feet;
+        let footprint = |x0: f64, x1: f64| {
+            vec![
+                Point2::new(ft(x0), Length::ZERO),
+                Point2::new(ft(x1), Length::ZERO),
+                Point2::new(ft(x1), ft(12.0)),
+                Point2::new(ft(x0), ft(12.0)),
+            ]
+        };
+        let plane = |id: &str, x0: f64, x1: f64| {
+            RoofPlane::new(
+                id,
+                id,
+                "level-1",
+                "system-roof",
+                footprint(x0, x1),
+                Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+                0,
+                ft(8.0),
+            )
+        };
+
+        let mut model = surface_systems_model();
+        // Order matters: covered plane first, cathedral plane second.
+        model.roof_planes.push(plane("roof-covered", 0.0, 20.0));
+        model.roof_planes.push(plane("roof-cathedral", 30.0, 50.0));
+        // A ceiling over only the first plane's footprint.
+        model.ceilings.push(Ceiling::new(
+            "ceiling-1",
+            "Ceiling",
+            "level-1",
+            "system-ceiling",
+            SurfaceRegion::Polygon(footprint(0.0, 20.0)),
+            Length::from_whole_inches(12),
+        ));
+
+        assert_eq!(model.roof_cathedral_flags(), vec![false, true]);
+        // The per-plane form agrees index-for-index with the batched form.
+        for (plane, &flag) in model
+            .roof_planes
+            .iter()
+            .zip(model.roof_cathedral_flags().iter())
+        {
+            assert_eq!(model.roof_plane_is_cathedral(plane), flag);
+        }
+    }
+
+    #[test]
     fn surface_objects_validate_when_well_formed() {
         let mut model = surface_systems_model();
         model
