@@ -269,6 +269,14 @@ impl FramerApp {
                     {
                         self.toggle_ceiling_tool();
                     }
+                    if widgets::tool_button(ui, Icon::Angular, "Vault", self.vault_tool_active, true)
+                        .on_hover_text(
+                            "Vault an enclosed area: two opposing sloped ceilings meeting at a ridge (V)",
+                        )
+                        .clicked()
+                    {
+                        self.toggle_vault_tool();
+                    }
                     if widgets::tool_button(
                         ui,
                         Icon::LayoutGrid,

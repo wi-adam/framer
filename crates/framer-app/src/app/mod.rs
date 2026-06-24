@@ -75,6 +75,9 @@ pub(crate) struct FramerApp {
     /// commits its object when the user clicks inside an enclosed wall loop.
     ceiling_tool_active: bool,
     floor_tool_active: bool,
+    /// The vault tool: a region-gated tool that authors a scissor/vault as two
+    /// opposing sloped ceilings over the enclosed loop under the click.
+    vault_tool_active: bool,
     opening_drag: Option<OpeningDragState>,
     /// In-progress drag of a wall endpoint handle in the plan view.
     wall_drag: Option<WallDragState>,
@@ -171,6 +174,61 @@ enum RoofForm {
 /// level, system, pitch, springing) is filled in by `add_roof`.
 type RoofPlaneSpec = (Vec<Point2>, u32);
 
+/// Split a region outline's bounding box into the two opposing halves of a scissor
+/// vault, divided by a ridge along the longer span. Each half is a rectangle whose
+/// **edge 0 is its outer (spring) wall**, so a [`framer_core::CeilingSlope`] with
+/// `low_edge: 0` springs there and rises to the shared ridge. `None` for a
+/// degenerate (zero-area) region. v2 vaults the axis-aligned bounding box (like the
+/// rest of the framing); a non-rectangular room is covered by its bbox.
+fn scissor_halves(outline: &[Point2]) -> Option<(Vec<Point2>, Vec<Point2>)> {
+    if outline.len() < 3 {
+        return None;
+    }
+    let (mut min, mut max) = (outline[0], outline[0]);
+    for p in outline {
+        min = Point2::new(min.x.min(p.x), min.y.min(p.y));
+        max = Point2::new(max.x.max(p.x), max.y.max(p.y));
+    }
+    let (width, depth) = (max.x - min.x, max.y - min.y);
+    if width <= Length::ZERO || depth <= Length::ZERO {
+        return None;
+    }
+    let p = Point2::new;
+    if width >= depth {
+        // Ridge along x at mid-depth; halves spring from the y-min / y-max walls.
+        let mid = min.y + depth / 2;
+        let low = vec![
+            p(min.x, min.y),
+            p(max.x, min.y),
+            p(max.x, mid),
+            p(min.x, mid),
+        ];
+        let high = vec![
+            p(min.x, max.y),
+            p(max.x, max.y),
+            p(max.x, mid),
+            p(min.x, mid),
+        ];
+        Some((low, high))
+    } else {
+        // Ridge along y at mid-width; halves spring from the x-min / x-max walls.
+        let mid = min.x + width / 2;
+        let low = vec![
+            p(min.x, min.y),
+            p(min.x, max.y),
+            p(mid, max.y),
+            p(mid, min.y),
+        ];
+        let high = vec![
+            p(max.x, min.y),
+            p(max.x, max.y),
+            p(mid, max.y),
+            p(mid, min.y),
+        ];
+        Some((low, high))
+    }
+}
+
 /// How walls are drawn in the Plan and 3D views. A single shared presentation
 /// setting (not per-view) so toggling it reads consistently across both. The
 /// cleanest mode is the default so a fresh shell reads as an outline first.
@@ -261,6 +319,11 @@ enum ViewClick {
     },
     /// A floor-tool click placing a floor deck over the loop under the point.
     PlaceFloor {
+        point: Point2,
+    },
+    /// A vault-tool click authoring a scissor/vault (two opposing sloped ceilings)
+    /// over the loop under the point.
+    PlaceVault {
         point: Point2,
     },
     /// Select an existing room (e.g. clicking its fill in the plan).
@@ -376,6 +439,7 @@ impl Default for FramerApp {
             draw_wall_tool: DrawWallToolState::default(),
             room_tool_active: false,
             ceiling_tool_active: false,
+            vault_tool_active: false,
             floor_tool_active: false,
             opening_drag: None,
             wall_drag: None,
@@ -708,6 +772,7 @@ impl FramerApp {
             room_pressed,
             ceiling_pressed,
             floor_pressed,
+            vault_pressed,
             delete_pressed,
             redo_pressed,
             undo_pressed,
@@ -718,6 +783,7 @@ impl FramerApp {
             let room = input.consume_key(egui::Modifiers::NONE, egui::Key::R);
             let ceiling = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
             let floor = input.consume_key(egui::Modifiers::NONE, egui::Key::F);
+            let vault = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
             let delete = input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
             // Redo MUST be consumed before undo: egui's consume_key matches
@@ -731,7 +797,7 @@ impl FramerApp {
             // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
             let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
             (
-                escape, dimension, draw_wall, room, ceiling, floor, delete, redo, undo,
+                escape, dimension, draw_wall, room, ceiling, floor, vault, delete, redo, undo,
             )
         });
 
@@ -753,6 +819,8 @@ impl FramerApp {
             self.toggle_ceiling_tool();
         } else if floor_pressed {
             self.toggle_floor_tool();
+        } else if vault_pressed {
+            self.toggle_vault_tool();
         }
     }
 
@@ -954,6 +1022,7 @@ impl FramerApp {
         self.draw_wall_tool = DrawWallToolState::default();
         self.room_tool_active = false;
         self.ceiling_tool_active = false;
+        self.vault_tool_active = false;
         self.floor_tool_active = false;
         self.opening_drag = None;
         self.dimension_status =
@@ -978,6 +1047,7 @@ impl FramerApp {
             self.dimension_tool.clear_picks();
             self.room_tool_active = false;
             self.ceiling_tool_active = false;
+            self.vault_tool_active = false;
             self.floor_tool_active = false;
             self.opening_drag = None;
             self.viewport_mode = ViewportMode::Plan;
@@ -1577,6 +1647,7 @@ impl FramerApp {
             self.dimension_tool.clear_picks();
             self.draw_wall_tool = DrawWallToolState::default();
             self.ceiling_tool_active = false;
+            self.vault_tool_active = false;
             self.floor_tool_active = false;
             self.opening_drag = None;
             self.viewport_mode = ViewportMode::Plan;
@@ -1600,6 +1671,24 @@ impl FramerApp {
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
                 Some("Click inside an enclosed area to place a flat ceiling".to_owned());
+        } else {
+            self.dimension_status = None;
+        }
+    }
+
+    /// Toggle the vault tool — region-gated like the ceiling tool, but it authors a
+    /// scissor/vault (two opposing sloped ceilings) rather than one flat ceiling.
+    fn toggle_vault_tool(&mut self) {
+        let activate = !self.vault_tool_active;
+        self.deactivate_placement_tools();
+        self.vault_tool_active = activate;
+        if activate {
+            if !self.workspace_mode.allows_design_edits() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            self.viewport_mode = ViewportMode::Plan;
+            self.dimension_status =
+                Some("Click inside an enclosed area to vault it (two opposing slopes)".to_owned());
         } else {
             self.dimension_status = None;
         }
@@ -1630,6 +1719,7 @@ impl FramerApp {
         self.dimension_tool.clear_picks();
         self.room_tool_active = false;
         self.ceiling_tool_active = false;
+        self.vault_tool_active = false;
         self.floor_tool_active = false;
         self.opening_drag = None;
     }
@@ -1674,6 +1764,63 @@ impl FramerApp {
                     Some("No enclosed area here — close a wall loop first".to_owned());
             }
         }
+    }
+
+    /// Vault the enclosed loop under a vault-tool click: author the two opposing
+    /// sloped ceilings of a scissor/vault, gated on a closed loop.
+    fn handle_place_vault(&mut self, point: Point2) {
+        if !self.vault_tool_active {
+            return;
+        }
+        match framer_core::room_boundary(&self.model, point) {
+            Some(boundary) => self.add_vault(boundary.vertices),
+            None => {
+                self.dimension_status =
+                    Some("No enclosed area here — close a wall loop first".to_owned());
+            }
+        }
+    }
+
+    /// Author a scissor/vault over `outline` as one undo step: two opposing sloped
+    /// `Ceiling` planes (each a polygon half springing from its outer wall up to the
+    /// shared ridge along the region's longer span), at a default 4:12 pitch, both
+    /// editable in the inspector. The cathedral case is just "no ceiling", so this
+    /// tool only authors the scissor form.
+    fn add_vault(&mut self, outline: Vec<Point2>) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Some((low_half, high_half)) = scissor_halves(&outline) else {
+            self.dimension_status = Some("This area is too small to vault".to_owned());
+            return;
+        };
+        // A default 4:12 pitch; the spring (low) edge is index 0 of each half by
+        // construction. Both editable per ceiling in the inspector.
+        let pitch =
+            framer_core::Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12));
+        let slope = framer_core::CeilingSlope::new(pitch, 0);
+        self.edit("Add vault", |app| {
+            let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
+            let level = app.first_level_id();
+            let mut first_id = None;
+            for half in [low_half, high_half] {
+                let (id, index) = next_ceiling_id(&app.model);
+                let mut ceiling = framer_core::Ceiling::new(
+                    id.clone(),
+                    format!("Vault {index}"),
+                    level.clone(),
+                    system.clone(),
+                    framer_core::SurfaceRegion::Polygon(half),
+                    Length::ZERO,
+                );
+                ceiling.slope = Some(slope);
+                app.model.ceilings.push(ceiling);
+                first_id.get_or_insert(id);
+            }
+            if let Some(id) = first_id {
+                app.selected = Selection::Ceiling(id);
+            }
+        });
     }
 
     /// Resolve the enclosed wall loop under `point` to a [`SurfaceRegion`]: a
@@ -2435,6 +2582,9 @@ impl FramerApp {
             }
             ViewClick::PlaceFloor { point } => {
                 self.handle_place_floor(point);
+            }
+            ViewClick::PlaceVault { point } => {
+                self.handle_place_vault(point);
             }
             ViewClick::Room { room_id } => {
                 self.selected = Selection::Room(room_id);
