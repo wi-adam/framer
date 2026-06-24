@@ -4,14 +4,16 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** v1 Implemented (core types + schema v11, floor/ceiling joisting, roof rafters,
-> render + 3-D viewport, authoring UX, roofed example) · v2 Proposed (sloped/cathedral/scissor
-> ceilings + the ridge structural fork; then hip/valley roofs) ·
+> **Status:** v1 Implemented (core types, floor/ceiling joisting, roof rafters,
+> render + 3-D viewport, authoring UX, roofed example) · v2 Phase A in progress — Slice A1 done
+> (cathedral underside finish + the ridge-board-vs-beam tie fork + cathedral/attic diagnostic);
+> Slice A2 done (sloped-ceiling model `CeilingSlope` + validation, schema **v12**); Slices A3–A5
+> (sloped joists, render, authoring) and Phase B (hip/valley roofs) remain ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
 > [2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md) ·
-> **Last reviewed:** 2026-06-23
+> **Last reviewed:** 2026-06-24
 
 ## Intent / Purpose
 
@@ -117,8 +119,9 @@ Sequenced and tracked in
   cathedral: the room sees the roof assembly's *conditioned-side* (interior) finish on the
   underside, not the weather face. v1 renders both faces with the roofing material; v2 resolves
   the underside through the roof system's interior layer.
-- **`Ceiling.slope` becomes live.** A ceiling may carry a `Some(Slope)` with a downslope
-  reference; the solver frames its joists on that plane (true sloped cut length, plan length for
+- **`Ceiling.slope` becomes live.** A ceiling may carry a `Some(CeilingSlope { pitch, low_edge })`
+  — a `Slope` plus the polygon edge it springs from (Slice A2; a sloped ceiling requires a
+  `Polygon` region); the solver frames its joists on that plane (true sloped cut length, plan length for
   spacing/area — the rafter math), and both meshers lift the surface via the shared
   `RoofPlaneFrame` projection rather than a constant elevation. `slope == None` stays flat and
   byte-identical. A **scissor/vault** ceiling is two opposing sloped ceilings, mirroring how a
@@ -231,7 +234,10 @@ non-axis-aligned framing member**.
     reference_elevation: Length, eave_overhang: Length, rake_overhang: Length,
     openings: Vec<RoofOpening> }` — `system.kind == Roof`.
   - `Ceiling { id, name, level, system, region: SurfaceRegion, height: Length,
-    slope: Option<Slope> }` — `system.kind == Ceiling`; `slope` is `None` (flat) in v1.
+    slope: Option<CeilingSlope> }` — `system.kind == Ceiling`; `slope` is `None` (flat) in v1.
+    v2 makes `slope` live as `CeilingSlope { pitch: Slope, low_edge: u32 }` — the surface
+    springs from the polygon's `low_edge` at `height` and rises at `pitch`, reusing the
+    `RoofPlaneFrame` lift; a sloped ceiling requires a `Polygon` region (validation enforces this).
   - `FloorDeck { id, name, level, system, region: SurfaceRegion, span: SpanDirection }` —
     `system.kind == Floor`.
   - `Slope { rise: Length, run: Length }`; `SurfaceRegion = Room(ElementId) | Polygon(Vec<Point2>)`;
@@ -254,7 +260,8 @@ non-axis-aligned framing member**.
 - **Validation** (`BuildingModel::validate`, `ConstructionSystem::validate`): new kind-matched
   system-reference checks; generalize the single-framing-layer rule (today gated `kind == Wall`)
   to `Roof`/`Floor`/`Ceiling`; range/geometry checks per the requirements.
-- **Serialization** (`project.rs`): a schema bump (**v10 → v11**; the loader is single-version,
+- **Serialization** (`project.rs`): a schema bump (v1: **v10 → v11**; v2 Slice A2: **v11 → v12**
+  for `CeilingSlope`; the loader is single-version,
   `MIN_SUPPORTED == PROJECT_SCHEMA_VERSION`). New collections join `sort_deterministically()`
   (id-sorted; nested `RoofOpening`s sorted by id) and the round-trip fixtures. See
   [project-files.md](../project-files.md).
@@ -330,9 +337,10 @@ non-axis-aligned framing member**.
   collections are canonicalized.
 - **Closed enums for things the app reasons about** (`SystemKind`, `LayerFunction`,
   `MemberKind`, `MemberFamily`, `OpeningKind`); open data only for material substance.
-- **`.framer` is single-version (v11 after this change); no migration** — older files are
-  rejected, not upgraded (current policy). New persisted structs use
-  `#[serde(deny_unknown_fields)]` + serde defaults so empty projects/fixtures stay byte-stable.
+- **`.framer` is single-version (v12 after v2 Slice A2; v11 in v1); no migration** — older files
+  are rejected, not upgraded (current policy). New persisted structs use
+  `#[serde(deny_unknown_fields)]` + serde defaults so empty projects/fixtures stay byte-stable
+  (flat ceilings omit `slope`, so the v1 examples are byte-identical under v12).
 - **CPU render is the reference; GPU mirrors it.** v1 adds only opaque-diffuse geometry through
   the shared `Triangle`/`Scene`/`to_gpu` path, preserving triangle/BVH order; `gpu_parity` stays
   green.
@@ -369,11 +377,12 @@ non-axis-aligned framing member**.
   defaults to shorter with an override on the element; confirm the heuristic on L/T regions.
 - **Whether the derived `ProjectFramePlan` shape change** (new member kinds / sloped placement)
   warrants a versioned plan type, given the plan is round-tripped/compared in solver tests.
-- **(v2) The downslope-reference field shape on `Ceiling`.** A bare `Slope` is ambiguous without
-  a low edge. Options: a `low_edge: u32` indexing the region polygon (mirrors `RoofPlane.eave_edge`,
-  but a `Room` region has no stable outline order), a `SpanDirection`-style downslope vector, or a
-  small `CeilingSlope { slope, reference }` struct. Resolve at the start of v2 Slice A2; it drives
-  the v11 → v12 schema bump.
+- **(v2) The downslope-reference field shape on `Ceiling`. — Resolved (Slice A2).** Adopted the
+  `CeilingSlope { pitch: Slope, low_edge: u32 }` struct (`Ceiling.slope: Option<CeilingSlope>`),
+  mirroring `RoofPlane`'s `(slope, eave_edge)`. The `Room`-region instability of a raw `low_edge`
+  index is resolved by **requiring a `Polygon` region for any sloped ceiling** (validation enforces
+  it) — which is what the vault tool emits anyway (two half-polygons, not a whole-room boundary).
+  Drove the v11 → v12 schema bump.
 - **(v2) Tie-detection containment test.** A1.1 must decide whether a ceiling/deck region
   "encloses" a roof plane's footprint to count as a thrust tie — exact polygon containment vs. a
   cheaper bbox/centroid test. Start with centroid-in-region (reuse `point_in_polygon`) and
