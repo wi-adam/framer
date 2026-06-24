@@ -2222,7 +2222,7 @@ mod tests {
 
         assert_eq!(
             loaded.content_hash,
-            "blake3:0b183b4be43d95e540f5593f11fff6fb0f4962672fe9faedc581b1bcb94b7649"
+            "blake3:8b688c3aa82cf916df7d26caf33b135696c81ee399329d608a98563ae39a56ce"
         );
     }
 

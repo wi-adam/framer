@@ -10,7 +10,7 @@ use framer_core::{CodeProfile, Length, OpeningKind, Point2, Wall};
 
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
-use super::{FramerApp, Selection};
+use super::{FramerApp, RoofForm, Selection, ViewClick, ViewportMode};
 
 /// Feed a single key-press through a real egui frame so `handle_keyboard_shortcuts`
 /// sees it via `consume_key` exactly as it would at runtime.
@@ -241,6 +241,503 @@ fn delete_room_is_a_single_undoable_step() {
 
     app.undo();
     assert_eq!(app.model.rooms.len(), 1, "undo restores the deleted room");
+}
+
+#[test]
+fn add_ceiling_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    let systems_before = app.model.systems.len();
+
+    // Seed inside the demo shell (28ft × 20ft); the region resolves to the
+    // enclosed wall loop.
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+
+    assert_eq!(app.model.ceilings.len(), before + 1);
+    // The whole change is one undo step, the ceiling references a Ceiling-kind
+    // system (reused if present, else seeded), and the model validates.
+    let ceiling = app.model.ceilings.last().unwrap();
+    let system = app
+        .model
+        .systems
+        .iter()
+        .find(|system| system.id == ceiling.system)
+        .expect("the ceiling references an existing system");
+    assert_eq!(system.kind, framer_core::SystemKind::Ceiling);
+    assert!(
+        app.model.validate().is_ok(),
+        "authored ceiling must validate"
+    );
+    assert_eq!(app.history.undo_label(), Some("Add ceiling"));
+
+    app.undo();
+    assert_eq!(app.model.ceilings.len(), before, "undo removes the ceiling");
+    assert_eq!(
+        app.model.systems.len(),
+        systems_before,
+        "undo restores the system list"
+    );
+}
+
+#[test]
+fn add_ceiling_seeds_a_ceiling_system_when_absent() {
+    let mut app = FramerApp::default();
+    // Drop every ceiling system so the next placement must seed one.
+    app.model
+        .systems
+        .retain(|system| system.kind != framer_core::SystemKind::Ceiling);
+    let systems_before = app.model.systems.len();
+
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+
+    assert_eq!(
+        app.model.systems.len(),
+        systems_before + 1,
+        "a Ceiling system is seeded in the same step"
+    );
+    assert!(app.model.validate().is_ok(), "seeded ceiling must validate");
+}
+
+#[test]
+fn add_floor_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.floor_decks.len();
+
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_floor(region);
+
+    assert_eq!(app.model.floor_decks.len(), before + 1);
+    assert!(app.model.validate().is_ok(), "authored floor must validate");
+    assert_eq!(app.history.undo_label(), Some("Add floor"));
+
+    app.undo();
+    assert_eq!(app.model.floor_decks.len(), before, "undo removes the deck");
+}
+
+#[test]
+fn delete_ceiling_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region);
+    let id = match &app.selected {
+        Selection::Ceiling(id) => id.clone(),
+        other => panic!("expected the new ceiling selected, got {other:?}"),
+    };
+
+    app.delete_selected_ceiling();
+    assert!(app.model.ceilings.iter().all(|ceiling| ceiling.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete ceiling"));
+
+    app.undo();
+    assert_eq!(app.model.ceilings.len(), 1, "undo restores the ceiling");
+}
+
+#[test]
+fn add_gable_roof_generates_two_valid_planes_in_one_step() {
+    let mut app = FramerApp::default();
+    let before = app.model.roof_planes.len();
+
+    app.add_roof(RoofForm::Gable);
+
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before + 2,
+        "a gable is two opposing planes"
+    );
+    assert!(app.model.validate().is_ok(), "generated roof must validate");
+    // Each plane references a Roof system, has a positive run, and an in-range
+    // eave edge.
+    for plane in &app.model.roof_planes {
+        let system = app
+            .model
+            .systems
+            .iter()
+            .find(|system| system.id == plane.system)
+            .expect("plane references an existing system");
+        assert_eq!(system.kind, framer_core::SystemKind::Roof);
+        assert!(plane.slope.run > Length::ZERO);
+        assert!((plane.eave_edge as usize) < plane.outline.len());
+        assert!(plane.frame().is_some(), "plane geometry is non-degenerate");
+    }
+    assert_eq!(app.history.undo_label(), Some("Add roof"));
+    assert_eq!(
+        app.viewport_mode,
+        ViewportMode::RoofPlan,
+        "adding a roof switches to the roof-plan view"
+    );
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo removes both planes in one step"
+    );
+}
+
+#[test]
+fn add_shed_roof_generates_one_plane() {
+    let mut app = FramerApp::default();
+    app.add_roof(RoofForm::Shed);
+    assert_eq!(app.model.roof_planes.len(), 1, "a shed is a single plane");
+    assert!(app.model.validate().is_ok(), "generated roof must validate");
+}
+
+#[test]
+fn add_roof_without_walls_is_a_no_op() {
+    let mut app = FramerApp::default();
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let undo_before = app.history.can_undo();
+
+    app.add_roof(RoofForm::Gable);
+
+    assert!(
+        app.model.roof_planes.is_empty(),
+        "no footprint -> no roof planes"
+    );
+    assert_eq!(
+        app.history.can_undo(),
+        undo_before,
+        "a no-op roof records no undo step"
+    );
+}
+
+#[test]
+fn surface_placed_in_a_room_attaches_to_that_room() {
+    let mut app = FramerApp::default();
+    let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
+    app.add_room(seed);
+    let room_id = match &app.selected {
+        Selection::Room(id) => id.clone(),
+        other => panic!("expected the new room selected, got {other:?}"),
+    };
+
+    // A ceiling/floor placed over a loop that already holds a room references
+    // that room (so the surface tracks the room as walls move), not a frozen
+    // polygon.
+    let region = app
+        .surface_region_at(seed)
+        .expect("the demo shell is an enclosed loop");
+    assert!(
+        matches!(&region, framer_core::SurfaceRegion::Room(id) if id.0 == room_id),
+        "region should reference the room, got {region:?}"
+    );
+    app.add_ceiling(region);
+    let ceiling = app.model.ceilings.last().unwrap();
+    assert!(
+        matches!(&ceiling.region, framer_core::SurfaceRegion::Room(id) if id.0 == room_id),
+        "ceiling should attach to the room"
+    );
+    assert!(app.model.validate().is_ok());
+}
+
+#[test]
+fn delete_floor_deck_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_floor(region);
+    let id = match &app.selected {
+        Selection::FloorDeck(id) => id.clone(),
+        other => panic!("expected the new floor deck selected, got {other:?}"),
+    };
+
+    app.delete_selected_floor_deck();
+    assert!(app.model.floor_decks.iter().all(|deck| deck.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete floor deck"));
+
+    app.undo();
+    assert_eq!(app.model.floor_decks.len(), 1, "undo restores the deck");
+}
+
+#[test]
+fn delete_roof_plane_is_a_single_undoable_step() {
+    let mut app = FramerApp::default();
+    app.add_roof(RoofForm::Gable);
+    let id = match &app.selected {
+        Selection::RoofPlane(id) => id.clone(),
+        other => panic!("expected the new roof plane selected, got {other:?}"),
+    };
+    let before = app.model.roof_planes.len();
+
+    app.delete_selected_roof_plane();
+    assert_eq!(app.model.roof_planes.len(), before - 1);
+    assert!(app.model.roof_planes.iter().all(|plane| plane.id.0 != id));
+    assert_eq!(app.history.undo_label(), Some("Delete roof plane"));
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo restores the deleted roof plane"
+    );
+}
+
+#[test]
+fn referenced_surface_systems_cannot_be_deleted() {
+    let mut app = FramerApp::default();
+    let region = app
+        .surface_region_at(Point2::new(
+            Length::from_feet(14.0),
+            Length::from_feet(10.0),
+        ))
+        .expect("the demo shell is an enclosed loop");
+    app.add_ceiling(region.clone());
+    app.add_floor(region);
+    app.add_roof(RoofForm::Shed);
+
+    // Each surface's referenced system must be undeletable (deleting it would
+    // dangle the surface's `system`) — the widened deletion guard covers roofs,
+    // ceilings, and floors, not just walls.
+    let referenced: Vec<String> = [
+        app.model.ceilings.last().map(|c| c.system.0.clone()),
+        app.model.floor_decks.last().map(|d| d.system.0.clone()),
+        app.model.roof_planes.last().map(|p| p.system.0.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert_eq!(referenced.len(), 3, "all three surfaces were placed");
+
+    for system_id in referenced {
+        app.selected = Selection::System(system_id.clone());
+        let before = app.model.systems.len();
+        app.delete_selected_system();
+        assert_eq!(
+            app.model.systems.len(),
+            before,
+            "a referenced surface system must not be deleted"
+        );
+        assert!(
+            app.model
+                .systems
+                .iter()
+                .any(|system| system.id.0 == system_id),
+            "the referenced system {system_id} is still present"
+        );
+    }
+}
+
+#[test]
+fn roof_springing_falls_back_to_tallest_wall_without_level_height() {
+    let mut app = FramerApp::default();
+    // The demo level has no authored height, so the springing line falls back to
+    // the tallest wall top (elevation + max wall height), never `Length::ZERO`.
+    assert_eq!(app.model.levels[0].height, Length::ZERO);
+    let elevation = app.model.levels[0].elevation;
+    app.model.walls[0].height = Length::from_feet(12.0); // make one wall clearly tallest
+
+    app.add_roof(RoofForm::Shed);
+
+    let plane = app.model.roof_planes.last().unwrap();
+    assert_eq!(
+        plane.reference_elevation,
+        elevation + Length::from_feet(12.0),
+        "springing follows the tallest wall when the level has no height"
+    );
+    assert!(plane.reference_elevation > Length::ZERO);
+}
+
+#[test]
+fn roof_springing_uses_level_top_when_height_authored() {
+    let mut app = FramerApp::default();
+    // An authored level height defines the top plane directly, taking precedence
+    // over the wall-height fallback.
+    app.model.levels[0].height = Length::from_feet(10.0);
+    let elevation = app.model.levels[0].elevation;
+
+    app.add_roof(RoofForm::Shed);
+
+    let plane = app.model.roof_planes.last().unwrap();
+    assert_eq!(
+        plane.reference_elevation,
+        elevation + Length::from_feet(10.0),
+        "springing is the authored level top"
+    );
+}
+
+#[test]
+fn gable_over_a_tall_footprint_uses_the_y_longer_branch() {
+    let mut app = FramerApp::default();
+    // Clear the wider-than-tall demo shell and lay a footprint that is taller than
+    // it is wide (10ft × 30ft), so the ridge runs along x and the eave edges are
+    // 3 and 1 (the branch the demo shell never exercises).
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let corners = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 30.0),
+        (0.0, 30.0),
+        (0.0, 0.0),
+    ];
+    for pair in corners.windows(2) {
+        app.add_wall(
+            Point2::new(Length::from_feet(pair[0].0), Length::from_feet(pair[0].1)),
+            Point2::new(Length::from_feet(pair[1].0), Length::from_feet(pair[1].1)),
+        );
+    }
+
+    app.add_roof(RoofForm::Gable);
+
+    assert_eq!(app.model.roof_planes.len(), 2, "a gable is two planes");
+    let mut eaves: Vec<u32> = app
+        .model
+        .roof_planes
+        .iter()
+        .map(|plane| plane.eave_edge)
+        .collect();
+    eaves.sort_unstable();
+    assert_eq!(
+        eaves,
+        vec![1, 3],
+        "a y-longer gable's planes eave on edges 1 and 3"
+    );
+    assert!(app.model.validate().is_ok());
+    for plane in &app.model.roof_planes {
+        assert!(
+            (plane.eave_edge as usize) < plane.outline.len(),
+            "eave edge in range"
+        );
+        assert!(plane.frame().is_some(), "plane geometry is non-degenerate");
+    }
+}
+
+#[test]
+fn add_opening_preserves_skylight_and_stair_kinds() {
+    // The un-fork: Skylight/Stair openings keep their kind instead of being
+    // coerced to Window (BOM and render dispatch on opening.kind). A fresh app +
+    // free wall per kind keeps the single opening clear of the demo openings.
+    for kind in [OpeningKind::Skylight, OpeningKind::Stair] {
+        let mut app = FramerApp::default();
+        app.add_wall(
+            Point2::new(Length::from_feet(0.0), Length::from_feet(40.0)),
+            Point2::new(Length::from_feet(20.0), Length::from_feet(40.0)),
+        );
+        app.selected_wall = app.model.walls.len() - 1;
+        app.selected = Selection::Wall;
+
+        app.add_opening(kind);
+        let id = match &app.selected {
+            Selection::Opening(id) => id.clone(),
+            other => panic!("expected the new opening selected, got {other:?}"),
+        };
+        let opening = app.model.walls[app.selected_wall]
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == id)
+            .expect("the new opening exists");
+        assert_eq!(opening.kind, kind, "{kind:?} opening keeps its kind");
+        assert!(app.model.validate().is_ok(), "{kind:?} opening validates");
+    }
+}
+
+#[test]
+fn region_tools_are_mutually_exclusive() {
+    let mut app = FramerApp::default();
+
+    app.toggle_ceiling_tool();
+    assert!(app.ceiling_tool_active, "ceiling tool activates");
+    assert!(
+        !app.floor_tool_active
+            && !app.room_tool_active
+            && !app.draw_wall_tool.active
+            && !app.dimension_tool.active,
+        "activating the ceiling tool cancels every other placement tool"
+    );
+
+    app.toggle_floor_tool();
+    assert!(app.floor_tool_active, "floor tool activates");
+    assert!(!app.ceiling_tool_active, "activating floor cancels ceiling");
+
+    app.toggle_room_tool();
+    assert!(app.room_tool_active, "room tool activates");
+    assert!(!app.floor_tool_active, "activating room cancels floor");
+
+    // Toggling the active tool off leaves nothing active.
+    app.toggle_room_tool();
+    assert!(!app.room_tool_active, "toggling off deactivates the tool");
+}
+
+#[test]
+fn c_and_f_keys_toggle_ceiling_and_floor_tools() {
+    let mut app = FramerApp::default();
+
+    press_key(&mut app, egui::Key::C, egui::Modifiers::NONE);
+    assert!(
+        app.ceiling_tool_active,
+        "C routes through to the ceiling tool"
+    );
+
+    press_key(&mut app, egui::Key::F, egui::Modifiers::NONE);
+    assert!(app.floor_tool_active, "F routes through to the floor tool");
+    assert!(!app.ceiling_tool_active, "F cancels the ceiling tool");
+
+    press_key(&mut app, egui::Key::F, egui::Modifiers::NONE);
+    assert!(!app.floor_tool_active, "F again deactivates the floor tool");
+}
+
+#[test]
+fn place_ceiling_and_floor_clicks_route_and_gate_on_the_tool() {
+    let mut app = FramerApp::default();
+    let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
+
+    // Gate: a PlaceCeiling/PlaceFloor click with the tool inactive is a no-op.
+    app.handle_view_click(ViewClick::PlaceCeiling { point: seed });
+    app.handle_view_click(ViewClick::PlaceFloor { point: seed });
+    assert!(
+        app.model.ceilings.is_empty() && app.model.floor_decks.is_empty(),
+        "placement clicks do nothing while the tool is inactive"
+    );
+
+    // Routing: with the matching tool active, the click drops the surface.
+    app.toggle_ceiling_tool();
+    app.handle_view_click(ViewClick::PlaceCeiling { point: seed });
+    assert_eq!(
+        app.model.ceilings.len(),
+        1,
+        "PlaceCeiling routes to add_ceiling"
+    );
+
+    app.toggle_floor_tool();
+    app.handle_view_click(ViewClick::PlaceFloor { point: seed });
+    assert_eq!(
+        app.model.floor_decks.len(),
+        1,
+        "PlaceFloor routes to add_floor"
+    );
 }
 
 #[test]

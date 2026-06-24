@@ -34,8 +34,9 @@ use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
-    next_dimension_id, next_material_id, next_opening_id, next_room_id, next_system_id,
-    next_wall_id, translate_keeps_ortho, translate_keeps_positive_length,
+    next_ceiling_id, next_dimension_id, next_floor_id, next_material_id, next_opening_id,
+    next_roof_id, next_room_id, next_system_id, next_wall_id, translate_keeps_ortho,
+    translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
@@ -70,6 +71,10 @@ pub(crate) struct FramerApp {
     dimension_tool: DimensionToolState,
     draw_wall_tool: DrawWallToolState,
     room_tool_active: bool,
+    /// The flat-ceiling and floor-deck placement tools: like the room tool, each
+    /// commits its object when the user clicks inside an enclosed wall loop.
+    ceiling_tool_active: bool,
+    floor_tool_active: bool,
     opening_drag: Option<OpeningDragState>,
     /// In-progress drag of a wall endpoint handle in the plan view.
     wall_drag: Option<WallDragState>,
@@ -145,10 +150,26 @@ impl WorkspaceMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewportMode {
     Plan,
+    /// A top-down roof authoring view: the plan footprint with the authored roof
+    /// planes drawn and selectable on top. Reuses the 2-D plan machinery.
+    RoofPlan,
     Elevation,
     Axonometric,
     Render,
 }
+
+/// The roof form the auto-from-footprint roof tool generates. v1 authors a single
+/// shed plane or two opposing gable planes; hips/valleys are a later phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoofForm {
+    Gable,
+    Shed,
+}
+
+/// One generated roof-plane outline: its plan-projected polygon and the index of
+/// its eave (downslope) edge. The rest of a [`framer_core::RoofPlane`] (id, name,
+/// level, system, pitch, springing) is filled in by `add_roof`.
+type RoofPlaneSpec = (Vec<Point2>, u32);
 
 /// How walls are drawn in the Plan and 3D views. A single shared presentation
 /// setting (not per-view) so toggling it reads consistently across both. The
@@ -232,6 +253,14 @@ enum ViewClick {
     DrawWallCancel,
     /// A room-tool click placing a room at a model point inside a closed loop.
     PlaceRoom {
+        point: Point2,
+    },
+    /// A ceiling-tool click placing a flat ceiling over the loop under the point.
+    PlaceCeiling {
+        point: Point2,
+    },
+    /// A floor-tool click placing a floor deck over the loop under the point.
+    PlaceFloor {
         point: Point2,
     },
     /// Select an existing room (e.g. clicking its fill in the plan).
@@ -346,6 +375,8 @@ impl Default for FramerApp {
             dimension_tool: DimensionToolState::default(),
             draw_wall_tool: DrawWallToolState::default(),
             room_tool_active: false,
+            ceiling_tool_active: false,
+            floor_tool_active: false,
             opening_drag: None,
             wall_drag: None,
             gpu_target_format: None,
@@ -675,6 +706,8 @@ impl FramerApp {
             dimension_pressed,
             draw_wall_pressed,
             room_pressed,
+            ceiling_pressed,
+            floor_pressed,
             delete_pressed,
             redo_pressed,
             undo_pressed,
@@ -683,6 +716,8 @@ impl FramerApp {
             let dimension = input.consume_key(egui::Modifiers::NONE, egui::Key::D);
             let draw_wall = input.consume_key(egui::Modifiers::NONE, egui::Key::W);
             let room = input.consume_key(egui::Modifiers::NONE, egui::Key::R);
+            let ceiling = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
+            let floor = input.consume_key(egui::Modifiers::NONE, egui::Key::F);
             let delete = input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
             // Redo MUST be consumed before undo: egui's consume_key matches
@@ -695,7 +730,9 @@ impl FramerApp {
             ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y);
             // Undo: Cmd+Z on macOS, Ctrl+Z elsewhere (COMMAND is platform-aware).
             let undo = input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            (escape, dimension, draw_wall, room, delete, redo, undo)
+            (
+                escape, dimension, draw_wall, room, ceiling, floor, delete, redo, undo,
+            )
         });
 
         if undo_pressed {
@@ -712,6 +749,10 @@ impl FramerApp {
             self.toggle_draw_wall_tool();
         } else if room_pressed {
             self.toggle_room_tool();
+        } else if ceiling_pressed {
+            self.toggle_ceiling_tool();
+        } else if floor_pressed {
+            self.toggle_floor_tool();
         }
     }
 
@@ -722,6 +763,9 @@ impl FramerApp {
             Selection::Opening(_) => self.delete_selected_opening(),
             Selection::Wall => self.delete_selected_wall(),
             Selection::Room(_) => self.delete_selected_room(),
+            Selection::RoofPlane(_) => self.delete_selected_roof_plane(),
+            Selection::Ceiling(_) => self.delete_selected_ceiling(),
+            Selection::FloorDeck(_) => self.delete_selected_floor_deck(),
             Selection::System(_) => self.delete_selected_system(),
             Selection::Material(_) => self.delete_selected_material(),
             Selection::Furnishing(_) => self.delete_selected_furnishing(),
@@ -733,7 +777,8 @@ impl FramerApp {
     }
 
     /// Delete the selected construction system as one undo step, refusing when any
-    /// wall still references it (deleting it would dangle `wall.system`).
+    /// wall, roof plane, ceiling, or floor deck still references it (deleting it
+    /// would dangle that object's `system`).
     fn delete_selected_system(&mut self) {
         if !self.workspace_mode.allows_design_edits() {
             return;
@@ -741,9 +786,26 @@ impl FramerApp {
         let Selection::System(id) = self.selected.clone() else {
             return;
         };
-        if self.model.walls.iter().any(|wall| wall.system.0 == id) {
+        let referenced = self.model.walls.iter().any(|wall| wall.system.0 == id)
+            || self
+                .model
+                .roof_planes
+                .iter()
+                .any(|plane| plane.system.0 == id)
+            || self
+                .model
+                .ceilings
+                .iter()
+                .any(|ceiling| ceiling.system.0 == id)
+            || self
+                .model
+                .floor_decks
+                .iter()
+                .any(|deck| deck.system.0 == id);
+        if referenced {
             self.error = Some(format!(
-                "Cannot delete system '{id}': it is still applied to one or more walls"
+                "Cannot delete system '{id}': it is still applied to one or more \
+                 walls, roofs, ceilings, or floors"
             ));
             return;
         }
@@ -891,6 +953,8 @@ impl FramerApp {
         self.dimension_tool.clear_picks();
         self.draw_wall_tool = DrawWallToolState::default();
         self.room_tool_active = false;
+        self.ceiling_tool_active = false;
+        self.floor_tool_active = false;
         self.opening_drag = None;
         self.dimension_status =
             Some("Pick two anchors, then move the pointer to place the dimension".to_owned());
@@ -913,6 +977,8 @@ impl FramerApp {
             self.dimension_tool.active = false;
             self.dimension_tool.clear_picks();
             self.room_tool_active = false;
+            self.ceiling_tool_active = false;
+            self.floor_tool_active = false;
             self.opening_drag = None;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
@@ -1148,6 +1214,57 @@ impl FramerApp {
         });
     }
 
+    /// Delete the selected roof plane as one undo step.
+    fn delete_selected_roof_plane(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::RoofPlane(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete roof plane", |app| {
+            let before = app.model.roof_planes.len();
+            app.model.roof_planes.retain(|plane| plane.id.0 != id);
+            if app.model.roof_planes.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    /// Delete the selected ceiling as one undo step.
+    fn delete_selected_ceiling(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::Ceiling(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete ceiling", |app| {
+            let before = app.model.ceilings.len();
+            app.model.ceilings.retain(|ceiling| ceiling.id.0 != id);
+            if app.model.ceilings.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
+    /// Delete the selected floor deck as one undo step.
+    fn delete_selected_floor_deck(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::FloorDeck(id) = self.selected.clone() else {
+            return;
+        };
+        self.edit("Delete floor deck", |app| {
+            let before = app.model.floor_decks.len();
+            app.model.floor_decks.retain(|deck| deck.id.0 != id);
+            if app.model.floor_decks.len() != before {
+                app.selected = Selection::Wall;
+            }
+        });
+    }
+
     /// Add a new wall-kind construction system as one undo step, seeded with a
     /// minimal valid stack so it passes validation immediately and renders
     /// sensibly. `exterior` adds an outboard cladding layer (so the derived
@@ -1215,6 +1332,127 @@ impl FramerApp {
             });
             app.selected = Selection::System(id);
         });
+    }
+
+    /// Add a new roof/floor/ceiling construction system as one undo step, seeded
+    /// with a minimal valid stack. Selects the new system. Walls keep their
+    /// dedicated [`add_wall_system`] (which adds the exterior/interior cladding
+    /// choice).
+    fn add_surface_system(&mut self, kind: framer_core::SystemKind) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add system", |app| {
+            let system = app.default_surface_system(kind);
+            let id = system.id.0.clone();
+            app.model.systems.push(system);
+            app.selected = Selection::System(id);
+        });
+    }
+
+    /// Build a minimal valid roof/floor/ceiling construction system: exactly one
+    /// framing layer (member sized and named for its family) plus a finish/skin
+    /// layer, ordered conditioned-side -> weather-side like a wall stack. Materials
+    /// resolve from the project library by tag, falling back when absent. Does not
+    /// mutate the model; callers push it and wrap the change in an `edit`.
+    fn default_surface_system(
+        &self,
+        kind: framer_core::SystemKind,
+    ) -> framer_core::ConstructionSystem {
+        use framer_core::{
+            BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
+            FramingSpec, LayerFunction, MemberFamily, SystemKind,
+        };
+        let (id, index) = next_system_id(&self.model);
+        let framing_material = self.first_material_with_tag("framing", "mat-spf");
+        let sheathing_material = self.first_material_with_tag("sheathing", "mat-plywood");
+        let finish_material = self.first_material_with_tag("finish", "mat-drywall");
+
+        let (member, family, name) = match kind {
+            SystemKind::Roof => (BoardProfile::TwoByEight, MemberFamily::Rafter, "Roof"),
+            SystemKind::Floor => (BoardProfile::TwoByTen, MemberFamily::FloorJoist, "Floor"),
+            SystemKind::Ceiling => (
+                BoardProfile::TwoBySix,
+                MemberFamily::CeilingJoist,
+                "Ceiling",
+            ),
+            SystemKind::Wall => (BoardProfile::TwoByFour, MemberFamily::Stud, "Wall"),
+        };
+        let framing_layer = ConstructionLayer::new(
+            LayerFunction::Framing,
+            framing_material,
+            member.nominal_depth(),
+        )
+        .with_framing(FramingSpec {
+            member,
+            spacing: Length::from_whole_inches(16),
+            pattern: FramingPattern::Single,
+            member_family: family,
+            cavity_material: None,
+        });
+        let layers = match kind {
+            // Roof: rafters under the deck, then the weather skin.
+            SystemKind::Roof => vec![
+                framing_layer,
+                ConstructionLayer::new(
+                    LayerFunction::Sheathing,
+                    sheathing_material,
+                    Length::from_inches(0.5),
+                ),
+                ConstructionLayer::new(
+                    LayerFunction::Roofing,
+                    self.first_material_with_tag("roofing", "mat-asphalt-shingle"),
+                    Length::from_inches(0.25),
+                ),
+            ],
+            // Floor: subfloor deck over the joists.
+            SystemKind::Floor => vec![
+                ConstructionLayer::new(
+                    LayerFunction::Sheathing,
+                    sheathing_material,
+                    Length::from_inches(0.75),
+                ),
+                framing_layer,
+            ],
+            // Ceiling (and the unreachable Wall fallback): finished underside below
+            // the joists.
+            SystemKind::Ceiling | SystemKind::Wall => vec![
+                ConstructionLayer::new(
+                    LayerFunction::CeilingFinish,
+                    finish_material,
+                    Length::from_inches(0.625),
+                ),
+                framing_layer,
+            ],
+        };
+
+        ConstructionSystem {
+            id: ElementId::new(id),
+            name: format!("{name} {index}"),
+            kind,
+            source: None,
+            layers,
+        }
+    }
+
+    /// The id of an existing system of `kind`, or — when the model has none yet —
+    /// a freshly built default one pushed into the model (so the first ceiling or
+    /// floor placed on a system-less project still validates and frames). Call
+    /// inside an `edit` closure; the pushed system rides that same undo step.
+    fn ensure_surface_system(&mut self, kind: framer_core::SystemKind) -> String {
+        if let Some(id) = self
+            .model
+            .systems
+            .iter()
+            .find(|system| system.kind == kind)
+            .map(|system| system.id.0.clone())
+        {
+            return id;
+        }
+        let system = self.default_surface_system(kind);
+        let id = system.id.0.clone();
+        self.model.systems.push(system);
+        id
     }
 
     /// The id of the first material carrying `tag`, or `fallback` if none does
@@ -1338,6 +1576,8 @@ impl FramerApp {
             self.dimension_tool.active = false;
             self.dimension_tool.clear_picks();
             self.draw_wall_tool = DrawWallToolState::default();
+            self.ceiling_tool_active = false;
+            self.floor_tool_active = false;
             self.opening_drag = None;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
@@ -1345,6 +1585,53 @@ impl FramerApp {
         } else {
             self.dimension_status = None;
         }
+    }
+
+    /// Toggle the flat-ceiling tool. Like the room tool, it is region-gated: a
+    /// click inside a closed wall loop drops a ceiling over that region.
+    fn toggle_ceiling_tool(&mut self) {
+        let activate = !self.ceiling_tool_active;
+        self.deactivate_placement_tools();
+        self.ceiling_tool_active = activate;
+        if activate {
+            if !self.workspace_mode.allows_design_edits() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            self.viewport_mode = ViewportMode::Plan;
+            self.dimension_status =
+                Some("Click inside an enclosed area to place a flat ceiling".to_owned());
+        } else {
+            self.dimension_status = None;
+        }
+    }
+
+    /// Toggle the floor-deck tool — region-gated like the ceiling tool.
+    fn toggle_floor_tool(&mut self) {
+        let activate = !self.floor_tool_active;
+        self.deactivate_placement_tools();
+        self.floor_tool_active = activate;
+        if activate {
+            if !self.workspace_mode.allows_design_edits() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            self.viewport_mode = ViewportMode::Plan;
+            self.dimension_status =
+                Some("Click inside an enclosed area to place a floor deck".to_owned());
+        } else {
+            self.dimension_status = None;
+        }
+    }
+
+    /// Clear every wall/room/ceiling/floor/dimension placement tool. Used by the
+    /// region tools so activating one cancels the others.
+    fn deactivate_placement_tools(&mut self) {
+        self.draw_wall_tool = DrawWallToolState::default();
+        self.dimension_tool.active = false;
+        self.dimension_tool.clear_picks();
+        self.room_tool_active = false;
+        self.ceiling_tool_active = false;
+        self.floor_tool_active = false;
+        self.opening_drag = None;
     }
 
     /// Place a room from a room-tool click, but only when the point is inside a
@@ -1359,6 +1646,284 @@ impl FramerApp {
             self.dimension_status =
                 Some("No enclosed area here — close a wall loop first".to_owned());
         }
+    }
+
+    /// Place a flat ceiling from a ceiling-tool click, gated on an enclosed loop.
+    fn handle_place_ceiling(&mut self, point: Point2) {
+        if !self.ceiling_tool_active {
+            return;
+        }
+        match self.surface_region_at(point) {
+            Some(region) => self.add_ceiling(region),
+            None => {
+                self.dimension_status =
+                    Some("No enclosed area here — close a wall loop first".to_owned());
+            }
+        }
+    }
+
+    /// Place a floor deck from a floor-tool click, gated on an enclosed loop.
+    fn handle_place_floor(&mut self, point: Point2) {
+        if !self.floor_tool_active {
+            return;
+        }
+        match self.surface_region_at(point) {
+            Some(region) => self.add_floor(region),
+            None => {
+                self.dimension_status =
+                    Some("No enclosed area here — close a wall loop first".to_owned());
+            }
+        }
+    }
+
+    /// Resolve the enclosed wall loop under `point` to a [`SurfaceRegion`]: a
+    /// `Room` reference when a room already occupies that loop (so the surface
+    /// tracks the room as walls move), otherwise the loop's frozen `Polygon`.
+    /// `None` when `point` is not inside any closed loop.
+    fn surface_region_at(&self, point: Point2) -> Option<framer_core::SurfaceRegion> {
+        use framer_core::SurfaceRegion;
+        // Resolve the loop under `point` and every room's loop in ONE batched pass:
+        // `room_boundaries` derives the bounded faces a single time. `point` is the
+        // first seed; the rooms follow in order.
+        let mut seeds = Vec::with_capacity(self.model.rooms.len() + 1);
+        seeds.push(point);
+        seeds.extend(self.model.rooms.iter().map(|room| room.seed));
+        let mut boundaries = framer_core::room_boundaries(&self.model, &seeds).into_iter();
+        let boundary = boundaries.next().flatten()?; // the loop under `point`
+        let room = self
+            .model
+            .rooms
+            .iter()
+            .zip(boundaries)
+            .find_map(|(room, other)| {
+                other
+                    .filter(|other| other.vertices == boundary.vertices)
+                    .map(|_| room.id.clone())
+            });
+        Some(match room {
+            Some(id) => SurfaceRegion::Room(id),
+            None => SurfaceRegion::Polygon(boundary.vertices),
+        })
+    }
+
+    /// Add a flat ceiling over `region` as one undo step, seeding a ceiling system
+    /// if the project has none yet. Defaults to flush with the level top (height 0,
+    /// editable in the inspector).
+    fn add_ceiling(&mut self, region: framer_core::SurfaceRegion) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add ceiling", |app| {
+            let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
+            let (id, index) = next_ceiling_id(&app.model);
+            let level = app.first_level_id();
+            let ceiling = framer_core::Ceiling::new(
+                id.clone(),
+                format!("Ceiling {index}"),
+                level,
+                system,
+                region,
+                Length::ZERO,
+            );
+            app.model.ceilings.push(ceiling);
+            app.selected = Selection::Ceiling(id);
+        });
+    }
+
+    /// Add a floor deck over `region` as one undo step, seeding a floor system if
+    /// the project has none yet. Joists default to the shorter clear span.
+    fn add_floor(&mut self, region: framer_core::SurfaceRegion) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add floor", |app| {
+            let system = app.ensure_surface_system(framer_core::SystemKind::Floor);
+            let (id, index) = next_floor_id(&app.model);
+            let level = app.first_level_id();
+            let deck = framer_core::FloorDeck::new(
+                id.clone(),
+                format!("Floor {index}"),
+                level,
+                system,
+                region,
+            );
+            app.model.floor_decks.push(deck);
+            app.selected = Selection::FloorDeck(id);
+        });
+    }
+
+    /// The id of the project's first level, or `"level-1"` when there is none —
+    /// the same fallback walls and rooms use when assigning a new object's level.
+    fn first_level_id(&self) -> String {
+        self.model
+            .levels
+            .first()
+            .map(|level| level.id.0.clone())
+            .unwrap_or_else(|| "level-1".to_owned())
+    }
+
+    /// Auto-generate a roof of `form` over the project's wall footprint as one undo
+    /// step (the hybrid roof tool: generate planes, then store them as editable
+    /// objects), seeding a Roof system if the project has none. Switches to the
+    /// roof-plan view so the result is visible. No-ops with a status hint when
+    /// there is no footprint yet.
+    fn add_roof(&mut self, form: RoofForm) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let level = self.first_level_id();
+        let Some((specs, springing)) = self.footprint_roof_specs(&level, form) else {
+            self.dimension_status =
+                Some("Draw walls to enclose a footprint before adding a roof".to_owned());
+            return;
+        };
+        // A default 4:12 pitch with modest overhangs; all editable per plane.
+        let slope =
+            framer_core::Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12));
+        let eave_overhang = Length::from_whole_inches(12);
+        let rake_overhang = Length::from_whole_inches(8);
+        self.edit("Add roof", |app| {
+            let system = app.ensure_surface_system(framer_core::SystemKind::Roof);
+            let mut last_id = None;
+            for (outline, eave_edge) in specs {
+                let (id, index) = next_roof_id(&app.model);
+                let plane = framer_core::RoofPlane::new(
+                    id.clone(),
+                    format!("Roof plane {index}"),
+                    level.clone(),
+                    system.clone(),
+                    outline,
+                    slope,
+                    eave_edge,
+                    springing,
+                )
+                .with_eave_overhang(eave_overhang)
+                .with_rake_overhang(rake_overhang);
+                app.model.roof_planes.push(plane);
+                last_id = Some(id);
+            }
+            if let Some(id) = last_id {
+                app.selected = Selection::RoofPlane(id);
+            }
+        });
+        self.viewport_mode = ViewportMode::RoofPlan;
+    }
+
+    /// The plane outlines (plan polygon + eave-edge index) for an auto-generated
+    /// `form` roof over the footprint of the walls on `level`, plus the springing
+    /// elevation (the bearing line). `None` when the level has no walls. The
+    /// springing prefers the authored level top (`elevation + height`) and falls
+    /// back to the tallest wall on the level when the level has no authored height,
+    /// so a one-click roof on a fresh shell still sits on top of the walls.
+    fn footprint_roof_specs(
+        &self,
+        level: &str,
+        form: RoofForm,
+    ) -> Option<(Vec<RoofPlaneSpec>, Length)> {
+        let walls: Vec<&Wall> = self
+            .model
+            .walls
+            .iter()
+            .filter(|wall| wall.level.0 == level)
+            .collect();
+        if walls.is_empty() {
+            return None;
+        }
+        let mut min_x = i64::MAX;
+        let mut min_y = i64::MAX;
+        let mut max_x = i64::MIN;
+        let mut max_y = i64::MIN;
+        for wall in &walls {
+            for point in [wall.start, wall.end] {
+                min_x = min_x.min(point.x.ticks());
+                min_y = min_y.min(point.y.ticks());
+                max_x = max_x.max(point.x.ticks());
+                max_y = max_y.max(point.y.ticks());
+            }
+        }
+        if min_x >= max_x || min_y >= max_y {
+            return None;
+        }
+        let p = |x: i64, y: i64| Point2::new(Length::from_ticks(x), Length::from_ticks(y));
+
+        let specs = match form {
+            // A shed roof is one plane over the whole footprint, sloping up from the
+            // low (min-y) eave to the opposite ridge.
+            RoofForm::Shed => vec![(
+                vec![
+                    p(min_x, min_y),
+                    p(max_x, min_y),
+                    p(max_x, max_y),
+                    p(min_x, max_y),
+                ],
+                0,
+            )],
+            // A gable is two opposing planes meeting at a ridge along the longer
+            // axis; each plane's eave is its outer footprint edge (the up-slope
+            // direction toward the ridge is derived by RoofPlane::frame()).
+            RoofForm::Gable => {
+                if max_x - min_x >= max_y - min_y {
+                    let mid = (min_y + max_y) / 2;
+                    vec![
+                        (
+                            vec![
+                                p(min_x, min_y),
+                                p(max_x, min_y),
+                                p(max_x, mid),
+                                p(min_x, mid),
+                            ],
+                            0,
+                        ),
+                        (
+                            vec![
+                                p(min_x, mid),
+                                p(max_x, mid),
+                                p(max_x, max_y),
+                                p(min_x, max_y),
+                            ],
+                            2,
+                        ),
+                    ]
+                } else {
+                    let mid = (min_x + max_x) / 2;
+                    vec![
+                        (
+                            vec![
+                                p(min_x, min_y),
+                                p(mid, min_y),
+                                p(mid, max_y),
+                                p(min_x, max_y),
+                            ],
+                            3,
+                        ),
+                        (
+                            vec![
+                                p(mid, min_y),
+                                p(max_x, min_y),
+                                p(max_x, max_y),
+                                p(mid, max_y),
+                            ],
+                            1,
+                        ),
+                    ]
+                }
+            }
+        };
+
+        let level_def = self.model.levels.iter().find(|lvl| lvl.id.0 == level);
+        let elevation = level_def.map(|lvl| lvl.elevation).unwrap_or(Length::ZERO);
+        let height = level_def.map(|lvl| lvl.height).unwrap_or(Length::ZERO);
+        let springing = if height > Length::ZERO {
+            elevation + height
+        } else {
+            let tallest = walls
+                .iter()
+                .map(|wall| wall.height)
+                .max()
+                .unwrap_or(Length::ZERO);
+            elevation + tallest
+        };
+        Some((specs, springing))
     }
 
     fn add_opening(&mut self, kind: OpeningKind) {
@@ -1394,7 +1959,7 @@ impl FramerApp {
                     )
                     .with_kind(OpeningKind::GarageDoor)
                 }
-                OpeningKind::Window | OpeningKind::Skylight | OpeningKind::Stair => {
+                OpeningKind::Window => {
                     let (id, index) = next_opening_id(wall, "opening-window");
                     Opening::window(
                         id,
@@ -1404,6 +1969,34 @@ impl FramerApp {
                         Length::from_inches(42.0),
                         Length::from_inches(36.0),
                     )
+                }
+                // Skylight and stair openings are window-shaped on a wall but keep
+                // their own kind (rather than being coerced to a window): a skylight
+                // hosted on a wall reads as a skylight, and the BOM/render see the
+                // true kind. Roof-hosted skylights are a separate RoofOpening.
+                OpeningKind::Skylight => {
+                    let (id, index) = next_opening_id(wall, "opening-skylight");
+                    Opening::window(
+                        id,
+                        format!("Skylight {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(42.0),
+                        Length::from_inches(36.0),
+                    )
+                    .with_kind(OpeningKind::Skylight)
+                }
+                OpeningKind::Stair => {
+                    let (id, index) = next_opening_id(wall, "opening-stair");
+                    Opening::window(
+                        id,
+                        format!("Stair {index}"),
+                        center,
+                        Length::from_inches(36.0),
+                        Length::from_inches(42.0),
+                        Length::from_inches(36.0),
+                    )
+                    .with_kind(OpeningKind::Stair)
                 }
             };
 
@@ -1836,6 +2429,12 @@ impl FramerApp {
             }
             ViewClick::PlaceRoom { point } => {
                 self.handle_place_room(point);
+            }
+            ViewClick::PlaceCeiling { point } => {
+                self.handle_place_ceiling(point);
+            }
+            ViewClick::PlaceFloor { point } => {
+                self.handle_place_floor(point);
             }
             ViewClick::Room { room_id } => {
                 self.selected = Selection::Room(room_id);

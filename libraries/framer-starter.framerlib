@@ -7,6 +7,25 @@
   "coordinate": "framer-lib://framer/starter",
   "materials": [
     {
+      "id": "mat-asphalt-shingle",
+      "name": "Asphalt shingle",
+      "appearance": {
+        "SolidColor": [
+          54,
+          54,
+          58
+        ]
+      },
+      "tags": [
+        "roofing"
+      ],
+      "properties": {
+        "r_per_inch_milli": {
+          "Int": 440
+        }
+      }
+    },
+    {
       "id": "mat-drywall",
       "name": "5/8\" Gypsum",
       "appearance": {
@@ -121,6 +140,25 @@
       }
     },
     {
+      "id": "mat-roofing-felt",
+      "name": "Roofing underlayment",
+      "appearance": {
+        "SolidColor": [
+          44,
+          42,
+          46
+        ]
+      },
+      "tags": [
+        "underlayment"
+      ],
+      "properties": {
+        "r_per_inch_milli": {
+          "Int": 0
+        }
+      }
+    },
+    {
       "id": "mat-spf",
       "name": "SPF framing",
       "appearance": {
@@ -141,6 +179,110 @@
     }
   ],
   "systems": [
+    {
+      "id": "system-ceiling-1",
+      "name": "Flat ceiling",
+      "kind": "Ceiling",
+      "layers": [
+        {
+          "function": "CeilingFinish",
+          "material": "mat-drywall",
+          "thickness": {
+            "ticks": 10
+          }
+        },
+        {
+          "function": "Framing",
+          "material": "mat-spf",
+          "thickness": {
+            "ticks": 96
+          },
+          "framing": {
+            "member": "TwoBySix",
+            "spacing": {
+              "ticks": 256
+            },
+            "pattern": "Single",
+            "member_family": "CeilingJoist",
+            "cavity_material": "mat-mineral-wool"
+          }
+        }
+      ]
+    },
+    {
+      "id": "system-floor-1",
+      "name": "Floor deck",
+      "kind": "Floor",
+      "layers": [
+        {
+          "function": "Sheathing",
+          "material": "mat-plywood",
+          "thickness": {
+            "ticks": 12
+          }
+        },
+        {
+          "function": "Framing",
+          "material": "mat-spf",
+          "thickness": {
+            "ticks": 160
+          },
+          "framing": {
+            "member": "TwoByTen",
+            "spacing": {
+              "ticks": 256
+            },
+            "pattern": "Single",
+            "member_family": "FloorJoist",
+            "cavity_material": "mat-mineral-wool"
+          }
+        }
+      ]
+    },
+    {
+      "id": "system-roof-1",
+      "name": "Asphalt shingle roof",
+      "kind": "Roof",
+      "layers": [
+        {
+          "function": "Framing",
+          "material": "mat-spf",
+          "thickness": {
+            "ticks": 128
+          },
+          "framing": {
+            "member": "TwoByEight",
+            "spacing": {
+              "ticks": 384
+            },
+            "pattern": "Single",
+            "member_family": "Rafter",
+            "cavity_material": "mat-mineral-wool"
+          }
+        },
+        {
+          "function": "Sheathing",
+          "material": "mat-plywood",
+          "thickness": {
+            "ticks": 8
+          }
+        },
+        {
+          "function": "Underlayment",
+          "material": "mat-roofing-felt",
+          "thickness": {
+            "ticks": 2
+          }
+        },
+        {
+          "function": "Roofing",
+          "material": "mat-asphalt-shingle",
+          "thickness": {
+            "ticks": 4
+          }
+        }
+      ]
+    },
     {
       "id": "system-wall-exterior-1",
       "name": "Exterior wall",

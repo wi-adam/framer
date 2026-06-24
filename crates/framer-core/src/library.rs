@@ -335,12 +335,14 @@ mod tests {
                 .map(|material| material.id.0.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "mat-asphalt-shingle",
                 "mat-drywall",
                 "mat-fiber-cement",
                 "mat-mineral-wool",
                 "mat-plywood",
                 "mat-polyiso",
                 "mat-rainscreen",
+                "mat-roofing-felt",
                 "mat-spf",
             ]
         );
@@ -350,8 +352,47 @@ mod tests {
                 .iter()
                 .map(|system| system.id.0.as_str())
                 .collect::<Vec<_>>(),
-            vec!["system-wall-exterior-1", "system-wall-interior-1"]
+            vec![
+                "system-ceiling-1",
+                "system-floor-1",
+                "system-roof-1",
+                "system-wall-exterior-1",
+                "system-wall-interior-1",
+            ]
         );
+
+        // The seed roof/floor/ceiling systems each carry exactly one framing layer
+        // with the member family the solver dispatches on.
+        for (id, kind, family) in [
+            ("system-roof-1", SystemKind::Roof, MemberFamily::Rafter),
+            (
+                "system-floor-1",
+                SystemKind::Floor,
+                MemberFamily::FloorJoist,
+            ),
+            (
+                "system-ceiling-1",
+                SystemKind::Ceiling,
+                MemberFamily::CeilingJoist,
+            ),
+        ] {
+            let system = library
+                .systems
+                .iter()
+                .find(|system| system.id == ElementId::new(id))
+                .unwrap();
+            assert_eq!(system.kind, kind);
+            assert_eq!(
+                system
+                    .framing_layer()
+                    .unwrap()
+                    .framing
+                    .as_ref()
+                    .unwrap()
+                    .member_family,
+                family
+            );
+        }
 
         let exterior = library
             .systems

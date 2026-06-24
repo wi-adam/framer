@@ -108,7 +108,8 @@ impl FramerApp {
         let active_wall_drag = self.wall_drag.map(|drag| (drag.wall_index, drag.handle));
         let mut wall_drag_out: Option<WallDragEvent> = None;
         let click = match self.viewport_mode {
-            ViewportMode::Plan => {
+            ViewportMode::Plan | ViewportMode::RoofPlan => {
+                let roof_plan_mode = self.viewport_mode == ViewportMode::RoofPlan;
                 let draw_tool = DrawWallPlanInput {
                     active: self.draw_wall_tool.active,
                     start: self.draw_wall_tool.start,
@@ -124,6 +125,9 @@ impl FramerApp {
                         layers: self.layers,
                         draw_tool: &draw_tool,
                         room_tool_active: self.room_tool_active,
+                        ceiling_tool_active: self.ceiling_tool_active,
+                        floor_tool_active: self.floor_tool_active,
+                        roof_plan_mode,
                         active_wall_drag,
                     },
                     &mut self.plan_view,
@@ -464,6 +468,7 @@ fn viewport_mode_title(workspace_mode: WorkspaceMode, viewport_mode: ViewportMod
         (WorkspaceMode::Design, ViewportMode::Plan) => "Shell",
         (WorkspaceMode::Design, ViewportMode::Elevation) => "Wall",
         (_, ViewportMode::Plan) => "Plan",
+        (_, ViewportMode::RoofPlan) => "Roof",
         (_, ViewportMode::Elevation) => "Elevation",
         (_, ViewportMode::Axonometric) => "3D",
         (_, ViewportMode::Render) => "Render",
