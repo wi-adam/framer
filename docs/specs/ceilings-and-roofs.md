@@ -4,10 +4,10 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Partial (Slices 1–4 of 6 landed: core types + schema v11, floor/ceiling
-> joisting, roof rafters, and render + 3-D viewport; authoring UX and the example/docs
-> remain) · **Linked milestone:** M3 (Floors And Roofs) ·
-> **Proposed goal:** G-014 (Ceilings & Roofs) ·
+> **Status:** Implemented (v1 — core types + schema v11, floor/ceiling joisting, roof
+> rafters, render + 3-D viewport, authoring UX, and the roofed example + docs) ·
+> **Linked milestone:** M3 (Floors And Roofs) ·
+> **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plan:** [2026-06-20-ceilings-and-roofs.md](../plans/2026-06-20-ceilings-and-roofs.md) ·
 > **Last reviewed:** 2026-06-23
 
@@ -172,9 +172,12 @@ non-axis-aligned framing member**.
     `Opening`. `OpeningKind::{Skylight, Stair}` already exist.
 - **`FramingSpec`** (`model.rs`, `{member, spacing, pattern, cavity_material}`) gains a
   `member_family: MemberFamily` (`Stud | Rafter | CeilingJoist | FloorJoist | Truss`),
-  `#[serde(default)]` → `Stud`, so the solver dispatches member geometry by family. **Span
-  direction lives on the plane/deck element, not on `FramingSpec`** — bearing is instance data
-  (same reason wall geometry lives on `Wall`, not its system), keeping the assembly generic.
+  `#[serde(default)]` → `Stud`, tagging the framing method a system produces. v1's solver
+  selects the generator and the `MemberKind` from the framed object
+  (`RoofPlane`/`Ceiling`/`FloorDeck`), not from `member_family`; the tag sets up family-based
+  dispatch for the later truss/engineered-member work. **Span direction lives on the
+  plane/deck element, not on `FramingSpec`** — bearing is instance data (same reason wall
+  geometry lives on `Wall`, not its system), keeping the assembly generic.
 - **`LayerFunction`** gains roof/floor roles: `Roofing` (the weather face), `Underlayment`,
   `CeilingFinish`. `exposure()` is wall-centric ("Exterior iff WeatherBarrier|Cladding|Masonry|
   ContinuousInsulation") and is re-scoped per `SystemKind` (a roof's weather face is `Roofing`).

@@ -61,8 +61,8 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof,Ceiling},
   source: Option<Provenance>, layers: Vec<ConstructionLayer>`. Layers are ordered
   **interior → exterior** and are *never sorted* (order is semantic). Helpers:
-  `framing_layer()`, `total_thickness()`, `exposure()`, `r_value_milli(materials)`. Only
-  `Wall` systems are wired today.
+  `framing_layer()`, `total_thickness()`, `exposure()`, `r_value_milli(materials)`. All four
+  kinds (`Wall`/`Floor`/`Roof`/`Ceiling`) are wired through authoring, the solver, and render.
 - **`ConstructionLayer`** — `function: LayerFunction, material: ElementId, thickness,
   framing: Option<FramingSpec>`. `framing` is present **iff** `function == Framing`.
 - **`FramingSpec`** — `member: BoardProfile, spacing, pattern: FramingPattern,
@@ -329,9 +329,10 @@ the real symbols:
 | Goal | Touch | Then |
 | --- | --- | --- |
 | **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render/3D handling in `framer-render/src/build.rs` + `viewport/scene_build.rs`; inspector in `framer-app` `panels.rs`. |
+| **New roof plane / ceiling / floor deck object** | the element collection (`roof_planes` / `ceilings` / `floor_decks`) + its struct in `framer-core/src/model.rs`, and a kind-matched `SystemKind` system | framing in `framer-solver/src/lib.rs` (`generate_roof_plan` / shared joisting generator); surface meshing in `framer-render/src/build.rs` + `viewport/scene_build.rs`; tools/tree/inspector in `framer-app` `panels.rs` + `viewport/plan.rs`; bump `PROJECT_SCHEMA_VERSION`; update [ceilings-and-roofs.md](specs/ceilings-and-roofs.md) + [project-files.md](project-files.md). |
 | **New construction layer function / material** | `LayerFunction` / `Material` / `Appearance` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material lowering in `framer-render/src/build.rs`; asset bytes via `framer-library` package/store helpers. |
 | **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import/placement UI in `framer-app/src/app/panels.rs`; add drawing/picking in the relevant viewport; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
-| **New solver rule / member** | `MemberKind` + rule in `framer-solver/src/lib.rs` | attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
+| **New solver rule / member kind** | `MemberKind` + rule in `framer-solver/src/lib.rs`; the authoring-side family tag is `MemberFamily` on `FramingSpec` in `framer-core/src/model.rs` | the surface/wall generator passes the matching `MemberKind` explicitly (the solver does not dispatch on `member_family`); attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
 | **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
 | **Schema change** | bump `PROJECT_SCHEMA_VERSION` in `project.rs`; add types in `model.rs` | update the three `examples/projects/*.framer` (round-trip tests are byte-exact); update [project-files.md](project-files.md); add a rejection/round-trip test. |

@@ -264,7 +264,8 @@ a positive `Length` in ticks.
 Each system in `systems` stores:
 
 - `id`, `name`.
-- `kind`: `Wall`, `Floor`, or `Roof` (only `Wall` is wired today).
+- `kind`: `Wall`, `Floor`, `Roof`, or `Ceiling` (all four are wired — authoring, solver, and
+  render; see [specs/ceilings-and-roofs.md](specs/ceilings-and-roofs.md)).
 - `source`: optional `Provenance` for systems copied from a `.framerlib`.
 - `layers`: an ordered list from **interior → exterior**. Layer order is semantic
   and is **never sorted**.

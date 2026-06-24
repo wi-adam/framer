@@ -97,7 +97,9 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 
 ## Out of scope (YAGNI)
 
-- Floor and roof systems (`SystemKind::Floor`/`Roof` exist but only `Wall` is wired).
+- Sloped-ceiling and engineered-member assemblies. `SystemKind::Floor`/`Roof`/`Ceiling` are
+  now fully wired (authoring, solver, render); cathedral/scissor ceilings and I-joist/LVL/truss
+  members are later phases of [ceilings-and-roofs.md](ceilings-and-roofs.md).
 - `Staggered`/`Double` framing-pattern *generation* (authored but not yet generated).
 - Framing-factor (parallel-path) R-value derate; richer `Appearance` beyond texture/depth-map
   assets (lapped siding, masonry coursing) — the enum is the seam for these.
