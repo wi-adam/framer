@@ -59,9 +59,13 @@ The relevant existing seams (the spec's Architecture section holds the durable d
 The highest-value, lowest-risk slice: pure solver/render judgment over the existing v11 model.
 
 - **Task A1.1** — Tie detection in the solver. Add a helper `roof_has_ceiling_tie(model, plane)`
-  that reports whether the roof plane's bearing region carries a horizontal tie at (or near) the
-  plate — a **flat** `Ceiling` or a `FloorDeck` whose region encloses the plane's footprint, or a
-  (future) collar/rafter tie. In `generate_roof_plan`, replace the unconditional
+  that reports whether a horizontal tie resists rafter thrust **at the bearing/plate line**
+  (`level.elevation + level.height`): a **flat** `Ceiling` enclosing the plane's footprint at/near
+  that elevation (ceilings hang from the level top, so a ceiling with a small `height` sits at the
+  plate). A `FloorDeck` is **not** a tie by default — it resolves at `level.elevation`, the floor,
+  not the plate — so it qualifies only when its elevation matches the bearing line; a sloped
+  (scissor) ceiling is not a full tie. (Explicit collar/rafter ties are a later, M4-adjacent
+  addition.) In `generate_roof_plan`, replace the unconditional
   `roof.ridge.no-tie` warning with the fork: **tied** → keep the `RidgeBoard`, emit an `Info`
   `roof.ridge.tied` ("a ridge board is adequate where a continuous tie resists rafter thrust");
   **untied** (cathedral / scissor / no deck) → emit `Unsupported` `roof.ridge.beam-required`
@@ -73,16 +77,22 @@ The highest-value, lowest-risk slice: pure solver/render judgment over the exist
   - Verify: `cargo test -p framer-solver` (new unit tests: gable + flat ceiling → `tied`/Info;
     gable + no ceiling → `beam-required`/Unsupported; shed → neither, as today)
   - Commit: `feat(solver): ridge-board-vs-beam fork from ceiling-tie detection`
-- **Task A1.2** — Cathedral underside finish in the renderer. When a roof plane covers a region
-  with **no** `Ceiling`, the room sees the roof's *interior* finish, not its weather face. Add a
-  `SurfaceFace::RoofUnderside` (or pass the conditioned-side layer) so `surface_material` resolves
-  the roof assembly's innermost finish for the underside, and emit the underside triangle wind/
-  material accordingly (the path tracer already renders both faces; today both show `Roofing`).
-  Keep the weather face as-is. No GPU/WGSL change (opaque diffuse only).
-  - Files: `crates/framer-render/src/build.rs`
-  - Verify: `cargo test -p framer-render` (a cathedral scene resolves the interior finish on the
-    underside); `cargo test -p framer-app --test gpu_parity` stays green
-  - Commit: `feat(render): show roof interior finish on a cathedral underside`
+- **Task A1.2** — Cathedral underside finish — in the **shared core API and both consumers**.
+  When a roof plane covers a region with **no** `Ceiling`, the room sees the roof's *interior*
+  finish, not its weather face. The face lookup lives in `framer-core`
+  (`ConstructionSystem::surface_finish_material`, which today always returns the roof **weather**
+  face) and is called by both the path-tracer builder *and* the interactive viewport mesher — so a
+  render-only change would leave the 3-D view still showing roofing underneath. Add an underside
+  (conditioned-side / innermost) face to that core helper, then route the cathedral underside
+  through it in **both** `framer-render` and the app's `SurfaceFace` / `surface_color` path. Keep
+  the weather face as-is. No GPU/WGSL change (opaque diffuse only).
+  - Files: `crates/framer-core/src/model.rs` (the `surface_finish_material` face API),
+    `crates/framer-render/src/build.rs`, `crates/framer-app/src/app/viewport/scene_build.rs`
+  - Verify: `cargo test -p framer-core` (underside face resolves the interior layer);
+    `cargo test -p framer-render` (cathedral scene shows the interior finish underside);
+    `cargo test -p framer-app` + `--test gpu_parity` stays green; manual 3-D: cathedral underside
+    matches the render
+  - Commit: `feat: cathedral underside shows the roof interior finish (core + render + 3-D)`
 - **Task A1.3** — Surface the cathedral/attic relationship as a derived diagnostic so Plan Mode
   can explain it: per roof region, `roof.ceiling.cathedral` (Info) when no ceiling exists, vs the
   attic case. (Optional but cheap; it makes A1.1's fork legible in the diagnostics panel.)
@@ -109,7 +119,8 @@ The highest-value, lowest-risk slice: pure solver/render judgment over the exist
   - Commit: `feat(core): validate sloped ceilings, fail closed`
 - **Task A2.3** — Schema **v11 → v12**: bump `PROJECT_SCHEMA_VERSION`; regenerate the three
   `examples/projects/*.framer`; update the version-pinned tests
-  (`save_project_writes_schema_versioned_authored_model`, `load_project_rejects_old_schema`);
+  (`save_project_writes_schema_versioned_authored_model`,
+  `load_project_rejects_old_schema_with_unsupported_version_error`);
   update `docs/project-files.md` and the schema invariant in `AGENTS.md` (v11→v12).
   - Files: `crates/framer-core/src/project.rs`, `examples/projects/*.framer`,
     `docs/project-files.md`, `AGENTS.md`
@@ -196,9 +207,15 @@ The highest-value, lowest-risk slice: pure solver/render judgment over the exist
 - **Task B1.2** — Per-edge roof form. Extend the roof tool: `RoofForm` gains `Hip`; for a
   rectangular footprint, `footprint_roof_specs` emits **four** planes (two trapezoids + two
   triangles) meeting at a central ridge with four hip lines. Write them as editable `RoofPlane`s
-  (the model already stores planes; no new model type). Per-edge gable/hip flag in the inspector.
+  (the model already stores planes; no new model type). The **per-edge gable/hip choice is a
+  transient input of the roof tool at generation time only** (it lives in the tool's gesture
+  state, like pitch and overhang defaults) — it is **not** persisted and **not** a per-edge
+  inspector field, since that would reintroduce the parametric roof-assembly the store-planes
+  decision (#4 / #11) rejects. After generation the user edits the resulting `RoofPlane`s
+  directly (per-plane pitch, move the ridge); re-running the tool replaces the planes.
   - Files: `crates/framer-app/src/app/mod.rs`, `crates/framer-app/src/app/panels.rs`
-  - Verify: `cargo test -p framer-app`; manual: one-click hip roof on `demo-shell`
+  - Verify: `cargo test -p framer-app`; manual: one-click hip roof on `demo-shell`, then edit a
+    resulting plane's pitch
   - Commit: `feat(app): hip roof auto-from-footprint (rectangular)`
 - **Task B1.3** — Hip rafters in the solver: a multi-plane post-pass (sibling of
   `add_join_members`) that, given adjacent planes sharing a sloped edge, emits the `HipRafter`

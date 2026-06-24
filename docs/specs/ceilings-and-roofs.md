@@ -125,9 +125,13 @@ Sequenced and tracked in
   gable roof is two opposing planes.
 - **The ridge is framed from a real tie check, not an unconditional warning.** v1 always emits a
   `RidgeBoard` plus a fixed `roof.ridge.no-tie` warning. v2 detects whether a horizontal tie
-  resists rafter thrust at the plate (a **flat** ceiling or floor deck enclosing the footprint;
-  later, collar/rafter ties): **tied** ⇒ keep the ridge board, emit an `Info` note; **untied**
-  (cathedral / scissor / no deck) ⇒ emit an `Unsupported` "structural ridge beam required" note.
+  resists rafter thrust **at the bearing/plate line** (`level.elevation + level.height`): a
+  **flat** ceiling enclosing the footprint at/near that elevation (later, explicit collar/rafter
+  ties). A `FloorDeck` does **not** qualify by default — it resolves at `level.elevation` (the
+  floor), not the plate — so it counts only if its elevation matches the bearing line; a dropped
+  or sloped ceiling is not a full tie either. **Tied** ⇒ keep the ridge board, emit an `Info`
+  note; **untied** (cathedral / scissor / no plate-line tie) ⇒ emit an `Unsupported` "structural
+  ridge beam required" note.
   Geometry is unchanged (beam sizing is M4); the *judgment* becomes correct.
 - **Validation extends to sloped ceilings** (fail closed): when `slope` is `Some`, `slope.run > 0`
   and the downslope reference is in range, mirroring `RoofPlane` checks. Flat ceilings keep
