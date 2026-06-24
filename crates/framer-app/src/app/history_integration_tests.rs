@@ -10,7 +10,7 @@ use framer_core::{CodeProfile, Length, OpeningKind, Point2, Wall};
 
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
-use super::{FramerApp, RoofForm, Selection, ViewportMode};
+use super::{FramerApp, RoofForm, Selection, ViewClick, ViewportMode};
 
 /// Feed a single key-press through a real egui frame so `handle_keyboard_shortcuts`
 /// sees it via `consume_key` exactly as it would at runtime.
@@ -662,6 +662,82 @@ fn add_opening_preserves_skylight_and_stair_kinds() {
         assert_eq!(opening.kind, kind, "{kind:?} opening keeps its kind");
         assert!(app.model.validate().is_ok(), "{kind:?} opening validates");
     }
+}
+
+#[test]
+fn region_tools_are_mutually_exclusive() {
+    let mut app = FramerApp::default();
+
+    app.toggle_ceiling_tool();
+    assert!(app.ceiling_tool_active, "ceiling tool activates");
+    assert!(
+        !app.floor_tool_active
+            && !app.room_tool_active
+            && !app.draw_wall_tool.active
+            && !app.dimension_tool.active,
+        "activating the ceiling tool cancels every other placement tool"
+    );
+
+    app.toggle_floor_tool();
+    assert!(app.floor_tool_active, "floor tool activates");
+    assert!(!app.ceiling_tool_active, "activating floor cancels ceiling");
+
+    app.toggle_room_tool();
+    assert!(app.room_tool_active, "room tool activates");
+    assert!(!app.floor_tool_active, "activating room cancels floor");
+
+    // Toggling the active tool off leaves nothing active.
+    app.toggle_room_tool();
+    assert!(!app.room_tool_active, "toggling off deactivates the tool");
+}
+
+#[test]
+fn c_and_f_keys_toggle_ceiling_and_floor_tools() {
+    let mut app = FramerApp::default();
+
+    press_key(&mut app, egui::Key::C, egui::Modifiers::NONE);
+    assert!(
+        app.ceiling_tool_active,
+        "C routes through to the ceiling tool"
+    );
+
+    press_key(&mut app, egui::Key::F, egui::Modifiers::NONE);
+    assert!(app.floor_tool_active, "F routes through to the floor tool");
+    assert!(!app.ceiling_tool_active, "F cancels the ceiling tool");
+
+    press_key(&mut app, egui::Key::F, egui::Modifiers::NONE);
+    assert!(!app.floor_tool_active, "F again deactivates the floor tool");
+}
+
+#[test]
+fn place_ceiling_and_floor_clicks_route_and_gate_on_the_tool() {
+    let mut app = FramerApp::default();
+    let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
+
+    // Gate: a PlaceCeiling/PlaceFloor click with the tool inactive is a no-op.
+    app.handle_view_click(ViewClick::PlaceCeiling { point: seed });
+    app.handle_view_click(ViewClick::PlaceFloor { point: seed });
+    assert!(
+        app.model.ceilings.is_empty() && app.model.floor_decks.is_empty(),
+        "placement clicks do nothing while the tool is inactive"
+    );
+
+    // Routing: with the matching tool active, the click drops the surface.
+    app.toggle_ceiling_tool();
+    app.handle_view_click(ViewClick::PlaceCeiling { point: seed });
+    assert_eq!(
+        app.model.ceilings.len(),
+        1,
+        "PlaceCeiling routes to add_ceiling"
+    );
+
+    app.toggle_floor_tool();
+    app.handle_view_click(ViewClick::PlaceFloor { point: seed });
+    assert_eq!(
+        app.model.floor_decks.len(),
+        1,
+        "PlaceFloor routes to add_floor"
+    );
 }
 
 #[test]

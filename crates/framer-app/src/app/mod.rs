@@ -1682,16 +1682,19 @@ impl FramerApp {
     /// `None` when `point` is not inside any closed loop.
     fn surface_region_at(&self, point: Point2) -> Option<framer_core::SurfaceRegion> {
         use framer_core::SurfaceRegion;
-        let boundary = framer_core::room_boundary(&self.model, point)?;
-        // Resolve every room's loop in one batched graph pass (room_boundaries
-        // derives the bounded faces once) rather than calling room_boundary per
-        // room, then match the one whose loop is the loop under `point`.
-        let seeds: Vec<Point2> = self.model.rooms.iter().map(|room| room.seed).collect();
+        // Resolve the loop under `point` and every room's loop in ONE batched pass:
+        // `room_boundaries` derives the bounded faces a single time. `point` is the
+        // first seed; the rooms follow in order.
+        let mut seeds = Vec::with_capacity(self.model.rooms.len() + 1);
+        seeds.push(point);
+        seeds.extend(self.model.rooms.iter().map(|room| room.seed));
+        let mut boundaries = framer_core::room_boundaries(&self.model, &seeds).into_iter();
+        let boundary = boundaries.next().flatten()?; // the loop under `point`
         let room = self
             .model
             .rooms
             .iter()
-            .zip(framer_core::room_boundaries(&self.model, &seeds))
+            .zip(boundaries)
             .find_map(|(room, other)| {
                 other
                     .filter(|other| other.vertices == boundary.vertices)
