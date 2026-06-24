@@ -4830,6 +4830,64 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_roof_plane_is_not_classified_cathedral_or_attic() {
+        // The classification is skipped for a plane that frames nothing, so a
+        // degenerate plane carries only its `roof.outline.degenerate` warning, never a
+        // misleading attic/cathedral Info. A degenerate outline is rejected by model
+        // validation, so it reaches the classifier only by calling `generate_roof_plans`
+        // directly (the guard is defensive). `roof_cathedral_flags` still returns a flag
+        // for the plane (its centroid is testable), so the geometry guard is what
+        // suppresses the diagnostic: without it this plane would emit
+        // `roof.ceiling.cathedral` (the model has no ceiling), and an inverted guard
+        // would instead drop the well-formed planes' classification.
+        let mut model = gable_model();
+        model.roof_planes.push(RoofPlane::new(
+            "roof-degenerate",
+            "Degenerate",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(24.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+            pitch_9_12(),
+            0,
+            Length::from_feet(8.0),
+        ));
+
+        let mut plan = ProjectFramePlan {
+            wall_plans: Vec::new(),
+            floor_plans: Vec::new(),
+            ceiling_plans: Vec::new(),
+            roof_plans: Vec::new(),
+            diagnostics: Vec::new(),
+            rooms: Vec::new(),
+            layers: Vec::new(),
+        };
+        generate_roof_plans(&mut plan, &model).unwrap();
+
+        let degenerate = plan.roof_plan(&ElementId::new("roof-degenerate")).unwrap();
+        assert!(
+            degenerate
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "roof.outline.degenerate"),
+            "the degenerate plane keeps its outline warning"
+        );
+        assert!(
+            degenerate
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "roof.ceiling.cathedral" && d.code != "roof.ceiling.attic"),
+            "a plane that frames nothing is not classified cathedral or attic"
+        );
+        // The guard did not over-suppress: the well-formed planes stay classified.
+        assert!(roof_region_is_cathedral(&plan, "roof-a"));
+    }
+
+    #[test]
     fn ceiling_tie_respects_the_plate_slack_threshold() {
         // The ceiling sits `height` below the 96in level top, and the springing is
         // 96in, so it ties only while `height <= TIE_PLATE_SLACK` (6in). This pins
