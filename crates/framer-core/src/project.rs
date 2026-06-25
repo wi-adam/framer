@@ -494,9 +494,14 @@ mod tests {
 
         assert_eq!(model.walls.len(), 4);
         assert_eq!(model.wall_joins.len(), 4);
-        // Capped with a gable roof (two planes), a flat ceiling, and a floor deck.
+        // Capped with a gable roof (two planes), a scissor-vault ceiling (two
+        // opposing sloped halves), and a floor deck.
         assert_eq!(model.roof_planes.len(), 2);
-        assert_eq!(model.ceilings.len(), 1);
+        assert_eq!(model.ceilings.len(), 2);
+        assert!(
+            model.ceilings.iter().all(|c| c.slope.is_some()),
+            "the demo shell's ceiling is a scissor vault"
+        );
         assert_eq!(model.floor_decks.len(), 1);
         assert_eq!(save_project(&model).unwrap(), example);
     }

@@ -4680,10 +4680,10 @@ mod tests {
         assert!(project_plywood >= 144 * 96);
     }
 
-    /// The shipped `demo-shell` example (capped with a gable roof, a flat ceiling,
-    /// and a floor deck in Slice 6) frames end-to-end: both slopes rafter, the
-    /// gable shares one ridge board, the ceiling and deck joist, and every new
-    /// member family folds into the project BOM.
+    /// The shipped `demo-shell` example (capped with a gable roof, a scissor-vault
+    /// ceiling, and a floor deck) frames end-to-end: both slopes rafter, the gable
+    /// shares one ridge board, the two sloped vault halves joist, the deck joists,
+    /// and every new member family folds into the project BOM.
     #[test]
     fn roofed_demo_shell_example_frames_every_surface() {
         let example = include_str!("../../../examples/projects/demo-shell.framer");
@@ -4691,7 +4691,8 @@ mod tests {
         let plan = generate_project_plan(&model).unwrap();
 
         assert_eq!(plan.roof_plans.len(), 2);
-        assert_eq!(plan.ceiling_plans.len(), 1);
+        // A scissor vault is two opposing sloped ceilings.
+        assert_eq!(plan.ceiling_plans.len(), 2);
         assert_eq!(plan.floor_plans.len(), 1);
 
         for id in ["roof-north", "roof-south"] {
@@ -4711,32 +4712,51 @@ mod tests {
             .count();
         assert_eq!(ridges, 1, "a gable shares one ridge board");
 
-        // The authored flat ceiling sits exactly at the roof's bearing line, so the
-        // gable's ridge is tied and a ridge board is adequate. Pins the product-
-        // visible tie flip through the real load_project + region-resolution +
-        // elevation-derivation path (the synthetic tests hand-set those inputs).
+        // The scissor vault is sloped, so it is NOT a flat rafter tie at the plate:
+        // the gable reverts to a structural ridge beam. Pins the product-visible tie
+        // fork through the real load_project + region-resolution + elevation path (the
+        // synthetic tests hand-set those inputs).
         let roof_diagnostics = || {
             plan.roof_plans
                 .iter()
                 .flat_map(|roof| roof.diagnostics.iter())
         };
         assert!(
-            roof_diagnostics().any(|diagnostic| diagnostic.code == "roof.ridge.tied"
-                && diagnostic.severity == DiagnosticSeverity::Info),
-            "demo-shell's plate-line ceiling ties the ridge (ridge board adequate)"
+            roof_diagnostics().any(|diagnostic| diagnostic.code == "roof.ridge.beam-required"
+                && diagnostic.severity == DiagnosticSeverity::Unsupported),
+            "a vaulted shell has no flat tie, so the ridge needs a beam"
         );
         assert!(
-            roof_diagnostics().all(|diagnostic| diagnostic.code != "roof.ridge.beam-required"),
-            "demo-shell does not require a ridge beam"
+            roof_diagnostics().all(|diagnostic| diagnostic.code != "roof.ridge.tied"),
+            "a vaulted shell's ridge is not reported as tied"
         );
 
-        assert!(
-            plan.ceiling_plan(&ElementId::new("ceiling-1"))
-                .unwrap()
-                .members
-                .iter()
-                .any(|member| member.kind == MemberKind::CeilingJoist)
-        );
+        // Each vault half frames sloped ceiling joists and carries the scissor note.
+        for id in ["ceiling-1", "ceiling-2"] {
+            let ceiling = plan.ceiling_plan(&ElementId::new(id)).unwrap();
+            assert!(
+                ceiling
+                    .members
+                    .iter()
+                    .any(|member| member.kind == MemberKind::CeilingJoist),
+                "{id} frames ceiling joists"
+            );
+            assert!(
+                ceiling
+                    .members
+                    .iter()
+                    .filter(|member| member.kind == MemberKind::CeilingJoist)
+                    .all(|member| member.sloped.is_some()),
+                "{id} is a sloped (vault) ceiling"
+            );
+            assert!(
+                ceiling
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "ceiling.slope.scissor"),
+                "{id} reports the scissor condition"
+            );
+        }
         assert!(
             plan.floor_plan(&ElementId::new("deck-1"))
                 .unwrap()
