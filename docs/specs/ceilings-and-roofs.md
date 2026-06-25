@@ -5,10 +5,12 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** v1 Implemented (core types, floor/ceiling joisting, roof rafters,
-> render + 3-D viewport, authoring UX, roofed example) · v2 Phase A in progress — Slice A1 done
-> (cathedral underside finish + the ridge-board-vs-beam tie fork + cathedral/attic diagnostic);
-> Slice A2 done (sloped-ceiling model `CeilingSlope` + validation, schema **v12**); Slices A3–A5
-> (sloped joists, render, authoring) and Phase B (hip/valley roofs) remain ·
+> render + 3-D viewport, authoring UX, roofed example) · **v2 Phase A Implemented** —
+> cathedral underside finish + the ridge-board-vs-beam tie fork + cathedral/attic diagnostic
+> (A1); the live sloped-ceiling model `CeilingSlope` + validation, schema **v12** (A2); sloped
+> ceiling joists with true cut lengths + scissor diagnostics (A3); the sloped-ceiling render in
+> both meshers (A4); and authoring — the inspector per-ceiling slope editor + the one-click vault
+> tool + the vaulted `demo-shell` example (A5). Phase B (hip/valley roofs) remains ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
@@ -109,7 +111,7 @@ The observable contract. Testable statements; edge cases are explicit.
   a ceiling/deck whose enclosing loop is open reports "boundary open" and recovers when the
   loop closes.
 
-### v2 — Sloped ceilings & the ridge structural fork (planned, Phase A)
+### v2 — Sloped ceilings & the ridge structural fork (Implemented, Phase A)
 
 Deepens the v1 surfaces so a roof and its ceiling describe the *space between them* honestly.
 Sequenced and tracked in

@@ -84,6 +84,13 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - **`Opening`** (`OpeningKind`: Door/Window/GarageDoor/Skylight/Stair…), **`WallJoin`**
   (`WallJoinKind`: Corner/EndToEnd/Tee/Cross), **`Room`** (`RoomUsage`), **`Level`**,
   **`DimensionConstraint`** (+ anchor/axis/kind enums) — the rest of the authored model.
+- **`RoofPlane`** / **`Ceiling`** / **`FloorDeck`** — the level-owned surfaces. A roof plane and a
+  **sloped** `Ceiling` (`slope: Option<CeilingSlope { pitch: Slope, low_edge }>`) share one affine
+  lift — `surface_frame(outline, slope, low_edge, reference_elevation) -> RoofPlaneFrame`, reached via
+  `RoofPlane::frame` / `Ceiling::frame` — so the solver and both meshers project identically. A sloped
+  ceiling needs a `Polygon` region (validation enforces it); `slope == None` is flat. A region with no
+  `Ceiling` is a *cathedral* (`BuildingModel::roof_cathedral_flags`). See
+  [ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
 - **`CodeProfile`** / `PrescriptiveCode::Irc2021` — starter prescriptive defaults
   (`irc_2021_prescriptive()`). Not a complete code-compliance engine.
 - **`ElementId`** — stable semantic id (lowercase letters/digits/hyphens). **`ModelError`** —
@@ -249,8 +256,8 @@ mirrors this exact math.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. |
-| `panels.rs` | Model tree, inspector, toolbar, status bar — the egui panel bodies. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`. |
+| `panels.rs` | Model tree, inspector, toolbar, status bar — the egui panel bodies. The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + auto-join derivation. |
 | `history.rs` | `History<Snapshot>` undo/redo stack (+ `history_integration_tests.rs`). |
