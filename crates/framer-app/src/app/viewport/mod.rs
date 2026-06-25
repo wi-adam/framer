@@ -126,6 +126,7 @@ impl FramerApp {
                         draw_tool: &draw_tool,
                         room_tool_active: self.room_tool_active,
                         ceiling_tool_active: self.ceiling_tool_active,
+                        vault_tool_active: self.vault_tool_active,
                         floor_tool_active: self.floor_tool_active,
                         roof_plan_mode,
                         active_wall_drag,

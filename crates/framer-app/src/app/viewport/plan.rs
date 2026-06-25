@@ -62,6 +62,7 @@ pub(super) struct PlanView<'a> {
     pub(super) draw_tool: &'a DrawWallPlanInput,
     pub(super) room_tool_active: bool,
     pub(super) ceiling_tool_active: bool,
+    pub(super) vault_tool_active: bool,
     pub(super) floor_tool_active: bool,
     /// The top-down roof authoring view: overlay the authored roof-plane outlines
     /// and let clicks select them.
@@ -402,14 +403,16 @@ pub(super) fn draw_project_plan(
         draw_tool,
         room_tool_active,
         ceiling_tool_active,
+        vault_tool_active,
         floor_tool_active,
         roof_plan_mode,
         active_wall_drag,
     } = plan;
-    // The room, ceiling, and floor tools are all region-gated placement tools:
-    // while any is active, a click drops its object rather than selecting or
+    // The room, ceiling, vault, and floor tools are all region-gated placement
+    // tools: while any is active, a click drops its object rather than selecting or
     // editing, so the wall-handle/selection interactions are all suppressed.
-    let region_tool_active = room_tool_active || ceiling_tool_active || floor_tool_active;
+    let region_tool_active =
+        room_tool_active || ceiling_tool_active || vault_tool_active || floor_tool_active;
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -890,6 +893,8 @@ pub(super) fn draw_project_plan(
         // others), so dispatch to whichever placed the click.
         let click = if ceiling_tool_active {
             ViewClick::PlaceCeiling { point }
+        } else if vault_tool_active {
+            ViewClick::PlaceVault { point }
         } else if floor_tool_active {
             ViewClick::PlaceFloor { point }
         } else {

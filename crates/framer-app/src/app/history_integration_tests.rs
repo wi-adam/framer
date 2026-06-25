@@ -710,6 +710,49 @@ fn c_and_f_keys_toggle_ceiling_and_floor_tools() {
 }
 
 #[test]
+fn v_key_toggles_the_vault_tool() {
+    let mut app = FramerApp::default();
+
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(app.vault_tool_active, "V routes through to the vault tool");
+
+    // A sibling region-tool key cancels it, and V again deactivates.
+    press_key(&mut app, egui::Key::C, egui::Modifiers::NONE);
+    assert!(!app.vault_tool_active, "C cancels the vault tool");
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(app.vault_tool_active);
+    press_key(&mut app, egui::Key::V, egui::Modifiers::NONE);
+    assert!(!app.vault_tool_active, "V again deactivates the vault tool");
+}
+
+#[test]
+fn scissor_halves_rejects_a_degenerate_region() {
+    // A zero-area region (collinear points → zero depth) cannot be vaulted; the guard
+    // returns None so add_vault's "too small to vault" early-return fires instead of
+    // authoring a degenerate ceiling.
+    let degenerate = vec![
+        Point2::new(Length::ZERO, Length::ZERO),
+        Point2::new(Length::from_feet(10.0), Length::ZERO),
+        Point2::new(Length::from_feet(20.0), Length::ZERO),
+    ];
+    assert!(super::scissor_halves(&degenerate).is_none());
+
+    // add_vault on a degenerate outline authors nothing and records no undo step.
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    app.add_vault(&degenerate);
+    assert_eq!(
+        app.model.ceilings.len(),
+        before,
+        "a degenerate region is not vaulted"
+    );
+    assert!(
+        !app.history.can_undo(),
+        "a rejected vault records no undo step"
+    );
+}
+
+#[test]
 fn place_ceiling_and_floor_clicks_route_and_gate_on_the_tool() {
     let mut app = FramerApp::default();
     let seed = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
@@ -942,4 +985,237 @@ fn whole_wall_translate_slides_perpendicular_and_stretches_neighbour() {
 
     app.undo();
     assert_eq!(app.model, original);
+}
+
+/// The vault tool authors a scissor/vault as two opposing sloped ceilings in one
+/// undoable step, and the result round-trips with its slopes intact.
+#[test]
+fn add_vault_authors_two_opposing_sloped_ceilings() {
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    let outline = framer_core::room_boundary(
+        &app.model,
+        Point2::new(Length::from_feet(14.0), Length::from_feet(10.0)),
+    )
+    .expect("the demo shell is an enclosed loop")
+    .vertices;
+    app.add_vault(&outline);
+
+    assert_eq!(
+        app.model.ceilings.len(),
+        before + 2,
+        "a vault is two opposing ceilings"
+    );
+    let vault: Vec<_> = app.model.ceilings.iter().rev().take(2).collect();
+    assert!(
+        vault.iter().all(|c| c.slope.is_some()),
+        "both halves are sloped"
+    );
+    assert!(
+        vault
+            .iter()
+            .all(|c| matches!(c.region, framer_core::SurfaceRegion::Polygon(_))),
+        "both halves are explicit polygons (a sloped ceiling needs one)"
+    );
+    assert_ne!(
+        vault[0].region, vault[1].region,
+        "the two halves are opposing, not identical"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "the authored vault must validate"
+    );
+
+    // Round-trips through save/load with both slopes intact.
+    let json = framer_core::save_project(&app.model).expect("the vaulted model saves");
+    let reloaded = framer_core::load_project(&json).expect("the vaulted model loads");
+    assert_eq!(
+        reloaded
+            .ceilings
+            .iter()
+            .filter(|c| c.slope.is_some())
+            .count(),
+        2,
+        "both sloped ceilings survive a round-trip"
+    );
+
+    // One undoable step.
+    assert_eq!(app.history.undo_label(), Some("Add vault"));
+    app.undo();
+    assert_eq!(
+        app.model.ceilings.len(),
+        before,
+        "undo removes both vault halves in one step"
+    );
+}
+
+/// The vault frames a *rising tent*: each half rises from its spring wall to a
+/// shared, higher ridge — not an inverted vault. Pinned through the solver, since
+/// validation only checks `low_edge` bounds and would pass an inverted half.
+#[test]
+fn a_vault_frames_a_rising_tent() {
+    let mut app = FramerApp::default();
+    let outline = framer_core::room_boundary(
+        &app.model,
+        Point2::new(Length::from_feet(14.0), Length::from_feet(10.0)),
+    )
+    .expect("the demo shell is an enclosed loop")
+    .vertices;
+    app.add_vault(&outline);
+    let plan = app.project_plan.as_ref().expect("the vault re-solves");
+
+    let mut ridge_elevations = Vec::new();
+    for ceiling in &app.model.ceilings {
+        let ceiling_plan = plan
+            .ceiling_plan(&framer_core::ElementId::new(ceiling.id.0.clone()))
+            .expect("each vault half has a ceiling plan");
+        // The common ceiling joists run up the slope (the band joists/blocking are
+        // level at their edge, so they are excluded).
+        let joists: Vec<_> = ceiling_plan
+            .members
+            .iter()
+            .filter(|member| member.kind == framer_solver::MemberKind::CeilingJoist)
+            .filter_map(|member| member.sloped)
+            .collect();
+        assert!(!joists.is_empty(), "a sloped vault half frames joists");
+        // Every joist rises: its ridge (high) end is above its spring (low) end.
+        assert!(
+            joists.iter().all(|s| s.high_elevation > s.low_elevation),
+            "the vault rises from its spring wall; it does not invert"
+        );
+        ridge_elevations.push(joists[0].high_elevation);
+    }
+    // The two opposing halves meet at one shared ridge elevation.
+    assert_eq!(ridge_elevations.len(), 2);
+    assert_eq!(
+        ridge_elevations[0], ridge_elevations[1],
+        "the two halves meet at the same ridge elevation"
+    );
+}
+
+/// A vault click does nothing unless the tool is active and the point is inside a
+/// closed wall loop.
+#[test]
+fn vault_click_gates_on_the_tool_and_an_enclosed_loop() {
+    let mut app = FramerApp::default();
+    let before = app.model.ceilings.len();
+    let inside = Point2::new(Length::from_feet(14.0), Length::from_feet(10.0));
+
+    // Tool inactive → ignored.
+    app.handle_place_vault(inside);
+    assert_eq!(
+        app.model.ceilings.len(),
+        before,
+        "no vault while the tool is inactive"
+    );
+
+    app.toggle_vault_tool();
+    assert!(app.vault_tool_active, "the vault tool activates");
+
+    // Active but outside any loop → no vault.
+    app.handle_place_vault(Point2::new(
+        Length::from_feet(500.0),
+        Length::from_feet(500.0),
+    ));
+    assert_eq!(
+        app.model.ceilings.len(),
+        before,
+        "no vault outside an enclosed loop"
+    );
+
+    // Active and inside the loop → authors the vault.
+    app.handle_place_vault(inside);
+    assert_eq!(
+        app.model.ceilings.len(),
+        before + 2,
+        "a click inside the loop vaults it"
+    );
+}
+
+/// The scissor split divides the bounding box along its longer span: a 28×20 region
+/// ridges along x at the mid-depth, with halves springing from the y=0 / y=20 walls
+/// (edge 0) and meeting at the ridge.
+#[test]
+fn scissor_halves_splits_along_the_longer_span() {
+    let ft = Length::from_feet;
+    let outline = vec![
+        Point2::new(Length::ZERO, Length::ZERO),
+        Point2::new(ft(28.0), Length::ZERO),
+        Point2::new(ft(28.0), ft(20.0)),
+        Point2::new(Length::ZERO, ft(20.0)),
+    ];
+    let (low, high) = super::scissor_halves(&outline).expect("a vaultable rectangle");
+
+    // Edge 0 (verts 0..1) of each half is its outer spring wall.
+    assert_eq!(low[0].y, Length::ZERO, "low half springs from the y=0 wall");
+    assert_eq!(low[1].y, Length::ZERO);
+    assert_eq!(high[0].y, ft(20.0), "high half springs from the y=20 wall");
+    assert_eq!(high[1].y, ft(20.0));
+    // Both reach the shared ridge at y = 10ft.
+    let mid = ft(10.0);
+    assert!(
+        low.iter().any(|p| p.y == mid) && high.iter().any(|p| p.y == mid),
+        "the halves meet at the ridge"
+    );
+}
+
+/// The portrait branch: a 20×28 region (depth > width) ridges along y at the
+/// mid-width, with halves springing from the x=0 / x=20 walls (edge 0). Pins the
+/// second `scissor_halves` branch — model validation only checks `low_edge` bounds,
+/// so an inverted vault here would otherwise validate silently.
+#[test]
+fn scissor_halves_splits_a_portrait_region_along_y() {
+    let ft = Length::from_feet;
+    let outline = vec![
+        Point2::new(Length::ZERO, Length::ZERO),
+        Point2::new(ft(20.0), Length::ZERO),
+        Point2::new(ft(20.0), ft(28.0)),
+        Point2::new(Length::ZERO, ft(28.0)),
+    ];
+    let (low, high) = super::scissor_halves(&outline).expect("a vaultable rectangle");
+
+    // Edge 0 (verts 0..1) of each half is its outer spring wall (x = min / max).
+    assert_eq!(low[0].x, Length::ZERO, "low half springs from the x=0 wall");
+    assert_eq!(low[1].x, Length::ZERO);
+    assert_eq!(high[0].x, ft(20.0), "high half springs from the x=20 wall");
+    assert_eq!(high[1].x, ft(20.0));
+    // Both reach the shared ridge at x = 10ft.
+    let mid = ft(10.0);
+    assert!(
+        low.iter().any(|p| p.x == mid) && high.iter().any(|p| p.x == mid),
+        "the halves meet at the ridge"
+    );
+}
+
+/// Arming the vault tool and then any sibling region tool (or vice versa) leaves
+/// exactly one active — so a click never authors a vault under the wrong tool.
+#[test]
+fn the_vault_tool_is_mutually_exclusive_with_the_other_region_tools() {
+    let mut app = FramerApp::default();
+
+    // Each sibling cancels an armed vault tool.
+    for activate_sibling in [
+        FramerApp::toggle_room_tool as fn(&mut FramerApp),
+        FramerApp::toggle_ceiling_tool,
+        FramerApp::toggle_floor_tool,
+    ] {
+        app.toggle_vault_tool();
+        assert!(app.vault_tool_active, "vault tool armed");
+        activate_sibling(&mut app);
+        assert!(
+            !app.vault_tool_active,
+            "arming another region tool must cancel the vault tool"
+        );
+    }
+
+    // And arming the vault tool cancels every other region tool.
+    app.toggle_room_tool();
+    app.toggle_vault_tool();
+    assert!(
+        app.vault_tool_active
+            && !app.room_tool_active
+            && !app.ceiling_tool_active
+            && !app.floor_tool_active,
+        "the vault tool cancels the other region tools"
+    );
 }
