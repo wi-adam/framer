@@ -18,5 +18,5 @@ framer-solver.workspace = true
 # AccessKit tree only — no wgpu rendering or image snapshots — which keeps the
 # dev-build lean and the harness deterministic across platforms.
 [dev-dependencies]
-egui_kittest = "0.34"
+egui_kittest = "0.35"
 pollster.workspace = true
