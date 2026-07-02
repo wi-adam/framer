@@ -5359,6 +5359,72 @@ mod tests {
         model
     }
 
+    fn square_hip_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(roof_system());
+        let (side, mid) = (Length::from_feet(20.0), Length::from_feet(10.0));
+        let peak = Point2::new(mid, mid);
+        let slope = pitch_6_12();
+        let springing = Length::from_feet(8.0);
+        model.roof_planes.push(RoofPlane::new(
+            "roof-south",
+            "South hip triangle",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(side, Length::ZERO),
+                peak,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-east",
+            "East hip triangle",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(side, Length::ZERO),
+                Point2::new(side, side),
+                peak,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-north",
+            "North hip triangle",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(side, side),
+                Point2::new(Length::ZERO, side),
+                peak,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-west",
+            "West hip triangle",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, side),
+                Point2::new(Length::ZERO, Length::ZERO),
+                peak,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model
+    }
+
     #[test]
     fn gable_with_no_ceiling_tie_emits_ridge_beam_required() {
         let plan = generate_project_plan(&gable_model()).unwrap();
@@ -5486,6 +5552,55 @@ mod tests {
                 item.kind == MemberKind::HipRafter && item.cut_length == Length::from_feet(9.0)
             })
             .expect("hip rafters fold into the project BOM");
+        assert_eq!(hip_bom.quantity, 4);
+    }
+
+    #[test]
+    fn square_hip_roof_frames_hips_without_a_ridge() {
+        let plan = generate_project_plan(&square_hip_model()).unwrap();
+        assert_eq!(plan.roof_plans.len(), 4);
+
+        let hips: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::HipRafter)
+            .collect();
+        assert_eq!(hips.len(), 4, "one hip rafter per corner-to-peak edge");
+        assert!(
+            hips.iter()
+                .all(|member| member.cut_length == Length::from_feet(15.0)),
+            "a 10ft by 10ft plan hip at 6:12 has a true 15ft cut length"
+        );
+        assert!(
+            hips.iter().all(|member| {
+                member.sloped
+                    == Some(SlopedPlacement {
+                        low_elevation: Length::from_feet(8.0),
+                        high_elevation: Length::from_feet(13.0),
+                    })
+            }),
+            "hips run from the plate corner to the shared peak"
+        );
+
+        let ridges: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::RidgeBoard)
+            .collect();
+        assert!(
+            ridges.is_empty(),
+            "a square pyramidal hip has no horizontal ridge board"
+        );
+
+        let hip_bom = plan
+            .bom()
+            .into_iter()
+            .find(|item| {
+                item.kind == MemberKind::HipRafter && item.cut_length == Length::from_feet(15.0)
+            })
+            .expect("square hip rafters fold into the project BOM");
         assert_eq!(hip_bom.quantity, 4);
     }
 
