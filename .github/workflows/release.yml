@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b1b44fef029483cc79808c5eb89461241fd8f32f # 1.93.0
+      - uses: dtolnay/rust-toolchain@45f5412a0cc5dee553bb061a37369fc8e63fa137 # 1.93.0
         with:
           toolchain: "1.93.0"
       # No build cache here on purpose. Releases are infrequent, so the build-time
@@ -186,7 +186,7 @@ jobs:
       # provenance (Sigstore). Verify with:
       #   gh attestation verify <file> --repo ${{ github.repository }}
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             dist/*.zip
