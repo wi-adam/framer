@@ -10,9 +10,9 @@
 > (A1); the live sloped-ceiling model `CeilingSlope` + validation, schema **v12** (A2); sloped
 > ceiling joists with true cut lengths + scissor diagnostics (A3); the sloped-ceiling render in
 > both meshers (A4); authoring — the inspector per-ceiling slope editor + the one-click vault
-> tool + the vaulted `demo-shell` example (A5); and **v2 Phase B Slice B1 Implemented** —
-> rectangular hip roof auto-generation, reserved hip/valley/jack member kinds, hip rafters, and
-> a shortened hip ridge. Jack rafters and valleys remain planned ·
+> tool + the vaulted `demo-shell` example (A5); and **v2 Phase B Slices B1-B2 Implemented** —
+> rectangular hip roof auto-generation, hip/valley/jack member kinds, hip rafters,
+> a shortened hip ridge, and jack rafters dying into hips. Valleys remain planned ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
@@ -153,7 +153,7 @@ Sequenced and tracked in
   (rise/run + downslope) for hand-editing a single plane. A cathedral is still authored by leaving
   the region ceiling-less.
 
-### v2 — Hip & valley roofs (Phase B: B1 implemented; B2-B4 planned)
+### v2 — Hip & valley roofs (Phase B: B1-B2 implemented; B3-B4 planned)
 
 The first non-opposing-plane roof geometry, built on Phase A. Tracked in the same v2 plan.
 
@@ -162,8 +162,9 @@ The first non-opposing-plane roof geometry, built on Phase A. Tracked in the sam
   lines, stored as editable `RoofPlane`s. No per-edge persisted roof-assembly state is added.
 - **New member kinds:** `HipRafter`, `ValleyRafter`, `JackRafter`. The B1 multi-plane post-pass
   emits `HipRafter`s between adjacent planes with true sloped placement and shortens the ridge
-  board to span hip-to-hip. `ValleyRafter` and `JackRafter` are reserved for the remaining
-  Phase B slices; common rafters still overrun hips until B2 replaces them with jacks.
+  board to span hip-to-hip. B2 replaces overlong common rafters on hip-bounded planes with
+  `JackRafter`s that shorten progressively and die into the hip line with true sloped cut
+  lengths. `ValleyRafter` remains reserved for the remaining Phase B slices.
 - **Valleys for equal-pitch L/T (multi-wing) footprints.** Where two right-angle wings of equal
   pitch meet, the valley bisects in plan; v2 frames that case. **Unequal-pitch valleys, dormers,
   and full straight-skeleton multi-wing auto-roofs are diagnosed as unsupported** and left to a
@@ -283,8 +284,9 @@ non-axis-aligned framing member**.
   unified surface type — least churn to the existing `bom()` / `layer_bom()` flatteners, which
   just traverse the new lists).
 - `MemberKind` gains `Rafter, CeilingJoist, FloorJoist, RidgeBoard, RimJoist, Blocking`,
-  `HipRafter`, `ValleyRafter`, and `JackRafter`. B1 emits `HipRafter`; valley and jack rafters
-  are reserved until the later Phase B slices. The **exhaustive** matches
+  `HipRafter`, `ValleyRafter`, and `JackRafter`. B1 emits `HipRafter`; B2 emits hip-bounded
+  `JackRafter`s; valley rafters and valley jacks are reserved until the later Phase B slices.
+  The **exhaustive** matches
   (`MemberKind::label()`, `member_svg_color()`, and the app's `member_color()`) must be updated
   or the build breaks — the intended safety.
 - **The sloped member.** `FrameMember` is 2-D-per-host (`x`, `elevation`, orientation

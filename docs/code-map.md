@@ -200,7 +200,7 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
   `bom()` / `layer_bom()`.
 - **`FrameMember`** — one generated piece: `kind: MemberKind` (BottomPlate, TopPlate,
   CommonStud, KingStud, JackStud, Header, RoughSill, CrippleStud, CornerPost, Rafter,
-  RidgeBoard, HipRafter, …),
+  RidgeBoard, HipRafter, JackRafter, …),
   `profile: BoardProfile`, `orientation`, position/length, and `provenance: RuleProvenance`
   (rule id + human-readable why).
 - **`LayerBomItem`** — per-layer material takeoff row (area goods / volumetric goods by
@@ -213,8 +213,8 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
 - **`generate_project_plan(&BuildingModel) -> Result<ProjectFramePlan, SolverError>`** — the
   one entry the app calls. Validates, then per wall calls `generate_wall_plan`, adds join
   members (corner posts / partition + backing studs), generates floor/ceiling/roof plans, adds
-  hip rafters from shared roof-plane edges, and builds the room schedule + per-layer BOM from
-  construction systems.
+  hip rafters from shared roof-plane edges, frames jack rafters where hip-bounded planes shorten,
+  and builds the room schedule + per-layer BOM from construction systems.
 - `generate_wall_plan(wall, code, system, materials)` — single-wall framing.
 - Exports: `export_bom_csv`, `export_layer_bom_csv`, `export_room_schedule_csv`,
   `export_wall_elevation_svg`, `export_project_svg`.

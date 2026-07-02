@@ -453,10 +453,10 @@ pub enum MemberKind {
     /// a footprint corner up to the ridge end.
     HipRafter,
     /// A diagonal valley rafter shared by two inward roof planes. Reserved for
-    /// the valley phase; v2 B1 does not emit these yet.
+    /// the valley phase.
     ValleyRafter,
-    /// A shortened rafter that dies into a hip or valley. Reserved for the jack
-    /// rafter phase; v2 B1 does not emit these yet.
+    /// A shortened rafter that dies into a hip or valley. v2 B2 emits these
+    /// against hips; valley jacks arrive with the valley phase.
     JackRafter,
 }
 
@@ -1298,6 +1298,62 @@ fn edge_length(edge: (Point2, Point2)) -> Length {
     Length::from_inches((dx * dx + dy * dy).sqrt())
 }
 
+/// The longest up-slope plan run available at one rafter layout mark before the
+/// rafter hits the roof polygon boundary. Rectangular/gable planes return the
+/// full run; hip trapezoids and triangles shorten near the hips so those marks
+/// become jack rafters instead of common rafters overrunning the hip line.
+fn rafter_run_at_mark(
+    plane: &RoofPlane,
+    frame: &RoofPlaneFrame,
+    geometry: &RoofPlaneGeometry,
+    mark: Length,
+) -> Length {
+    const EPS: f64 = 1.0e-7;
+
+    let target = mark.inches();
+    let local: Vec<(f64, f64)> = plane
+        .outline
+        .iter()
+        .map(|point| {
+            (
+                eave_axis_position(plane, *point).inches(),
+                frame.up_slope_distance(point.x.inches(), point.y.inches()),
+            )
+        })
+        .collect();
+
+    let mut runs = Vec::new();
+    for index in 0..local.len() {
+        let (x0, v0) = local[index];
+        let (x1, v1) = local[(index + 1) % local.len()];
+
+        if (x0 - target).abs() <= EPS {
+            runs.push(v0);
+        }
+        if (x1 - target).abs() <= EPS {
+            runs.push(v1);
+        }
+        if (x0 - x1).abs() <= EPS {
+            if (x0 - target).abs() <= EPS {
+                runs.push(v0);
+                runs.push(v1);
+            }
+            continue;
+        }
+
+        let min_x = x0.min(x1);
+        let max_x = x0.max(x1);
+        if target > min_x + EPS && target < max_x - EPS {
+            let t = (target - x0) / (x1 - x0);
+            runs.push(v0 + t * (v1 - v0));
+        }
+    }
+
+    let full_run = geometry.run_extent.inches();
+    let run = runs.into_iter().fold(0.0_f64, f64::max);
+    Length::from_inches(run.clamp(0.0, full_run))
+}
+
 /// True sloped length per unit plan run for a pitch (1 when flat, ≥ 1 otherwise).
 fn slope_factor(slope: Slope) -> f64 {
     let rise = slope.rise.inches();
@@ -1382,31 +1438,59 @@ pub fn generate_roof_plan(
         });
     };
 
+    let frame = plane
+        .frame()
+        .expect("roof_plane_geometry returned Some only when the frame is valid");
     let factor = slope_factor(plane.slope);
     let ratio = slope_ratio(plane.slope);
     let run_extent = geometry.run_extent;
     let overhang = plane.eave_overhang;
 
-    // The whole rafter board, eave overhang tail included, cut to true length.
-    let total_plan_run = run_extent + overhang;
-    let cut_length = Length::from_inches(total_plan_run.inches() * factor);
     // Plane-local v = 0 is the eave bearing line; the tail sits at v = -overhang.
     let tail_v = Length::ZERO - overhang;
     let ridge_elevation = ridge_elevation(plane, run_extent);
     let tail_elevation = plane.reference_elevation - Length::from_inches(overhang.inches() * ratio);
-    let rafter_slope = SlopedPlacement {
-        low_elevation: tail_elevation,
-        high_elevation: ridge_elevation,
-    };
 
-    // Common rafters: arrayed along the eave (layout) axis at o.c., each running
-    // up the slope. End rafters align with the rake edges.
+    // Rafters are arrayed along the eave (layout) axis at o.c. A mark that can
+    // reach the full high edge is a common rafter; a mark whose run is clipped by
+    // a hip line becomes a jack rafter and dies into that hip.
     let positions = stud_positions(geometry.eave_length, spacing, rafter_thickness);
     for mark in &positions {
+        let local_run = rafter_run_at_mark(plane, &frame, &geometry, *mark);
+        let is_jack = run_extent - local_run > Length::from_ticks(1);
+        let total_plan_run = local_run + overhang;
+        let cut_length = Length::from_inches(total_plan_run.inches() * factor);
+        let high_elevation =
+            plane.reference_elevation + Length::from_inches(local_run.inches() * ratio);
+        let member_kind = if is_jack {
+            MemberKind::JackRafter
+        } else {
+            MemberKind::Rafter
+        };
+        let (id, rule_id, summary) = if is_jack {
+            (
+                format!("jack-rafter-{}", mark.ticks()),
+                "roof.jack-rafters.hip",
+                format!(
+                    "A jack rafter at layout mark {mark} dies into the hip after a {} plan run; its cut length is the true sloped length.",
+                    local_run
+                ),
+            )
+        } else {
+            (
+                format!("rafter-{}", mark.ticks()),
+                "roof.rafters.on-center",
+                format!(
+                    "Common rafters span the {} plan run perpendicular to the eave; end rafters align with the rake edges and interior rafters fall on {} layout marks. The cut length is the true sloped length (plan run times the {}:{} pitch).",
+                    run_extent, spacing, plane.slope.rise, plane.slope.run
+                ),
+            )
+        };
+
         members.push(frame_member(
-            format!("rafter-{}", mark.ticks()),
+            id,
             &plane.id,
-            MemberKind::Rafter,
+            member_kind,
             rafter,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
@@ -1415,15 +1499,12 @@ pub fn generate_roof_plan(
                 cut_length,
                 rafter_thickness,
             )
-            .with_slope(rafter_slope),
+            .with_slope(SlopedPlacement {
+                low_elevation: tail_elevation,
+                high_elevation,
+            }),
             band,
-            RuleProvenance::new(
-                "roof.rafters.on-center",
-                format!(
-                    "Common rafters span the {} plan run perpendicular to the eave; end rafters align with the rake edges and interior rafters fall on {} layout marks. The cut length is the true sloped length (plan run times the {}:{} pitch).",
-                    run_extent, spacing, plane.slope.rise, plane.slope.run
-                ),
-            ),
+            RuleProvenance::new(rule_id, summary),
         ));
     }
 
@@ -5556,6 +5637,84 @@ mod tests {
     }
 
     #[test]
+    fn rectangular_hip_roof_replaces_overrunning_common_rafters_with_jacks() {
+        let plan = generate_project_plan(&rectangular_hip_model()).unwrap();
+        let south = plan.roof_plan(&ElementId::new("roof-south")).unwrap();
+
+        let ridge_start = Length::from_feet(6.0);
+        let ridge_end = Length::from_feet(18.0);
+        let full_run = Length::from_feet(6.0);
+        let full_cut = Length::from_inches(full_run.inches() * slope_factor(pitch_6_12()));
+        let ridge_elevation = Length::from_feet(11.0);
+
+        let common: Vec<_> = south
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::Rafter)
+            .collect();
+        assert!(
+            !common.is_empty(),
+            "the central ridge span still frames common rafters"
+        );
+        assert!(
+            common.iter().all(|member| {
+                member.x >= ridge_start
+                    && member.x <= ridge_end
+                    && member.cut_length == full_cut
+                    && member
+                        .sloped
+                        .is_some_and(|slope| slope.high_elevation == ridge_elevation)
+            }),
+            "only rafters under the central ridge run the full common length"
+        );
+
+        let jacks: Vec<_> = south
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::JackRafter)
+            .collect();
+        assert!(!jacks.is_empty(), "hip-bounded marks become jack rafters");
+        assert!(
+            jacks.iter().all(|member| {
+                member.cut_length < full_cut
+                    && member
+                        .sloped
+                        .is_some_and(|slope| slope.high_elevation < ridge_elevation)
+            }),
+            "jack rafters stop at the hip instead of overrunning to the ridge"
+        );
+
+        let right_jacks: Vec<_> = jacks
+            .iter()
+            .copied()
+            .filter(|member| member.x > ridge_end)
+            .collect();
+        assert!(right_jacks.len() >= 2);
+        for pair in right_jacks.windows(2) {
+            assert!(
+                pair[0].cut_length > pair[1].cut_length,
+                "jack cut lengths descend toward the hip corner"
+            );
+        }
+        for jack in right_jacks {
+            let expected_run = Length::from_feet(24.0) - jack.x;
+            let expected_high =
+                Length::from_feet(8.0) + Length::from_inches(expected_run.inches() * 0.5);
+            let expected_cut =
+                Length::from_inches(expected_run.inches() * slope_factor(pitch_6_12()));
+            assert_eq!(jack.sloped.unwrap().high_elevation, expected_high);
+            assert_eq!(jack.cut_length, expected_cut);
+        }
+
+        let jack_bom = plan
+            .bom()
+            .into_iter()
+            .find(|item| item.kind == MemberKind::JackRafter)
+            .expect("jack rafters fold into the project BOM");
+        assert!(jack_bom.quantity > 0);
+    }
+
+    #[test]
     fn square_hip_roof_frames_hips_without_a_ridge() {
         let plan = generate_project_plan(&square_hip_model()).unwrap();
         assert_eq!(plan.roof_plans.len(), 4);
@@ -5602,6 +5761,37 @@ mod tests {
             })
             .expect("square hip rafters fold into the project BOM");
         assert_eq!(hip_bom.quantity, 4);
+    }
+
+    #[test]
+    fn square_hip_roof_frames_jacks_without_overrunning_common_rafters() {
+        let plan = generate_project_plan(&square_hip_model()).unwrap();
+
+        for roof in &plan.roof_plans {
+            assert!(
+                roof.members
+                    .iter()
+                    .all(|member| member.kind != MemberKind::Rafter),
+                "a pyramidal hip has no central ridge span for common rafters"
+            );
+            let jacks: Vec<_> = roof
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::JackRafter)
+                .collect();
+            assert!(
+                !jacks.is_empty(),
+                "each square hip plane frames jack rafters against its hips"
+            );
+            assert!(
+                jacks.iter().all(|member| {
+                    member
+                        .sloped
+                        .is_some_and(|slope| slope.high_elevation < Length::from_feet(13.0))
+                }),
+                "no jack overruns the hip to the shared peak"
+            );
+        }
     }
 
     /// The tied-gable fixture: `gable_model` with the level top raised to the roof
