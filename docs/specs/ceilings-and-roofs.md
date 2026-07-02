@@ -9,13 +9,15 @@
 > cathedral underside finish + the ridge-board-vs-beam tie fork + cathedral/attic diagnostic
 > (A1); the live sloped-ceiling model `CeilingSlope` + validation, schema **v12** (A2); sloped
 > ceiling joists with true cut lengths + scissor diagnostics (A3); the sloped-ceiling render in
-> both meshers (A4); and authoring — the inspector per-ceiling slope editor + the one-click vault
-> tool + the vaulted `demo-shell` example (A5). Phase B (hip/valley roofs) remains ·
+> both meshers (A4); authoring — the inspector per-ceiling slope editor + the one-click vault
+> tool + the vaulted `demo-shell` example (A5); and **v2 Phase B Slice B1 Implemented** —
+> rectangular hip roof auto-generation, reserved hip/valley/jack member kinds, hip rafters, and
+> a shortened hip ridge. Jack rafters and valleys remain planned ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
 > [2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md) ·
-> **Last reviewed:** 2026-06-24
+> **Last reviewed:** 2026-07-02
 
 ## Intent / Purpose
 
@@ -54,7 +56,9 @@ The observable contract. Testable statements; edge cases are explicit.
   **reference elevation** (the bearing/springing line), and eave/rake overhangs. A roof plane
   references a system of `kind == Roof`.
 - A **gable roof** is two opposing roof planes sharing a ridge; a **shed/mono roof** is one
-  plane. v1 authors these two forms.
+  plane. A **rectangular hip roof** is four stored planes (two trapezoids plus two triangles)
+  meeting at a shortened central ridge and four hip lines. The auto roof tool authors all three
+  forms as editable `RoofPlane`s.
 - A **ceiling** is a per-region (per-room or explicit polygon) finished surface at an authored
   height below the level top, **flat in v1** (slope reserved for later vault/scissor work). It
   references a system of `kind == Ceiling`. A region with **no** ceiling object is a
@@ -88,9 +92,10 @@ The observable contract. Testable statements; edge cases are explicit.
 ### Authoring
 
 - A user authors a roof with a **roof tool** that auto-generates planes from the building
-  footprint plus a global pitch and a per-edge gable/hip flag, then **writes the resulting
-  planes into the model** as editable objects (hybrid: generate, then store). v1 generates
-  gable/shed planes for a rectangular footprint; other forms are hand-authored or come later.
+  footprint plus a global pitch and a transient form choice, then **writes the resulting
+  planes into the model** as editable objects (hybrid: generate, then store). It generates
+  gable, shed, and rectangular hip planes; after generation, the user edits the stored planes
+  directly.
 - A user authors a flat ceiling with a **ceiling tool** that, like the room tool, requires an
   enclosed region (reuses `topology::room_boundary`) and attaches the ceiling to that room.
 - Roof planes, ceilings, and floor decks appear in the **model tree** under their level
@@ -148,16 +153,17 @@ Sequenced and tracked in
   (rise/run + downslope) for hand-editing a single plane. A cathedral is still authored by leaving
   the region ceiling-less.
 
-### v2 — Hip & valley roofs (planned, Phase B)
+### v2 — Hip & valley roofs (Phase B: B1 implemented; B2-B4 planned)
 
 The first non-opposing-plane roof geometry, built on Phase A. Tracked in the same v2 plan.
 
-- **Hip roofs on a rectangular footprint.** The roof tool gains a per-edge **gable/hip** flag; a
-  hip footprint emits four planes (two trapezoids + two triangles) meeting at a central ridge
-  with four hip lines, stored as editable `RoofPlane`s.
-- **New member kinds:** `HipRafter`, `ValleyRafter`, `JackRafter`. A multi-plane post-pass
-  (sibling of `add_join_members`) emits the hip/valley members between adjacent planes with true
-  sloped placement; common rafters shorten into **jack rafters** that die into each hip/valley.
+- **Hip roofs on a rectangular footprint.** The roof tool's transient form choice can emit four
+  planes (two trapezoids + two triangles) meeting at a shortened central ridge with four hip
+  lines, stored as editable `RoofPlane`s. No per-edge persisted roof-assembly state is added.
+- **New member kinds:** `HipRafter`, `ValleyRafter`, `JackRafter`. The B1 multi-plane post-pass
+  emits `HipRafter`s between adjacent planes with true sloped placement and shortens the ridge
+  board to span hip-to-hip. `ValleyRafter` and `JackRafter` are reserved for the remaining
+  Phase B slices; common rafters still overrun hips until B2 replaces them with jacks.
 - **Valleys for equal-pitch L/T (multi-wing) footprints.** Where two right-angle wings of equal
   pitch meet, the valley bisects in plan; v2 frames that case. **Unequal-pitch valleys, dormers,
   and full straight-skeleton multi-wing auto-roofs are diagnosed as unsupported** and left to a
@@ -276,10 +282,11 @@ non-axis-aligned framing member**.
 - `ProjectFramePlan` gains `roof_plans`, `ceiling_plans`, `floor_plans` (separate `Vec`s, not a
   unified surface type — least churn to the existing `bom()` / `layer_bom()` flatteners, which
   just traverse the new lists).
-- `MemberKind` gains `Rafter, CeilingJoist, FloorJoist, RidgeBoard, RimJoist, Blocking`
-  (+ `HipRafter, ValleyRafter, JackRafter` reserved for the hips phase). The **exhaustive**
-  matches (`MemberKind::label()`, `member_svg_color()`, and the app's `member_color()`) must be
-  updated or the build breaks — the intended safety.
+- `MemberKind` gains `Rafter, CeilingJoist, FloorJoist, RidgeBoard, RimJoist, Blocking`,
+  `HipRafter`, `ValleyRafter`, and `JackRafter`. B1 emits `HipRafter`; valley and jack rafters
+  are reserved until the later Phase B slices. The **exhaustive** matches
+  (`MemberKind::label()`, `member_svg_color()`, and the app's `member_color()`) must be updated
+  or the build breaks — the intended safety.
 - **The sloped member.** `FrameMember` is 2-D-per-host (`x`, `elevation`, orientation
   `Horizontal|Vertical`). Extend it with an optional integer-tick **sloped placement** (a
   start/end elevation pair plus an in-plane axis in a roof-plane-local basis) so a rafter is "a
@@ -349,7 +356,7 @@ non-axis-aligned framing member**.
 
 ## Out of scope (YAGNI — architecturally open)
 
-> Cathedral/scissor/sloped ceilings and rectangular hips + equal-pitch L/T valleys move **into
+> Cathedral/scissor/sloped ceilings, rectangular hips, and equal-pitch L/T valleys move **into
 > scope** with v2 (see the v2 requirements above). What remains out:
 
 - **Unequal-pitch valleys, dormers, and full straight-skeleton multi-wing auto-roofs** — the

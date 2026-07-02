@@ -33,6 +33,28 @@ fn rename_first_wall(app: &mut FramerApp) {
     app.model.walls[0].name.push('*');
 }
 
+fn replace_walls_with_rectangular_footprint(app: &mut FramerApp, width_ft: f64, depth_ft: f64) {
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let corners = [
+        (0.0, 0.0),
+        (width_ft, 0.0),
+        (width_ft, depth_ft),
+        (0.0, depth_ft),
+        (0.0, 0.0),
+    ];
+    for pair in corners.windows(2) {
+        app.add_wall(
+            Point2::new(Length::from_feet(pair[0].0), Length::from_feet(pair[0].1)),
+            Point2::new(Length::from_feet(pair[1].0), Length::from_feet(pair[1].1)),
+        );
+    }
+    app.history.clear();
+}
+
 #[test]
 fn edit_records_an_undo_step_and_undo_restores_the_model() {
     let mut app = FramerApp::default();
@@ -402,6 +424,121 @@ fn add_shed_roof_generates_one_plane() {
     app.add_roof(RoofForm::Shed);
     assert_eq!(app.model.roof_planes.len(), 1, "a shed is a single plane");
     assert!(app.model.validate().is_ok(), "generated roof must validate");
+}
+
+#[test]
+fn add_hip_roof_generates_four_valid_planes() {
+    let mut app = FramerApp::default();
+    let before = app.model.roof_planes.len();
+
+    app.add_roof(RoofForm::Hip);
+
+    let new_planes = &app.model.roof_planes[before..];
+    assert_eq!(new_planes.len(), 4, "a hip roof is four stored planes");
+    assert_eq!(
+        new_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 4)
+            .count(),
+        2,
+        "the long sides are trapezoids"
+    );
+    assert_eq!(
+        new_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 3)
+            .count(),
+        2,
+        "the short ends are hip triangles"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "generated hip roof must validate"
+    );
+    assert!(new_planes.iter().all(|plane| plane.frame().is_some()));
+    assert_eq!(app.history.undo_label(), Some("Add roof"));
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo removes all four hip planes in one step"
+    );
+}
+
+#[test]
+fn add_square_hip_roof_generates_four_triangular_planes() {
+    let mut app = FramerApp::default();
+    replace_walls_with_rectangular_footprint(&mut app, 20.0, 20.0);
+
+    app.add_roof(RoofForm::Hip);
+
+    assert_eq!(
+        app.model.roof_planes.len(),
+        4,
+        "a square hip has four planes"
+    );
+    assert!(
+        app.model
+            .roof_planes
+            .iter()
+            .all(|plane| plane.outline.len() == 3),
+        "a square hip degenerates to four triangles meeting at one peak"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "generated square hip roof must validate"
+    );
+    assert!(
+        app.model
+            .roof_planes
+            .iter()
+            .all(|plane| plane.frame().is_some()),
+        "every square hip plane has a usable frame"
+    );
+}
+
+#[test]
+fn add_portrait_hip_roof_generates_four_valid_planes() {
+    let mut app = FramerApp::default();
+    replace_walls_with_rectangular_footprint(&mut app, 20.0, 28.0);
+
+    app.add_roof(RoofForm::Hip);
+
+    assert_eq!(
+        app.model.roof_planes.len(),
+        4,
+        "a portrait hip has four planes"
+    );
+    assert_eq!(
+        app.model
+            .roof_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 4)
+            .count(),
+        2,
+        "the long sides are trapezoids"
+    );
+    assert_eq!(
+        app.model
+            .roof_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 3)
+            .count(),
+        2,
+        "the short ends are hip triangles"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "generated portrait hip roof must validate"
+    );
+    assert!(
+        app.model
+            .roof_planes
+            .iter()
+            .all(|plane| plane.frame().is_some()),
+        "every portrait hip plane has a usable frame"
+    );
 }
 
 #[test]

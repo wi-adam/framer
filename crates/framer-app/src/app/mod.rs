@@ -161,12 +161,14 @@ enum ViewportMode {
     Render,
 }
 
-/// The roof form the auto-from-footprint roof tool generates. v1 authors a single
-/// shed plane or two opposing gable planes; hips/valleys are a later phase.
+/// The roof form the auto-from-footprint roof tool generates. The tool writes
+/// explicit roof planes into the model; the form choice is transient authoring
+/// input, not a persisted roof-assembly parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoofForm {
     Gable,
     Shed,
+    Hip,
 }
 
 /// One generated roof-plane outline: its plan-projected polygon and the index of
@@ -2052,6 +2054,57 @@ impl FramerApp {
                             ],
                             1,
                         ),
+                    ]
+                }
+            }
+            // A rectangular hip roof has four authored planes. On the longer axis,
+            // the two long sides are trapezoids whose high edge is the central
+            // ridge; the two short ends are hip triangles. A square footprint
+            // degenerates to four triangles meeting at one peak.
+            RoofForm::Hip => {
+                let width = max_x - min_x;
+                let depth = max_y - min_y;
+                if width == depth {
+                    let peak = p((min_x + max_x) / 2, (min_y + max_y) / 2);
+                    vec![
+                        (vec![p(min_x, min_y), p(max_x, min_y), peak], 0),
+                        (vec![p(max_x, min_y), p(max_x, max_y), peak], 0),
+                        (vec![p(max_x, max_y), p(min_x, max_y), peak], 0),
+                        (vec![p(min_x, max_y), p(min_x, min_y), peak], 0),
+                    ]
+                } else if width > depth {
+                    let inset = depth / 2;
+                    let mid_y = (min_y + max_y) / 2;
+                    let ridge_west = p(min_x + inset, mid_y);
+                    let ridge_east = p(max_x - inset, mid_y);
+                    vec![
+                        (
+                            vec![p(min_x, min_y), p(max_x, min_y), ridge_east, ridge_west],
+                            0,
+                        ),
+                        (
+                            vec![p(max_x, max_y), p(min_x, max_y), ridge_west, ridge_east],
+                            0,
+                        ),
+                        (vec![p(max_x, min_y), p(max_x, max_y), ridge_east], 0),
+                        (vec![p(min_x, max_y), p(min_x, min_y), ridge_west], 0),
+                    ]
+                } else {
+                    let inset = width / 2;
+                    let mid_x = (min_x + max_x) / 2;
+                    let ridge_south = p(mid_x, min_y + inset);
+                    let ridge_north = p(mid_x, max_y - inset);
+                    vec![
+                        (
+                            vec![p(min_x, max_y), p(min_x, min_y), ridge_south, ridge_north],
+                            0,
+                        ),
+                        (
+                            vec![p(max_x, min_y), p(max_x, max_y), ridge_north, ridge_south],
+                            0,
+                        ),
+                        (vec![p(min_x, min_y), p(max_x, min_y), ridge_south], 0),
+                        (vec![p(max_x, max_y), p(min_x, max_y), ridge_north], 0),
                     ]
                 }
             }
