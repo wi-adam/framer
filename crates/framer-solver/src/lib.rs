@@ -449,6 +449,15 @@ pub enum MemberKind {
     /// The ridge board a gable's opposing rafters bear against, running level
     /// along the ridge (the shared high edge of two roof planes).
     RidgeBoard,
+    /// A diagonal hip rafter shared by two adjacent hip-roof planes, running from
+    /// a footprint corner up to the ridge end.
+    HipRafter,
+    /// A diagonal valley rafter shared by two inward roof planes. Reserved for
+    /// the valley phase; v2 B1 does not emit these yet.
+    ValleyRafter,
+    /// A shortened rafter that dies into a hip or valley. Reserved for the jack
+    /// rafter phase; v2 B1 does not emit these yet.
+    JackRafter,
 }
 
 impl MemberKind {
@@ -471,6 +480,9 @@ impl MemberKind {
             Self::Blocking => "blocking",
             Self::Rafter => "rafter",
             Self::RidgeBoard => "ridge board",
+            Self::HipRafter => "hip rafter",
+            Self::ValleyRafter => "valley rafter",
+            Self::JackRafter => "jack rafter",
         }
     }
 }
@@ -1221,6 +1233,9 @@ struct RoofPlaneGeometry {
     /// The high (ridge) edge as an endpoint pair (exact outline points), compared
     /// unordered to find two planes that share a gable ridge.
     high_edge: (Point2, Point2),
+    /// The high-edge plan length. Equal to the eave length for a rectangular
+    /// gable, shorter for a hip trapezoid whose ridge stops at the hip rafters.
+    high_edge_length: Length,
 }
 
 /// Derive a roof plane's plan geometry. Returns `None` for a degenerate outline
@@ -1273,7 +1288,14 @@ fn surface_geometry(
         eave_length: Length::from_inches(frame.eave_length()),
         run_extent: Length::from_inches(run_extent),
         high_edge,
+        high_edge_length: edge_length(high_edge),
     }
+}
+
+fn edge_length(edge: (Point2, Point2)) -> Length {
+    let dx = edge.1.x.inches() - edge.0.x.inches();
+    let dy = edge.1.y.inches() - edge.0.y.inches();
+    Length::from_inches((dx * dx + dy * dy).sqrt())
 }
 
 /// True sloped length per unit plan run for a pitch (1 when flat, ≥ 1 otherwise).
@@ -1451,7 +1473,7 @@ pub fn generate_roof_plan(
                 MemberOrientation::Horizontal,
                 Length::ZERO,
                 run_extent,
-                geometry.eave_length,
+                geometry.high_edge_length,
                 rafter_thickness,
             )
             .with_slope(SlopedPlacement {
@@ -1575,6 +1597,162 @@ fn ridge_condition(
         (true, true, true) => RidgeCondition::Deferred,
         (true, true, false) => RidgeCondition::Carries,
     }
+}
+
+fn eave_axis_position(plane: &RoofPlane, point: Point2) -> Length {
+    if plane.outline.len() < 2 {
+        return Length::ZERO;
+    }
+    let i = plane.eave_edge as usize % plane.outline.len();
+    let a = plane.outline[i];
+    let b = plane.outline[(i + 1) % plane.outline.len()];
+    let dx = b.x.inches() - a.x.inches();
+    let dy = b.y.inches() - a.y.inches();
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= f64::EPSILON {
+        return Length::ZERO;
+    }
+    let px = point.x.inches() - a.x.inches();
+    let py = point.y.inches() - a.y.inches();
+    Length::from_inches((px * dx + py * dy) / length)
+}
+
+fn matching_edge_elevations(
+    first: &RoofPlane,
+    second: &RoofPlane,
+    edge: (Point2, Point2),
+) -> Option<(Length, Length)> {
+    let first_frame = first.frame()?;
+    let second_frame = second.frame()?;
+    let elevations = |frame: RoofPlaneFrame| {
+        (
+            Length::from_inches(frame.elevation_at(edge.0.x.inches(), edge.0.y.inches())),
+            Length::from_inches(frame.elevation_at(edge.1.x.inches(), edge.1.y.inches())),
+        )
+    };
+    let first_elevations = elevations(first_frame);
+    let second_elevations = elevations(second_frame);
+    if (first_elevations.0 - second_elevations.0).abs() > Length::from_ticks(1)
+        || (first_elevations.1 - second_elevations.1).abs() > Length::from_ticks(1)
+    {
+        return None;
+    }
+    Some(first_elevations)
+}
+
+fn add_hip_members(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+    geometries: &[Option<RoofPlaneGeometry>],
+) -> Result<(), SolverError> {
+    for (first_index, first) in model.roof_planes.iter().enumerate() {
+        let Some(first_geometry) = geometries[first_index].as_ref() else {
+            continue;
+        };
+        for (second_index, second) in model.roof_planes.iter().enumerate().skip(first_index + 1) {
+            let Some(second_geometry) = geometries[second_index].as_ref() else {
+                continue;
+            };
+            for edge_index in 0..first.outline.len() {
+                let edge = (
+                    first.outline[edge_index],
+                    first.outline[(edge_index + 1) % first.outline.len()],
+                );
+                let shared = (0..second.outline.len()).any(|other_edge_index| {
+                    same_edge(
+                        edge,
+                        (
+                            second.outline[other_edge_index],
+                            second.outline[(other_edge_index + 1) % second.outline.len()],
+                        ),
+                    )
+                });
+                if !shared {
+                    continue;
+                }
+                if same_edge(edge, first_geometry.high_edge)
+                    && same_edge(edge, second_geometry.high_edge)
+                {
+                    // A shared high edge is the ridge board, not a hip.
+                    continue;
+                }
+                let Some((a_elevation, b_elevation)) =
+                    matching_edge_elevations(first, second, edge)
+                else {
+                    continue;
+                };
+                if (a_elevation - b_elevation).abs() <= Length::from_ticks(1) {
+                    continue;
+                }
+
+                let (owner, peer) = if first.id <= second.id {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                let system = system_by_id(model, &owner.system).ok_or_else(|| {
+                    SolverError::MissingSystemForElement {
+                        element: owner.id.clone(),
+                        system: owner.system.clone(),
+                    }
+                })?;
+                let framing = system_framing(system)?;
+                let band = FramingBand::for_system(system)?;
+                let frame = owner.frame();
+                let (low_point, low_elevation, high_elevation) = if a_elevation <= b_elevation {
+                    (edge.0, a_elevation, b_elevation)
+                } else {
+                    (edge.1, b_elevation, a_elevation)
+                };
+                let rise = high_elevation - low_elevation;
+                let plan_length = edge_length(edge);
+                let cut_length = Length::from_inches(
+                    (plan_length.inches().powi(2) + rise.inches().powi(2)).sqrt(),
+                );
+                let placement_run = frame
+                    .map(|frame| {
+                        Length::from_inches(
+                            frame.up_slope_distance(low_point.x.inches(), low_point.y.inches()),
+                        )
+                    })
+                    .unwrap_or(Length::ZERO);
+                let placement_x = eave_axis_position(owner, low_point);
+                let member = frame_member(
+                    format!("hip-rafter-{}-edge-{edge_index}", peer.id.0),
+                    &owner.id,
+                    MemberKind::HipRafter,
+                    framing.member,
+                    FrameMemberPlacement::new(
+                        MemberOrientation::Vertical,
+                        placement_x,
+                        placement_run,
+                        cut_length,
+                        framing.member.thickness(),
+                    )
+                    .with_slope(SlopedPlacement {
+                        low_elevation,
+                        high_elevation,
+                    }),
+                    band,
+                    RuleProvenance::new(
+                        "roof.hip.shared-edge",
+                        format!(
+                            "A hip rafter follows the shared sloped edge between {} and {}; its cut length is the true length from plate corner to ridge end.",
+                            owner.name, peer.name
+                        ),
+                    ),
+                );
+                if let Some(owner_plan) = plan
+                    .roof_plans
+                    .iter_mut()
+                    .find(|roof_plan| roof_plan.roof == owner.id)
+                {
+                    owner_plan.members.push(member);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A varying-plate-height message when the walls on a roof plane's level have
@@ -1794,6 +1972,7 @@ fn generate_roof_plans(
         }
         plan.roof_plans.push(roof_plan);
     }
+    add_hip_members(plan, model, &geometries)?;
     Ok(())
 }
 
@@ -3030,6 +3209,9 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
         MemberKind::Blocking => "#b59a6a",
         MemberKind::Rafter => "#8a6f4a",
         MemberKind::RidgeBoard => "#5d4a32",
+        MemberKind::HipRafter => "#7f6848",
+        MemberKind::ValleyRafter => "#725f7f",
+        MemberKind::JackRafter => "#a8844f",
     }
 }
 
@@ -4922,6 +5104,10 @@ mod tests {
         Slope::new(Length::from_whole_inches(9), Length::from_whole_inches(12))
     }
 
+    fn pitch_6_12() -> Slope {
+        Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12))
+    }
+
     #[test]
     fn roof_plane_arrays_rafters_at_true_sloped_length() {
         let plane = shed_plane(pitch_9_12());
@@ -5103,6 +5289,76 @@ mod tests {
         model
     }
 
+    fn rectangular_hip_model() -> BuildingModel {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model.systems.push(roof_system());
+        let (w, d, mid_y, inset) = (
+            Length::from_feet(24.0),
+            Length::from_feet(12.0),
+            Length::from_feet(6.0),
+            Length::from_feet(6.0),
+        );
+        let ridge_west = Point2::new(inset, mid_y);
+        let ridge_east = Point2::new(w - inset, mid_y);
+        let slope = pitch_6_12();
+        let springing = Length::from_feet(8.0);
+        model.roof_planes.push(RoofPlane::new(
+            "roof-south",
+            "South hip field",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(w, Length::ZERO),
+                ridge_east,
+                ridge_west,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-north",
+            "North hip field",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(w, d),
+                Point2::new(Length::ZERO, d),
+                ridge_west,
+                ridge_east,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-east",
+            "East hip end",
+            "level-1",
+            "system-roof",
+            vec![Point2::new(w, Length::ZERO), Point2::new(w, d), ridge_east],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-west",
+            "West hip end",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, d),
+                Point2::new(Length::ZERO, Length::ZERO),
+                ridge_west,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model
+    }
+
     #[test]
     fn gable_with_no_ceiling_tie_emits_ridge_beam_required() {
         let plan = generate_project_plan(&gable_model()).unwrap();
@@ -5169,6 +5425,68 @@ mod tests {
             .map(|layer| layer.area_sq_in)
             .sum();
         assert_eq!(roofing, 2 * 288 * 144);
+    }
+
+    #[test]
+    fn rectangular_hip_roof_frames_hips_and_a_shortened_ridge() {
+        let plan = generate_project_plan(&rectangular_hip_model()).unwrap();
+        assert_eq!(plan.roof_plans.len(), 4);
+
+        let hips: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::HipRafter)
+            .collect();
+        assert_eq!(hips.len(), 4, "one hip rafter per corner-to-ridge edge");
+        assert!(
+            hips.iter()
+                .all(|member| member.cut_length == Length::from_feet(9.0)),
+            "a 6ft by 6ft plan hip at 6:12 has a true 9ft cut length"
+        );
+        assert!(
+            hips.iter().all(|member| {
+                member.sloped
+                    == Some(SlopedPlacement {
+                        low_elevation: Length::from_feet(8.0),
+                        high_elevation: Length::from_feet(11.0),
+                    })
+            }),
+            "hips run from the plate corner to the ridge end"
+        );
+
+        let ridges: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::RidgeBoard)
+            .collect();
+        assert_eq!(
+            ridges.len(),
+            1,
+            "the two trapezoids share one central ridge"
+        );
+        assert_eq!(
+            ridges[0].cut_length,
+            Length::from_feet(12.0),
+            "ridge length is the footprint length minus the two hip insets"
+        );
+        assert_eq!(
+            ridges[0].sloped,
+            Some(SlopedPlacement {
+                low_elevation: Length::from_feet(11.0),
+                high_elevation: Length::from_feet(11.0),
+            })
+        );
+
+        let hip_bom = plan
+            .bom()
+            .into_iter()
+            .find(|item| {
+                item.kind == MemberKind::HipRafter && item.cut_length == Length::from_feet(9.0)
+            })
+            .expect("hip rafters fold into the project BOM");
+        assert_eq!(hip_bom.quantity, 4);
     }
 
     /// The tied-gable fixture: `gable_model` with the level top raised to the roof

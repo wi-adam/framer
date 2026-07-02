@@ -405,6 +405,46 @@ fn add_shed_roof_generates_one_plane() {
 }
 
 #[test]
+fn add_hip_roof_generates_four_valid_planes() {
+    let mut app = FramerApp::default();
+    let before = app.model.roof_planes.len();
+
+    app.add_roof(RoofForm::Hip);
+
+    let new_planes = &app.model.roof_planes[before..];
+    assert_eq!(new_planes.len(), 4, "a hip roof is four stored planes");
+    assert_eq!(
+        new_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 4)
+            .count(),
+        2,
+        "the long sides are trapezoids"
+    );
+    assert_eq!(
+        new_planes
+            .iter()
+            .filter(|plane| plane.outline.len() == 3)
+            .count(),
+        2,
+        "the short ends are hip triangles"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "generated hip roof must validate"
+    );
+    assert!(new_planes.iter().all(|plane| plane.frame().is_some()));
+    assert_eq!(app.history.undo_label(), Some("Add roof"));
+
+    app.undo();
+    assert_eq!(
+        app.model.roof_planes.len(),
+        before,
+        "undo removes all four hip planes in one step"
+    );
+}
+
+#[test]
 fn add_roof_without_walls_is_a_no_op() {
     let mut app = FramerApp::default();
     while !app.model.walls.is_empty() {
