@@ -897,6 +897,9 @@ pub(super) fn member_color(kind: MemberKind) -> Color32 {
         MemberKind::Blocking => Color32::from_rgb(181, 154, 106),
         MemberKind::Rafter => Color32::from_rgb(138, 111, 74),
         MemberKind::RidgeBoard => Color32::from_rgb(93, 74, 50),
+        MemberKind::HipRafter => Color32::from_rgb(127, 104, 72),
+        MemberKind::ValleyRafter => Color32::from_rgb(114, 95, 127),
+        MemberKind::JackRafter => Color32::from_rgb(168, 132, 79),
     }
 }
 
