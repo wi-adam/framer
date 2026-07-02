@@ -163,7 +163,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   # Framer's spec-aware PR review, GATED on the rest of CI passing so we never
-  # spend (expensive) review tokens on a PR that fails lint/build/tests. It lives
+  # spend (expensive) review tokens on a PR that fails lint/build/tests. It also
+  # skips Dependabot-authored PRs: dependency bumps are covered by the normal CI
+  # gates, and claude-code-action rejects Dependabot as a non-human actor. It lives
   # here rather than a standalone workflow so `needs:` can depend on those jobs
   # natively: when any fails, the Claude step is skipped (zero tokens) while this
   # job still reports a clean result. The review itself (the /pr-review command +
@@ -200,8 +202,12 @@ jobs:
           TEST: ${{ needs.test.result }}
           GPU: ${{ needs.gpu.result }}
           DOCS: ${{ needs.docs.result }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          if [ "$LINT" = success ] && [ "$TEST" = success ] && [ "$GPU" = success ] && [ "$DOCS" = success ]; then
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Dependabot-authored PR — skipping Claude review; ordinary CI remains the merge gate."
+          elif [ "$LINT" = success ] && [ "$TEST" = success ] && [ "$GPU" = success ] && [ "$DOCS" = success ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "All gating checks passed — running the review."
           else
