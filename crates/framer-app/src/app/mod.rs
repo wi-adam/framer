@@ -2786,7 +2786,7 @@ impl FramerApp {
                     .fill(t.title_bar)
                     .inner_margin(egui::Margin::symmetric(8, 5)),
             )
-            .show_inside(ui, |ui| self.app_header(ui));
+            .show(ui, |ui| self.app_header(ui));
         Panel::top("toolbar")
             .frame(
                 Frame::new()
@@ -2794,7 +2794,7 @@ impl FramerApp {
                     .stroke(t.soft_stroke())
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
-            .show_inside(ui, |ui| self.toolbar(ui));
+            .show(ui, |ui| self.toolbar(ui));
         Panel::bottom("status-bar")
             .frame(
                 Frame::new()
@@ -2802,7 +2802,7 @@ impl FramerApp {
                     .stroke(theme::soft_stroke())
                     .inner_margin(egui::Margin::symmetric(10, 5)),
             )
-            .show_inside(ui, |ui| self.status_bar(ui));
+            .show(ui, |ui| self.status_bar(ui));
         Panel::left("model-tree")
             .resizable(true)
             .default_size(280.0)
@@ -2813,7 +2813,7 @@ impl FramerApp {
                     .stroke(theme::soft_stroke())
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
-            .show_inside(ui, |ui| self.model_tree(ui));
+            .show(ui, |ui| self.model_tree(ui));
         Panel::right("inspector")
             .resizable(true)
             .default_size(360.0)
@@ -2824,14 +2824,14 @@ impl FramerApp {
                     .stroke(theme::soft_stroke())
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.inspector(ui));
             });
         CentralPanel::default()
             .frame(Frame::new().fill(theme::workspace_bg()))
-            .show_inside(ui, |ui| self.workspace(ui));
+            .show(ui, |ui| self.workspace(ui));
 
         // All panels have rendered; any inspector edit run has opened its
         // transaction. Settle it into a single undo step once the interaction
