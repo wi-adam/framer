@@ -278,6 +278,91 @@ pub fn roofed_scene() -> Scene {
     scene_from_model(&roofed_model(), &opts)
 }
 
+/// The demo shell capped with a rectangular hip roof. Four stored planes (two
+/// trapezoids and two triangles) share the same springing line and shortened
+/// ridge that the app's auto-roof tool emits.
+fn hip_roof_model() -> BuildingModel {
+    let ft = Length::from_feet;
+    let mut model = roofed_model();
+    model.roof_planes.clear();
+
+    let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+    let springing = ft(8.0);
+    let ridge_west = Point2::new(ft(10.0), ft(10.0));
+    let ridge_east = Point2::new(ft(18.0), ft(10.0));
+
+    model.roof_planes.push(RoofPlane::new(
+        "roof-east",
+        "East hip end",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(ft(28.0), Length::ZERO),
+            Point2::new(ft(28.0), ft(20.0)),
+            ridge_east,
+        ],
+        slope,
+        0,
+        springing,
+    ));
+    model.roof_planes.push(RoofPlane::new(
+        "roof-north",
+        "North hip field",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(ft(28.0), ft(20.0)),
+            Point2::new(Length::ZERO, ft(20.0)),
+            ridge_west,
+            ridge_east,
+        ],
+        slope,
+        0,
+        springing,
+    ));
+    model.roof_planes.push(RoofPlane::new(
+        "roof-south",
+        "South hip field",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(ft(28.0), Length::ZERO),
+            ridge_east,
+            ridge_west,
+        ],
+        slope,
+        0,
+        springing,
+    ));
+    model.roof_planes.push(RoofPlane::new(
+        "roof-west",
+        "West hip end",
+        "level-1",
+        "system-roof",
+        vec![
+            Point2::new(Length::ZERO, ft(20.0)),
+            Point2::new(Length::ZERO, Length::ZERO),
+            ridge_west,
+        ],
+        slope,
+        0,
+        springing,
+    ));
+    model
+}
+
+/// A model-derived scene that locks the production extraction path for a
+/// multi-plane hip roof: every plane is still an authored [`RoofPlane`] lifted
+/// through its own frame; no persisted roof-assembly primitive is involved.
+pub fn hip_roof_scene() -> Scene {
+    let opts = RenderOptions {
+        aspect: REFERENCE_WIDTH as f32 / REFERENCE_HEIGHT as f32,
+        ..RenderOptions::default()
+    };
+    scene_from_model(&hip_roof_model(), &opts)
+}
+
 /// The demo shell with a **scissor vault** ceiling — two opposing 6:12 sloped
 /// ceilings springing at the 8ft wall top and meeting at a ridge along y = 10ft
 /// (rising 120in × 6/12 = 60" to 156") — plus a floor deck, and no roof so the
@@ -452,6 +537,54 @@ mod tests {
                 "non-finite geometry in scissor_scene"
             );
         }
+        assert!(!scene.bvh.nodes.is_empty());
+    }
+
+    #[test]
+    fn hip_roof_scene_lifts_all_stored_planes() {
+        let model = hip_roof_model();
+        assert_eq!(model.roof_planes.len(), 4);
+        assert_eq!(
+            model
+                .roof_planes
+                .iter()
+                .filter(|plane| plane.outline.len() == 4)
+                .count(),
+            2,
+            "two long hip fields are trapezoids"
+        );
+        assert_eq!(
+            model
+                .roof_planes
+                .iter()
+                .filter(|plane| plane.outline.len() == 3)
+                .count(),
+            2,
+            "two short hip ends are triangles"
+        );
+
+        let scene = hip_roof_scene();
+        let tilted: Vec<&Triangle> = scene
+            .triangles
+            .iter()
+            .filter(|t| {
+                let nz = t.geom_normal.z.abs();
+                nz > 0.1 && nz < 0.99
+            })
+            .collect();
+        assert_eq!(
+            tilted.len(),
+            6,
+            "two trapezoids plus two triangles emit six sloped roof triangles"
+        );
+        let zs = tilted
+            .iter()
+            .flat_map(|t| [t.v0.z, (t.v0 + t.edge1).z, (t.v0 + t.edge2).z]);
+        let (lo, hi) = zs.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), z| {
+            (lo.min(z), hi.max(z))
+        });
+        assert!((lo - 96.0).abs() < 0.5, "hip eaves at {lo}, want ~96in");
+        assert!((hi - 156.0).abs() < 0.5, "hip ridge at {hi}, want ~156in");
         assert!(!scene.bvh.nodes.is_empty());
     }
 }

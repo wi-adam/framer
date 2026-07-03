@@ -231,6 +231,7 @@ mirrors this exact math.
 | --- | --- |
 | `src/lib.rs` | Public API: `accumulate`, `tonemap_accum`, `render`; re-exports `build::*`. |
 | `src/build.rs` | **Scene extraction from the model**: `scene_from_model`, `build_scene`, `RenderOptions`, `SceneFraming` (auto-derives cladding/drywall/glass/door/ground materials + sky + sun). |
+| `src/scenes.rs` | Shared render-test fixtures: the synthetic reference scene plus model-derived gable, scissor-vault, and hip-roof scenes used by golden and parity tests. |
 | `src/scene.rs` | `Scene`, lighting (`DirectionalSun`, `Sky`). |
 | `src/bvh.rs`, `src/aabb.rs`, `src/geom.rs`, `src/ray.rs` | BVH acceleration + geometry/ray primitives. |
 | `src/integrator.rs` | Path-tracing integrator + BSDF evaluation (the reference for the WGSL kernel). |
@@ -364,6 +365,7 @@ cargo test --workspace
 ```
 
 Notable test suites: schema round-trip + rejection (`framer-core/src/project.rs`), solver
-determinism + BOM (`framer-solver/src/lib.rs`), golden render (`framer-render/tests/golden.rs`,
-regen with `UPDATE_GOLDEN=1`), GPU↔CPU parity (`framer-app/tests/gpu_parity.rs`), headless UI
-(`framer-app/src/app/ui_harness_tests.rs`).
+determinism + BOM (`framer-solver/src/lib.rs`), shared render fixtures
+(`framer-render/src/scenes.rs`, including the hip-roof scene), golden render
+(`framer-render/tests/golden.rs`, regen with `UPDATE_GOLDEN=1`), GPU↔CPU parity
+(`framer-app/tests/gpu_parity.rs`), headless UI (`framer-app/src/app/ui_harness_tests.rs`).

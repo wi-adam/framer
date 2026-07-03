@@ -14,7 +14,7 @@ use framer_render::render;
 use framer_render::scene::Scene;
 use framer_render::scenes::{
     REFERENCE_HEIGHT as HEIGHT, REFERENCE_SEED as SEED, REFERENCE_SPP as SPP,
-    REFERENCE_WIDTH as WIDTH, reference_scene, roofed_scene, scissor_scene,
+    REFERENCE_WIDTH as WIDTH, hip_roof_scene, reference_scene, roofed_scene, scissor_scene,
 };
 
 fn golden_path(name: &str) -> std::path::PathBuf {
@@ -86,4 +86,11 @@ fn scissor_render_matches_golden() {
 #[test]
 fn roofed_render_matches_golden() {
     assert_matches_golden("roofed", &roofed_scene());
+}
+
+/// Locks the multi-plane hip roof path: four authored roof planes, each lifted
+/// through its own frame, rendered through the same model-extraction path.
+#[test]
+fn hip_roof_render_matches_golden() {
+    assert_matches_golden("hip-roof", &hip_roof_scene());
 }

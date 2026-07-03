@@ -10,11 +10,12 @@
 > (A1); the live sloped-ceiling model `CeilingSlope` + validation, schema **v12** (A2); sloped
 > ceiling joists with true cut lengths + scissor diagnostics (A3); the sloped-ceiling render in
 > both meshers (A4); authoring — the inspector per-ceiling slope editor + the one-click vault
-> tool + the vaulted `demo-shell` example (A5); and **v2 Phase B Slices B1-B3 Implemented** —
+> tool + the vaulted `demo-shell` example (A5); and **v2 Phase B Implemented** —
 > rectangular hip roof auto-generation, hip/valley/jack member kinds, hip rafters,
 > a shortened hip ridge, jack rafters dying into hips, and equal-pitch L-footprint
-> valley rafters with jack rafters dying into the valley;
-> unequal-pitch valleys are diagnosed as unsupported. B4 render/example polish remains planned ·
+> valley rafters with jack rafters dying into the valley; unequal-pitch valleys
+> are diagnosed as unsupported; and B4 render/example polish adds hip-roof
+> render coverage plus a hip-roofed `demo-shell` example ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
@@ -155,7 +156,7 @@ Sequenced and tracked in
   (rise/run + downslope) for hand-editing a single plane. A cathedral is still authored by leaving
   the region ceiling-less.
 
-### v2 — Hip & valley roofs (Phase B: B1-B3 implemented; B4 planned)
+### v2 — Hip & valley roofs (Implemented, Phase B)
 
 The first non-opposing-plane roof geometry, built on Phase A. Tracked in the same v2 plan.
 
@@ -172,6 +173,10 @@ The first non-opposing-plane roof geometry, built on Phase A. Tracked in the sam
   pitch meet, the valley bisects in plan; v2 frames the simple L-footprint case and diagnoses
   unequal-pitch valley edges as unsupported. Dormers and full straight-skeleton multi-wing
   auto-roofs are left to a later phase.
+- **Multi-plane roofs render in both meshers.** Hip and valley planes are still ordinary stored
+  `RoofPlane`s, so the path tracer and 3-D viewport lift each plane through the same
+  `RoofPlaneFrame` path used by gables. The render suite carries a hip-roof golden scene, and
+  `demo-shell.framer` is the checked-in hip-roof example.
 
 ## Decisions (locked)
 
@@ -316,8 +321,9 @@ non-axis-aligned framing member**.
   `SceneFraming`, and emit well-formed winding (degenerate tris are dropped at `PARALLEL_EPS`).
 - The app's separate 3-D mesher (`viewport/scene_build.rs`, wall-vertical `WallCuboid`) gains a
   sloped roof solid + `PickSolid` + `member_color` entries so roofs/ceilings select like walls.
-- Add a model-derived roofed golden scene (demo-shell + a gable roof) to lock the sloped path
-  in `golden.rs` / `gpu_parity.rs`.
+- Model-derived golden scenes lock the sloped path: a gable roof, a scissor vault, and a
+  multi-plane hip roof in `golden.rs`; `gpu_parity.rs` already pins the shared extraction path
+  via the roofed/scissor scenes.
 
 ### `framer-app` (authoring)
 

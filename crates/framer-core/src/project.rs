@@ -494,9 +494,25 @@ mod tests {
 
         assert_eq!(model.walls.len(), 4);
         assert_eq!(model.wall_joins.len(), 4);
-        // Capped with a gable roof (two planes), a scissor-vault ceiling (two
+        // Capped with a hip roof (four planes), a scissor-vault ceiling (two
         // opposing sloped halves), and a floor deck.
-        assert_eq!(model.roof_planes.len(), 2);
+        assert_eq!(model.roof_planes.len(), 4);
+        assert_eq!(
+            model
+                .roof_planes
+                .iter()
+                .filter(|plane| plane.outline.len() == 4)
+                .count(),
+            2
+        );
+        assert_eq!(
+            model
+                .roof_planes
+                .iter()
+                .filter(|plane| plane.outline.len() == 3)
+                .count(),
+            2
+        );
         assert_eq!(model.ceilings.len(), 2);
         assert!(
             model.ceilings.iter().all(|c| c.slope.is_some()),

@@ -690,11 +690,69 @@
     ],
     "roof_planes": [
       {
-        "id": "roof-north",
-        "name": "North roof",
+        "id": "roof-east",
+        "name": "East hip end",
         "level": "level-1",
         "system": "system-roof-1",
         "outline": [
+          {
+            "x": {
+              "ticks": 5376
+            },
+            "y": {
+              "ticks": 0
+            }
+          },
+          {
+            "x": {
+              "ticks": 5376
+            },
+            "y": {
+              "ticks": 3840
+            }
+          },
+          {
+            "x": {
+              "ticks": 3456
+            },
+            "y": {
+              "ticks": 1920
+            }
+          }
+        ],
+        "slope": {
+          "rise": {
+            "ticks": 96
+          },
+          "run": {
+            "ticks": 192
+          }
+        },
+        "eave_edge": 0,
+        "reference_elevation": {
+          "ticks": 1536
+        },
+        "eave_overhang": {
+          "ticks": 0
+        },
+        "rake_overhang": {
+          "ticks": 0
+        }
+      },
+      {
+        "id": "roof-north",
+        "name": "North hip field",
+        "level": "level-1",
+        "system": "system-roof-1",
+        "outline": [
+          {
+            "x": {
+              "ticks": 5376
+            },
+            "y": {
+              "ticks": 3840
+            }
+          },
           {
             "x": {
               "ticks": 0
@@ -705,15 +763,7 @@
           },
           {
             "x": {
-              "ticks": 5376
-            },
-            "y": {
-              "ticks": 3840
-            }
-          },
-          {
-            "x": {
-              "ticks": 5376
+              "ticks": 1920
             },
             "y": {
               "ticks": 1920
@@ -721,7 +771,7 @@
           },
           {
             "x": {
-              "ticks": 0
+              "ticks": 3456
             },
             "y": {
               "ticks": 1920
@@ -749,7 +799,7 @@
       },
       {
         "id": "roof-south",
-        "name": "South roof",
+        "name": "South hip field",
         "level": "level-1",
         "system": "system-roof-1",
         "outline": [
@@ -771,7 +821,7 @@
           },
           {
             "x": {
-              "ticks": 5376
+              "ticks": 3456
             },
             "y": {
               "ticks": 1920
@@ -779,7 +829,57 @@
           },
           {
             "x": {
+              "ticks": 1920
+            },
+            "y": {
+              "ticks": 1920
+            }
+          }
+        ],
+        "slope": {
+          "rise": {
+            "ticks": 96
+          },
+          "run": {
+            "ticks": 192
+          }
+        },
+        "eave_edge": 0,
+        "reference_elevation": {
+          "ticks": 1536
+        },
+        "eave_overhang": {
+          "ticks": 0
+        },
+        "rake_overhang": {
+          "ticks": 0
+        }
+      },
+      {
+        "id": "roof-west",
+        "name": "West hip end",
+        "level": "level-1",
+        "system": "system-roof-1",
+        "outline": [
+          {
+            "x": {
               "ticks": 0
+            },
+            "y": {
+              "ticks": 3840
+            }
+          },
+          {
+            "x": {
+              "ticks": 0
+            },
+            "y": {
+              "ticks": 0
+            }
+          },
+          {
+            "x": {
+              "ticks": 1920
             },
             "y": {
               "ticks": 1920
