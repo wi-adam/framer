@@ -142,7 +142,7 @@ workbench, but purpose-built for wood-framed structures.
 | Modal authoring tools (`Wall`, `Room`, `Ceiling`, `Floor`, `Dimension`) | Workflow command strip tab/panel | Shortcuts / command search | Inspector |
 | Tool settings (`Driving` vs `Reference`, placement mode, wall baseline) | Contextual tool tab or options strip | Inspector when selection-backed | Permanent global buttons |
 | Object insertion variants (`Door`, `Window`, `Garage`, roof forms) | Command-strip flyout, catalog, or host-aware Insert | Command search | Permanent top-level buttons |
-| Selection lifecycle (`Delete`, `Duplicate`, isolate/show`) | Marking menu / shortcut menu / compact context toolbar | Shortcuts / command search | Permanent command-strip buttons |
+| Selection lifecycle (`Delete`, `Duplicate`, `isolate/show`) | Marking menu / shortcut menu / compact context toolbar | Shortcuts / command search | Permanent command-strip buttons |
 | Selected-object properties | PropertyManager-style inspector | Canvas handles where direct manipulation helps | App header |
 | Exports, generated reports, plan artifacts | Plan workspace tab or project menu | Command search | Always-visible Design command strip |
 
