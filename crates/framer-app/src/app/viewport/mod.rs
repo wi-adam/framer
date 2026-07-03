@@ -1,10 +1,12 @@
 use eframe::egui::{
-    self, Align2, FontId, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    self, Align2, ComboBox, FontId, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
+    Ui, Vec2,
 };
-use framer_core::{Length, Point2};
+use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
 use super::actions::{self, ActionId};
 use super::draw_wall::SnapResult;
+use super::labels::{dimension_axis_label, dimension_kind_label};
 #[cfg(test)]
 use super::model_edit::OpeningEditHandle;
 use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
@@ -23,9 +25,7 @@ use camera_3d::{DOLLY_MAX, DOLLY_MIN, PAN_MAX_RADII};
 #[cfg(test)]
 use framer_core::BuildingModel;
 #[cfg(test)]
-use framer_core::{
-    DimensionAnchor, DimensionAxis, DimensionHorizontalReference, DimensionVerticalReference,
-};
+use framer_core::{DimensionAnchor, DimensionHorizontalReference, DimensionVerticalReference};
 #[cfg(test)]
 use framer_render::math::Vec3;
 #[cfg(test)]
@@ -91,6 +91,10 @@ pub(super) struct DrawWallPlanInput {
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
         self.workspace_header(ui);
+        if self.has_active_tool_options() {
+            ui.add_space(4.0);
+            self.tool_options_strip(ui);
+        }
         ui.add_space(8.0);
 
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
@@ -458,6 +462,149 @@ impl FramerApp {
             }
         });
     }
+
+    fn has_active_tool_options(&self) -> bool {
+        self.draw_wall_tool.active
+            || self.dimension_tool.active
+            || self.room_tool_active
+            || self.ceiling_tool_active
+            || self.vault_tool_active
+            || self.floor_tool_active
+    }
+
+    fn tool_options_strip(&mut self, ui: &mut Ui) {
+        let t = design::active();
+        Frame::new()
+            .fill(t.toolbar)
+            .stroke(t.soft_stroke())
+            .corner_radius(design::radius::SM)
+            .inner_margin(Margin::symmetric(6, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::XS);
+                    if self.draw_wall_tool.active {
+                        self.wall_tool_options(ui);
+                    } else if self.dimension_tool.active {
+                        self.dimension_tool_options(ui);
+                    } else if self.room_tool_active {
+                        self.region_tool_options(ui, "Room options", "Room", "Unspecified");
+                    } else if self.ceiling_tool_active {
+                        self.surface_tool_options(ui, "Ceiling options", "Flat ceiling", "Flush");
+                    } else if self.vault_tool_active {
+                        self.surface_tool_options(ui, "Vault options", "Scissor vault", "4:12");
+                    } else if self.floor_tool_active {
+                        self.surface_tool_options(ui, "Floor options", "Floor deck", "Auto span");
+                    }
+                });
+            });
+    }
+
+    fn wall_tool_options(&self, ui: &mut Ui) {
+        let wall_system_name = self.default_wall_system_name();
+        let wall_height = self.model.code.default_wall_height.to_string();
+        let level_name = self.first_level_name();
+
+        option_strip_title(ui, "Wall options");
+        readonly_option(ui, "Type", wall_system_name.as_str());
+        readonly_option(ui, "Baseline", "Centerline");
+        readonly_option(ui, "Height", wall_height.as_str());
+        readonly_option(ui, "Level", level_name.as_str());
+        readonly_option(
+            ui,
+            "Placement",
+            if self.draw_wall_tool.start.is_some() {
+                "Next endpoint"
+            } else {
+                "First endpoint"
+            },
+        );
+    }
+
+    fn dimension_tool_options(&mut self, ui: &mut Ui) {
+        option_strip_title(ui, "Dimension options");
+        let kind_action = actions::metadata(ActionId::DimensionKind);
+        labeled_option(ui, kind_action.label, |ui| {
+            ComboBox::from_id_salt("context-dimension-tool-kind")
+                .selected_text(dimension_kind_label(self.dimension_tool.kind))
+                .width(96.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.dimension_tool.kind,
+                        DimensionKind::Driving,
+                        "Driving",
+                    );
+                    ui.selectable_value(
+                        &mut self.dimension_tool.kind,
+                        DimensionKind::Reference,
+                        "Reference",
+                    );
+                })
+                .response
+                .on_hover_text(kind_action.tooltip);
+        });
+
+        let axis_action = actions::metadata(ActionId::DimensionAxis);
+        labeled_option(ui, axis_action.label, |ui| {
+            ComboBox::from_id_salt("context-dimension-tool-axis")
+                .selected_text(dimension_axis_label(self.dimension_tool.axis))
+                .width(104.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.dimension_tool.axis,
+                        DimensionAxis::Horizontal,
+                        "Horizontal",
+                    );
+                    ui.selectable_value(
+                        &mut self.dimension_tool.axis,
+                        DimensionAxis::Vertical,
+                        "Vertical",
+                    );
+                })
+                .response
+                .on_hover_text(axis_action.tooltip);
+        });
+    }
+
+    fn region_tool_options(&self, ui: &mut Ui, title: &str, kind: &str, usage: &str) {
+        option_strip_title(ui, title);
+        readonly_option(ui, "Type", kind);
+        readonly_option(ui, "Usage", usage);
+        readonly_option(ui, "Level", self.first_level_name().as_str());
+        readonly_option(ui, "Placement", "Enclosed region");
+    }
+
+    fn surface_tool_options(&self, ui: &mut Ui, title: &str, kind: &str, setting: &str) {
+        option_strip_title(ui, title);
+        readonly_option(ui, "Type", kind);
+        readonly_option(ui, "Setting", setting);
+        readonly_option(ui, "Level", self.first_level_name().as_str());
+        readonly_option(ui, "Placement", "Enclosed region");
+    }
+
+    fn default_wall_system_name(&self) -> String {
+        self.model
+            .systems
+            .iter()
+            .find(|system| {
+                system.id.0 == "system-wall-exterior-1" && system.kind == SystemKind::Wall
+            })
+            .or_else(|| {
+                self.model
+                    .systems
+                    .iter()
+                    .find(|system| system.kind == SystemKind::Wall)
+            })
+            .map(|system| system.name.clone())
+            .unwrap_or_else(|| "Wall system".to_owned())
+    }
+
+    fn first_level_name(&self) -> String {
+        self.model
+            .levels
+            .first()
+            .map(|level| level.name.clone())
+            .unwrap_or_else(|| "Level 1".to_owned())
+    }
 }
 
 fn workspace_mode_tab(
@@ -480,6 +627,57 @@ fn workspace_mode_tab(
 fn view_tab(ui: &mut Ui, action_id: ActionId, label: &str, selected: bool) -> egui::Response {
     let action = actions::metadata(action_id);
     design::widgets::tab(ui, label, selected).on_hover_text(action.tooltip)
+}
+
+fn option_strip_title(ui: &mut Ui, label: &str) {
+    let t = design::active();
+    ui.label(
+        RichText::new(label)
+            .strong()
+            .size(design::text_size::LABEL)
+            .color(t.text),
+    );
+    option_divider(ui);
+}
+
+fn labeled_option(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    let t = design::active();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = design::space::XS;
+        ui.label(
+            RichText::new(label)
+                .size(design::text_size::LABEL)
+                .color(t.text_muted),
+        );
+        add(ui);
+    });
+}
+
+fn readonly_option(ui: &mut Ui, label: &str, value: &str) {
+    labeled_option(ui, label, |ui| {
+        let t = design::active();
+        Frame::new()
+            .fill(t.control)
+            .stroke(t.soft_stroke())
+            .corner_radius(design::radius::SM)
+            .inner_margin(Margin::symmetric(6, 2))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(value)
+                        .size(design::text_size::LABEL)
+                        .color(t.text),
+                );
+            });
+    });
+}
+
+fn option_divider(ui: &mut Ui) {
+    let t = design::active();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 20.0), Sense::hover());
+    ui.painter().line_segment(
+        [rect.center_top(), rect.center_bottom()],
+        Stroke::new(1.0, t.divider),
+    );
 }
 
 fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
