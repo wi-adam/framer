@@ -7,7 +7,7 @@
 
 use eframe::egui::{
     Align2, Button, CollapsingHeader, Color32, FontId, Pos2, Response, RichText, Sense, Stroke, Ui,
-    Vec2,
+    Vec2, WidgetInfo, WidgetType,
 };
 
 use super::{Icon, active, control, icon_font, icon_text, radius, space, text_size};
@@ -89,6 +89,7 @@ pub(crate) fn tool_button(
         FontId::proportional(text_size::MICRO),
         fg,
     );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
     response
 }
 

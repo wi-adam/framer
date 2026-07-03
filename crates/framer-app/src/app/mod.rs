@@ -1,3 +1,4 @@
+mod actions;
 mod design;
 mod draw_wall;
 mod history;

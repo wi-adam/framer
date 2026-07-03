@@ -16,6 +16,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
+use super::actions::{self, ActionId};
 use super::{FramerApp, Selection, ViewportMode, WallDisplay, design};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
@@ -79,6 +80,28 @@ fn boots_and_lays_out_demo_shell() {
         harness.query_all_by_label("Framer").next().is_some(),
         "the 'Framer' title label should be in the accessibility tree"
     );
+}
+
+/// The workflow command buttons are custom-painted, so their visible text is not
+/// automatically exposed to AccessKit. The command metadata should still give
+/// them accessible/searchable names.
+#[test]
+fn command_buttons_expose_metadata_labels() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    for id in [
+        ActionId::SaveProject,
+        ActionId::View3d,
+        ActionId::ToolDimensionLinear,
+    ] {
+        let action = actions::metadata(id);
+        assert!(
+            harness.query_all_by_label(action.label).next().is_some(),
+            "{id:?} should expose '{}' as an accessible command label",
+            action.label
+        );
+    }
 }
 
 /// The `W` keyboard shortcut toggles the draw-wall tool, proving keyboard input

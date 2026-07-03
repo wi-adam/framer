@@ -195,12 +195,12 @@ workbench, but purpose-built for wood-framed structures.
   `canvas_floating_toolbar`; it is the right home for context actions, marking
   menu hooks, navigation controls, and tool feedback that depend on canvas
   selection or placement state.
-- A future `crates/framer-app/src/app/actions.rs` should hold lightweight command
-  metadata (`ActionId`, workflow tab, panel, surfaces, labels, icons, shortcuts,
-  context predicates, flyout membership) without becoming a generic command bus.
-  Actual mutations can continue routing through existing `FramerApp` methods such
-  as `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`,
-  `undo`, and `redo`.
+- `crates/framer-app/src/app/actions.rs` holds lightweight command metadata
+  (`ActionId`, workflow tab, panel, surfaces, labels, icons, flyout membership,
+  and intent-mutation flags) without becoming a generic command bus. Actual
+  mutations continue routing through existing `FramerApp` methods such as
+  `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`, `undo`,
+  and `redo`.
 - Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` should
   cover smoke-level reachability for core command surfaces. Pure command metadata
   tests can cover duplicate ids, missing labels/tooltips, flyout reachability, and
