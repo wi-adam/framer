@@ -22,7 +22,8 @@ use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
     DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room, RoomUsage, Wall,
-    load_project as load_project_document, save_project as save_project_document,
+    concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
+    save_project as save_project_document,
 };
 use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
@@ -175,6 +176,62 @@ enum RoofForm {
 /// its eave (downslope) edge. The rest of a [`framer_core::RoofPlane`] (id, name,
 /// level, system, pitch, springing) is filled in by `add_roof`.
 type RoofPlaneSpec = (Vec<Point2>, u32);
+
+fn orthogonal_valley_roof_specs(outline: &[Point2]) -> Option<Vec<RoofPlaneSpec>> {
+    let concave_corners = concave_polygon_corners(outline);
+    let [c] = concave_corners.as_slice() else {
+        return None;
+    };
+
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for point in outline {
+        min_x = min_x.min(point.x.ticks());
+        min_y = min_y.min(point.y.ticks());
+        max_x = max_x.max(point.x.ticks());
+        max_y = max_y.max(point.y.ticks());
+    }
+
+    let concave_index = outline.iter().position(|point| point == c)?;
+    let c = *c;
+    let previous = outline[(concave_index + outline.len() - 1) % outline.len()];
+    let next = outline[(concave_index + 1) % outline.len()];
+    let horizontal = if previous.y == c.y {
+        previous
+    } else if next.y == c.y {
+        next
+    } else {
+        return None;
+    };
+    let vertical = if previous.x == c.x {
+        previous
+    } else if next.x == c.x {
+        next
+    } else {
+        return None;
+    };
+    let sign_x = (horizontal.x - c.x).ticks().signum();
+    let sign_y = (vertical.y - c.y).ticks().signum();
+    if sign_x == 0 || sign_y == 0 {
+        return None;
+    }
+
+    let corner_x = if sign_x > 0 { min_x } else { max_x };
+    let corner_y = if sign_y > 0 { min_y } else { max_y };
+    let far_x = if sign_x > 0 { max_x } else { min_x };
+    let far_y = if sign_y > 0 { max_y } else { min_y };
+    if (c.x.ticks() - corner_x).abs() != (c.y.ticks() - corner_y).abs() {
+        return None;
+    }
+    let p = |x, y| Point2::new(Length::from_ticks(x), Length::from_ticks(y));
+    let shared_low = p(corner_x, corner_y);
+    let horizontal_low = p(far_x, corner_y);
+    let vertical_low = p(corner_x, far_y);
+
+    Some(vec![
+        (vec![shared_low, horizontal_low, horizontal, c], 0),
+        (vec![shared_low, vertical_low, vertical, c], 0),
+    ])
+}
 
 /// Split a region outline's bounding box into the two opposing halves of a scissor
 /// vault, divided by a ridge along the longer span. Each half is a rectangle whose
@@ -1993,6 +2050,7 @@ impl FramerApp {
         if min_x >= max_x || min_y >= max_y {
             return None;
         }
+        let footprint_outline = level_wall_loop_outline(&self.model, &ElementId::new(level));
         let p = |x: i64, y: i64| Point2::new(Length::from_ticks(x), Length::from_ticks(y));
 
         let specs = match form {
@@ -2062,50 +2120,57 @@ impl FramerApp {
             // ridge; the two short ends are hip triangles. A square footprint
             // degenerates to four triangles meeting at one peak.
             RoofForm::Hip => {
-                let width = max_x - min_x;
-                let depth = max_y - min_y;
-                if width == depth {
-                    let peak = p((min_x + max_x) / 2, (min_y + max_y) / 2);
-                    vec![
-                        (vec![p(min_x, min_y), p(max_x, min_y), peak], 0),
-                        (vec![p(max_x, min_y), p(max_x, max_y), peak], 0),
-                        (vec![p(max_x, max_y), p(min_x, max_y), peak], 0),
-                        (vec![p(min_x, max_y), p(min_x, min_y), peak], 0),
-                    ]
-                } else if width > depth {
-                    let inset = depth / 2;
-                    let mid_y = (min_y + max_y) / 2;
-                    let ridge_west = p(min_x + inset, mid_y);
-                    let ridge_east = p(max_x - inset, mid_y);
-                    vec![
-                        (
-                            vec![p(min_x, min_y), p(max_x, min_y), ridge_east, ridge_west],
-                            0,
-                        ),
-                        (
-                            vec![p(max_x, max_y), p(min_x, max_y), ridge_west, ridge_east],
-                            0,
-                        ),
-                        (vec![p(max_x, min_y), p(max_x, max_y), ridge_east], 0),
-                        (vec![p(min_x, max_y), p(min_x, min_y), ridge_west], 0),
-                    ]
+                if let Some(specs) = footprint_outline
+                    .as_deref()
+                    .and_then(orthogonal_valley_roof_specs)
+                {
+                    specs
                 } else {
-                    let inset = width / 2;
-                    let mid_x = (min_x + max_x) / 2;
-                    let ridge_south = p(mid_x, min_y + inset);
-                    let ridge_north = p(mid_x, max_y - inset);
-                    vec![
-                        (
-                            vec![p(min_x, max_y), p(min_x, min_y), ridge_south, ridge_north],
-                            0,
-                        ),
-                        (
-                            vec![p(max_x, min_y), p(max_x, max_y), ridge_north, ridge_south],
-                            0,
-                        ),
-                        (vec![p(min_x, min_y), p(max_x, min_y), ridge_south], 0),
-                        (vec![p(max_x, max_y), p(min_x, max_y), ridge_north], 0),
-                    ]
+                    let width = max_x - min_x;
+                    let depth = max_y - min_y;
+                    if width == depth {
+                        let peak = p((min_x + max_x) / 2, (min_y + max_y) / 2);
+                        vec![
+                            (vec![p(min_x, min_y), p(max_x, min_y), peak], 0),
+                            (vec![p(max_x, min_y), p(max_x, max_y), peak], 0),
+                            (vec![p(max_x, max_y), p(min_x, max_y), peak], 0),
+                            (vec![p(min_x, max_y), p(min_x, min_y), peak], 0),
+                        ]
+                    } else if width > depth {
+                        let inset = depth / 2;
+                        let mid_y = (min_y + max_y) / 2;
+                        let ridge_west = p(min_x + inset, mid_y);
+                        let ridge_east = p(max_x - inset, mid_y);
+                        vec![
+                            (
+                                vec![p(min_x, min_y), p(max_x, min_y), ridge_east, ridge_west],
+                                0,
+                            ),
+                            (
+                                vec![p(max_x, max_y), p(min_x, max_y), ridge_west, ridge_east],
+                                0,
+                            ),
+                            (vec![p(max_x, min_y), p(max_x, max_y), ridge_east], 0),
+                            (vec![p(min_x, max_y), p(min_x, min_y), ridge_west], 0),
+                        ]
+                    } else {
+                        let inset = width / 2;
+                        let mid_x = (min_x + max_x) / 2;
+                        let ridge_south = p(mid_x, min_y + inset);
+                        let ridge_north = p(mid_x, max_y - inset);
+                        vec![
+                            (
+                                vec![p(min_x, max_y), p(min_x, min_y), ridge_south, ridge_north],
+                                0,
+                            ),
+                            (
+                                vec![p(max_x, min_y), p(max_x, max_y), ridge_north, ridge_south],
+                                0,
+                            ),
+                            (vec![p(min_x, min_y), p(max_x, min_y), ridge_south], 0),
+                            (vec![p(max_x, max_y), p(min_x, max_y), ridge_north], 0),
+                        ]
+                    }
                 }
             }
         };

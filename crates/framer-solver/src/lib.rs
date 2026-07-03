@@ -5,7 +5,8 @@ use framer_core::{
     BoardProfile, BuildingModel, Ceiling, CeilingSlope, CodeProfile, ConstructionSystem, ElementId,
     FloorDeck, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
     RoofPlane, RoofPlaneFrame, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin, WallJoinKind,
-    point_in_polygon, polygon_area_square_inches, room_boundaries,
+    concave_polygon_corners, level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
+    room_boundaries,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -452,8 +453,7 @@ pub enum MemberKind {
     /// A diagonal hip rafter shared by two adjacent hip-roof planes, running from
     /// a footprint corner up to the ridge end.
     HipRafter,
-    /// A diagonal valley rafter shared by two inward roof planes. Reserved for
-    /// the valley phase.
+    /// A diagonal valley rafter shared by two inward roof planes.
     ValleyRafter,
     /// A shortened rafter that dies into a hip or valley. v2 B2 emits these
     /// against hips; valley jacks arrive with the valley phase.
@@ -1470,9 +1470,9 @@ pub fn generate_roof_plan(
         let (id, rule_id, summary) = if is_jack {
             (
                 format!("jack-rafter-{}", mark.ticks()),
-                "roof.jack-rafters.hip",
+                "roof.jack-rafters.intersection",
                 format!(
-                    "A jack rafter at layout mark {mark} dies into the hip after a {} plan run; its cut length is the true sloped length.",
+                    "A jack rafter at layout mark {mark} dies into a hip or valley after a {} plan run; its cut length is the true sloped length.",
                     local_run
                 ),
             )
@@ -1703,16 +1703,8 @@ fn matching_edge_elevations(
     second: &RoofPlane,
     edge: (Point2, Point2),
 ) -> Option<(Length, Length)> {
-    let first_frame = first.frame()?;
-    let second_frame = second.frame()?;
-    let elevations = |frame: RoofPlaneFrame| {
-        (
-            Length::from_inches(frame.elevation_at(edge.0.x.inches(), edge.0.y.inches())),
-            Length::from_inches(frame.elevation_at(edge.1.x.inches(), edge.1.y.inches())),
-        )
-    };
-    let first_elevations = elevations(first_frame);
-    let second_elevations = elevations(second_frame);
+    let first_elevations = edge_elevations(first, edge)?;
+    let second_elevations = edge_elevations(second, edge)?;
     if (first_elevations.0 - second_elevations.0).abs() > Length::from_ticks(1)
         || (first_elevations.1 - second_elevations.1).abs() > Length::from_ticks(1)
     {
@@ -1721,7 +1713,39 @@ fn matching_edge_elevations(
     Some(first_elevations)
 }
 
-fn add_hip_members(
+fn edge_elevations(plane: &RoofPlane, edge: (Point2, Point2)) -> Option<(Length, Length)> {
+    let frame = plane.frame()?;
+    Some((
+        Length::from_inches(frame.elevation_at(edge.0.x.inches(), edge.0.y.inches())),
+        Length::from_inches(frame.elevation_at(edge.1.x.inches(), edge.1.y.inches())),
+    ))
+}
+
+fn shared_edge_elevations_match(
+    first: &RoofPlane,
+    second: &RoofPlane,
+    edge: (Point2, Point2),
+) -> bool {
+    matching_edge_elevations(first, second, edge).is_some()
+}
+
+fn concave_footprint_corners(model: &BuildingModel, level: &ElementId) -> Vec<Point2> {
+    level_wall_loop_outline(model, level)
+        .map(|outline| concave_polygon_corners(&outline))
+        .unwrap_or_default()
+}
+
+fn shared_edge_has_concave_endpoint(
+    model: &BuildingModel,
+    level: &ElementId,
+    edge: (Point2, Point2),
+) -> bool {
+    concave_footprint_corners(model, level)
+        .into_iter()
+        .any(|corner| corner == edge.0 || corner == edge.1)
+}
+
+fn add_roof_intersection_members(
     plan: &mut ProjectFramePlan,
     model: &BuildingModel,
     geometries: &[Option<RoofPlaneGeometry>],
@@ -1755,6 +1779,28 @@ fn add_hip_members(
                     && same_edge(edge, second_geometry.high_edge)
                 {
                     // A shared high edge is the ridge board, not a hip.
+                    continue;
+                }
+                let is_valley = first.level == second.level
+                    && shared_edge_has_concave_endpoint(model, &first.level, edge);
+                let elevations_match = shared_edge_elevations_match(first, second, edge);
+                if is_valley && !elevations_match {
+                    let owner = if first.id <= second.id { first } else { second };
+                    if let Some(owner_plan) = plan
+                        .roof_plans
+                        .iter_mut()
+                        .find(|roof_plan| roof_plan.roof == owner.id)
+                    {
+                        owner_plan.diagnostics.push(PlanDiagnostic::new(
+                            DiagnosticSeverity::Unsupported,
+                            "roof.valley.unequal-pitch",
+                            Some(owner.id.clone()),
+                            format!(
+                                "The shared valley edge between {} and {} does not have matching elevations on both roof planes. v2 only frames equal-pitch right-angle valleys.",
+                                first.name, second.name
+                            ),
+                        ));
+                    }
                     continue;
                 }
                 let Some((a_elevation, b_elevation)) =
@@ -1799,9 +1845,17 @@ fn add_hip_members(
                     .unwrap_or(Length::ZERO);
                 let placement_x = eave_axis_position(owner, low_point);
                 let member = frame_member(
-                    format!("hip-rafter-{}-edge-{edge_index}", peer.id.0),
+                    format!(
+                        "{}-rafter-{}-edge-{edge_index}",
+                        if is_valley { "valley" } else { "hip" },
+                        peer.id.0
+                    ),
                     &owner.id,
-                    MemberKind::HipRafter,
+                    if is_valley {
+                        MemberKind::ValleyRafter
+                    } else {
+                        MemberKind::HipRafter
+                    },
                     framing.member,
                     FrameMemberPlacement::new(
                         MemberOrientation::Vertical,
@@ -1815,13 +1869,23 @@ fn add_hip_members(
                         high_elevation,
                     }),
                     band,
-                    RuleProvenance::new(
-                        "roof.hip.shared-edge",
-                        format!(
-                            "A hip rafter follows the shared sloped edge between {} and {}; its cut length is the true length from plate corner to ridge end.",
-                            owner.name, peer.name
-                        ),
-                    ),
+                    if is_valley {
+                        RuleProvenance::new(
+                            "roof.valley.equal-pitch",
+                            format!(
+                                "A valley rafter follows the shared sloped edge between {} and {}; v2 frames equal-pitch right-angle valleys and cuts the member to its true sloped length.",
+                                owner.name, peer.name
+                            ),
+                        )
+                    } else {
+                        RuleProvenance::new(
+                            "roof.hip.shared-edge",
+                            format!(
+                                "A hip rafter follows the shared sloped edge between {} and {}; its cut length is the true length from plate corner to ridge end.",
+                                owner.name, peer.name
+                            ),
+                        )
+                    },
                 );
                 if let Some(owner_plan) = plan
                     .roof_plans
@@ -2053,7 +2117,7 @@ fn generate_roof_plans(
         }
         plan.roof_plans.push(roof_plan);
     }
-    add_hip_members(plan, model, &geometries)?;
+    add_roof_intersection_members(plan, model, &geometries)?;
     Ok(())
 }
 
@@ -5506,6 +5570,60 @@ mod tests {
         model
     }
 
+    /// An equal-pitch L-footprint valley: the wall loop has one reentrant corner
+    /// at (12ft, 12ft), and two stored planes share the diagonal valley from the
+    /// outside corner to that reentrant corner. Each plane clips its rafters
+    /// against the diagonal, producing jack rafters that die into the valley.
+    fn l_valley_model() -> BuildingModel {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model.systems.push(roof_system());
+        let p = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let footprint = [
+            p(0.0, 0.0),
+            p(24.0, 0.0),
+            p(24.0, 12.0),
+            p(12.0, 12.0),
+            p(12.0, 24.0),
+            p(0.0, 24.0),
+            p(0.0, 0.0),
+        ];
+        for (index, pair) in footprint.windows(2).enumerate() {
+            model.walls.push(
+                Wall::new(
+                    format!("wall-l-{index}"),
+                    format!("L footprint wall {index}"),
+                    Length::from_feet(1.0),
+                    &code,
+                )
+                .with_placement("level-1", pair[0], pair[1]),
+            );
+        }
+        let slope = pitch_6_12();
+        let springing = Length::from_feet(8.0);
+        model.roof_planes.push(RoofPlane::new(
+            "roof-a",
+            "Lower L-wing valley slope",
+            "level-1",
+            "system-roof",
+            vec![p(0.0, 0.0), p(24.0, 0.0), p(24.0, 12.0), p(12.0, 12.0)],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-b",
+            "Upper L-wing valley slope",
+            "level-1",
+            "system-roof",
+            vec![p(0.0, 0.0), p(0.0, 24.0), p(12.0, 24.0), p(12.0, 12.0)],
+            slope,
+            0,
+            springing,
+        ));
+        model
+    }
+
     #[test]
     fn gable_with_no_ceiling_tie_emits_ridge_beam_required() {
         let plan = generate_project_plan(&gable_model()).unwrap();
@@ -5792,6 +5910,94 @@ mod tests {
                 "no jack overruns the hip to the shared peak"
             );
         }
+    }
+
+    #[test]
+    fn equal_pitch_l_roof_frames_valley_and_symmetric_jacks() {
+        let plan = generate_project_plan(&l_valley_model()).unwrap();
+        assert_eq!(plan.roof_plans.len(), 2);
+
+        let valleys: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::ValleyRafter)
+            .collect();
+        assert_eq!(valleys.len(), 1, "the L footprint has one shared valley");
+        assert_eq!(
+            valleys[0].cut_length,
+            Length::from_feet(18.0),
+            "a 12ft by 12ft plan valley at 6:12 cuts to an 18ft true length"
+        );
+        assert_eq!(
+            valleys[0].sloped,
+            Some(SlopedPlacement {
+                low_elevation: Length::from_feet(8.0),
+                high_elevation: Length::from_feet(14.0),
+            })
+        );
+        assert!(
+            plan.roof_plans
+                .iter()
+                .flat_map(|roof| roof.members.iter())
+                .all(|member| member.kind != MemberKind::HipRafter),
+            "the reentrant shared edge is not misclassified as a hip"
+        );
+
+        for roof_id in ["roof-a", "roof-b"] {
+            let roof = plan.roof_plan(&ElementId::new(roof_id)).unwrap();
+            let jacks: Vec<_> = roof
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::JackRafter)
+                .collect();
+            assert!(
+                !jacks.is_empty(),
+                "{roof_id} clips common rafters into valley jacks"
+            );
+            assert!(
+                jacks.iter().all(|jack| jack
+                    .sloped
+                    .is_some_and(|slope| slope.high_elevation < Length::from_feet(14.0))),
+                "{roof_id} jacks stop on the valley before the full ridge height"
+            );
+        }
+
+        let valley_bom = plan
+            .bom()
+            .into_iter()
+            .find(|item| item.kind == MemberKind::ValleyRafter)
+            .expect("valley rafters fold into the project BOM");
+        assert_eq!(valley_bom.quantity, 1);
+        assert!(
+            plan.roof_plans.iter().all(|roof| {
+                roof.diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != "roof.valley.unequal-pitch")
+            }),
+            "equal-pitch valleys do not emit the unsupported unequal-pitch diagnostic"
+        );
+    }
+
+    #[test]
+    fn unequal_pitch_l_roof_valley_is_diagnosed_not_framed() {
+        let mut model = l_valley_model();
+        model.roof_planes[1].slope = pitch_9_12();
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert!(
+            plan.roof_plans
+                .iter()
+                .flat_map(|roof| roof.members.iter())
+                .all(|member| member.kind != MemberKind::ValleyRafter),
+            "unequal-pitch valley edges are diagnosed rather than framed"
+        );
+        assert!(plan.roof_plans.iter().any(|roof| {
+            roof.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "roof.valley.unequal-pitch"
+                    && diagnostic.severity == DiagnosticSeverity::Unsupported
+            })
+        }));
     }
 
     /// The tied-gable fixture: `gable_model` with the level top raised to the roof

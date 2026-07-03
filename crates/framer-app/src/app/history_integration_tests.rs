@@ -55,6 +55,30 @@ fn replace_walls_with_rectangular_footprint(app: &mut FramerApp, width_ft: f64, 
     app.history.clear();
 }
 
+fn replace_walls_with_l_footprint(app: &mut FramerApp) {
+    while !app.model.walls.is_empty() {
+        app.selected = Selection::Wall;
+        app.selected_wall = 0;
+        app.delete_selected_wall();
+    }
+    let corners = [
+        (0.0, 0.0),
+        (24.0, 0.0),
+        (24.0, 12.0),
+        (12.0, 12.0),
+        (12.0, 24.0),
+        (0.0, 24.0),
+        (0.0, 0.0),
+    ];
+    for pair in corners.windows(2) {
+        app.add_wall(
+            Point2::new(Length::from_feet(pair[0].0), Length::from_feet(pair[0].1)),
+            Point2::new(Length::from_feet(pair[1].0), Length::from_feet(pair[1].1)),
+        );
+    }
+    app.history.clear();
+}
+
 #[test]
 fn edit_records_an_undo_step_and_undo_restores_the_model() {
     let mut app = FramerApp::default();
@@ -463,6 +487,47 @@ fn add_hip_roof_generates_four_valid_planes() {
         app.model.roof_planes.len(),
         before,
         "undo removes all four hip planes in one step"
+    );
+}
+
+#[test]
+fn add_hip_roof_on_l_footprint_generates_valley_planes() {
+    let mut app = FramerApp::default();
+    replace_walls_with_l_footprint(&mut app);
+
+    app.add_roof(RoofForm::Hip);
+
+    assert_eq!(
+        app.model.roof_planes.len(),
+        2,
+        "a simple L footprint starts with the two stored valley planes"
+    );
+    assert!(
+        app.model.validate().is_ok(),
+        "generated L-footprint valley roof must validate"
+    );
+    let plan = framer_solver::generate_project_plan(&app.model).unwrap();
+    let valleys: Vec<_> = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof| roof.members.iter())
+        .filter(|member| member.kind == framer_solver::MemberKind::ValleyRafter)
+        .collect();
+    assert_eq!(valleys.len(), 1, "the generated planes share one valley");
+    for roof in &plan.roof_plans {
+        assert!(
+            roof.members
+                .iter()
+                .any(|member| member.kind == framer_solver::MemberKind::JackRafter),
+            "each generated valley plane has jack rafters clipped to the diagonal"
+        );
+    }
+    assert_eq!(app.history.undo_label(), Some("Add roof"));
+
+    app.undo();
+    assert!(
+        app.model.roof_planes.is_empty(),
+        "undo removes the generated L-footprint valley planes"
     );
 }
 
