@@ -322,7 +322,8 @@ non-axis-aligned framing member**.
 - The app's separate 3-D mesher (`viewport/scene_build.rs`, wall-vertical `WallCuboid`) gains a
   sloped roof solid + `PickSolid` + `member_color` entries so roofs/ceilings select like walls.
 - Model-derived golden scenes lock the sloped path: a gable roof, a scissor vault, and a
-  multi-plane hip roof in `golden.rs`; `gpu_parity.rs` exercises the same scene extraction path.
+  multi-plane hip roof in `golden.rs`; `gpu_parity.rs` already pins the shared extraction path
+  via the roofed/scissor scenes.
 
 ### `framer-app` (authoring)
 
