@@ -91,7 +91,10 @@ fn command_buttons_expose_metadata_labels() {
     harness.run();
 
     for id in [
+        ActionId::NewProject,
         ActionId::SaveProject,
+        ActionId::Undo,
+        ActionId::Redo,
         ActionId::View3d,
         ActionId::ToolDimensionLinear,
     ] {
@@ -100,6 +103,28 @@ fn command_buttons_expose_metadata_labels() {
             harness.query_all_by_label(action.label).next().is_some(),
             "{id:?} should expose '{}' as an accessible command label",
             action.label
+        );
+    }
+}
+
+/// Project, edit, and sample loading commands live in the app header/menu
+/// surfaces, not in the workflow command strip.
+#[test]
+fn header_owns_non_modeling_command_surfaces() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    for label in ["Project", "Examples", "New", "Open", "Save", "Undo", "Redo"] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "the app header should expose '{label}'"
+        );
+    }
+
+    for strip_group in ["PROJECT", "EDIT", "SAMPLES"] {
+        assert!(
+            harness.query_all_by_label(strip_group).next().is_none(),
+            "'{strip_group}' should not be a workflow command-strip group"
         );
     }
 }

@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Proposed · **Linked goal:** G-011 (CAD Workspace UX) ·
+> **Status:** In progress · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md) ·
 > **Last reviewed:** 2026-07-03
 
@@ -184,8 +184,9 @@ workbench, but purpose-built for wood-framed structures.
 ## Architecture (grounded in the codebase)
 
 - `crates/framer-app/src/app/panels.rs` currently owns `app_header`, `toolbar`,
-  inspector bodies, and `status_bar`. The existing `toolbar()` function is the
-  migration starting point for the workflow command strip.
+  inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
+  controls plus Project and Examples menus; `toolbar()` is the migration starting
+  point for the remaining workflow command strip.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,

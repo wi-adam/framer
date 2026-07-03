@@ -81,6 +81,8 @@ with documentation and mockups, then migrates the app without changing the `.fra
 
 - **Task 3.1** — Move project/document actions and sample loaders out of the command strip into
   the app/quick-access bar and project menu.
+  - Status: implemented for header quick-access New/Open/Save/Undo/Redo, Project menu
+    New/Open/Save/Export, and Examples menu demo loaders.
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/design/widgets.rs`
   - Verify: `cargo test -p framer-app --all-features --locked`; manual app run
@@ -139,22 +141,22 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Verify: manual run and screenshots
   - Commit: `docs(app): record command surface budget`
 
-## Current toolbar inventory
+## Current command-surface inventory
 
-| Current group | Current commands | Spec route |
+| Current surface/group | Current commands | Spec route |
 | --- | --- | --- |
-| PROJECT | New, Open, Save, Export | App/quick-access bar or project menu; Export also Plan workspace |
-| EDIT | Undo, Redo | App/quick-access bar, menu, shortcuts |
-| SAMPLES | Shell, Wall | Project menu or examples picker |
-| WORKSPACE | Design, Plan | App/workspace switcher or workspace/view bar |
-| VIEW | Shell/Plan, Wall/Elevation, Roof, 3D, Render | Workspace/view bar |
-| BUILD | Wall, Room, Ceiling, Vault, Floor | Workflow command strip: Design / Frame panels |
-| BUILD | Delete | Marking menu / shortcut menu / shortcut |
-| BUILD | Door, Window, Garage | Openings panel flyout, catalog, or host-aware Insert |
-| BUILD | Gable, Shed, Hip | Roofs panel flyout or active roof options |
-| DIMENSION | Linear | Workflow command strip: Annotate panel |
-| DIMENSION | Driving/Reference, Horizontal/Vertical | Contextual tool tab, options strip, or placement preview |
-| TOOLS (Plan) | Section | Plan command tab or view-control bar |
+| App header quick access | New, Open, Save, Undo, Redo | App/quick-access bar |
+| Project menu | New, Open, Save, Export | Project menu; Export also Plan workspace |
+| Examples menu | Shell, Wall demo loaders | Examples picker / Project menu |
+| Workflow strip: WORKSPACE | Design, Plan | App/workspace switcher or workspace/view bar |
+| Workflow strip: VIEW | Shell/Plan, Wall/Elevation, Roof, 3D, Render | Workspace/view bar |
+| Workflow strip: BUILD | Wall, Room, Ceiling, Vault, Floor | Workflow command strip: Design / Frame panels |
+| Workflow strip: BUILD | Delete | Marking menu / shortcut menu / shortcut |
+| Workflow strip: BUILD | Door, Window, Garage | Openings panel flyout, catalog, or host-aware Insert |
+| Workflow strip: BUILD | Gable, Shed, Hip | Roofs panel flyout or active roof options |
+| Workflow strip: DIMENSION | Linear | Workflow command strip: Annotate panel |
+| Workflow strip: DIMENSION | Driving/Reference, Horizontal/Vertical | Contextual tool tab, options strip, or placement preview |
+| Workflow strip: TOOLS (Plan) | Section | Plan command tab or view-control bar |
 
 ## Final verification
 
