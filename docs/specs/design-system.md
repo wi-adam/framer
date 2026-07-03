@@ -11,9 +11,11 @@
 Framer's UI grew organically and has no logically organized design system: `theme.rs`
 is ~30 loose, dark-only color functions, spacing/typography/sizing are inline magic
 numbers, and components are ad-hoc helpers. Bring the app in line with the approved
-mockup (a light "studio" CAD interface with a dark app header, icon-driven toolbars,
-a sectioned inspector, a workspace tab bar, status-bar toggles, an on-canvas nav cube
-and axis gizmo) by building a real design system and reskinning the app onto it.
+direction: a compact parametric CAD workbench with a dark app/quick-access bar,
+dense workflow command strip, sectioned browser/property panels, status/view
+controls, on-canvas ViewCube/navigation, and restrained technical styling.
+Command placement is governed by [Command Surfaces](command-surfaces.md); this spec
+owns the visual system and reusable widgets.
 
 ## Decisions
 
@@ -28,6 +30,13 @@ and axis gizmo) by building a real design system and reskinning the app onto it.
 - **Title bar:** Keep native window decorations (real macOS traffic lights) and render
   the dark app header directly beneath — visually equivalent to the mock without going
   frameless and reimplementing window drag/resize.
+- **Visual target:** Prefer Fusion/Inventor/SOLIDWORKS/Onshape-like CAD density over
+  SaaS-style spacious cards: compact controls, low-radius chrome, small icons,
+  subdued gray panels, sparse accent color, and canvas-first composition.
+- **Art direction:** Use CAD density plus Framer craft. The UI should feel like a
+  technical instrument for framing: graphite chrome, cool gray panels, warm
+  drawing-paper canvas, blue selection, construction amber authored intent,
+  green valid completion, red conflicts, and custom framing-aware icons.
 
 ## Architecture
 
@@ -36,6 +45,8 @@ Replace flat `theme.rs` with a `design/` module in `framer-app`:
 - `design/tokens.rs` — `Theme`, a cheap `Copy` struct of semantic tokens + metrics.
 - `design/palette.rs` — `Theme::studio_light()` and `Theme::studio_dark()`.
 - `design/icons.rs` — bundled font registration + `Icon` enum (`Icon::Save.glyph()`).
+  Custom framing icon glyphs or vector paths should live beside the bundled icon
+  font and be wrapped by the same typed `Icon` enum.
 - `design/widgets.rs` — reusable component builders.
 - `design/mod.rs` — re-exports + the active-theme accessor.
 
@@ -47,6 +58,8 @@ Grouped by role so call sites read intent, not hex:
   `control`, `control_hover`, `overlay`.
 - **Text:** `text`, `text_secondary`, `text_muted`, `text_on_accent`.
 - **Accent + semantic:** `accent`, `accent_soft`, `success`, `warning`, `danger`.
+- **Framing semantics:** `authored`, `generated`, `construction`, `snap`,
+  `constraint`, `conflict`, `paper_warm`.
 - **Lines:** `divider`, `divider_soft`, `border` (+ `Stroke` helpers).
 - **Drawing/canvas:** `paper`, `grid_minor`, `grid_major`, `ruler`, `framing`,
   `framing_dark`, `selection`, `dimension`.
@@ -67,7 +80,11 @@ header.
 
 Each reads `theme(ui)` so it restyles for free:
 
-- `tool_button(Icon, label, active, enabled)` — icon-over-label toolbar button.
+- `tool_button(Icon, label, active, enabled)` — compact CAD command button; labels
+  stay short and buttons avoid card-like proportions.
+- `split_tool_button(Icon, label, active, enabled, menu)` — command plus flyout for
+  variants.
+- `command_panel(title, actions)` — grouped command-strip panel with dividers.
 - `icon_button(Icon, tooltip)` — bare icon (tree footer, status bar, help).
 - `toggle_switch(&mut bool, label)` — sliding Grid/Ortho/Snap switch.
 - `segmented(&mut T, options)` — Design/Plan + view segments.
@@ -76,36 +93,43 @@ Each reads `theme(ui)` so it restyles for free:
 - `property_row(label, value_widget)` — left label / right-aligned value field.
 - `swatch_field(...)` — wall-type visual stripe + dropdown.
 - `chip(text, tone)`, `status_item(...)`, `tab_bar(...)`, `panel_header(...)`.
-- Canvas overlays: `floating_toolbar(actions)`, `view_cube`, `axis_gizmo`,
-  `scale_bar`, `nav_widget`.
+- Canvas overlays: `marking_menu(actions)`, `context_toolbar(actions)`,
+  `view_cube`, `axis_gizmo`, `scale_bar`, `nav_widget`.
+- Domain visuals: `wall_glyph`, `opening_glyph`, `roof_glyph`, `layer_stack_glyph`,
+  `section_cut_glyph`, `framing_swatch`, and `validation_badge`.
 
 ## Screen-by-screen reskin
 
-- **App header (new):** dark strip — wordmark · `project ▾` · "✓ Saved" · right:
-  `IRC 2021 profile ▾` · `?` · theme toggle.
-- **Toolbar:** text buttons → grouped `tool_button`s with icons
-  (PROJECT/WORKSPACE/VIEW/BUILD/DIMENSION/TOOLS), active-blue states.
-- **Workspace tab bar (new):** "Design Workspace" · `Shell` · `Level 1` · `+`.
-- **Model Browser:** search + filter icon, restyled indented tree, Wall Joins /
-  Catalog sections, bottom icon footer.
-- **Inspector:** collapsible `section`s (Dimensions, Placement, Wall Type, Materials,
-  Tags) with `property_row`s + wall-type swatch.
-- **Canvas:** floating contextual toolbar over selection; axis gizmo (bottom-left),
-  nav cube (bottom-right), scale bar, `2D/3D ▾`; light "paper" palette.
-- **Status bar:** ✓ Ready · `Level ▾` · X/Y/Z live readout · `Snap ▾` · Grid/Ortho
-  toggles · errors/warnings · view-layout icons · zoom · fullscreen.
+- **App / quick-access bar:** dark strip — wordmark · project/document controls ·
+  save/undo/redo · command search · profile/code/help/theme.
+- **Workflow command strip:** compact tabbed command panels (`Design`, `Frame`,
+  `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`), small icon buttons,
+  flyouts for variants, custom framing icons where Lucide is too generic, and
+  contextual tabs/options while a tool is active.
+- **Workspace/view bar:** current workspace, view tabs, level selector, display
+  preset, and view-layout controls close to the viewport.
+- **Model Browser:** search + filter icon, dense disclosure tree, visibility toggles,
+  authored/generated sections, Wall Joins / Catalog sections, compact footer icons.
+- **Property Manager / Inspector:** dense field rows, accept/cancel affordances for
+  active tools, collapsible sections (Dimensions, Placement, Wall Type, Materials,
+  Tags), and wall-type swatches.
+- **Canvas:** model-first drawing area; warm drawing-paper surface, rulers, major/
+  minor technical grid, authored construction highlights, marking menu / compact
+  context toolbar on selection, axis gizmo, ViewCube, scale bar, navigation widget.
+- **Status / view-control bar:** ✓ Ready · `Level ▾` · X/Y/Z live readout ·
+  `Snap ▾` · Grid/Ortho toggles · layer/display controls · diagnostics · zoom.
 
 ## Phasing (each phase compiles & runs; existing tests stay green)
 
 1. **Foundation** — `design/` module, tokens, light+dark palettes, icon font,
    `configure_style`, theme accessor + toggle. App reskins via the accessor swap.
-2. **Chrome** — app header, tool_button toolbar, tab bar, sectioned inspector, status
-   bar layout, tree footer.
+2. **Chrome** — app/quick-access bar, workflow command strip, workspace/view bar,
+   sectioned browser/property panels, status/view-control bar, tree footer.
 3. **Wire real state** — add `grid`, `ortho`, `snap_step`, live cursor X/Y/Z, active
    level; make Grid/Ortho/Snap + Snap/Level/2D-3D dropdowns drive drafting and the
    existing viewport; promote the 3D view cube into a shared on-canvas nav widget.
-4. **Polish** — floating canvas toolbar actions (select/move/duplicate/delete), scale
-   bar, hover/disabled states, spacing pass against the mock.
+4. **Polish** — marking/context actions (select/move/duplicate/delete), scale bar,
+   hover/disabled states, command-strip density pass against the CAD workbench mock.
 
 ## Verification
 

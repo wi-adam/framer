@@ -18,6 +18,7 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | [Render View Mode](render-view.md) | — | Implemented |
 | [Undo / Redo Infrastructure](undo-redo.md) | — | Implemented |
 | [Design System](design-system.md) | G-011 | Implemented (evolving) |
+| [Command Surfaces](command-surfaces.md) | G-011 | Proposed |
 | [Build & CI](build-and-ci.md) | — (infrastructure) | Implemented |
 
 Related durable specs that live elsewhere because they are heavily cross-linked:

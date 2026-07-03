@@ -23,7 +23,7 @@ framer-core   ─┬─→ framer-solver  ─┐
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
-| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
+| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
 
 **The load-bearing invariant:** `framer-core`, `framer-solver`, and `framer-render` carry
 **no UI dependency**. They must stay testable, scriptable, and exportable without the app.
@@ -261,7 +261,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
-| `panels.rs` | Model tree, inspector, toolbar, status bar — the egui panel bodies. The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
+| `panels.rs` | Model tree, inspector, app header, workflow command strip, status bar — the egui panel bodies. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + auto-join derivation. |
 | `history.rs` | `History<Snapshot>` undo/redo stack (+ `history_integration_tests.rs`). |
@@ -273,7 +273,8 @@ mirrors this exact math.
 ### `src/app/design/` — design system
 
 `mod.rs` (theme install + tokens), `tokens.rs`, `palette.rs`, `icons.rs` (Lucide icon font),
-`widgets.rs` (semantic custom controls). New UI styling goes here, not inline.
+`widgets.rs` (semantic custom controls). New UI styling goes here, not inline; command routing
+policy belongs in [command-surfaces.md](specs/command-surfaces.md).
 
 ### `src/app/viewport/` — the viewports (layered modules)
 
