@@ -259,11 +259,18 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
         harness.query_all_by_label("Elevation").next().is_some(),
         "Plan workspace should relabel the elevation view tab"
     );
+    harness.get_by_label("Elevation").click();
+    harness.run();
+    assert_eq!(harness.state().viewport_mode, ViewportMode::Elevation);
 
     harness.get_by_label("Design Workspace").click();
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
     assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+
+    harness.get_by_label("Shell").click();
+    harness.run();
+    assert_eq!(harness.state().viewport_mode, ViewportMode::Plan);
 
     harness.get_by_label("Render").click();
     harness.run_steps(1);
@@ -272,6 +279,10 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
     harness.get_by_label("Roof").click();
     harness.run_steps(1);
     assert_eq!(harness.state().viewport_mode, ViewportMode::RoofPlan);
+
+    harness.get_by_label("3D").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().viewport_mode, ViewportMode::Axonometric);
 }
 
 /// Tool shortcuts entered from the generated-plan workflow must return to a
