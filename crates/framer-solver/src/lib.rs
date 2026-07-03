@@ -1735,14 +1735,10 @@ fn concave_footprint_corners(model: &BuildingModel, level: &ElementId) -> Vec<Po
         .unwrap_or_default()
 }
 
-fn shared_edge_has_concave_endpoint(
-    model: &BuildingModel,
-    level: &ElementId,
-    edge: (Point2, Point2),
-) -> bool {
-    concave_footprint_corners(model, level)
-        .into_iter()
-        .any(|corner| corner == edge.0 || corner == edge.1)
+fn shared_edge_has_concave_endpoint(corners: &[Point2], edge: (Point2, Point2)) -> bool {
+    corners
+        .iter()
+        .any(|corner| *corner == edge.0 || *corner == edge.1)
 }
 
 fn add_roof_intersection_members(
@@ -1750,6 +1746,13 @@ fn add_roof_intersection_members(
     model: &BuildingModel,
     geometries: &[Option<RoofPlaneGeometry>],
 ) -> Result<(), SolverError> {
+    let mut concave_corners_by_level = BTreeMap::new();
+    for plane in &model.roof_planes {
+        concave_corners_by_level
+            .entry(plane.level.clone())
+            .or_insert_with(|| concave_footprint_corners(model, &plane.level));
+    }
+
     for (first_index, first) in model.roof_planes.iter().enumerate() {
         let Some(first_geometry) = geometries[first_index].as_ref() else {
             continue;
@@ -1782,7 +1785,9 @@ fn add_roof_intersection_members(
                     continue;
                 }
                 let is_valley = first.level == second.level
-                    && shared_edge_has_concave_endpoint(model, &first.level, edge);
+                    && concave_corners_by_level
+                        .get(&first.level)
+                        .is_some_and(|corners| shared_edge_has_concave_endpoint(corners, edge));
                 let elevations_match = shared_edge_elevations_match(first, second, edge);
                 if is_valley && !elevations_match {
                     let owner = if first.id <= second.id { first } else { second };

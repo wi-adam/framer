@@ -219,7 +219,9 @@ fn orthogonal_valley_roof_specs(outline: &[Point2]) -> Option<Vec<RoofPlaneSpec>
     let corner_y = if sign_y > 0 { min_y } else { max_y };
     let far_x = if sign_x > 0 { max_x } else { min_x };
     let far_y = if sign_y > 0 { max_y } else { min_y };
-    if (c.x.ticks() - corner_x).abs() != (c.y.ticks() - corner_y).abs() {
+    if (c.x.ticks() - corner_x).abs() != (c.y.ticks() - corner_y).abs()
+        || (far_x - c.x.ticks()).abs() != (far_y - c.y.ticks()).abs()
+    {
         return None;
     }
     let p = |x, y| Point2::new(Length::from_ticks(x), Length::from_ticks(y));
@@ -2931,6 +2933,72 @@ mod tests {
             DimensionAxis::Horizontal => Length::from_inches(72.0),
             DimensionAxis::Vertical => Length::from_inches(96.0),
         }
+    }
+
+    fn pt_ft(x_ft: f64, y_ft: f64) -> Point2 {
+        Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
+    }
+
+    #[test]
+    fn orthogonal_valley_roof_specs_accepts_symmetric_l() {
+        let shared_low = pt_ft(0.0, 0.0);
+        let reentrant = pt_ft(12.0, 12.0);
+        let specs = orthogonal_valley_roof_specs(&[
+            shared_low,
+            pt_ft(24.0, 0.0),
+            pt_ft(24.0, 12.0),
+            reentrant,
+            pt_ft(12.0, 24.0),
+            pt_ft(0.0, 24.0),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            specs,
+            vec![
+                (
+                    vec![shared_low, pt_ft(24.0, 0.0), pt_ft(24.0, 12.0), reentrant],
+                    0,
+                ),
+                (
+                    vec![shared_low, pt_ft(0.0, 24.0), pt_ft(12.0, 24.0), reentrant],
+                    0,
+                ),
+            ]
+        );
+        assert!(
+            specs
+                .iter()
+                .all(|(outline, _)| outline.contains(&shared_low) && outline.contains(&reentrant))
+        );
+    }
+
+    #[test]
+    fn orthogonal_valley_roof_specs_rejects_unequal_leg_l() {
+        assert!(
+            orthogonal_valley_roof_specs(&[
+                pt_ft(0.0, 0.0),
+                pt_ft(24.0, 0.0),
+                pt_ft(24.0, 12.0),
+                pt_ft(12.0, 12.0),
+                pt_ft(12.0, 36.0),
+                pt_ft(0.0, 36.0),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn orthogonal_valley_roof_specs_rejects_rectangle() {
+        assert!(
+            orthogonal_valley_roof_specs(&[
+                pt_ft(0.0, 0.0),
+                pt_ft(24.0, 0.0),
+                pt_ft(24.0, 12.0),
+                pt_ft(0.0, 12.0),
+            ])
+            .is_none()
+        );
     }
 
     #[test]
