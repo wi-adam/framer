@@ -8,14 +8,14 @@ dependency.
 Depends on: `framer-core`, `framer-solver`, `framer-render`.
 
 Entry: `src/main.rs` → `FramerApp` (`src/app/mod.rs`), whose `ui_root` lays out the
-header/toolbar, model tree, inspector, viewport, and status bar.
+app header, workflow command strip, model tree, inspector, viewport, and status bar.
 
 ## Module groups
 
 | Path | Purpose |
 | --- | --- |
 | `src/app/mod.rs` | `FramerApp` state + `impl eframe::App` + `ui_root`; project save/load/export; plan regeneration; selection/undo wiring. |
-| `src/app/panels.rs` | Model tree, inspector, toolbar, status bar bodies. |
+| `src/app/panels.rs` | Model tree, inspector, app header, workflow command strip, status bar bodies. |
 | `src/app/model_edit.rs`, `draw_wall.rs`, `history.rs` | Authored-model mutation primitives; draw-wall snapping + auto-joins; undo/redo. |
 | `src/app/render_job.rs`, `project_io.rs`, `labels.rs`, `theme.rs` | Background CPU render job; file/export helpers; labels; theme shim. |
 | `src/app/design/` | Design system: theme install, tokens, palette, Lucide icons, semantic widgets. |

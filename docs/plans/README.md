@@ -15,3 +15,4 @@ New plan? Copy [`../templates/plan-template.md`](../templates/plan-template.md).
 | [2026-06-18 — Wall editing & snapping](2026-06-18-wall-editing-snapping.md) | [Wall Editing & Snapping](../specs/wall-editing-and-snapping.md) |
 | [2026-06-18 — Viewport module refactor](2026-06-18-viewport-module-refactor.md) | — (internal refactor; see [code-map.md](../code-map.md#srcappviewport--the-viewports-layered-modules)) |
 | [2026-06-19 — Libraries](2026-06-19-libraries.md) | [Libraries](../specs/libraries.md) |
+| [2026-07-03 — Command surfaces](2026-07-03-command-surfaces.md) | [Command Surfaces](../specs/command-surfaces.md) |
