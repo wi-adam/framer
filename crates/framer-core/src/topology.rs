@@ -59,6 +59,91 @@ pub fn room_boundaries(model: &BuildingModel, seeds: &[Point2]) -> Vec<Option<Ro
         .collect()
 }
 
+/// The outer loop of a level whose walls form exactly one simple closed footprint:
+/// every endpoint has degree two, with no loose ends or interior partitions. This
+/// is intentionally narrower than [`room_boundary`]: authoring tools use it when
+/// they need a perimeter footprint (for example an L-shaped roof auto-generator)
+/// and should fall back when the wall graph is more complex.
+pub fn level_wall_loop_outline(model: &BuildingModel, level: &ElementId) -> Option<Vec<Point2>> {
+    let mut adjacency: BTreeMap<(i64, i64), Vec<(i64, i64)>> = BTreeMap::new();
+    for wall in model.walls.iter().filter(|wall| &wall.level == level) {
+        if wall.start == wall.end {
+            continue;
+        }
+        let start = point_key(wall.start);
+        let end = point_key(wall.end);
+        if start == end {
+            continue;
+        }
+        adjacency.entry(start).or_default().push(end);
+        adjacency.entry(end).or_default().push(start);
+    }
+    if adjacency.len() < 3 {
+        return None;
+    }
+    for neighbors in adjacency.values_mut() {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+        if neighbors.len() != 2 {
+            return None;
+        }
+    }
+
+    let start = *adjacency.keys().next()?;
+    let mut outline = Vec::with_capacity(adjacency.len());
+    let mut previous = None;
+    let mut current = start;
+    loop {
+        outline.push(current);
+        let neighbors = adjacency.get(&current)?;
+        let next = match previous {
+            Some(previous) if neighbors[0] == previous => neighbors[1],
+            Some(_) => neighbors[0],
+            None => neighbors[0],
+        };
+        previous = Some(current);
+        current = next;
+        if current == start {
+            break;
+        }
+        if outline.len() > adjacency.len() {
+            return None;
+        }
+    }
+    if outline.len() != adjacency.len() {
+        return None;
+    }
+
+    let mut points: Vec<Point2> = outline.into_iter().map(point_from_key).collect();
+    if polygon_signed_area2(&points) < 0 {
+        points.reverse();
+    }
+    Some(points)
+}
+
+/// Reflex vertices of a simple polygon, returned after normalizing the loop to
+/// counterclockwise winding. Orthogonal L/T roof generation and valley detection
+/// use these corners as the footprint signal for an interior valley.
+pub fn concave_polygon_corners(vertices: &[Point2]) -> Vec<Point2> {
+    if vertices.len() < 4 {
+        return Vec::new();
+    }
+    let mut outline = vertices.to_vec();
+    if polygon_signed_area2(&outline) < 0 {
+        outline.reverse();
+    }
+    let mut corners = Vec::new();
+    for index in 0..outline.len() {
+        let previous = outline[(index + outline.len() - 1) % outline.len()];
+        let current = outline[index];
+        let next = outline[(index + 1) % outline.len()];
+        if cross2(previous, current, next) < 0 {
+            corners.push(current);
+        }
+    }
+    corners
+}
+
 impl RoomBoundary {
     fn from_vertices(vertices: Vec<Point2>) -> Self {
         let perimeter = polygon_perimeter(&vertices);
@@ -188,6 +273,14 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
         }
     }
     faces
+}
+
+fn point_key(point: Point2) -> (i64, i64) {
+    (point.x.ticks(), point.y.ticks())
+}
+
+fn point_from_key((x, y): (i64, i64)) -> Point2 {
+    Point2::new(Length::from_ticks(x), Length::from_ticks(y))
 }
 
 /// The number of enclosed rooms (bounded faces) in the wall graph — the count of
@@ -541,6 +634,35 @@ mod tests {
 
         assert_eq!(boundary.vertices.len(), 6);
         assert!((boundary.area_square_feet() - 108.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn level_wall_loop_outline_reports_concave_l_footprint_corner() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let (a, b) = (72.0, 144.0);
+        let pts = [p(0.0, 0.0), p(b, 0.0), p(b, a), p(a, a), p(a, b), p(0.0, b)];
+        for index in 0..pts.len() {
+            let next = (index + 1) % pts.len();
+            model
+                .walls
+                .push(wall(&format!("w-{index}"), pts[index], pts[next]));
+        }
+
+        let outline = level_wall_loop_outline(&model, &ElementId::new("level-1"))
+            .expect("simple L perimeter loop");
+
+        assert_eq!(outline.len(), 6);
+        assert_eq!(concave_polygon_corners(&outline), vec![p(a, a)]);
+    }
+
+    #[test]
+    fn level_wall_loop_outline_rejects_partitioned_wall_graph() {
+        let mut model = rect_model(12.0, 8.0);
+        model
+            .walls
+            .push(wall("interior", p(72.0, 0.0), p(72.0, 96.0)));
+
+        assert!(level_wall_loop_outline(&model, &ElementId::new("level-1")).is_none());
     }
 
     #[test]

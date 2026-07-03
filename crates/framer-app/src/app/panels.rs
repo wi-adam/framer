@@ -335,7 +335,7 @@ impl FramerApp {
                         self.add_roof(RoofForm::Shed);
                     }
                     if widgets::tool_button(ui, Icon::Angular, "Hip", false, true)
-                        .on_hover_text("Generate a hip roof over the rectangular footprint")
+                        .on_hover_text("Generate a hip roof over a rectangular footprint, or valley planes over a simple L footprint")
                         .clicked()
                     {
                         self.add_roof(RoofForm::Hip);

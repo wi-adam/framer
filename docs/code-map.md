@@ -213,8 +213,8 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
 - **`generate_project_plan(&BuildingModel) -> Result<ProjectFramePlan, SolverError>`** — the
   one entry the app calls. Validates, then per wall calls `generate_wall_plan`, adds join
   members (corner posts / partition + backing studs), generates floor/ceiling/roof plans, adds
-  hip rafters from shared roof-plane edges, frames jack rafters where hip-bounded planes shorten,
-  and builds the room schedule + per-layer BOM from construction systems.
+  hip or valley rafters from shared roof-plane edges, frames jack rafters where hip/valley-bounded
+  planes shorten, and builds the room schedule + per-layer BOM from construction systems.
 - `generate_wall_plan(wall, code, system, materials)` — single-wall framing.
 - Exports: `export_bom_csv`, `export_layer_bom_csv`, `export_room_schedule_csv`,
   `export_wall_elevation_svg`, `export_project_svg`.
@@ -259,7 +259,7 @@ mirrors this exact math.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, and rectangular hip planes. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
 | `panels.rs` | Model tree, inspector, toolbar, status bar — the egui panel bodies. The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + auto-join derivation. |
