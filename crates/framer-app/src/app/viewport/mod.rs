@@ -3,6 +3,7 @@ use eframe::egui::{
 };
 use framer_core::{Length, Point2};
 
+use super::actions::{self, ActionId};
 use super::draw_wall::SnapResult;
 #[cfg(test)]
 use super::model_edit::OpeningEditHandle;
@@ -89,12 +90,7 @@ pub(super) struct DrawWallPlanInput {
 
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
-        workspace_header(
-            ui,
-            self.workspace_mode,
-            self.viewport_mode,
-            self.model.code.display_name.as_str(),
-        );
+        self.workspace_header(ui);
         ui.add_space(8.0);
 
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
@@ -369,6 +365,121 @@ impl FramerApp {
                     });
             });
     }
+
+    fn workspace_header(&mut self, ui: &mut Ui) {
+        let t = design::active();
+        let code_name = self.model.code.display_name.clone();
+        Frame::new()
+            .fill(t.panel)
+            .inner_margin(Margin::symmetric(6, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = design::space::LG;
+                    self.workspace_switcher(ui);
+                    self.viewport_tabs(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(code_name.as_str())
+                                .size(design::text_size::LABEL)
+                                .color(t.text_muted),
+                        );
+                    });
+                });
+            });
+    }
+
+    fn workspace_switcher(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = design::space::XS;
+            if workspace_mode_tab(ui, WorkspaceMode::Design, self.workspace_mode).clicked() {
+                self.set_workspace_mode(WorkspaceMode::Design);
+            }
+            if workspace_mode_tab(ui, WorkspaceMode::Plan, self.workspace_mode).clicked() {
+                self.set_workspace_mode(WorkspaceMode::Plan);
+            }
+        });
+    }
+
+    fn viewport_tabs(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = design::space::XS;
+            let design_mode = self.workspace_mode.allows_design_edits();
+            let plan_label = if design_mode { "Shell" } else { "Plan" };
+            let elevation_label = if design_mode { "Wall" } else { "Elevation" };
+            if view_tab(
+                ui,
+                ActionId::ViewPlan,
+                plan_label,
+                self.viewport_mode == ViewportMode::Plan,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Plan;
+            }
+            if view_tab(
+                ui,
+                ActionId::ViewElevation,
+                elevation_label,
+                self.viewport_mode == ViewportMode::Elevation,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Elevation;
+            }
+            if view_tab(
+                ui,
+                ActionId::ViewRoof,
+                "Roof",
+                self.viewport_mode == ViewportMode::RoofPlan,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::RoofPlan;
+            }
+            if view_tab(
+                ui,
+                ActionId::View3d,
+                "3D",
+                self.viewport_mode == ViewportMode::Axonometric,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Axonometric;
+            }
+            if view_tab(
+                ui,
+                ActionId::ViewRender,
+                "Render",
+                self.viewport_mode == ViewportMode::Render,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Render;
+            }
+        });
+    }
+}
+
+fn workspace_mode_tab(
+    ui: &mut Ui,
+    mode: WorkspaceMode,
+    active_mode: WorkspaceMode,
+) -> egui::Response {
+    let action_id = match mode {
+        WorkspaceMode::Design => ActionId::WorkspaceDesign,
+        WorkspaceMode::Plan => ActionId::WorkspacePlan,
+    };
+    let label = match mode {
+        WorkspaceMode::Design => "Design Workspace",
+        WorkspaceMode::Plan => "Plan Workspace",
+    };
+    let action = actions::metadata(action_id);
+    design::widgets::tab(ui, label, mode == active_mode).on_hover_text(action.tooltip)
+}
+
+fn view_tab(ui: &mut Ui, action_id: ActionId, label: &str, selected: bool) -> egui::Response {
+    let action = actions::metadata(action_id);
+    design::widgets::tab(ui, label, selected).on_hover_text(action.tooltip)
 }
 
 fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
@@ -423,56 +534,6 @@ fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
             FontId::proportional(7.5),
             theme.text_muted,
         );
-    }
-}
-
-fn workspace_header(
-    ui: &mut Ui,
-    workspace_mode: WorkspaceMode,
-    viewport_mode: ViewportMode,
-    code_name: &str,
-) {
-    let t = design::active();
-    Frame::new()
-        .fill(t.panel)
-        .inner_margin(Margin::symmetric(6, 6))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = design::space::LG;
-                ui.label(
-                    RichText::new(workspace_mode_title(workspace_mode))
-                        .strong()
-                        .size(design::text_size::HEADING)
-                        .color(t.text),
-                );
-                design::widgets::tab(ui, viewport_mode_title(workspace_mode, viewport_mode), true);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(code_name)
-                            .size(design::text_size::LABEL)
-                            .color(t.text_muted),
-                    );
-                });
-            });
-        });
-}
-
-fn workspace_mode_title(mode: WorkspaceMode) -> &'static str {
-    match mode {
-        WorkspaceMode::Design => "Design Workspace",
-        WorkspaceMode::Plan => "Plan Workspace",
-    }
-}
-
-fn viewport_mode_title(workspace_mode: WorkspaceMode, viewport_mode: ViewportMode) -> &'static str {
-    match (workspace_mode, viewport_mode) {
-        (WorkspaceMode::Design, ViewportMode::Plan) => "Shell",
-        (WorkspaceMode::Design, ViewportMode::Elevation) => "Wall",
-        (_, ViewportMode::Plan) => "Plan",
-        (_, ViewportMode::RoofPlan) => "Roof",
-        (_, ViewportMode::Elevation) => "Elevation",
-        (_, ViewportMode::Axonometric) => "3D",
-        (_, ViewportMode::Render) => "Render",
     }
 }
 

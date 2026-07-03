@@ -280,7 +280,9 @@ styling goes here, not inline; command routing policy belongs in
 
 ### `src/app/viewport/` — the viewports (layered modules)
 
-`workspace` (`viewport/mod.rs:91`) routes to one viewport per frame based on `ViewportMode`.
+`workspace` (`viewport/mod.rs:91`) renders the workspace/view bar and routes to one viewport
+per frame based on `ViewportMode`. The workspace/view bar owns Design/Plan switching and
+Shell/Plan, Wall/Elevation, Roof, 3D, and Render view tabs.
 
 | File | Contains |
 | --- | --- |

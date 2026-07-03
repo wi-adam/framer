@@ -221,6 +221,59 @@ fn workflow_command_strip_routes_tabbed_panels() {
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
 }
 
+/// Workspace mode and view switching live in the workspace/view bar, not inside
+/// the workflow command strip's modeling panels.
+#[test]
+fn workspace_view_bar_owns_workspace_and_view_controls() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    for label in [
+        "Design Workspace",
+        "Plan Workspace",
+        "Shell",
+        "Wall",
+        "Roof",
+        "3D",
+        "Render",
+    ] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "workspace/view bar should expose '{label}'"
+        );
+    }
+    assert!(
+        harness.query_all_by_label("View").next().is_none(),
+        "workflow command strip should no longer expose a View panel"
+    );
+
+    harness.get_by_label("Plan Workspace").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
+    assert!(
+        harness.query_all_by_label("Plan").next().is_some(),
+        "Plan workspace should relabel the plan view tab"
+    );
+    assert!(
+        harness.query_all_by_label("Elevation").next().is_some(),
+        "Plan workspace should relabel the elevation view tab"
+    );
+
+    harness.get_by_label("Design Workspace").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().viewport_mode, ViewportMode::Render);
+
+    harness.get_by_label("Roof").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().viewport_mode, ViewportMode::RoofPlan);
+}
+
 /// Tool shortcuts entered from the generated-plan workflow must return to a
 /// Design-compatible command tab before activating the tool.
 #[test]

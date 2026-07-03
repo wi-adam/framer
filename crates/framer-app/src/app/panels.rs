@@ -174,7 +174,6 @@ impl FramerApp {
 
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
-                self.view_command_panel(ui);
                 self.workflow_command_panels(ui);
             });
         });
@@ -215,70 +214,6 @@ impl FramerApp {
             | WorkflowTab::Annotate
             | WorkflowTab::Inspect => self.set_workspace_mode(WorkspaceMode::Design),
         }
-    }
-
-    fn view_command_panel(&mut self, ui: &mut Ui) {
-        widgets::command_panel(ui, "View", |ui| {
-            let design_mode = self.workspace_mode.allows_design_edits();
-            let shell_label = if design_mode { "Shell" } else { "Plan" };
-            let wall_label = if design_mode { "Wall" } else { "Elevation" };
-            let plan_action = actions::metadata(ActionId::ViewPlan);
-            if widgets::tool_button(
-                ui,
-                plan_action.icon,
-                shell_label,
-                self.viewport_mode == ViewportMode::Plan,
-                true,
-            )
-            .on_hover_text(plan_action.tooltip)
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::Plan;
-            }
-            let elevation_action = actions::metadata(ActionId::ViewElevation);
-            if widgets::tool_button(
-                ui,
-                elevation_action.icon,
-                wall_label,
-                self.viewport_mode == ViewportMode::Elevation,
-                true,
-            )
-            .on_hover_text(elevation_action.tooltip)
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::Elevation;
-            }
-            if action_tool_button(
-                ui,
-                ActionId::ViewRoof,
-                self.viewport_mode == ViewportMode::RoofPlan,
-                true,
-            )
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::RoofPlan;
-            }
-            if action_tool_button(
-                ui,
-                ActionId::View3d,
-                self.viewport_mode == ViewportMode::Axonometric,
-                true,
-            )
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::Axonometric;
-            }
-            if action_tool_button(
-                ui,
-                ActionId::ViewRender,
-                self.viewport_mode == ViewportMode::Render,
-                true,
-            )
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::Render;
-            }
-        });
     }
 
     fn workflow_command_panels(&mut self, ui: &mut Ui) {
