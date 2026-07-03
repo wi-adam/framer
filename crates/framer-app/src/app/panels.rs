@@ -40,12 +40,50 @@ impl FramerApp {
                     .color(head.text),
             );
             header_divider(ui, head.divider);
-            ui.label(
-                RichText::new("Project")
-                    .size(design::text_size::LABEL)
-                    .color(head.text_muted),
-            );
-            let path_width = (ui.available_width() * 0.40).clamp(240.0, 520.0);
+            if header_command_button(ui, head, ActionId::NewProject, true, None).clicked() {
+                self.new_project();
+            }
+            if header_command_button(ui, head, ActionId::OpenProject, true, None).clicked() {
+                self.load_project_file();
+            }
+            if header_command_button(ui, head, ActionId::SaveProject, true, None).clicked() {
+                self.save_project_file();
+            }
+            header_divider(ui, head.divider);
+            let undo_tip = match self.history.undo_label() {
+                Some(label) => format!("Undo {label}  (⌘Z / Ctrl+Z)"),
+                None => "Nothing to undo  (⌘Z / Ctrl+Z)".to_owned(),
+            };
+            if header_command_button(
+                ui,
+                head,
+                ActionId::Undo,
+                self.history.can_undo(),
+                Some(undo_tip.as_str()),
+            )
+            .clicked()
+            {
+                self.undo();
+            }
+            let redo_tip = match self.history.redo_label() {
+                Some(label) => format!("Redo {label}  (⌘⇧Z / Ctrl+Y)"),
+                None => "Nothing to redo  (⌘⇧Z / Ctrl+Y)".to_owned(),
+            };
+            if header_command_button(
+                ui,
+                head,
+                ActionId::Redo,
+                self.history.can_redo(),
+                Some(redo_tip.as_str()),
+            )
+            .clicked()
+            {
+                self.redo();
+            }
+            header_divider(ui, head.divider);
+            self.project_header_menu(ui, head);
+            self.examples_header_menu(ui, head);
+            let path_width = (ui.available_width() * 0.34).clamp(220.0, 460.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.project_path)
                     .desired_width(path_width)
@@ -76,62 +114,53 @@ impl FramerApp {
         });
     }
 
+    fn project_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
+        let can_export = self.workspace_mode.shows_generated_plan();
+        let (response, _) = MenuButton::new(header_menu_text("Project", head)).ui(ui, |ui| {
+            ui.set_min_width(176.0);
+            if header_menu_action(ui, ActionId::NewProject, true).clicked() {
+                self.new_project();
+                ui.close();
+            }
+            if header_menu_action(ui, ActionId::OpenProject, true).clicked() {
+                self.load_project_file();
+                ui.close();
+            }
+            if header_menu_action(ui, ActionId::SaveProject, true).clicked() {
+                self.save_project_file();
+                ui.close();
+            }
+            ui.separator();
+            if header_menu_action(ui, ActionId::ExportArtifacts, can_export).clicked() {
+                self.export_current_artifacts();
+                ui.close();
+            }
+        });
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Project"));
+        response.on_hover_text("Project actions");
+    }
+
+    fn examples_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
+        let (response, _) = MenuButton::new(header_menu_text("Examples", head)).ui(ui, |ui| {
+            ui.set_min_width(176.0);
+            if header_menu_action(ui, ActionId::LoadShellDemo, true).clicked() {
+                self.reset_demo();
+                ui.close();
+            }
+            if header_menu_action(ui, ActionId::LoadWallDemo, true).clicked() {
+                self.reset_wall_demo();
+                ui.close();
+            }
+        });
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Examples"));
+        response.on_hover_text("Example projects");
+    }
+
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
-
-            widgets::tool_group(ui, "PROJECT", |ui| {
-                if action_tool_button(ui, ActionId::NewProject, false, true).clicked() {
-                    self.new_project();
-                }
-                if action_tool_button(ui, ActionId::OpenProject, false, true).clicked() {
-                    self.load_project_file();
-                }
-                if action_tool_button(ui, ActionId::SaveProject, false, true).clicked() {
-                    self.save_project_file();
-                }
-                let can_export = self.workspace_mode.shows_generated_plan();
-                if action_tool_button(ui, ActionId::ExportArtifacts, false, can_export).clicked() {
-                    self.export_current_artifacts();
-                }
-            });
-            widgets::tool_divider(ui);
-
-            widgets::tool_group(ui, "EDIT", |ui| {
-                let undo = actions::metadata(ActionId::Undo);
-                let undo_tip = match self.history.undo_label() {
-                    Some(label) => format!("Undo {label}  (⌘Z / Ctrl+Z)"),
-                    None => "Nothing to undo  (⌘Z / Ctrl+Z)".to_owned(),
-                };
-                if widgets::tool_button(ui, undo.icon, undo.label, false, self.history.can_undo())
-                    .on_hover_text(undo_tip)
-                    .clicked()
-                {
-                    self.undo();
-                }
-                let redo = actions::metadata(ActionId::Redo);
-                let redo_tip = match self.history.redo_label() {
-                    Some(label) => format!("Redo {label}  (⌘⇧Z / Ctrl+Y)"),
-                    None => "Nothing to redo  (⌘⇧Z / Ctrl+Y)".to_owned(),
-                };
-                if widgets::tool_button(ui, redo.icon, redo.label, false, self.history.can_redo())
-                    .on_hover_text(redo_tip)
-                    .clicked()
-                {
-                    self.redo();
-                }
-            });
-            widgets::tool_divider(ui);
-
-            widgets::tool_group(ui, "SAMPLES", |ui| {
-                if action_tool_button(ui, ActionId::LoadShellDemo, false, true).clicked() {
-                    self.reset_demo();
-                }
-                if action_tool_button(ui, ActionId::LoadWallDemo, false, true).clicked() {
-                    self.reset_wall_demo();
-                }
-            });
-            widgets::tool_divider(ui);
 
             widgets::tool_group(ui, "WORKSPACE", |ui| {
                 if action_tool_button(
@@ -2809,6 +2838,53 @@ fn header_divider(ui: &mut Ui, color: Color32) {
         ],
         Stroke::new(1.0, color),
     );
+}
+
+fn header_command_button(
+    ui: &mut Ui,
+    head: design::Theme,
+    id: ActionId,
+    enabled: bool,
+    tooltip_override: Option<&str>,
+) -> Response {
+    let action = actions::metadata(id);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(design::control::ICON_BTN), sense);
+    if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(rect, design::radius::SM, Color32::from_white_alpha(18));
+    }
+    let fg = if enabled { head.text } else { head.text_muted };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        action.icon.glyph().to_string(),
+        design::icon_font(design::control::INLINE_ICON),
+        fg,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
+    response.on_hover_text(tooltip_override.unwrap_or(action.tooltip))
+}
+
+fn header_menu_text(label: &str, head: design::Theme) -> RichText {
+    RichText::new(label)
+        .size(design::text_size::LABEL)
+        .color(head.text)
+}
+
+fn header_menu_action(ui: &mut Ui, id: ActionId, enabled: bool) -> Response {
+    let action = actions::metadata(id);
+    let response = ui
+        .add_enabled(enabled, egui::Button::new(action.label))
+        .on_hover_text(action.tooltip);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
+    response
 }
 
 fn header_save_pill(ui: &mut Ui, head: design::Theme, status: Option<&str>) {
