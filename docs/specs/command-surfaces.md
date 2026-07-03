@@ -185,8 +185,10 @@ workbench, but purpose-built for wood-framed structures.
 
 - `crates/framer-app/src/app/panels.rs` currently owns `app_header`, `toolbar`,
   inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
-  controls plus Project and Examples menus; `toolbar()` is the migration starting
-  point for the remaining workflow command strip.
+  controls plus Project and Examples menus; `toolbar()` renders the workflow tab
+  row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`) and
+  compact command panels. The View panel remains in the strip until the
+  workspace/view-bar migration lands.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,

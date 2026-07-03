@@ -89,6 +89,10 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Commit: `refactor(app): move project actions to header`
 - **Task 3.2** — Replace the existing broad toolbar groups with workflow tabs and compact
   command panels (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`).
+  - Status: implemented as a workflow tab row plus compact View, Structure,
+    Openings, Roofs, Dimensions, and Generated command panels. View controls stay
+    in the strip until Task 3.3, and active dimension options stay inline until
+    Task 3.4.
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/design/widgets.rs`
   - Verify: `cargo test -p framer-app --all-features --locked`; manual app run
@@ -148,15 +152,16 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | App header quick access | New, Open, Save, Undo, Redo | App/quick-access bar |
 | Project menu | New, Open, Save, Export | Project menu; Export also Plan workspace |
 | Examples menu | Shell, Wall demo loaders | Examples picker / Project menu |
-| Workflow strip: WORKSPACE | Design, Plan | App/workspace switcher or workspace/view bar |
-| Workflow strip: VIEW | Shell/Plan, Wall/Elevation, Roof, 3D, Render | Workspace/view bar |
-| Workflow strip: BUILD | Wall, Room, Ceiling, Vault, Floor | Workflow command strip: Design / Frame panels |
-| Workflow strip: BUILD | Delete | Marking menu / shortcut menu / shortcut |
-| Workflow strip: BUILD | Door, Window, Garage | Openings panel flyout, catalog, or host-aware Insert |
-| Workflow strip: BUILD | Gable, Shed, Hip | Roofs panel flyout or active roof options |
-| Workflow strip: DIMENSION | Linear | Workflow command strip: Annotate panel |
-| Workflow strip: DIMENSION | Driving/Reference, Horizontal/Vertical | Contextual tool tab, options strip, or placement preview |
-| Workflow strip: TOOLS (Plan) | Section | Plan command tab or view-control bar |
+| Workflow tab row | Design, Frame, Openings, Roofs, Annotate, Inspect, Plan | Workflow command strip tabs; Plan switches to Plan workspace |
+| Workflow strip: View panel | Shell/Plan, Wall/Elevation, Roof, 3D, Render | Temporary until workspace/view bar migration |
+| Workflow strip: Design / Structure panel | Room | Workflow command strip: Design panel |
+| Workflow strip: Frame / Structure panel | Wall, Ceiling, Vault, Floor | Workflow command strip: Frame panel |
+| Shortcut / contextual route | Delete | Marking menu / shortcut menu / shortcut; permanent context surface lands in Slice 4.1 |
+| Workflow strip: Openings panel | Door, Window, Garage | Temporary top-level variants until flyout/catalog migration |
+| Workflow strip: Roofs panel | Gable, Shed, Hip | Temporary top-level variants until roof flyout/options migration |
+| Workflow strip: Annotate / Dimensions panel | Linear | Workflow command strip: Annotate panel |
+| Workflow strip: Annotate active options | Driving/Reference, Horizontal/Vertical | Temporary inline options until contextual options strip migration |
+| Workflow strip: Plan / Generated panel | Section | Plan command tab or view-control bar |
 
 ## Final verification
 

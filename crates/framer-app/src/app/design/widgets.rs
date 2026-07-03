@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use eframe::egui::{
-    Align2, Button, CollapsingHeader, Color32, FontId, Pos2, Response, RichText, Sense, Stroke, Ui,
-    Vec2, WidgetInfo, WidgetType,
+    Align2, Button, CollapsingHeader, Color32, FontId, Frame, Margin, Pos2, Response, RichText,
+    Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 
 use super::{Icon, active, control, icon_font, icon_text, radius, space, text_size};
@@ -109,6 +109,55 @@ pub(crate) fn tool_group(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
             add(ui);
         });
     });
+}
+
+/// A compact workflow-tab trigger for the command strip.
+pub(crate) fn workflow_tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
+    let t = active();
+    let (fill, stroke, fg) = if selected {
+        (t.accent_soft, t.accent_stroke(), t.text)
+    } else {
+        (
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, Color32::TRANSPARENT),
+            t.text_secondary,
+        )
+    };
+    ui.add(
+        Button::new(
+            RichText::new(label)
+                .strong()
+                .size(text_size::LABEL)
+                .color(fg),
+        )
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(radius::SM),
+    )
+}
+
+/// A low-chrome command-strip panel: caption above compact icon commands.
+pub(crate) fn command_panel(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    let t = active();
+    Frame::new()
+        .fill(t.toolbar)
+        .stroke(t.soft_stroke())
+        .corner_radius(radius::SM)
+        .inner_margin(Margin::symmetric(6, 3))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(label)
+                        .size(text_size::MICRO)
+                        .strong()
+                        .color(t.text_muted),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = space::XS;
+                    add(ui);
+                });
+            });
+        });
 }
 
 /// A vertical divider sized to a toolbar group's button row.

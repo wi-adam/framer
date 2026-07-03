@@ -82,9 +82,12 @@ Each reads `theme(ui)` so it restyles for free:
 
 - `tool_button(Icon, label, active, enabled)` — compact CAD command button; labels
   stay short and buttons avoid card-like proportions.
+- `workflow_tab(label, selected)` — compact command-strip workflow tab with a
+  restrained active state.
 - `split_tool_button(Icon, label, active, enabled, menu)` — command plus flyout for
   variants.
-- `command_panel(title, actions)` — grouped command-strip panel with dividers.
+- `command_panel(label, add)` — captioned compact command-strip row for related
+  actions.
 - `icon_button(Icon, tooltip)` — bare icon (tree footer, status bar, help).
 - `toggle_switch(&mut bool, label)` — sliding Grid/Ortho/Snap switch.
 - `segmented(&mut T, options)` — Design/Plan + view segments.
