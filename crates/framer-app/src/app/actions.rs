@@ -551,6 +551,76 @@ mod tests {
 
     use super::*;
 
+    const ALL_ACTION_IDS: &[ActionId] = &[
+        ActionId::NewProject,
+        ActionId::OpenProject,
+        ActionId::SaveProject,
+        ActionId::ExportArtifacts,
+        ActionId::Undo,
+        ActionId::Redo,
+        ActionId::LoadShellDemo,
+        ActionId::LoadWallDemo,
+        ActionId::WorkspaceDesign,
+        ActionId::WorkspacePlan,
+        ActionId::ViewPlan,
+        ActionId::ViewElevation,
+        ActionId::ViewRoof,
+        ActionId::View3d,
+        ActionId::ViewRender,
+        ActionId::ToolWall,
+        ActionId::ToolRoom,
+        ActionId::ToolCeiling,
+        ActionId::ToolVault,
+        ActionId::ToolFloor,
+        ActionId::DeleteSelection,
+        ActionId::AddDoor,
+        ActionId::AddWindow,
+        ActionId::AddGarageDoor,
+        ActionId::AddGableRoof,
+        ActionId::AddShedRoof,
+        ActionId::AddHipRoof,
+        ActionId::ToolDimensionLinear,
+        ActionId::DimensionKind,
+        ActionId::DimensionAxis,
+        ActionId::ToggleSection,
+    ];
+
+    fn assert_action_id_exhaustive(id: ActionId) {
+        match id {
+            ActionId::NewProject
+            | ActionId::OpenProject
+            | ActionId::SaveProject
+            | ActionId::ExportArtifacts
+            | ActionId::Undo
+            | ActionId::Redo
+            | ActionId::LoadShellDemo
+            | ActionId::LoadWallDemo
+            | ActionId::WorkspaceDesign
+            | ActionId::WorkspacePlan
+            | ActionId::ViewPlan
+            | ActionId::ViewElevation
+            | ActionId::ViewRoof
+            | ActionId::View3d
+            | ActionId::ViewRender
+            | ActionId::ToolWall
+            | ActionId::ToolRoom
+            | ActionId::ToolCeiling
+            | ActionId::ToolVault
+            | ActionId::ToolFloor
+            | ActionId::DeleteSelection
+            | ActionId::AddDoor
+            | ActionId::AddWindow
+            | ActionId::AddGarageDoor
+            | ActionId::AddGableRoof
+            | ActionId::AddShedRoof
+            | ActionId::AddHipRoof
+            | ActionId::ToolDimensionLinear
+            | ActionId::DimensionKind
+            | ActionId::DimensionAxis
+            | ActionId::ToggleSection => {}
+        }
+    }
+
     #[test]
     fn action_ids_are_unique() {
         let mut seen = BTreeSet::new();
@@ -558,6 +628,29 @@ mod tests {
             assert!(
                 seen.insert(action.id),
                 "duplicate action metadata for {:?}",
+                action.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_action_id_is_registered() {
+        let mut seen = BTreeSet::new();
+        for &id in ALL_ACTION_IDS {
+            assert_action_id_exhaustive(id);
+            assert!(seen.insert(id), "duplicate ActionId listed in test: {id:?}");
+            assert_eq!(metadata(id).id, id, "{id:?} missing from ACTIONS");
+        }
+
+        assert_eq!(
+            ALL_ACTION_IDS.len(),
+            ACTIONS.len(),
+            "ACTIONS and ALL_ACTION_IDS must stay in sync"
+        );
+        for action in ACTIONS {
+            assert!(
+                seen.contains(&action.id),
+                "{:?} exists in ACTIONS but not ALL_ACTION_IDS",
                 action.id
             );
         }
