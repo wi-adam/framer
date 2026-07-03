@@ -1169,6 +1169,79 @@ mod surface_tests {
         model
     }
 
+    /// The same 12×8 surface model, but capped by a rectangular hip roof: two
+    /// trapezoid fields plus two triangular hip ends sharing a shortened ridge.
+    fn hip_surface_model() -> BuildingModel {
+        let mut model = surface_model();
+        model.roof_planes.clear();
+
+        let ft = Length::from_feet;
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        let springing = ft(8.0);
+        let ridge_west = Point2::new(ft(4.0), ft(4.0));
+        let ridge_east = Point2::new(ft(8.0), ft(4.0));
+
+        model.roof_planes.push(RoofPlane::new(
+            "roof-east",
+            "East hip end",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(ft(12.0), Length::ZERO),
+                Point2::new(ft(12.0), ft(8.0)),
+                ridge_east,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-north",
+            "North hip field",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(ft(12.0), ft(8.0)),
+                Point2::new(Length::ZERO, ft(8.0)),
+                ridge_west,
+                ridge_east,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-south",
+            "South hip field",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(ft(12.0), Length::ZERO),
+                ridge_east,
+                ridge_west,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-west",
+            "West hip end",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, ft(8.0)),
+                Point2::new(Length::ZERO, Length::ZERO),
+                ridge_west,
+            ],
+            slope,
+            0,
+            springing,
+        ));
+        model
+    }
+
     fn build(model: &BuildingModel, selection: &Selection) -> Scene3d {
         Scene3d::from_project(
             model,
@@ -1245,6 +1318,40 @@ mod surface_tests {
             assert!(v.position.iter().all(|c| c.is_finite()));
             assert!(v.normal.iter().all(|c| c.is_finite()));
         }
+    }
+
+    #[test]
+    fn hip_roof_surfaces_emit_four_lifted_pickable_planes() {
+        let scene = build(&hip_surface_model(), &Selection::Wall);
+        let clicks = pick_clicks(&scene);
+        for id in ["roof-east", "roof-north", "roof-south", "roof-west"] {
+            assert!(
+                clicks
+                    .iter()
+                    .any(|c| matches!(c, ViewClick::RoofPlane { id: found } if found == id)),
+                "no pick volume emitted for {id}"
+            );
+        }
+
+        let mut tilted_zs: Vec<f32> = Vec::new();
+        let mut up_facing_tilted = 0;
+        for tri in scene.indices.chunks_exact(3) {
+            let v = |i: u32| scene.vertices[i as usize];
+            let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
+            let tilted = a.normal[2] > 0.1 && a.normal[2] < 0.99;
+            if tilted {
+                up_facing_tilted += 1;
+                tilted_zs.extend([a.position[2], b.position[2], c.position[2]]);
+            }
+        }
+        assert_eq!(
+            up_facing_tilted, 6,
+            "two trapezoids plus two triangles should emit six up-facing roof triangles"
+        );
+        let lo = tilted_zs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = tilted_zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!((lo - 96.0).abs() < 0.5, "hip eaves at {lo}, want ~96in");
+        assert!((hi - 120.0).abs() < 0.5, "hip ridge at {hi}, want ~120in");
     }
 
     /// The elevations of every fully-horizontal triangle (all three vertices at one

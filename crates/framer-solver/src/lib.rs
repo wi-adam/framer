@@ -5012,28 +5012,30 @@ mod tests {
         assert!(project_plywood >= 144 * 96);
     }
 
-    /// The shipped `demo-shell` example (capped with a gable roof, a scissor-vault
-    /// ceiling, and a floor deck) frames end-to-end: both slopes rafter, the gable
-    /// shares one ridge board, the two sloped vault halves joist, the deck joists,
-    /// and every new member family folds into the project BOM.
+    /// The shipped `demo-shell` example (capped with a hip roof, a scissor-vault
+    /// ceiling, and a floor deck) frames end-to-end: all four roof planes rafter,
+    /// the hip post-pass adds hips/jacks and the shortened ridge, the two sloped
+    /// vault halves joist, the deck joists, and every new member family folds
+    /// into the project BOM.
     #[test]
     fn roofed_demo_shell_example_frames_every_surface() {
         let example = include_str!("../../../examples/projects/demo-shell.framer");
         let model = load_project(example).unwrap();
         let plan = generate_project_plan(&model).unwrap();
 
-        assert_eq!(plan.roof_plans.len(), 2);
+        assert_eq!(plan.roof_plans.len(), 4);
         // A scissor vault is two opposing sloped ceilings.
         assert_eq!(plan.ceiling_plans.len(), 2);
         assert_eq!(plan.floor_plans.len(), 1);
 
-        for id in ["roof-north", "roof-south"] {
+        for id in ["roof-east", "roof-north", "roof-south", "roof-west"] {
             let roof = plan.roof_plan(&ElementId::new(id)).unwrap();
             assert!(
-                roof.members
-                    .iter()
-                    .any(|member| member.kind == MemberKind::Rafter),
-                "{id} frames rafters"
+                roof.members.iter().any(|member| matches!(
+                    member.kind,
+                    MemberKind::Rafter | MemberKind::JackRafter
+                )),
+                "{id} frames rafters or clipped jack rafters"
             );
         }
         let ridges = plan
@@ -5042,12 +5044,28 @@ mod tests {
             .flat_map(|roof| roof.members.iter())
             .filter(|member| member.kind == MemberKind::RidgeBoard)
             .count();
-        assert_eq!(ridges, 1, "a gable shares one ridge board");
+        assert_eq!(ridges, 1, "a rectangular hip shares one shortened ridge");
+
+        let hips = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::HipRafter)
+            .count();
+        assert_eq!(hips, 4, "a rectangular hip roof has one hip per corner");
+        let jacks = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter())
+            .filter(|member| member.kind == MemberKind::JackRafter)
+            .count();
+        assert!(jacks > 0, "hip-bounded rafters clip into jacks");
 
         // The scissor vault is sloped, so it is NOT a flat rafter tie at the plate:
-        // the gable reverts to a structural ridge beam. Pins the product-visible tie
-        // fork through the real load_project + region-resolution + elevation path (the
-        // synthetic tests hand-set those inputs).
+        // the hip roof's shortened ridge still needs structural-ridge judgment.
+        // Pins the product-visible tie fork through the real load_project +
+        // region-resolution + elevation path (the synthetic tests hand-set those
+        // inputs).
         let roof_diagnostics = || {
             plan.roof_plans
                 .iter()
@@ -5101,6 +5119,8 @@ mod tests {
         for kind in [
             MemberKind::Rafter,
             MemberKind::RidgeBoard,
+            MemberKind::HipRafter,
+            MemberKind::JackRafter,
             MemberKind::CeilingJoist,
             MemberKind::FloorJoist,
         ] {
