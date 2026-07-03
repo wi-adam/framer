@@ -2974,6 +2974,106 @@ mod tests {
     }
 
     #[test]
+    fn orthogonal_valley_roof_specs_accepts_mirrored_l_orientations() {
+        let cases = vec![
+            (
+                vec![
+                    pt_ft(0.0, 0.0),
+                    pt_ft(24.0, 0.0),
+                    pt_ft(24.0, 24.0),
+                    pt_ft(12.0, 24.0),
+                    pt_ft(12.0, 12.0),
+                    pt_ft(0.0, 12.0),
+                ],
+                vec![
+                    (
+                        vec![
+                            pt_ft(24.0, 0.0),
+                            pt_ft(0.0, 0.0),
+                            pt_ft(0.0, 12.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                    (
+                        vec![
+                            pt_ft(24.0, 0.0),
+                            pt_ft(24.0, 24.0),
+                            pt_ft(12.0, 24.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                ],
+            ),
+            (
+                vec![
+                    pt_ft(0.0, 0.0),
+                    pt_ft(12.0, 0.0),
+                    pt_ft(12.0, 12.0),
+                    pt_ft(24.0, 12.0),
+                    pt_ft(24.0, 24.0),
+                    pt_ft(0.0, 24.0),
+                ],
+                vec![
+                    (
+                        vec![
+                            pt_ft(0.0, 24.0),
+                            pt_ft(24.0, 24.0),
+                            pt_ft(24.0, 12.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                    (
+                        vec![
+                            pt_ft(0.0, 24.0),
+                            pt_ft(0.0, 0.0),
+                            pt_ft(12.0, 0.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                ],
+            ),
+            (
+                vec![
+                    pt_ft(0.0, 12.0),
+                    pt_ft(12.0, 12.0),
+                    pt_ft(12.0, 0.0),
+                    pt_ft(24.0, 0.0),
+                    pt_ft(24.0, 24.0),
+                    pt_ft(0.0, 24.0),
+                ],
+                vec![
+                    (
+                        vec![
+                            pt_ft(24.0, 24.0),
+                            pt_ft(0.0, 24.0),
+                            pt_ft(0.0, 12.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                    (
+                        vec![
+                            pt_ft(24.0, 24.0),
+                            pt_ft(24.0, 0.0),
+                            pt_ft(12.0, 0.0),
+                            pt_ft(12.0, 12.0),
+                        ],
+                        0,
+                    ),
+                ],
+            ),
+        ];
+
+        for (outline, expected) in cases {
+            assert_eq!(orthogonal_valley_roof_specs(&outline).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn orthogonal_valley_roof_specs_rejects_unequal_leg_l() {
         assert!(
             orthogonal_valley_roof_specs(&[
