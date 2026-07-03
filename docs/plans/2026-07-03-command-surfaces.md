@@ -98,6 +98,9 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Verify: `cargo test -p framer-app --all-features --locked`; manual app run
   - Commit: `refactor(app): add workflow command strip`
 - **Task 3.3** — Move view/workspace switching into the workspace/view bar.
+  - Status: implemented as clickable `Design Workspace` / `Plan Workspace` and
+    view tabs (`Shell`/`Plan`, `Wall`/`Elevation`, `Roof`, `3D`, `Render`) in
+    the workspace header. The temporary workflow-strip View panel is removed.
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/viewport/mod.rs`
   - Verify: `cargo test -p framer-app --all-features --locked`; manual app run
@@ -153,7 +156,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | Project menu | New, Open, Save, Export | Project menu; Export also Plan workspace |
 | Examples menu | Shell, Wall demo loaders | Examples picker / Project menu |
 | Workflow tab row | Design, Frame, Openings, Roofs, Annotate, Inspect, Plan | Workflow command strip tabs; Plan switches to Plan workspace |
-| Workflow strip: View panel | Shell/Plan, Wall/Elevation, Roof, 3D, Render | Temporary until workspace/view bar migration |
+| Workspace/view bar | Design Workspace, Plan Workspace, Shell/Plan, Wall/Elevation, Roof, 3D, Render | Workspace/view bar |
 | Workflow strip: Design / Structure panel | Room | Workflow command strip: Design panel |
 | Workflow strip: Frame / Structure panel | Wall, Ceiling, Vault, Floor | Workflow command strip: Frame panel |
 | Shortcut / contextual route | Delete | Marking menu / shortcut menu / shortcut; permanent context surface lands in Slice 4.1 |
