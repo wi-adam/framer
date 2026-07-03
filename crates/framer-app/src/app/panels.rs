@@ -13,6 +13,7 @@ use framer_core::{
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
+use super::actions::{self, ActionId};
 use super::design::{Icon, widgets};
 use super::labels::{
     diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
@@ -80,50 +81,40 @@ impl FramerApp {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
 
             widgets::tool_group(ui, "PROJECT", |ui| {
-                if widgets::tool_button(ui, Icon::New, "New", false, true)
-                    .on_hover_text("Start an empty wall project")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::NewProject, false, true).clicked() {
                     self.new_project();
                 }
-                if widgets::tool_button(ui, Icon::Open, "Open", false, true)
-                    .on_hover_text("Open the project path")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::OpenProject, false, true).clicked() {
                     self.load_project_file();
                 }
-                if widgets::tool_button(ui, Icon::Save, "Save", false, true)
-                    .on_hover_text("Save the current model")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::SaveProject, false, true).clicked() {
                     self.save_project_file();
                 }
                 let can_export = self.workspace_mode.shows_generated_plan();
-                if widgets::tool_button(ui, Icon::Export, "Export", false, can_export)
-                    .on_hover_text("Export plan artifacts from Plan workspace")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::ExportArtifacts, false, can_export).clicked() {
                     self.export_current_artifacts();
                 }
             });
             widgets::tool_divider(ui);
 
             widgets::tool_group(ui, "EDIT", |ui| {
+                let undo = actions::metadata(ActionId::Undo);
                 let undo_tip = match self.history.undo_label() {
                     Some(label) => format!("Undo {label}  (⌘Z / Ctrl+Z)"),
                     None => "Nothing to undo  (⌘Z / Ctrl+Z)".to_owned(),
                 };
-                if widgets::tool_button(ui, Icon::Undo, "Undo", false, self.history.can_undo())
+                if widgets::tool_button(ui, undo.icon, undo.label, false, self.history.can_undo())
                     .on_hover_text(undo_tip)
                     .clicked()
                 {
                     self.undo();
                 }
+                let redo = actions::metadata(ActionId::Redo);
                 let redo_tip = match self.history.redo_label() {
                     Some(label) => format!("Redo {label}  (⌘⇧Z / Ctrl+Y)"),
                     None => "Nothing to redo  (⌘⇧Z / Ctrl+Y)".to_owned(),
                 };
-                if widgets::tool_button(ui, Icon::Redo, "Redo", false, self.history.can_redo())
+                if widgets::tool_button(ui, redo.icon, redo.label, false, self.history.can_redo())
                     .on_hover_text(redo_tip)
                     .clicked()
                 {
@@ -133,26 +124,19 @@ impl FramerApp {
             widgets::tool_divider(ui);
 
             widgets::tool_group(ui, "SAMPLES", |ui| {
-                if widgets::tool_button(ui, Icon::Shell, "Shell", false, true)
-                    .on_hover_text("Load the multi-wall shell demo")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::LoadShellDemo, false, true).clicked() {
                     self.reset_demo();
                 }
-                if widgets::tool_button(ui, Icon::Wall, "Wall", false, true)
-                    .on_hover_text("Load the single-wall demo")
-                    .clicked()
-                {
+                if action_tool_button(ui, ActionId::LoadWallDemo, false, true).clicked() {
                     self.reset_wall_demo();
                 }
             });
             widgets::tool_divider(ui);
 
             widgets::tool_group(ui, "WORKSPACE", |ui| {
-                if widgets::tool_button(
+                if action_tool_button(
                     ui,
-                    Icon::Design,
-                    "Design",
+                    ActionId::WorkspaceDesign,
                     self.workspace_mode == WorkspaceMode::Design,
                     true,
                 )
@@ -160,10 +144,9 @@ impl FramerApp {
                 {
                     self.set_workspace_mode(WorkspaceMode::Design);
                 }
-                if widgets::tool_button(
+                if action_tool_button(
                     ui,
-                    Icon::Plan,
-                    "Plan",
+                    ActionId::WorkspacePlan,
                     self.workspace_mode == WorkspaceMode::Plan,
                     true,
                 )
@@ -178,44 +161,45 @@ impl FramerApp {
                 let design_mode = self.workspace_mode.allows_design_edits();
                 let shell_label = if design_mode { "Shell" } else { "Plan" };
                 let wall_label = if design_mode { "Wall" } else { "Elevation" };
+                let plan_action = actions::metadata(ActionId::ViewPlan);
                 if widgets::tool_button(
                     ui,
-                    Icon::Shell,
+                    plan_action.icon,
                     shell_label,
                     self.viewport_mode == ViewportMode::Plan,
                     true,
                 )
+                .on_hover_text(plan_action.tooltip)
                 .clicked()
                 {
                     self.viewport_mode = ViewportMode::Plan;
                 }
+                let elevation_action = actions::metadata(ActionId::ViewElevation);
                 if widgets::tool_button(
                     ui,
-                    Icon::Wall,
+                    elevation_action.icon,
                     wall_label,
                     self.viewport_mode == ViewportMode::Elevation,
                     true,
                 )
+                .on_hover_text(elevation_action.tooltip)
                 .clicked()
                 {
                     self.viewport_mode = ViewportMode::Elevation;
                 }
-                if widgets::tool_button(
+                if action_tool_button(
                     ui,
-                    Icon::Angular,
-                    "Roof",
+                    ActionId::ViewRoof,
                     self.viewport_mode == ViewportMode::RoofPlan,
                     true,
                 )
-                .on_hover_text("Top-down roof plan: view and select roof planes")
                 .clicked()
                 {
                     self.viewport_mode = ViewportMode::RoofPlan;
                 }
-                if widgets::tool_button(
+                if action_tool_button(
                     ui,
-                    Icon::View3d,
-                    "3D",
+                    ActionId::View3d,
                     self.viewport_mode == ViewportMode::Axonometric,
                     true,
                 )
@@ -223,10 +207,9 @@ impl FramerApp {
                 {
                     self.viewport_mode = ViewportMode::Axonometric;
                 }
-                if widgets::tool_button(
+                if action_tool_button(
                     ui,
-                    Icon::ThemeLight,
-                    "Render",
+                    ActionId::ViewRender,
                     self.viewport_mode == ViewportMode::Render,
                     true,
                 )
@@ -239,53 +222,28 @@ impl FramerApp {
             if self.workspace_mode.allows_design_edits() {
                 widgets::tool_divider(ui);
                 widgets::tool_group(ui, "BUILD", |ui| {
-                    if widgets::tool_button(
-                        ui,
-                        Icon::Wall,
-                        "Wall",
-                        self.draw_wall_tool.active,
-                        true,
-                    )
-                    .on_hover_text("Draw walls in the plan view (W)")
-                    .clicked()
+                    if action_tool_button(ui, ActionId::ToolWall, self.draw_wall_tool.active, true)
+                        .clicked()
                     {
                         self.toggle_draw_wall_tool();
                     }
-                    if widgets::tool_button(ui, Icon::Shell, "Room", self.room_tool_active, true)
-                        .on_hover_text("Place a room inside an enclosed area (R)")
+                    if action_tool_button(ui, ActionId::ToolRoom, self.room_tool_active, true)
                         .clicked()
                     {
                         self.toggle_room_tool();
                     }
-                    if widgets::tool_button(
-                        ui,
-                        Icon::PanelRight,
-                        "Ceiling",
-                        self.ceiling_tool_active,
-                        true,
-                    )
-                    .on_hover_text("Place a flat ceiling inside an enclosed area (C)")
-                    .clicked()
+                    if action_tool_button(ui, ActionId::ToolCeiling, self.ceiling_tool_active, true)
+                        .clicked()
                     {
                         self.toggle_ceiling_tool();
                     }
-                    if widgets::tool_button(ui, Icon::Angular, "Vault", self.vault_tool_active, true)
-                        .on_hover_text(
-                            "Vault an enclosed area: two opposing sloped ceilings meeting at a ridge (V)",
-                        )
+                    if action_tool_button(ui, ActionId::ToolVault, self.vault_tool_active, true)
                         .clicked()
                     {
                         self.toggle_vault_tool();
                     }
-                    if widgets::tool_button(
-                        ui,
-                        Icon::LayoutGrid,
-                        "Floor",
-                        self.floor_tool_active,
-                        true,
-                    )
-                    .on_hover_text("Place a floor deck inside an enclosed area (F)")
-                    .clicked()
+                    if action_tool_button(ui, ActionId::ToolFloor, self.floor_tool_active, true)
+                        .clicked()
                     {
                         self.toggle_floor_tool();
                     }
@@ -298,59 +256,38 @@ impl FramerApp {
                             | Selection::Ceiling(_)
                             | Selection::FloorDeck(_)
                     );
-                    if widgets::tool_button(ui, Icon::Delete, "Delete", false, can_delete)
-                        .on_hover_text("Delete the selected object (Del)")
+                    if action_tool_button(ui, ActionId::DeleteSelection, false, can_delete)
                         .clicked()
                     {
                         self.delete_selected();
                     }
-                    if widgets::tool_button(ui, Icon::Door, "Door", false, true)
-                        .on_hover_text("Add a door to the selected wall")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddDoor, false, true).clicked() {
                         self.add_opening(OpeningKind::Door);
                     }
-                    if widgets::tool_button(ui, Icon::Window, "Window", false, true)
-                        .on_hover_text("Add a window to the selected wall")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddWindow, false, true).clicked() {
                         self.add_opening(OpeningKind::Window);
                     }
-                    if widgets::tool_button(ui, Icon::GarageDoor, "Garage", false, true)
-                        .on_hover_text("Add a garage door to the selected wall")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddGarageDoor, false, true).clicked() {
                         self.add_opening(OpeningKind::GarageDoor);
                     }
-                    if widgets::tool_button(ui, Icon::Angular, "Gable", false, true)
-                        .on_hover_text("Generate a gable roof over the wall footprint")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddGableRoof, false, true).clicked() {
                         self.add_roof(RoofForm::Gable);
                     }
-                    if widgets::tool_button(ui, Icon::Angular, "Shed", false, true)
-                        .on_hover_text("Generate a shed (mono-pitch) roof over the footprint")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddShedRoof, false, true).clicked() {
                         self.add_roof(RoofForm::Shed);
                     }
-                    if widgets::tool_button(ui, Icon::Angular, "Hip", false, true)
-                        .on_hover_text("Generate a hip roof over a rectangular footprint, or valley planes over a simple L footprint")
-                        .clicked()
-                    {
+                    if action_tool_button(ui, ActionId::AddHipRoof, false, true).clicked() {
                         self.add_roof(RoofForm::Hip);
                     }
                 });
                 widgets::tool_divider(ui);
                 widgets::tool_group(ui, "DIMENSION", |ui| {
-                    if widgets::tool_button(
+                    if action_tool_button(
                         ui,
-                        Icon::Linear,
-                        "Linear",
+                        ActionId::ToolDimensionLinear,
                         self.dimension_tool.active,
                         true,
                     )
-                    .on_hover_text("Place a wall dimension (D)")
                     .clicked()
                     {
                         self.toggle_dimension_tool();
@@ -389,15 +326,8 @@ impl FramerApp {
             } else {
                 widgets::tool_divider(ui);
                 widgets::tool_group(ui, "TOOLS", |ui| {
-                    if widgets::tool_button(
-                        ui,
-                        Icon::LayoutColumns,
-                        "Section",
-                        self.show_section,
-                        true,
-                    )
-                    .on_hover_text("Toggle the wall section preview")
-                    .clicked()
+                    if action_tool_button(ui, ActionId::ToggleSection, self.show_section, true)
+                        .clicked()
                     {
                         self.show_section = !self.show_section;
                     }
@@ -2997,6 +2927,12 @@ fn should_capture_edit_base(
     text_focused: bool,
 ) -> bool {
     !is_pending && (pointer_down || any_click || text_focused)
+}
+
+fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) -> Response {
+    let action = actions::metadata(id);
+    widgets::tool_button(ui, action.icon, action.label, active, enabled)
+        .on_hover_text(action.tooltip)
 }
 
 fn toolbar_divider(ui: &mut Ui) {
