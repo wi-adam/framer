@@ -17,7 +17,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
 use super::actions::{self, ActionId};
-use super::{FramerApp, Selection, ViewportMode, WallDisplay, design};
+use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
 ///
@@ -49,6 +49,32 @@ fn demo_harness<'a>() -> Harness<'a, FramerApp> {
             },
             FramerApp::default(),
         )
+}
+
+fn assert_shortcut_from_annotate_routes_to(
+    key: egui::Key,
+    expected_tab: actions::WorkflowTab,
+    expected_label: &str,
+    assert_state: impl FnOnce(&FramerApp),
+) {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Annotate").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Annotate);
+
+    harness.key_press(key);
+    harness.run();
+    let app = harness.state();
+    assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+    assert_eq!(app.command_tab, expected_tab);
+    assert_state(app);
+    assert!(
+        harness.query_all_by_label(expected_label).next().is_some(),
+        "shortcut should expose the '{expected_label}' command on its owning tab"
+    );
 }
 
 /// The app boots, the demo shell loads, the framing plan regenerates, and the
@@ -96,7 +122,7 @@ fn command_buttons_expose_metadata_labels() {
         ActionId::Undo,
         ActionId::Redo,
         ActionId::View3d,
-        ActionId::ToolDimensionLinear,
+        ActionId::ToolWall,
     ] {
         let action = actions::metadata(id);
         assert!(
@@ -105,6 +131,16 @@ fn command_buttons_expose_metadata_labels() {
             action.label
         );
     }
+
+    harness.get_by_label("Annotate").click();
+    harness.run();
+    let action = actions::metadata(ActionId::ToolDimensionLinear);
+    assert!(
+        harness.query_all_by_label(action.label).next().is_some(),
+        "{:?} should expose '{}' when its workflow tab is active",
+        action.id,
+        action.label
+    );
 }
 
 /// Project, edit, and sample loading commands live in the app header/menu
@@ -127,6 +163,153 @@ fn header_owns_non_modeling_command_surfaces() {
             "'{strip_group}' should not be a workflow command-strip group"
         );
     }
+}
+
+/// The workflow command strip is tabbed by process instead of exposing every
+/// authoring button in one permanent row.
+#[test]
+fn workflow_command_strip_routes_tabbed_panels() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    for tab in [
+        "Design", "Frame", "Openings", "Roofs", "Annotate", "Inspect", "Plan",
+    ] {
+        assert!(
+            harness.query_all_by_label(tab).next().is_some(),
+            "workflow tab '{tab}' should be visible"
+        );
+    }
+
+    for old_group in ["WORKSPACE", "BUILD", "DIMENSION", "TOOLS"] {
+        assert!(
+            harness.query_all_by_label(old_group).next().is_none(),
+            "'{old_group}' should not be a broad command-strip group"
+        );
+    }
+
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+    assert!(
+        harness.query_all_by_label("Wall").next().is_some(),
+        "Frame tab should expose the Wall tool by default"
+    );
+
+    harness.get_by_label("Openings").click();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Garage").next().is_some(),
+        "Openings tab should expose opening variants"
+    );
+
+    harness.get_by_label("Roofs").click();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Gable").next().is_some(),
+        "Roofs tab should expose roof forms"
+    );
+
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert!(
+        harness.query_all_by_label("Section").next().is_some(),
+        "Plan tab should expose generated-plan tools"
+    );
+
+    harness.get_by_label("Frame").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+}
+
+/// Tool shortcuts entered from the generated-plan workflow must return to a
+/// Design-compatible command tab before activating the tool.
+#[test]
+fn tool_shortcut_from_plan_tab_returns_to_frame_commands() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
+    assert!(
+        harness.query_all_by_label("Section").next().is_some(),
+        "Plan tab should expose generated-plan commands before the shortcut"
+    );
+
+    harness.key_press(egui::Key::W);
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+    assert!(
+        harness.state().draw_wall_tool.active,
+        "W should activate the wall tool"
+    );
+    assert!(
+        harness.query_all_by_label("Wall").next().is_some(),
+        "shortcut should route back to Frame commands"
+    );
+}
+
+/// Dimension shortcuts entered from generated-plan workflow must reveal the
+/// annotation controls that configure the active dimension tool.
+#[test]
+fn dimension_shortcut_from_plan_tab_returns_to_annotate_commands() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
+
+    harness.key_press(egui::Key::D);
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Annotate);
+    assert!(
+        harness.state().dimension_tool.active,
+        "D should activate the dimension tool"
+    );
+    assert!(
+        harness.query_all_by_label("Linear").next().is_some(),
+        "shortcut should route back to Annotate commands"
+    );
+}
+
+/// Keyboard shortcuts should route the command strip to the tab that owns the
+/// newly active tool, even when launched from another workflow tab.
+#[test]
+fn authoring_shortcuts_route_to_owning_command_tabs() {
+    assert_shortcut_from_annotate_routes_to(
+        egui::Key::R,
+        actions::WorkflowTab::Design,
+        "Room",
+        |app| assert!(app.room_tool_active, "R should activate the room tool"),
+    );
+    assert_shortcut_from_annotate_routes_to(
+        egui::Key::C,
+        actions::WorkflowTab::Frame,
+        "Ceiling",
+        |app| {
+            assert!(
+                app.ceiling_tool_active,
+                "C should activate the ceiling tool"
+            )
+        },
+    );
+    assert_shortcut_from_annotate_routes_to(
+        egui::Key::F,
+        actions::WorkflowTab::Frame,
+        "Floor",
+        |app| assert!(app.floor_tool_active, "F should activate the floor tool"),
+    );
+    assert_shortcut_from_annotate_routes_to(
+        egui::Key::V,
+        actions::WorkflowTab::Frame,
+        "Vault",
+        |app| assert!(app.vault_tool_active, "V should activate the vault tool"),
+    );
 }
 
 /// The `W` keyboard shortcut toggles the draw-wall tool, proving keyboard input

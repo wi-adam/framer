@@ -13,7 +13,7 @@ use framer_core::{
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
-use super::actions::{self, ActionId};
+use super::actions::{self, ActionId, WorkflowTab};
 use super::design::{Icon, widgets};
 use super::labels::{
     diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
@@ -159,107 +159,145 @@ impl FramerApp {
     }
 
     pub(super) fn toolbar(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
+        ui.vertical(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
-
-            widgets::tool_group(ui, "WORKSPACE", |ui| {
-                if action_tool_button(
-                    ui,
-                    ActionId::WorkspaceDesign,
-                    self.workspace_mode == WorkspaceMode::Design,
-                    true,
-                )
-                .clicked()
-                {
-                    self.set_workspace_mode(WorkspaceMode::Design);
-                }
-                if action_tool_button(
-                    ui,
-                    ActionId::WorkspacePlan,
-                    self.workspace_mode == WorkspaceMode::Plan,
-                    true,
-                )
-                .clicked()
-                {
-                    self.set_workspace_mode(WorkspaceMode::Plan);
-                }
-            });
-            widgets::tool_divider(ui);
-
-            widgets::tool_group(ui, "VIEW", |ui| {
-                let design_mode = self.workspace_mode.allows_design_edits();
-                let shell_label = if design_mode { "Shell" } else { "Plan" };
-                let wall_label = if design_mode { "Wall" } else { "Elevation" };
-                let plan_action = actions::metadata(ActionId::ViewPlan);
-                if widgets::tool_button(
-                    ui,
-                    plan_action.icon,
-                    shell_label,
-                    self.viewport_mode == ViewportMode::Plan,
-                    true,
-                )
-                .on_hover_text(plan_action.tooltip)
-                .clicked()
-                {
-                    self.viewport_mode = ViewportMode::Plan;
-                }
-                let elevation_action = actions::metadata(ActionId::ViewElevation);
-                if widgets::tool_button(
-                    ui,
-                    elevation_action.icon,
-                    wall_label,
-                    self.viewport_mode == ViewportMode::Elevation,
-                    true,
-                )
-                .on_hover_text(elevation_action.tooltip)
-                .clicked()
-                {
-                    self.viewport_mode = ViewportMode::Elevation;
-                }
-                if action_tool_button(
-                    ui,
-                    ActionId::ViewRoof,
-                    self.viewport_mode == ViewportMode::RoofPlan,
-                    true,
-                )
-                .clicked()
-                {
-                    self.viewport_mode = ViewportMode::RoofPlan;
-                }
-                if action_tool_button(
-                    ui,
-                    ActionId::View3d,
-                    self.viewport_mode == ViewportMode::Axonometric,
-                    true,
-                )
-                .clicked()
-                {
-                    self.viewport_mode = ViewportMode::Axonometric;
-                }
-                if action_tool_button(
-                    ui,
-                    ActionId::ViewRender,
-                    self.viewport_mode == ViewportMode::Render,
-                    true,
-                )
-                .clicked()
-                {
-                    self.viewport_mode = ViewportMode::Render;
-                }
-            });
-
-            if self.workspace_mode.allows_design_edits() {
-                widgets::tool_divider(ui);
-                widgets::tool_group(ui, "BUILD", |ui| {
-                    if action_tool_button(ui, ActionId::ToolWall, self.draw_wall_tool.active, true)
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = design::space::XS;
+                for tab in WORKFLOW_TABS {
+                    if widgets::workflow_tab(ui, workflow_tab_label(*tab), self.command_tab == *tab)
                         .clicked()
                     {
-                        self.toggle_draw_wall_tool();
+                        self.select_workflow_tab(*tab);
                     }
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
+                self.view_command_panel(ui);
+                self.workflow_command_panels(ui);
+            });
+        });
+
+        if self.file_status.is_some()
+            || self.artifact_status.is_some()
+            || self.dimension_status.is_some()
+        {
+            Frame::new()
+                .fill(theme::chrome_mid())
+                .stroke(theme::soft_stroke())
+                .inner_margin(Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
+                        if let Some(status) = &self.file_status {
+                            status_chip(ui, status, StatusTone::Info);
+                        }
+                        if let Some(status) = &self.artifact_status {
+                            status_chip(ui, status, StatusTone::Success);
+                        }
+                        if let Some(status) = &self.dimension_status {
+                            status_chip(ui, status, StatusTone::Warning);
+                        }
+                    });
+                });
+        }
+    }
+
+    fn select_workflow_tab(&mut self, tab: WorkflowTab) {
+        self.command_tab = tab;
+        match tab {
+            WorkflowTab::Plan => self.set_workspace_mode(WorkspaceMode::Plan),
+            WorkflowTab::Design
+            | WorkflowTab::Frame
+            | WorkflowTab::Openings
+            | WorkflowTab::Roofs
+            | WorkflowTab::Annotate
+            | WorkflowTab::Inspect => self.set_workspace_mode(WorkspaceMode::Design),
+        }
+    }
+
+    fn view_command_panel(&mut self, ui: &mut Ui) {
+        widgets::command_panel(ui, "View", |ui| {
+            let design_mode = self.workspace_mode.allows_design_edits();
+            let shell_label = if design_mode { "Shell" } else { "Plan" };
+            let wall_label = if design_mode { "Wall" } else { "Elevation" };
+            let plan_action = actions::metadata(ActionId::ViewPlan);
+            if widgets::tool_button(
+                ui,
+                plan_action.icon,
+                shell_label,
+                self.viewport_mode == ViewportMode::Plan,
+                true,
+            )
+            .on_hover_text(plan_action.tooltip)
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Plan;
+            }
+            let elevation_action = actions::metadata(ActionId::ViewElevation);
+            if widgets::tool_button(
+                ui,
+                elevation_action.icon,
+                wall_label,
+                self.viewport_mode == ViewportMode::Elevation,
+                true,
+            )
+            .on_hover_text(elevation_action.tooltip)
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Elevation;
+            }
+            if action_tool_button(
+                ui,
+                ActionId::ViewRoof,
+                self.viewport_mode == ViewportMode::RoofPlan,
+                true,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::RoofPlan;
+            }
+            if action_tool_button(
+                ui,
+                ActionId::View3d,
+                self.viewport_mode == ViewportMode::Axonometric,
+                true,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Axonometric;
+            }
+            if action_tool_button(
+                ui,
+                ActionId::ViewRender,
+                self.viewport_mode == ViewportMode::Render,
+                true,
+            )
+            .clicked()
+            {
+                self.viewport_mode = ViewportMode::Render;
+            }
+        });
+    }
+
+    fn workflow_command_panels(&mut self, ui: &mut Ui) {
+        match self.command_tab {
+            WorkflowTab::Design => {
+                widgets::command_panel(ui, "Structure", |ui| {
                     if action_tool_button(ui, ActionId::ToolRoom, self.room_tool_active, true)
                         .clicked()
                     {
                         self.toggle_room_tool();
+                    }
+                });
+            }
+            WorkflowTab::Frame => {
+                widgets::command_panel(ui, "Structure", |ui| {
+                    if action_tool_button(ui, ActionId::ToolWall, self.draw_wall_tool.active, true)
+                        .clicked()
+                    {
+                        self.toggle_draw_wall_tool();
                     }
                     if action_tool_button(ui, ActionId::ToolCeiling, self.ceiling_tool_active, true)
                         .clicked()
@@ -276,20 +314,10 @@ impl FramerApp {
                     {
                         self.toggle_floor_tool();
                     }
-                    let can_delete = matches!(
-                        self.selected,
-                        Selection::Wall
-                            | Selection::Opening(_)
-                            | Selection::Room(_)
-                            | Selection::RoofPlane(_)
-                            | Selection::Ceiling(_)
-                            | Selection::FloorDeck(_)
-                    );
-                    if action_tool_button(ui, ActionId::DeleteSelection, false, can_delete)
-                        .clicked()
-                    {
-                        self.delete_selected();
-                    }
+                });
+            }
+            WorkflowTab::Openings => {
+                widgets::command_panel(ui, "Openings", |ui| {
                     if action_tool_button(ui, ActionId::AddDoor, false, true).clicked() {
                         self.add_opening(OpeningKind::Door);
                     }
@@ -299,6 +327,10 @@ impl FramerApp {
                     if action_tool_button(ui, ActionId::AddGarageDoor, false, true).clicked() {
                         self.add_opening(OpeningKind::GarageDoor);
                     }
+                });
+            }
+            WorkflowTab::Roofs => {
+                widgets::command_panel(ui, "Roofs", |ui| {
                     if action_tool_button(ui, ActionId::AddGableRoof, false, true).clicked() {
                         self.add_roof(RoofForm::Gable);
                     }
@@ -309,8 +341,9 @@ impl FramerApp {
                         self.add_roof(RoofForm::Hip);
                     }
                 });
-                widgets::tool_divider(ui);
-                widgets::tool_group(ui, "DIMENSION", |ui| {
+            }
+            WorkflowTab::Annotate => {
+                widgets::command_panel(ui, "Dimensions", |ui| {
                     if action_tool_button(
                         ui,
                         ActionId::ToolDimensionLinear,
@@ -352,9 +385,10 @@ impl FramerApp {
                             });
                     }
                 });
-            } else {
-                widgets::tool_divider(ui);
-                widgets::tool_group(ui, "TOOLS", |ui| {
+            }
+            WorkflowTab::Inspect => {}
+            WorkflowTab::Plan => {
+                widgets::command_panel(ui, "Generated", |ui| {
                     if action_tool_button(ui, ActionId::ToggleSection, self.show_section, true)
                         .clicked()
                     {
@@ -362,30 +396,6 @@ impl FramerApp {
                     }
                 });
             }
-        });
-
-        if self.file_status.is_some()
-            || self.artifact_status.is_some()
-            || self.dimension_status.is_some()
-        {
-            Frame::new()
-                .fill(theme::chrome_mid())
-                .stroke(theme::soft_stroke())
-                .inner_margin(Margin::symmetric(10, 4))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
-                        if let Some(status) = &self.file_status {
-                            status_chip(ui, status, StatusTone::Info);
-                        }
-                        if let Some(status) = &self.artifact_status {
-                            status_chip(ui, status, StatusTone::Success);
-                        }
-                        if let Some(status) = &self.dimension_status {
-                            status_chip(ui, status, StatusTone::Warning);
-                        }
-                    });
-                });
         }
     }
 
@@ -393,6 +403,7 @@ impl FramerApp {
         self.dimension_tool.active = !self.dimension_tool.active;
         self.dimension_tool.clear_picks();
         if self.dimension_tool.active {
+            self.command_tab = WorkflowTab::Annotate;
             self.draw_wall_tool = DrawWallToolState::default();
             self.room_tool_active = false;
         }
@@ -3009,6 +3020,28 @@ fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) ->
     let action = actions::metadata(id);
     widgets::tool_button(ui, action.icon, action.label, active, enabled)
         .on_hover_text(action.tooltip)
+}
+
+const WORKFLOW_TABS: &[WorkflowTab] = &[
+    WorkflowTab::Design,
+    WorkflowTab::Frame,
+    WorkflowTab::Openings,
+    WorkflowTab::Roofs,
+    WorkflowTab::Annotate,
+    WorkflowTab::Inspect,
+    WorkflowTab::Plan,
+];
+
+fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
+    match tab {
+        WorkflowTab::Design => "Design",
+        WorkflowTab::Frame => "Frame",
+        WorkflowTab::Openings => "Openings",
+        WorkflowTab::Roofs => "Roofs",
+        WorkflowTab::Annotate => "Annotate",
+        WorkflowTab::Inspect => "Inspect",
+        WorkflowTab::Plan => "Plan",
+    }
 }
 
 fn toolbar_divider(ui: &mut Ui) {

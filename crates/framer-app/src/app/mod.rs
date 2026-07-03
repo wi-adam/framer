@@ -55,6 +55,7 @@ pub(crate) struct FramerApp {
     file_status: Option<String>,
     artifact_status: Option<String>,
     dimension_status: Option<String>,
+    command_tab: actions::WorkflowTab,
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
@@ -489,6 +490,7 @@ impl Default for FramerApp {
             file_status: None,
             artifact_status: None,
             dimension_status: None,
+            command_tab: actions::WorkflowTab::Frame,
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
@@ -679,6 +681,7 @@ impl FramerApp {
     /// replaced wholesale (new/open/reset), so no in-progress draw, dimension, or
     /// drag gesture carries into a different document.
     fn reset_tools(&mut self) {
+        self.command_tab = actions::WorkflowTab::Frame;
         self.dimension_tool = DimensionToolState::default();
         self.draw_wall_tool = DrawWallToolState::default();
         self.room_tool_active = false;
@@ -806,10 +809,17 @@ impl FramerApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        match mode {
+            WorkspaceMode::Plan => self.command_tab = actions::WorkflowTab::Plan,
+            WorkspaceMode::Design if self.command_tab == actions::WorkflowTab::Plan => {
+                self.command_tab = actions::WorkflowTab::Frame;
+            }
+            WorkspaceMode::Design => {}
+        }
+
         if self.workspace_mode == mode {
             return;
         }
-
         self.workspace_mode = mode;
         self.opening_drag = None;
         match mode {
@@ -1078,6 +1088,7 @@ impl FramerApp {
         if !self.workspace_mode.allows_design_edits() {
             self.set_workspace_mode(WorkspaceMode::Design);
         }
+        self.command_tab = actions::WorkflowTab::Annotate;
 
         self.dimension_tool.active = true;
         self.dimension_tool.clear_picks();
@@ -1105,6 +1116,7 @@ impl FramerApp {
             if !self.workspace_mode.allows_design_edits() {
                 self.set_workspace_mode(WorkspaceMode::Design);
             }
+            self.command_tab = actions::WorkflowTab::Frame;
             self.dimension_tool.active = false;
             self.dimension_tool.clear_picks();
             self.room_tool_active = false;
@@ -1705,6 +1717,7 @@ impl FramerApp {
             if !self.workspace_mode.allows_design_edits() {
                 self.set_workspace_mode(WorkspaceMode::Design);
             }
+            self.command_tab = actions::WorkflowTab::Design;
             self.dimension_tool.active = false;
             self.dimension_tool.clear_picks();
             self.draw_wall_tool = DrawWallToolState::default();
@@ -1730,6 +1743,7 @@ impl FramerApp {
             if !self.workspace_mode.allows_design_edits() {
                 self.set_workspace_mode(WorkspaceMode::Design);
             }
+            self.command_tab = actions::WorkflowTab::Frame;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
                 Some("Click inside an enclosed area to place a flat ceiling".to_owned());
@@ -1748,6 +1762,7 @@ impl FramerApp {
             if !self.workspace_mode.allows_design_edits() {
                 self.set_workspace_mode(WorkspaceMode::Design);
             }
+            self.command_tab = actions::WorkflowTab::Frame;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
                 Some("Click inside an enclosed area to vault it (two opposing slopes)".to_owned());
@@ -1765,6 +1780,7 @@ impl FramerApp {
             if !self.workspace_mode.allows_design_edits() {
                 self.set_workspace_mode(WorkspaceMode::Design);
             }
+            self.command_tab = actions::WorkflowTab::Frame;
             self.viewport_mode = ViewportMode::Plan;
             self.dimension_status =
                 Some("Click inside an enclosed area to place a floor deck".to_owned());
@@ -2938,6 +2954,30 @@ mod tests {
 
     fn pt_ft(x_ft: f64, y_ft: f64) -> Point2 {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
+    }
+
+    #[test]
+    fn reset_tools_returns_workflow_commands_to_frame() {
+        let mut app = FramerApp {
+            command_tab: actions::WorkflowTab::Plan,
+            dimension_tool: DimensionToolState {
+                active: true,
+                ..Default::default()
+            },
+            draw_wall_tool: DrawWallToolState {
+                active: true,
+                ..Default::default()
+            },
+            room_tool_active: true,
+            ..Default::default()
+        };
+
+        app.reset_tools();
+
+        assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert!(!app.dimension_tool.active);
+        assert!(!app.draw_wall_tool.active);
+        assert!(!app.room_tool_active);
     }
 
     #[test]
