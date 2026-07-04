@@ -288,7 +288,7 @@ impl FramerApp {
             self.canvas_view_controls(ui, canvas);
         }
         if let Some(anchor) = toolbar_anchor {
-            self.canvas_floating_toolbar(ui, anchor);
+            self.canvas_context_toolbar(ui, anchor);
         }
     }
 
@@ -333,9 +333,13 @@ impl FramerApp {
             });
     }
 
-    fn canvas_floating_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
+    fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
+        if !self.has_selection_context_actions() {
+            return;
+        }
+
         let t = design::active();
-        egui::Area::new(egui::Id::new("canvas-floating-toolbar"))
+        egui::Area::new(egui::Id::new("canvas-context-toolbar"))
             .fixed_pos(Pos2::new(anchor.x - 40.0, anchor.y - 44.0))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
@@ -347,27 +351,68 @@ impl FramerApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            if design::widgets::icon_button(
-                                ui,
-                                design::Icon::Duplicate,
-                                "Duplicate opening",
-                            )
-                            .clicked()
-                            {
-                                self.duplicate_selected_opening();
+                            if self.can_duplicate_selected_opening() {
+                                let response = design::widgets::icon_button(
+                                    ui,
+                                    design::Icon::Duplicate,
+                                    "Duplicate opening",
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        "Duplicate opening",
+                                    )
+                                });
+                                if response.clicked() {
+                                    self.duplicate_selected_opening();
+                                }
                             }
-                            if design::widgets::icon_button(
-                                ui,
-                                design::Icon::Delete,
-                                "Delete opening",
-                            )
-                            .clicked()
-                            {
-                                self.delete_selected_opening();
+                            if self.can_delete_selected_from_context() {
+                                let action = actions::metadata(ActionId::DeleteSelection);
+                                let response =
+                                    design::widgets::icon_button(ui, action.icon, action.tooltip);
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        action.label,
+                                    )
+                                });
+                                if response.clicked() {
+                                    self.delete_selected();
+                                }
                             }
                         });
                     });
             });
+    }
+
+    fn has_selection_context_actions(&self) -> bool {
+        self.can_duplicate_selected_opening() || self.can_delete_selected_from_context()
+    }
+
+    fn can_duplicate_selected_opening(&self) -> bool {
+        self.workspace_mode.allows_design_edits() && matches!(self.selected, Selection::Opening(_))
+    }
+
+    fn can_delete_selected_from_context(&self) -> bool {
+        self.workspace_mode.allows_design_edits()
+            && matches!(
+                self.selected,
+                Selection::Wall
+                    | Selection::Opening(_)
+                    | Selection::Room(_)
+                    | Selection::RoofPlane(_)
+                    | Selection::Ceiling(_)
+                    | Selection::FloorDeck(_)
+                    | Selection::System(_)
+                    | Selection::Material(_)
+                    | Selection::Furnishing(_)
+                    | Selection::MepObject(_)
+                    | Selection::FurnishingInstance(_)
+                    | Selection::MepInstance(_)
+            )
     }
 
     fn workspace_header(&mut self, ui: &mut Ui) {

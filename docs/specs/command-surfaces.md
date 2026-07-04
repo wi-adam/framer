@@ -6,7 +6,7 @@
 >
 > **Status:** In progress · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md) ·
-> **Last reviewed:** 2026-07-03
+> **Last reviewed:** 2026-07-04
 
 ## Intent / Purpose
 
@@ -195,7 +195,7 @@ workbench, but purpose-built for wood-framed structures.
   split buttons, flyouts, panel headers, option rows), while command-routing policy
   stays in this spec.
 - `crates/framer-app/src/app/viewport/mod.rs` owns the workspace/view bar,
-  contextual tool options strip, workspace header, and `canvas_floating_toolbar`;
+  contextual tool options strip, workspace header, and selection context toolbar;
   it is the right home for workspace/view switching, active placement settings,
   context actions, marking menu hooks, navigation controls, and tool feedback
   that depend on canvas selection or placement state.
