@@ -547,7 +547,7 @@ impl FramerApp {
     fn wall_tool_options(&self, ui: &mut Ui) {
         let wall_system_name = self.default_wall_system_name();
         let wall_height = self.model.code.default_wall_height.to_string();
-        let level_name = self.first_level_name();
+        let level_name = self.active_level_name();
 
         option_strip_title(ui, "Wall options");
         readonly_option(ui, "Type", wall_system_name.as_str());
@@ -614,7 +614,7 @@ impl FramerApp {
         option_strip_title(ui, title);
         readonly_option(ui, "Type", kind);
         readonly_option(ui, "Usage", usage);
-        readonly_option(ui, "Level", self.first_level_name().as_str());
+        readonly_option(ui, "Level", self.active_level_name().as_str());
         readonly_option(ui, "Placement", "Enclosed region");
     }
 
@@ -622,7 +622,7 @@ impl FramerApp {
         option_strip_title(ui, title);
         readonly_option(ui, "Type", kind);
         readonly_option(ui, "Setting", setting);
-        readonly_option(ui, "Level", self.first_level_name().as_str());
+        readonly_option(ui, "Level", self.active_level_name().as_str());
         readonly_option(ui, "Placement", "Enclosed region");
     }
 
@@ -641,14 +641,6 @@ impl FramerApp {
             })
             .map(|system| system.name.clone())
             .unwrap_or_else(|| "Wall system".to_owned())
-    }
-
-    fn first_level_name(&self) -> String {
-        self.model
-            .levels
-            .first()
-            .map(|level| level.name.clone())
-            .unwrap_or_else(|| "Level 1".to_owned())
     }
 }
 
