@@ -450,7 +450,9 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         command_strip: Some(strip_route(
             WorkflowTab::Roofs,
             CommandPanel::Roofs,
-            CommandPresentation::FlyoutVariant { flyout: "Roof" },
+            CommandPresentation::FlyoutVariant {
+                flyout: "Roof form",
+            },
         )),
         mutates_authored_intent: true,
     },
@@ -465,7 +467,9 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         command_strip: Some(strip_route(
             WorkflowTab::Roofs,
             CommandPanel::Roofs,
-            CommandPresentation::FlyoutVariant { flyout: "Roof" },
+            CommandPresentation::FlyoutVariant {
+                flyout: "Roof form",
+            },
         )),
         mutates_authored_intent: true,
     },
@@ -480,7 +484,9 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         command_strip: Some(strip_route(
             WorkflowTab::Roofs,
             CommandPanel::Roofs,
-            CommandPresentation::FlyoutVariant { flyout: "Roof" },
+            CommandPresentation::FlyoutVariant {
+                flyout: "Roof form",
+            },
         )),
         mutates_authored_intent: true,
     },

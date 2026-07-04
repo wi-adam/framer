@@ -132,9 +132,13 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Commit: `feat(app): surface selection actions contextually`
 - **Task 4.2** — Move Door/Window/Garage and roof-form insertion to command-strip flyouts,
   catalog rows, or host-aware Insert menus.
+  - Status: implemented as command-strip flyouts. The Openings panel exposes an `Opening`
+    flyout for Door, Window, and Garage; the Roofs panel exposes a `Roof form` flyout for
+    Gable, Shed, and Hip.
   - Files: `crates/framer-app/src/app/panels.rs`,
-    `crates/framer-app/src/app/viewport/mod.rs`
-  - Verify: `cargo test -p framer-app --all-features --locked`; manual add/undo checks for each
+    `crates/framer-app/src/app/ui_harness_tests.rs`
+  - Verify: `cargo test -p framer-app insertion_flyouts_execute_opening_and_roof_variants --locked`;
+    `cargo test -p framer-app --all-features --locked`; manual add/undo checks for each
     insertion type
   - Commit: `feat(app): add contextual insertion surface`
 - **Task 4.3** — Add command search as the searchable backstop for commands that no longer
@@ -169,8 +173,8 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | Workflow strip: Design / Structure panel | Room | Workflow command strip: Design panel |
 | Workflow strip: Frame / Structure panel | Wall, Ceiling, Vault, Floor | Workflow command strip: Frame panel |
 | Selection context toolbar | Delete; Duplicate opening | Canvas context toolbar / shortcut; Delete is no longer permanent command-strip chrome |
-| Workflow strip: Openings panel | Door, Window, Garage | Temporary top-level variants until flyout/catalog migration |
-| Workflow strip: Roofs panel | Gable, Shed, Hip | Temporary top-level variants until roof flyout/options migration |
+| Workflow strip: Openings panel | Opening flyout: Door, Window, Garage | Command-strip flyout |
+| Workflow strip: Roofs panel | Roof form flyout: Gable, Shed, Hip | Command-strip flyout |
 | Workflow strip: Annotate / Dimensions panel | Linear | Workflow command strip: Annotate panel |
 | Contextual options strip | Wall defaults/context; Room/Ceiling/Vault/Floor placement context; Dimension Kind and Axis | Contextual tool options strip |
 | Workflow strip: Plan / Generated panel | Section | Plan command tab or view-control bar |

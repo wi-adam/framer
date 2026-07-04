@@ -187,8 +187,9 @@ workbench, but purpose-built for wood-framed structures.
   inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
   controls plus Project and Examples menus; `toolbar()` renders the workflow tab
   row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`)
-  and compact modeling/generated command panels. View/workspace switching and
-  active tool options live in workspace-adjacent chrome.
+  plus compact modeling/generated command panels and insertion flyouts for
+  opening and roof-form variants. View/workspace switching and active tool
+  options live in workspace-adjacent chrome.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,

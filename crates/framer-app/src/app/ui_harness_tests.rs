@@ -15,7 +15,7 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{DimensionAxis, DimensionKind};
+use framer_core::{DimensionAxis, DimensionKind, OpeningKind};
 
 use super::actions::{self, ActionId};
 use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design};
@@ -198,15 +198,35 @@ fn workflow_command_strip_routes_tabbed_panels() {
     harness.get_by_label("Openings").click();
     harness.run();
     assert!(
+        harness.query_all_by_label("Opening").next().is_some(),
+        "Openings tab should expose the opening flyout"
+    );
+    assert!(
+        harness.query_all_by_label("Garage").next().is_none(),
+        "opening variants should not be permanent top-level command buttons"
+    );
+    harness.get_by_label("Opening").click();
+    harness.run();
+    assert!(
         harness.query_all_by_label("Garage").next().is_some(),
-        "Openings tab should expose opening variants"
+        "opening flyout should expose opening variants"
     );
 
     harness.get_by_label("Roofs").click();
     harness.run();
     assert!(
+        harness.query_all_by_label("Roof form").next().is_some(),
+        "Roofs tab should expose the roof flyout"
+    );
+    assert!(
+        harness.query_all_by_label("Gable").next().is_none(),
+        "roof forms should not be permanent top-level command buttons"
+    );
+    harness.get_by_label("Roof form").click();
+    harness.run();
+    assert!(
         harness.query_all_by_label("Gable").next().is_some(),
-        "Roofs tab should expose roof forms"
+        "roof flyout should expose roof forms"
     );
 
     harness.get_by_label("Plan").click();
@@ -220,6 +240,51 @@ fn workflow_command_strip_routes_tabbed_panels() {
     harness.get_by_label("Frame").click();
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+}
+
+/// Insertion variants live in command-strip flyouts, but still execute the same
+/// authored-model mutations and undo labels as the old top-level buttons.
+#[test]
+fn insertion_flyouts_execute_opening_and_roof_variants() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    let openings_before = harness.state().model.walls[wall].openings.len();
+    harness.get_by_label("Openings").click();
+    harness.run();
+    harness.get_by_label("Opening").click();
+    harness.run();
+    harness.get_by_label("Garage").click();
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    assert_eq!(
+        harness.state().model.walls[wall].openings.len(),
+        openings_before + 1
+    );
+    assert!(
+        harness.state().model.walls[wall]
+            .openings
+            .iter()
+            .any(|opening| opening.kind == OpeningKind::GarageDoor),
+        "garage variant should insert a garage-door opening"
+    );
+    assert_eq!(harness.state().history.undo_label(), Some("Add opening"));
+
+    let roofs_before = harness.state().model.roof_planes.len();
+    harness.get_by_label("Roofs").click();
+    harness.run();
+    harness.get_by_label("Roof form").click();
+    harness.run();
+    harness.get_by_label("Hip").click();
+    harness.run();
+
+    assert!(
+        harness.state().model.roof_planes.len() > roofs_before,
+        "hip roof variant should author roof planes"
+    );
+    assert_eq!(harness.state().history.undo_label(), Some("Add roof"));
 }
 
 /// Workspace mode and view switching live in the workspace/view bar, not inside
