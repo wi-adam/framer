@@ -281,14 +281,15 @@ styling goes here, not inline; command routing policy belongs in
 ### `src/app/viewport/` — the viewports (layered modules)
 
 `workspace` (`viewport/mod.rs:91`) renders the workspace/view bar, contextual tool options
-strip, and one viewport per frame based on `ViewportMode`. The workspace/view bar owns
-Design/Plan switching and Shell/Plan, Wall/Elevation, Roof, 3D, and Render view tabs; the
-tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension placement context.
+strip, selection context toolbar, and one viewport per frame based on `ViewportMode`. The
+workspace/view bar owns Design/Plan switching and Shell/Plan, Wall/Elevation, Roof, 3D, and
+Render view tabs; the tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
+placement context, and the selection context toolbar owns selected-object lifecycle actions.
 
 | File | Contains |
 | --- | --- |
 | `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |

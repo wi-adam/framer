@@ -518,6 +518,9 @@ pub(super) fn draw_project_plan(
             Stroke::NONE,
         ));
         let label = plan_point(room.seed, bounds, drawing, camera);
+        if selected {
+            *toolbar_out = Some(label);
+        }
         painter.text(
             label,
             Align2::CENTER_CENTER,
@@ -567,6 +570,9 @@ pub(super) fn draw_project_plan(
             hovered,
             Color32::from_rgb(190, 172, 132),
         );
+        if selected {
+            *toolbar_out = Some(rect.center());
+        }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_furnishing = Some(ViewClick::FurnishingInstance {
                 instance_id: instance.id.0.clone(),
@@ -602,6 +608,9 @@ pub(super) fn draw_project_plan(
             hovered,
             Color32::from_rgb(124, 162, 186),
         );
+        if selected {
+            *toolbar_out = Some(rect.center());
+        }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_mep = Some(ViewClick::MepInstance {
                 instance_id: instance.id.0.clone(),
@@ -656,6 +665,7 @@ pub(super) fn draw_project_plan(
         };
         painter.line_segment([start, end], stroke);
         if selected {
+            *toolbar_out = Some(Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0));
             draw_selected_wall_handles(&painter, start, end, hovered_wall_handle);
         }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
@@ -838,6 +848,9 @@ pub(super) fn draw_project_plan(
                 Stroke::new(2.5, theme::framing_line_dark()),
             );
             if let Some(centroid) = polygon_centroid(&screen) {
+                if selected {
+                    *toolbar_out = Some(centroid);
+                }
                 painter.text(
                     centroid,
                     Align2::CENTER_CENTER,

@@ -20,7 +20,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 - `crates/framer-app/src/app/design/widgets.rs` provides visual primitives for toolbar
   buttons, groups, toggles, chips, and inspector sections. It needs compact command-strip
   primitives, split/flyout buttons, panel dividers, and PropertyManager rows.
-- `crates/framer-app/src/app/viewport/mod.rs` owns the workspace header and canvas floating
+- `crates/framer-app/src/app/viewport/mod.rs` owns the workspace header and selection context
   toolbar. It is the seam for marking/context menus, ViewCube/navigation affordances, and
   placement feedback.
 - `crates/framer-app/src/app/ui_harness_tests.rs` is the existing headless UI smoke-test seam.
@@ -121,9 +121,14 @@ with documentation and mockups, then migrates the app without changing the `.fra
 
 - **Task 4.1** — Move Delete and other selection lifecycle commands to a marking menu /
   shortcut menu / compact context toolbar while preserving shortcuts.
+  - Status: implemented as a canvas selection context toolbar for selected plan-view authored
+    objects. Opening duplicate stays opening-specific; Delete now routes through the same
+    `delete_selected` path as Delete/Backspace shortcuts.
   - Files: `crates/framer-app/src/app/viewport/mod.rs`,
-    `crates/framer-app/src/app/panels.rs`
-  - Verify: `cargo test -p framer-app --all-features --locked`; manual selection/delete undo check
+    `crates/framer-app/src/app/viewport/plan.rs`,
+    `crates/framer-app/src/app/ui_harness_tests.rs`
+  - Verify: `cargo test -p framer-app selection_context_toolbar_deletes_selected_wall --locked`;
+    `cargo test -p framer-app --all-features --locked`; manual selection/delete undo check
   - Commit: `feat(app): surface selection actions contextually`
 - **Task 4.2** — Move Door/Window/Garage and roof-form insertion to command-strip flyouts,
   catalog rows, or host-aware Insert menus.
@@ -163,7 +168,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | Workspace/view bar | Design Workspace, Plan Workspace, Shell/Plan, Wall/Elevation, Roof, 3D, Render | Workspace/view bar |
 | Workflow strip: Design / Structure panel | Room | Workflow command strip: Design panel |
 | Workflow strip: Frame / Structure panel | Wall, Ceiling, Vault, Floor | Workflow command strip: Frame panel |
-| Shortcut / contextual route | Delete | Marking menu / shortcut menu / shortcut; permanent context surface lands in Slice 4.1 |
+| Selection context toolbar | Delete; Duplicate opening | Canvas context toolbar / shortcut; Delete is no longer permanent command-strip chrome |
 | Workflow strip: Openings panel | Door, Window, Garage | Temporary top-level variants until flyout/catalog migration |
 | Workflow strip: Roofs panel | Gable, Shed, Hip | Temporary top-level variants until roof flyout/options migration |
 | Workflow strip: Annotate / Dimensions panel | Linear | Workflow command strip: Annotate panel |

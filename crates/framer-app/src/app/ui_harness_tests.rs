@@ -358,6 +358,28 @@ fn contextual_tool_options_follow_active_authoring_tools() {
     assert_eq!(harness.state().dimension_tool.axis, DimensionAxis::Vertical);
 }
 
+/// Selection lifecycle actions live on canvas context chrome instead of taking a
+/// permanent workflow command-strip slot.
+#[test]
+fn selection_context_toolbar_deletes_selected_wall() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().selected, Selection::Wall);
+    let before = harness.state().model.walls.len();
+    assert!(
+        harness.query_all_by_label("Delete").next().is_some(),
+        "a selected wall should expose contextual delete"
+    );
+
+    harness.get_by_label("Delete").click();
+    harness.run();
+
+    assert_eq!(harness.state().model.walls.len(), before - 1);
+    assert_eq!(harness.state().selected, Selection::Wall);
+    assert_eq!(harness.state().history.undo_label(), Some("Delete wall"));
+}
+
 /// Tool shortcuts entered from the generated-plan workflow must return to a
 /// Design-compatible command tab before activating the tool.
 #[test]
