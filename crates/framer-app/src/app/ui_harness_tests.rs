@@ -89,6 +89,16 @@ fn assert_accessible_label(harness: &Harness<FramerApp>, label: &str, surface: &
     );
 }
 
+fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: &str) {
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+            .next()
+            .is_some(),
+        "{surface} should expose '{label}' as a button"
+    );
+}
+
 /// The app boots, the demo shell loads, the framing plan regenerates, and the
 /// full panel tree lays out — all without panicking — and the window title is
 /// present in the accessibility tree.
@@ -288,7 +298,7 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
                 }) if action_tab == tab
             )
         }) {
-            assert_accessible_label(&harness, action.label, panels::workflow_tab_label(tab));
+            assert_accessible_button(&harness, action.label, panels::workflow_tab_label(tab));
             checked += 1;
         }
     }
@@ -343,7 +353,7 @@ fn command_surfaces_remain_reachable_at_minimum_window_size() {
             .get_by_role_and_label(Role::Button, panels::workflow_tab_label(tab))
             .click();
         harness.run();
-        assert_accessible_label(&harness, expected_label, panels::workflow_tab_label(tab));
+        assert_accessible_button(&harness, expected_label, panels::workflow_tab_label(tab));
     }
 
     harness.get_by_label("Commands").click();
