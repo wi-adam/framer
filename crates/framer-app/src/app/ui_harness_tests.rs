@@ -340,6 +340,86 @@ fn command_search_executes_hidden_insertion_variant() {
     assert_eq!(harness.state().history.undo_label(), Some("Add opening"));
 }
 
+#[test]
+fn command_search_enter_executes_first_enabled_match() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(!harness.state().action_enabled(ActionId::ExportArtifacts));
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "plan".to_owned();
+    harness.run();
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(
+        harness.state().workspace_mode,
+        WorkspaceMode::Plan,
+        "Enter should skip the disabled Export match and execute Plan"
+    );
+    assert!(!harness.state().command_search.open);
+}
+
+#[test]
+fn command_search_does_not_execute_disabled_action() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(harness.state().artifact_status.is_none());
+    assert!(!harness.state().action_enabled(ActionId::ExportArtifacts));
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "export".to_owned();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Export").next().is_some(),
+        "disabled commands should still be discoverable"
+    );
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(
+        harness.state().artifact_status.is_none(),
+        "disabled Export must not run from command search"
+    );
+    assert!(
+        harness.state().command_search.open,
+        "search should stay open when no enabled match can execute"
+    );
+}
+
+#[test]
+fn command_search_escape_closes_without_executing() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    let openings_before = harness.state().model.walls[wall].openings.len();
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "garage".to_owned();
+    harness.run();
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    assert!(!harness.state().command_search.open);
+    assert_eq!(
+        harness.state().model.walls[wall].openings.len(),
+        openings_before,
+        "Escape should dismiss search without executing the visible match"
+    );
+}
+
 /// Workspace mode and view switching live in the workspace/view bar, not inside
 /// the workflow command strip's modeling panels.
 #[test]
