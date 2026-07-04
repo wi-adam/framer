@@ -78,6 +78,25 @@ fn assert_shortcut_from_annotate_routes_to(
     );
 }
 
+fn assert_accessible_label(harness: &Harness<FramerApp>, label: &str, surface: &str) {
+    assert!(
+        harness.query_all_by_label(label).next().is_some(),
+        "{surface} should expose '{label}'"
+    );
+}
+
+fn workflow_tab_test_label(tab: actions::WorkflowTab) -> &'static str {
+    match tab {
+        actions::WorkflowTab::Design => "Design",
+        actions::WorkflowTab::Frame => "Frame",
+        actions::WorkflowTab::Openings => "Openings",
+        actions::WorkflowTab::Roofs => "Roofs",
+        actions::WorkflowTab::Annotate => "Annotate",
+        actions::WorkflowTab::Inspect => "Inspect",
+        actions::WorkflowTab::Plan => "Plan",
+    }
+}
+
 /// The app boots, the demo shell loads, the framing plan regenerates, and the
 /// full panel tree lays out — all without panicking — and the window title is
 /// present in the accessibility tree.
@@ -240,6 +259,45 @@ fn workflow_command_strip_routes_tabbed_panels() {
     harness.get_by_label("Frame").click();
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+}
+
+/// The command metadata seam and rendered command strip should stay in lockstep:
+/// every top-level command-strip action must be reachable on its owning workflow
+/// tab, or future commands can be documented without actually being surfaced.
+#[test]
+fn workflow_command_strip_renders_metadata_top_level_actions() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+
+    for tab in [
+        actions::WorkflowTab::Design,
+        actions::WorkflowTab::Frame,
+        actions::WorkflowTab::Openings,
+        actions::WorkflowTab::Roofs,
+        actions::WorkflowTab::Annotate,
+        actions::WorkflowTab::Inspect,
+        actions::WorkflowTab::Plan,
+    ] {
+        harness
+            .get_by_role_and_label(Role::Button, workflow_tab_test_label(tab))
+            .click();
+        harness.run();
+
+        for action in actions::ACTIONS.iter().filter(|action| {
+            matches!(
+                action.command_strip,
+                Some(actions::CommandStripRoute {
+                    tab: action_tab,
+                    presentation: actions::CommandPresentation::TopLevel,
+                    ..
+                }) if action_tab == tab
+            )
+        }) {
+            assert_accessible_label(&harness, action.label, workflow_tab_test_label(tab));
+        }
+    }
 }
 
 /// Insertion variants live in command-strip flyouts, but still execute the same
@@ -594,6 +652,44 @@ fn selection_context_toolbar_deletes_selected_wall() {
     assert_eq!(harness.state().model.walls.len(), before - 1);
     assert_eq!(harness.state().selected, Selection::Wall);
     assert_eq!(harness.state().history.undo_label(), Some("Delete wall"));
+}
+
+/// Opening-specific lifecycle actions share the canvas context toolbar with
+/// Delete. Duplicating from that surface must keep using the existing edit/undo
+/// path instead of becoming decorative chrome.
+#[test]
+fn selection_context_toolbar_duplicates_selected_opening() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let wall_index = harness.state().selected_wall;
+    let opening_id = harness.state().model.walls[wall_index].openings[0]
+        .id
+        .0
+        .clone();
+    let openings_before = harness.state().model.walls[wall_index].openings.len();
+    harness.state_mut().selected = Selection::Opening(opening_id);
+    harness.run();
+
+    assert_accessible_label(&harness, "Duplicate opening", "selection context toolbar");
+    assert_accessible_label(&harness, "Delete", "selection context toolbar");
+
+    harness.get_by_label("Duplicate opening").click();
+    harness.run();
+
+    let wall = &harness.state().model.walls[wall_index];
+    assert_eq!(wall.openings.len(), openings_before + 1);
+    assert!(
+        wall.openings
+            .iter()
+            .any(|opening| opening.name.ends_with(" copy")),
+        "duplicating from the context toolbar should author a copied opening"
+    );
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Duplicate opening")
+    );
+    assert!(matches!(harness.state().selected, Selection::Opening(_)));
 }
 
 /// Tool shortcuts entered from the generated-plan workflow must return to a

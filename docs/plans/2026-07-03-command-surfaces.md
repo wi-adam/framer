@@ -157,6 +157,9 @@ with documentation and mockups, then migrates the app without changing the `.fra
 
 - **Task 5.1** — Add or update headless UI smoke coverage for the app/quick-access bar, workflow
   command strip, contextual surface, and command-search reachability.
+  - Status: implemented with smoke coverage for command-strip metadata/rendering lockstep,
+    contextual Delete and Duplicate opening actions, app-header command search, insertion flyouts,
+    tool options, workspace/view chrome, and command-search keyboard/click execution.
   - Files: `crates/framer-app/src/app/ui_harness_tests.rs`
   - Verify: `cargo test -p framer-app --all-features --locked`
   - Commit: `test(app): cover command surfaces`
