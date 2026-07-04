@@ -877,7 +877,28 @@ impl FramerApp {
             | actions::ActionId::AddGableRoof
             | actions::ActionId::AddShedRoof
             | actions::ActionId::AddHipRoof => self.workspace_mode.allows_design_edits(),
-            _ => true,
+            actions::ActionId::CommandSearch
+            | actions::ActionId::NewProject
+            | actions::ActionId::OpenProject
+            | actions::ActionId::SaveProject
+            | actions::ActionId::LoadShellDemo
+            | actions::ActionId::LoadWallDemo
+            | actions::ActionId::WorkspaceDesign
+            | actions::ActionId::WorkspacePlan
+            | actions::ActionId::ViewPlan
+            | actions::ActionId::ViewElevation
+            | actions::ActionId::ViewRoof
+            | actions::ActionId::View3d
+            | actions::ActionId::ViewRender
+            | actions::ActionId::ToolWall
+            | actions::ActionId::ToolRoom
+            | actions::ActionId::ToolCeiling
+            | actions::ActionId::ToolVault
+            | actions::ActionId::ToolFloor
+            | actions::ActionId::ToolDimensionLinear
+            | actions::ActionId::DimensionKind
+            | actions::ActionId::DimensionAxis
+            | actions::ActionId::ToggleSection => true,
         }
     }
 

@@ -367,7 +367,7 @@ impl FramerApp {
                 }
 
                 ui.add_space(design::space::SM);
-                let query = self.command_search.query.trim().to_owned();
+                let query = self.command_search.query.trim().to_ascii_lowercase();
                 let matches: Vec<_> = actions::ACTIONS
                     .iter()
                     .copied()
@@ -3057,12 +3057,11 @@ fn action_route_label(action: actions::ActionMetadata) -> &'static str {
     }
 }
 
-fn command_search_matches(action: actions::ActionMetadata, query: &str) -> bool {
-    if query.is_empty() {
+fn command_search_matches(action: actions::ActionMetadata, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
         return true;
     }
 
-    let query = query.to_ascii_lowercase();
     let route = action_route_label(action);
     [
         action.label,
@@ -3071,7 +3070,19 @@ fn command_search_matches(action: actions::ActionMetadata, query: &str) -> bool 
         route,
     ]
     .into_iter()
-    .any(|value| value.to_ascii_lowercase().contains(&query))
+    .any(|value| contains_ascii_case_insensitive(value, lowercase_query))
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, lowercase_needle: &str) -> bool {
+    let needle = lowercase_needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn command_search_action(ui: &mut Ui, action: actions::ActionMetadata, enabled: bool) -> Response {
