@@ -18,7 +18,7 @@ use egui_kittest::kittest::Queryable;
 use framer_core::{DimensionAxis, DimensionKind, OpeningKind};
 
 use super::actions::{self, ActionId};
-use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design};
+use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
 ///
@@ -87,18 +87,6 @@ fn assert_accessible_label(harness: &Harness<FramerApp>, label: &str, surface: &
         harness.query_all_by_label(label).next().is_some(),
         "{surface} should expose '{label}'"
     );
-}
-
-fn workflow_tab_test_label(tab: actions::WorkflowTab) -> &'static str {
-    match tab {
-        actions::WorkflowTab::Design => "Design",
-        actions::WorkflowTab::Frame => "Frame",
-        actions::WorkflowTab::Openings => "Openings",
-        actions::WorkflowTab::Roofs => "Roofs",
-        actions::WorkflowTab::Annotate => "Annotate",
-        actions::WorkflowTab::Inspect => "Inspect",
-        actions::WorkflowTab::Plan => "Plan",
-    }
 }
 
 /// The app boots, the demo shell loads, the framing plan regenerates, and the
@@ -274,6 +262,7 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
 
     let mut harness = demo_harness();
     harness.run();
+    let mut checked = 0;
 
     for tab in [
         actions::WorkflowTab::Design,
@@ -285,7 +274,7 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
         actions::WorkflowTab::Plan,
     ] {
         harness
-            .get_by_role_and_label(Role::Button, workflow_tab_test_label(tab))
+            .get_by_role_and_label(Role::Button, panels::workflow_tab_label(tab))
             .click();
         harness.run();
 
@@ -299,9 +288,27 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
                 }) if action_tab == tab
             )
         }) {
-            assert_accessible_label(&harness, action.label, workflow_tab_test_label(tab));
+            assert_accessible_label(&harness, action.label, panels::workflow_tab_label(tab));
+            checked += 1;
         }
     }
+
+    let expected = actions::ACTIONS
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.command_strip,
+                Some(actions::CommandStripRoute {
+                    presentation: actions::CommandPresentation::TopLevel,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(
+        checked, expected,
+        "every TopLevel command-strip action should be reachable"
+    );
 }
 
 /// The native window's minimum size is the documented narrow budget for command
@@ -329,10 +336,10 @@ fn command_surfaces_remain_reachable_at_minimum_window_size() {
     ] {
         let (tab, expected_label) = tab;
         harness
-            .get_by_role_and_label(Role::Button, workflow_tab_test_label(tab))
+            .get_by_role_and_label(Role::Button, panels::workflow_tab_label(tab))
             .click();
         harness.run();
-        assert_accessible_label(&harness, expected_label, workflow_tab_test_label(tab));
+        assert_accessible_label(&harness, expected_label, panels::workflow_tab_label(tab));
     }
 
     harness.get_by_label("Commands").click();

@@ -3153,7 +3153,7 @@ const WORKFLOW_TABS: &[WorkflowTab] = &[
     WorkflowTab::Plan,
 ];
 
-fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
+pub(crate) fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
     match tab {
         WorkflowTab::Design => "Design",
         WorkflowTab::Frame => "Frame",
