@@ -327,8 +327,8 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
 
 /// The native window's minimum size is the documented narrow budget for command
 /// surfaces. At that width the command strip can wrap panels, but the primary
-/// tabs, flyouts, contextual route, and command-search backstop must remain
-/// reachable.
+/// tabs, panel and flyout trigger buttons, and command-search backstop must
+/// remain reachable.
 #[test]
 fn command_surfaces_remain_reachable_at_minimum_window_size() {
     use eframe::egui::accesskit::Role;
