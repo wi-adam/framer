@@ -187,9 +187,10 @@ workbench, but purpose-built for wood-framed structures.
   inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
   controls plus Project and Examples menus; `toolbar()` renders the workflow tab
   row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`)
-  plus compact modeling/generated command panels and insertion flyouts for
-  opening and roof-form variants. View/workspace switching and active tool
-  options live in workspace-adjacent chrome.
+  plus compact modeling/generated command panels, insertion flyouts for opening
+  and roof-form variants, and the app-header / Cmd/Ctrl+K command-search modal.
+  View/workspace switching and active tool options live in workspace-adjacent
+  chrome.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,
@@ -205,7 +206,8 @@ workbench, but purpose-built for wood-framed structures.
   and intent-mutation flags) without becoming a generic command bus. Actual
   mutations continue routing through existing `FramerApp` methods such as
   `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`, `undo`,
-  and `redo`.
+  and `redo`; command search reads this metadata and dispatches back through
+  those same app action paths.
 - Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` should
   cover smoke-level reachability for core command surfaces. Pure command metadata
   tests can cover duplicate ids, missing labels/tooltips, flyout reachability, and
@@ -233,8 +235,6 @@ workbench, but purpose-built for wood-framed structures.
 
 ## Open questions
 
-- Should the first command search be a simple searchable modal, or should it start
-  as a smaller project/menu overflow and grow later?
 - Should object insertion use a single catalog surface for doors/windows/roof forms,
   or separate host-aware Add menus in the canvas and inspector?
 - What exact command-strip budget should tests enforce once action metadata exists:

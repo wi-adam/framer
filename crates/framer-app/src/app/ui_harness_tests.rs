@@ -287,6 +287,157 @@ fn insertion_flyouts_execute_opening_and_roof_variants() {
     assert_eq!(harness.state().history.undo_label(), Some("Add roof"));
 }
 
+/// Command search is the universal backstop for commands that moved out of
+/// permanent chrome. Hidden flyout variants remain searchable and executable.
+#[test]
+fn command_search_header_button_opens_modal() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Commands").click();
+    harness.run();
+
+    assert!(harness.state().command_search.open);
+    assert!(
+        harness
+            .query_all_by_label("Command Search")
+            .next()
+            .is_some(),
+        "header command button should open command search through action dispatch"
+    );
+}
+
+#[test]
+fn command_search_executes_hidden_insertion_variant() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert!(
+        harness.query_all_by_label("Commands").next().is_some(),
+        "the app header should expose command search"
+    );
+    assert!(
+        harness.query_all_by_label("Garage").next().is_none(),
+        "garage should not be visible before opening its flyout or search"
+    );
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    assert!(
+        harness
+            .query_all_by_label("Command Search")
+            .next()
+            .is_some(),
+        "Cmd/Ctrl+K should open command search"
+    );
+
+    let wall = harness.state().selected_wall;
+    let openings_before = harness.state().model.walls[wall].openings.len();
+    harness.state_mut().command_search.query = "garage".to_owned();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Door").next().is_none(),
+        "search should filter non-matching opening variants"
+    );
+    harness.get_by_label("Garage").click();
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    assert_eq!(
+        harness.state().model.walls[wall].openings.len(),
+        openings_before + 1
+    );
+    assert!(
+        harness.state().model.walls[wall]
+            .openings
+            .iter()
+            .any(|opening| opening.kind == OpeningKind::GarageDoor),
+        "search result should execute the garage-door insertion"
+    );
+    assert!(!harness.state().command_search.open);
+    assert_eq!(harness.state().history.undo_label(), Some("Add opening"));
+}
+
+#[test]
+fn command_search_enter_executes_first_enabled_match() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(!harness.state().action_enabled(ActionId::ExportArtifacts));
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "plan".to_owned();
+    harness.run();
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(
+        harness.state().workspace_mode,
+        WorkspaceMode::Plan,
+        "Enter should skip the disabled Export match and execute Plan"
+    );
+    assert!(!harness.state().command_search.open);
+}
+
+#[test]
+fn command_search_does_not_execute_disabled_action() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(harness.state().artifact_status.is_none());
+    assert!(!harness.state().action_enabled(ActionId::ExportArtifacts));
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "export".to_owned();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Export").next().is_some(),
+        "disabled commands should still be discoverable"
+    );
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert!(
+        harness.state().artifact_status.is_none(),
+        "disabled Export must not run from command search"
+    );
+    assert!(
+        harness.state().command_search.open,
+        "search should stay open when no enabled match can execute"
+    );
+}
+
+#[test]
+fn command_search_escape_closes_without_executing() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    let openings_before = harness.state().model.walls[wall].openings.len();
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "garage".to_owned();
+    harness.run();
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    let wall = harness.state().selected_wall;
+    assert!(!harness.state().command_search.open);
+    assert_eq!(
+        harness.state().model.walls[wall].openings.len(),
+        openings_before,
+        "Escape should dismiss search without executing the visible match"
+    );
+}
+
 /// Workspace mode and view switching live in the workspace/view bar, not inside
 /// the workflow command strip's modeling panels.
 #[test]
