@@ -305,6 +305,10 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
             )
         })
         .count();
+    assert!(
+        expected > 0,
+        "metadata must expose at least one TopLevel command-strip action"
+    );
     assert_eq!(
         checked, expected,
         "every TopLevel command-strip action should be reachable"
