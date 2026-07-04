@@ -253,28 +253,12 @@ impl FramerApp {
             }
             WorkflowTab::Openings => {
                 widgets::command_panel(ui, "Openings", |ui| {
-                    if action_tool_button(ui, ActionId::AddDoor, false, true).clicked() {
-                        self.add_opening(OpeningKind::Door);
-                    }
-                    if action_tool_button(ui, ActionId::AddWindow, false, true).clicked() {
-                        self.add_opening(OpeningKind::Window);
-                    }
-                    if action_tool_button(ui, ActionId::AddGarageDoor, false, true).clicked() {
-                        self.add_opening(OpeningKind::GarageDoor);
-                    }
+                    self.opening_flyout(ui);
                 });
             }
             WorkflowTab::Roofs => {
                 widgets::command_panel(ui, "Roofs", |ui| {
-                    if action_tool_button(ui, ActionId::AddGableRoof, false, true).clicked() {
-                        self.add_roof(RoofForm::Gable);
-                    }
-                    if action_tool_button(ui, ActionId::AddShedRoof, false, true).clicked() {
-                        self.add_roof(RoofForm::Shed);
-                    }
-                    if action_tool_button(ui, ActionId::AddHipRoof, false, true).clicked() {
-                        self.add_roof(RoofForm::Hip);
-                    }
+                    self.roof_flyout(ui);
                 });
             }
             WorkflowTab::Annotate => {
@@ -302,6 +286,42 @@ impl FramerApp {
                 });
             }
         }
+    }
+
+    fn opening_flyout(&mut self, ui: &mut Ui) {
+        command_flyout_button(ui, "Opening", "Add an opening variant", |ui| {
+            ui.set_min_width(156.0);
+            if flyout_action(ui, ActionId::AddDoor).clicked() {
+                self.add_opening(OpeningKind::Door);
+                ui.close();
+            }
+            if flyout_action(ui, ActionId::AddWindow).clicked() {
+                self.add_opening(OpeningKind::Window);
+                ui.close();
+            }
+            if flyout_action(ui, ActionId::AddGarageDoor).clicked() {
+                self.add_opening(OpeningKind::GarageDoor);
+                ui.close();
+            }
+        });
+    }
+
+    fn roof_flyout(&mut self, ui: &mut Ui) {
+        command_flyout_button(ui, "Roof form", "Generate a roof form", |ui| {
+            ui.set_min_width(156.0);
+            if flyout_action(ui, ActionId::AddGableRoof).clicked() {
+                self.add_roof(RoofForm::Gable);
+                ui.close();
+            }
+            if flyout_action(ui, ActionId::AddShedRoof).clicked() {
+                self.add_roof(RoofForm::Shed);
+                ui.close();
+            }
+            if flyout_action(ui, ActionId::AddHipRoof).clicked() {
+                self.add_roof(RoofForm::Hip);
+                ui.close();
+            }
+        });
     }
 
     fn toggle_dimension_tool(&mut self) {
@@ -2925,6 +2945,40 @@ fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) ->
     let action = actions::metadata(id);
     widgets::tool_button(ui, action.icon, action.label, active, enabled)
         .on_hover_text(action.tooltip)
+}
+
+fn command_flyout_button(
+    ui: &mut Ui,
+    label: &'static str,
+    tooltip: &'static str,
+    add: impl FnOnce(&mut Ui),
+) -> Response {
+    let t = design::active();
+    let button = egui::Button::new(
+        RichText::new(label)
+            .size(design::text_size::LABEL)
+            .color(t.text_secondary),
+    )
+    .right_text(design::icon_text(Icon::ChevronDown, 11.0).color(t.text_muted))
+    .fill(t.control)
+    .stroke(t.soft_stroke())
+    .corner_radius(design::radius::SM)
+    .min_size(design::control::TOOL_BTN);
+    let (response, _) = MenuButton::from_button(button)
+        .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClick))
+        .ui(ui, add);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.on_hover_text(tooltip)
+}
+
+fn flyout_action(ui: &mut Ui, id: ActionId) -> Response {
+    let action = actions::metadata(id);
+    let response = ui
+        .add(egui::Button::new(action.label))
+        .on_hover_text(action.tooltip);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, action.label));
+    response
 }
 
 const WORKFLOW_TABS: &[WorkflowTab] = &[
