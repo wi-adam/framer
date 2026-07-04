@@ -290,6 +290,24 @@ fn insertion_flyouts_execute_opening_and_roof_variants() {
 /// Command search is the universal backstop for commands that moved out of
 /// permanent chrome. Hidden flyout variants remain searchable and executable.
 #[test]
+fn command_search_header_button_opens_modal() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Commands").click();
+    harness.run();
+
+    assert!(harness.state().command_search.open);
+    assert!(
+        harness
+            .query_all_by_label("Command Search")
+            .next()
+            .is_some(),
+        "header command button should open command search through action dispatch"
+    );
+}
+
+#[test]
 fn command_search_executes_hidden_insertion_variant() {
     let mut harness = demo_harness();
     harness.run();
