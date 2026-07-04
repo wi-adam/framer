@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** In progress · **Linked goal:** G-011 (CAD Workspace UX) ·
+> **Status:** Implemented · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md) ·
 > **Last reviewed:** 2026-07-04
 
@@ -118,6 +118,13 @@ workbench, but purpose-built for wood-framed structures.
   If adding a command would force another broad group or oversized button, the
   feature must use a flyout, contextual tab, catalog, property panel, command
   search, or marking menu instead.
+- The command-strip budget is intentionally small: at most **five top-level
+  command-strip actions per workflow tab**. The default desktop viewport is
+  `1360 x 860`, and the narrow/minimum supported viewport is `1040 x 680`.
+  At the narrow width command panels may wrap, but tabs, flyouts, contextual
+  actions, and command search must stay reachable. Adding commands beyond this
+  budget requires moving variants to flyouts/context/search instead of widening
+  permanent chrome.
 - The visual language is compact and technical: small square icon buttons,
   1-pixel dividers, subdued gray panels, low-radius controls, minimal shadows,
   sparse accent color, and no card-like toolbar buttons.
@@ -208,10 +215,12 @@ workbench, but purpose-built for wood-framed structures.
   `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`, `undo`,
   and `redo`; command search reads this metadata and dispatches back through
   those same app action paths.
-- Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` should
-  cover smoke-level reachability for core command surfaces. Pure command metadata
-  tests can cover duplicate ids, missing labels/tooltips, flyout reachability, and
-  command-strip budget checks once the metadata seam exists.
+- Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` cover
+  smoke-level reachability for core command surfaces, including app-header
+  quick access, workflow-strip tabs/panels, flyouts, contextual selection
+  actions, command search, active tool options, and minimum-window reachability.
+  Pure command metadata tests cover duplicate ids, missing labels/tooltips,
+  flyout routes, non-strip routing, and the top-level command-strip budget.
 
 ## Constraints & invariants
 
@@ -237,5 +246,3 @@ workbench, but purpose-built for wood-framed structures.
 
 - Should object insertion use a single catalog surface for doors/windows/roof forms,
   or separate host-aware Add menus in the canvas and inspector?
-- What exact command-strip budget should tests enforce once action metadata exists:
-  total visible commands, panel count, flyout depth, or minimum no-wrap width?

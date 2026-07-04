@@ -18,7 +18,7 @@ use egui_kittest::kittest::Queryable;
 use framer_core::{DimensionAxis, DimensionKind, OpeningKind};
 
 use super::actions::{self, ActionId};
-use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design};
+use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
 ///
@@ -26,6 +26,10 @@ use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, desi
 /// thing `eframe` passes to [`eframe::App::ui`] — so the panel tree lays out
 /// identically to the running app.
 fn demo_harness<'a>() -> Harness<'a, FramerApp> {
+    demo_harness_with_size(egui::vec2(1360.0, 860.0))
+}
+
+fn demo_harness_with_size<'a>(size: egui::Vec2) -> Harness<'a, FramerApp> {
     // `FramerApp::new` installs the design tokens + Lucide icon font on the egui
     // context before the first paint. The harness owns its own context, and
     // `set_fonts` only takes effect at the *next* frame's begin-pass — so the
@@ -34,7 +38,7 @@ fn demo_harness<'a>() -> Harness<'a, FramerApp> {
     // the real UI frames where `FontFamily::Name("lucide")` icons are laid out.
     let mut fonts_bound = false;
     Harness::builder()
-        .with_size(egui::vec2(1360.0, 860.0))
+        .with_size(size)
         // Generous headroom so `run()` never trips the default 4-step cap while
         // the first-frame layout settles (the Plan view requests no animation).
         .with_max_steps(16)
@@ -75,6 +79,23 @@ fn assert_shortcut_from_annotate_routes_to(
     assert!(
         harness.query_all_by_label(expected_label).next().is_some(),
         "shortcut should expose the '{expected_label}' command on its owning tab"
+    );
+}
+
+fn assert_accessible_label(harness: &Harness<FramerApp>, label: &str, surface: &str) {
+    assert!(
+        harness.query_all_by_label(label).next().is_some(),
+        "{surface} should expose '{label}'"
+    );
+}
+
+fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: &str) {
+    assert!(
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+            .next()
+            .is_some(),
+        "{surface} should expose '{label}' as a button"
     );
 }
 
@@ -240,6 +261,104 @@ fn workflow_command_strip_routes_tabbed_panels() {
     harness.get_by_label("Frame").click();
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+}
+
+/// The command metadata seam and rendered command strip should stay in lockstep:
+/// every top-level command-strip action must be reachable on its owning workflow
+/// tab, or future commands can be documented without actually being surfaced.
+#[test]
+fn workflow_command_strip_renders_metadata_top_level_actions() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    let mut checked = 0;
+
+    for tab in [
+        actions::WorkflowTab::Design,
+        actions::WorkflowTab::Frame,
+        actions::WorkflowTab::Openings,
+        actions::WorkflowTab::Roofs,
+        actions::WorkflowTab::Annotate,
+        actions::WorkflowTab::Inspect,
+        actions::WorkflowTab::Plan,
+    ] {
+        harness
+            .get_by_role_and_label(Role::Button, panels::workflow_tab_label(tab))
+            .click();
+        harness.run();
+
+        for action in actions::ACTIONS.iter().filter(|action| {
+            matches!(
+                action.command_strip,
+                Some(actions::CommandStripRoute {
+                    tab: action_tab,
+                    presentation: actions::CommandPresentation::TopLevel,
+                    ..
+                }) if action_tab == tab
+            )
+        }) {
+            assert_accessible_button(&harness, action.label, panels::workflow_tab_label(tab));
+            checked += 1;
+        }
+    }
+
+    let expected = actions::ACTIONS
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.command_strip,
+                Some(actions::CommandStripRoute {
+                    presentation: actions::CommandPresentation::TopLevel,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(
+        expected > 0,
+        "metadata must expose at least one TopLevel command-strip action"
+    );
+    assert_eq!(
+        checked, expected,
+        "every TopLevel command-strip action should be reachable"
+    );
+}
+
+/// The native window's minimum size is the documented narrow budget for command
+/// surfaces. At that width the command strip can wrap panels, but the primary
+/// tabs, panel and flyout trigger buttons, and command-search backstop must
+/// remain reachable.
+#[test]
+fn command_surfaces_remain_reachable_at_minimum_window_size() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness_with_size(egui::vec2(1040.0, 680.0));
+    harness.run();
+
+    for label in ["Framer", "Project", "Examples", "Commands"] {
+        assert_accessible_label(&harness, label, "minimum-width app header");
+    }
+
+    for tab in [
+        (actions::WorkflowTab::Design, "Room"),
+        (actions::WorkflowTab::Frame, "Wall"),
+        (actions::WorkflowTab::Openings, "Opening"),
+        (actions::WorkflowTab::Roofs, "Roof form"),
+        (actions::WorkflowTab::Annotate, "Linear"),
+        (actions::WorkflowTab::Plan, "Section"),
+    ] {
+        let (tab, expected_label) = tab;
+        harness
+            .get_by_role_and_label(Role::Button, panels::workflow_tab_label(tab))
+            .click();
+        harness.run();
+        assert_accessible_button(&harness, expected_label, panels::workflow_tab_label(tab));
+    }
+
+    harness.get_by_label("Commands").click();
+    harness.run();
+    assert_accessible_label(&harness, "Command Search", "minimum-width command search");
 }
 
 /// Insertion variants live in command-strip flyouts, but still execute the same
@@ -594,6 +713,44 @@ fn selection_context_toolbar_deletes_selected_wall() {
     assert_eq!(harness.state().model.walls.len(), before - 1);
     assert_eq!(harness.state().selected, Selection::Wall);
     assert_eq!(harness.state().history.undo_label(), Some("Delete wall"));
+}
+
+/// Opening-specific lifecycle actions share the canvas context toolbar with
+/// Delete. Duplicating from that surface must keep using the existing edit/undo
+/// path instead of becoming decorative chrome.
+#[test]
+fn selection_context_toolbar_duplicates_selected_opening() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let wall_index = harness.state().selected_wall;
+    let opening_id = harness.state().model.walls[wall_index].openings[0]
+        .id
+        .0
+        .clone();
+    let openings_before = harness.state().model.walls[wall_index].openings.len();
+    harness.state_mut().selected = Selection::Opening(opening_id);
+    harness.run();
+
+    assert_accessible_label(&harness, "Duplicate opening", "selection context toolbar");
+    assert_accessible_label(&harness, "Delete", "selection context toolbar");
+
+    harness.get_by_label("Duplicate opening").click();
+    harness.run();
+
+    let wall = &harness.state().model.walls[wall_index];
+    assert_eq!(wall.openings.len(), openings_before + 1);
+    assert!(
+        wall.openings
+            .iter()
+            .any(|opening| opening.name.ends_with(" copy")),
+        "duplicating from the context toolbar should author a copied opening"
+    );
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Duplicate opening")
+    );
+    assert!(matches!(harness.state().selected, Selection::Opening(_)));
 }
 
 /// Tool shortcuts entered from the generated-plan workflow must return to a
