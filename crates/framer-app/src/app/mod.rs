@@ -695,11 +695,15 @@ impl FramerApp {
         self.active_level = self.model.levels.first().map(|level| level.id.clone());
     }
 
+    fn has_level(&self, id: &ElementId) -> bool {
+        self.model.levels.iter().any(|level| &level.id == id)
+    }
+
     fn reconcile_active_level(&mut self) {
         if self
             .active_level
             .as_ref()
-            .is_some_and(|active| self.model.levels.iter().any(|level| level.id == *active))
+            .is_some_and(|active| self.has_level(active))
         {
             return;
         }
@@ -709,7 +713,7 @@ impl FramerApp {
     fn active_level_id(&self) -> ElementId {
         self.active_level
             .as_ref()
-            .filter(|active| self.model.levels.iter().any(|level| level.id == **active))
+            .filter(|active| self.has_level(active))
             .cloned()
             .or_else(|| self.model.levels.first().map(|level| level.id.clone()))
             .unwrap_or_else(|| ElementId::new("level-1"))
@@ -726,12 +730,7 @@ impl FramerApp {
     }
 
     fn set_active_level(&mut self, level: ElementId) {
-        if self
-            .model
-            .levels
-            .iter()
-            .any(|candidate| candidate.id == level)
-        {
+        if self.has_level(&level) {
             self.active_level = Some(level);
         }
     }
@@ -3860,12 +3859,13 @@ mod tests {
     fn active_level_controls_new_walls_rooms_and_surfaces() {
         let mut app = FramerApp::default();
         let level = add_second_level(&mut app);
-        let region = framer_core::SurfaceRegion::Polygon(vec![
+        let outline = vec![
             pt(360.0, 360.0),
             pt(480.0, 360.0),
             pt(480.0, 480.0),
             pt(360.0, 480.0),
-        ]);
+        ];
+        let region = framer_core::SurfaceRegion::Polygon(outline.clone());
 
         app.add_wall(pt(360.0, 360.0), pt(480.0, 360.0));
         assert_eq!(app.model.walls.last().unwrap().level, level);
@@ -3875,6 +3875,17 @@ mod tests {
 
         app.add_ceiling(region.clone());
         assert_eq!(app.model.ceilings.last().unwrap().level, level);
+
+        app.add_vault(&outline);
+        assert!(
+            app.model
+                .ceilings
+                .iter()
+                .rev()
+                .take(2)
+                .all(|ceiling| ceiling.level == level),
+            "both vault halves land on the active level"
+        );
 
         app.add_floor(region);
         assert_eq!(app.model.floor_decks.last().unwrap().level, level);
