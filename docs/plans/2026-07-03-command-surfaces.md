@@ -165,8 +165,16 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Commit: `test(app): cover command surfaces`
 - **Task 5.2** — Manual visual pass against default desktop width and a narrow window, confirming
   the workflow command strip stays dense and CAD-like rather than reverting to large buttons.
-  - Files: `docs/specs/command-surfaces.md` if the budget decision changes
-  - Verify: manual run and screenshots
+  - Status: implemented. Budget is recorded in the durable spec: default desktop
+    viewport `1360 x 860`, narrow/minimum viewport `1040 x 680`, and no more than
+    five top-level command-strip actions per workflow tab. At narrow width command
+    panels may wrap, but app header commands, workflow tabs/panels, flyouts,
+    contextual actions, and command search stay reachable.
+  - Files: `docs/specs/command-surfaces.md`,
+    `crates/framer-app/src/app/ui_harness_tests.rs`
+  - Verify: `cargo test -p framer-app command_surfaces_remain_reachable_at_minimum_window_size --locked`;
+    `cargo test -p framer-app --all-features --locked`; manual visual check at the default and
+    minimum native window sizes
   - Commit: `docs(app): record command surface budget`
 
 ## Current command-surface inventory
@@ -205,5 +213,5 @@ cargo test --workspace --all-features --locked
 python3 scripts/check-markdown-links.py
 ```
 
-When the UI migration lands, update the spec's **Status** and **Last reviewed**, refresh
-`docs/code-map.md`, and keep the command inventory consistent with the app.
+The UI migration has landed; keep the spec's **Status** / **Last reviewed** and the command
+inventory consistent with future app changes.

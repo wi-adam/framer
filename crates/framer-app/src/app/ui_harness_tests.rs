@@ -26,6 +26,10 @@ use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, desi
 /// thing `eframe` passes to [`eframe::App::ui`] — so the panel tree lays out
 /// identically to the running app.
 fn demo_harness<'a>() -> Harness<'a, FramerApp> {
+    demo_harness_with_size(egui::vec2(1360.0, 860.0))
+}
+
+fn demo_harness_with_size<'a>(size: egui::Vec2) -> Harness<'a, FramerApp> {
     // `FramerApp::new` installs the design tokens + Lucide icon font on the egui
     // context before the first paint. The harness owns its own context, and
     // `set_fonts` only takes effect at the *next* frame's begin-pass — so the
@@ -34,7 +38,7 @@ fn demo_harness<'a>() -> Harness<'a, FramerApp> {
     // the real UI frames where `FontFamily::Name("lucide")` icons are laid out.
     let mut fonts_bound = false;
     Harness::builder()
-        .with_size(egui::vec2(1360.0, 860.0))
+        .with_size(size)
         // Generous headroom so `run()` never trips the default 4-step cap while
         // the first-frame layout settles (the Plan view requests no animation).
         .with_max_steps(16)
@@ -298,6 +302,42 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
             assert_accessible_label(&harness, action.label, workflow_tab_test_label(tab));
         }
     }
+}
+
+/// The native window's minimum size is the documented narrow budget for command
+/// surfaces. At that width the command strip can wrap panels, but the primary
+/// tabs, flyouts, contextual route, and command-search backstop must remain
+/// reachable.
+#[test]
+fn command_surfaces_remain_reachable_at_minimum_window_size() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness_with_size(egui::vec2(1040.0, 680.0));
+    harness.run();
+
+    for label in ["Framer", "Project", "Examples", "Commands"] {
+        assert_accessible_label(&harness, label, "minimum-width app header");
+    }
+
+    for tab in [
+        (actions::WorkflowTab::Design, "Room"),
+        (actions::WorkflowTab::Frame, "Wall"),
+        (actions::WorkflowTab::Openings, "Opening"),
+        (actions::WorkflowTab::Roofs, "Roof form"),
+        (actions::WorkflowTab::Annotate, "Linear"),
+        (actions::WorkflowTab::Plan, "Section"),
+    ] {
+        let (tab, expected_label) = tab;
+        harness
+            .get_by_role_and_label(Role::Button, workflow_tab_test_label(tab))
+            .click();
+        harness.run();
+        assert_accessible_label(&harness, expected_label, workflow_tab_test_label(tab));
+    }
+
+    harness.get_by_label("Commands").click();
+    harness.run();
+    assert_accessible_label(&harness, "Command Search", "minimum-width command search");
 }
 
 /// Insertion variants live in command-strip flyouts, but still execute the same
