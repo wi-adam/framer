@@ -107,6 +107,10 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Commit: `refactor(app): move view switching to workspace chrome`
 - **Task 3.4** — Move active tool settings into a contextual tab or options strip. Wall should
   expose type, baseline, height, level, and placement compactly while active.
+  - Status: implemented as a contextual options strip under the workspace/view bar.
+    Wall, Room, Ceiling, Vault, Floor, and Dimension tools now expose active
+    placement context there; Dimension Kind / Axis moved out of the Annotate
+    command panel.
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/viewport/mod.rs`
   - Verify: `cargo test -p framer-app --all-features --locked`; manual Wall/Room/Ceiling/Floor/
@@ -163,7 +167,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | Workflow strip: Openings panel | Door, Window, Garage | Temporary top-level variants until flyout/catalog migration |
 | Workflow strip: Roofs panel | Gable, Shed, Hip | Temporary top-level variants until roof flyout/options migration |
 | Workflow strip: Annotate / Dimensions panel | Linear | Workflow command strip: Annotate panel |
-| Workflow strip: Annotate active options | Driving/Reference, Horizontal/Vertical | Temporary inline options until contextual options strip migration |
+| Contextual options strip | Wall defaults/context; Room/Ceiling/Vault/Floor placement context; Dimension Kind and Axis | Contextual tool options strip |
 | Workflow strip: Plan / Generated panel | Section | Plan command tab or view-control bar |
 
 ## Final verification

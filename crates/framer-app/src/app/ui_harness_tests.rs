@@ -15,6 +15,7 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use framer_core::{DimensionAxis, DimensionKind};
 
 use super::actions::{self, ActionId};
 use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design};
@@ -283,6 +284,78 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
     harness.get_by_label("3D").click();
     harness.run_steps(1);
     assert_eq!(harness.state().viewport_mode, ViewportMode::Axonometric);
+}
+
+/// Active tool settings live in the contextual options strip beside the canvas
+/// instead of expanding the workflow command strip's permanent panels.
+#[test]
+fn contextual_tool_options_follow_active_authoring_tools() {
+    let mut harness = demo_harness();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Wall options").next().is_none(),
+        "inactive tools should not show contextual options"
+    );
+
+    harness.key_press(egui::Key::W);
+    harness.run();
+    assert!(harness.state().draw_wall_tool.active);
+    for label in [
+        "Wall options",
+        "Baseline",
+        "Centerline",
+        "Height",
+        "Level",
+        "Placement",
+        "First endpoint",
+    ] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "wall tool options should expose '{label}'"
+        );
+    }
+
+    harness.key_press(egui::Key::W);
+    harness.run();
+    assert!(!harness.state().draw_wall_tool.active);
+    assert!(
+        harness.query_all_by_label("Wall options").next().is_none(),
+        "wall options should leave with the wall tool"
+    );
+
+    harness.key_press(egui::Key::D);
+    harness.run();
+    assert!(harness.state().dimension_tool.active);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Annotate);
+    for label in ["Dimension options", "Dimension Kind", "Dimension Axis"] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "dimension tool options should expose '{label}'"
+        );
+    }
+    assert!(
+        harness.query_all_by_value("Driving").next().is_some(),
+        "dimension kind combo should expose its current value"
+    );
+    assert!(
+        harness.query_all_by_value("Horizontal").next().is_some(),
+        "dimension axis combo should expose its current value"
+    );
+
+    harness.get_by_value("Driving").click();
+    harness.run();
+    harness.get_by_label("Reference").click();
+    harness.run();
+    assert_eq!(
+        harness.state().dimension_tool.kind,
+        DimensionKind::Reference
+    );
+
+    harness.get_by_value("Horizontal").click();
+    harness.run();
+    harness.get_by_label("Vertical").click();
+    harness.run();
+    assert_eq!(harness.state().dimension_tool.axis, DimensionAxis::Vertical);
 }
 
 /// Tool shortcuts entered from the generated-plan workflow must return to a

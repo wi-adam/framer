@@ -187,17 +187,18 @@ workbench, but purpose-built for wood-framed structures.
   inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
   controls plus Project and Examples menus; `toolbar()` renders the workflow tab
   row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`)
-  and compact modeling/generated command panels. View/workspace switching lives
-  in the workspace/view bar.
+  and compact modeling/generated command panels. View/workspace switching and
+  active tool options live in workspace-adjacent chrome.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,
   split buttons, flyouts, panel headers, option rows), while command-routing policy
   stays in this spec.
 - `crates/framer-app/src/app/viewport/mod.rs` owns the workspace/view bar,
-  workspace header, and `canvas_floating_toolbar`; it is the right home for
-  workspace/view switching, context actions, marking menu hooks, navigation
-  controls, and tool feedback that depend on canvas selection or placement state.
+  contextual tool options strip, workspace header, and `canvas_floating_toolbar`;
+  it is the right home for workspace/view switching, active placement settings,
+  context actions, marking menu hooks, navigation controls, and tool feedback
+  that depend on canvas selection or placement state.
 - `crates/framer-app/src/app/actions.rs` holds lightweight command metadata
   (`ActionId`, workflow tab, panel, surfaces, labels, icons, flyout membership,
   and intent-mutation flags) without becoming a generic command bus. Actual

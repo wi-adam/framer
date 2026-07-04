@@ -289,36 +289,6 @@ impl FramerApp {
                     {
                         self.toggle_dimension_tool();
                     }
-                    if self.dimension_tool.active {
-                        ComboBox::from_id_salt("dimension-tool-kind")
-                            .selected_text(dimension_kind_label(self.dimension_tool.kind))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.dimension_tool.kind,
-                                    DimensionKind::Driving,
-                                    "Driving",
-                                );
-                                ui.selectable_value(
-                                    &mut self.dimension_tool.kind,
-                                    DimensionKind::Reference,
-                                    "Reference",
-                                );
-                            });
-                        ComboBox::from_id_salt("dimension-tool-axis")
-                            .selected_text(dimension_axis_label(self.dimension_tool.axis))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.dimension_tool.axis,
-                                    DimensionAxis::Horizontal,
-                                    "Horizontal",
-                                );
-                                ui.selectable_value(
-                                    &mut self.dimension_tool.axis,
-                                    DimensionAxis::Vertical,
-                                    "Vertical",
-                                );
-                            });
-                    }
                 });
             }
             WorkflowTab::Inspect => {}
