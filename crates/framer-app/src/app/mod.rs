@@ -56,6 +56,7 @@ pub(crate) struct FramerApp {
     artifact_status: Option<String>,
     dimension_status: Option<String>,
     command_tab: actions::WorkflowTab,
+    command_search: CommandSearchState,
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
@@ -172,6 +173,13 @@ enum RoofForm {
     Gable,
     Shed,
     Hip,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CommandSearchState {
+    open: bool,
+    focus_input: bool,
+    query: String,
 }
 
 /// One generated roof-plane outline: its plan-projected polygon and the index of
@@ -491,6 +499,7 @@ impl Default for FramerApp {
             artifact_status: None,
             dimension_status: None,
             command_tab: actions::WorkflowTab::Frame,
+            command_search: CommandSearchState::default(),
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
@@ -832,7 +841,100 @@ impl FramerApp {
         }
     }
 
+    fn open_command_search(&mut self) {
+        self.command_search.open = true;
+        self.command_search.focus_input = true;
+        self.command_search.query.clear();
+    }
+
+    fn is_selection_deletable(&self) -> bool {
+        matches!(
+            self.selected,
+            Selection::Opening(_)
+                | Selection::Wall
+                | Selection::Room(_)
+                | Selection::RoofPlane(_)
+                | Selection::Ceiling(_)
+                | Selection::FloorDeck(_)
+                | Selection::System(_)
+                | Selection::Material(_)
+                | Selection::Furnishing(_)
+                | Selection::MepObject(_)
+                | Selection::FurnishingInstance(_)
+                | Selection::MepInstance(_)
+        )
+    }
+
+    fn action_enabled(&self, id: actions::ActionId) -> bool {
+        match id {
+            actions::ActionId::Undo => self.history.can_undo(),
+            actions::ActionId::Redo => self.history.can_redo(),
+            actions::ActionId::ExportArtifacts => self.workspace_mode.shows_generated_plan(),
+            actions::ActionId::DeleteSelection => self.is_selection_deletable(),
+            actions::ActionId::AddDoor
+            | actions::ActionId::AddWindow
+            | actions::ActionId::AddGarageDoor
+            | actions::ActionId::AddGableRoof
+            | actions::ActionId::AddShedRoof
+            | actions::ActionId::AddHipRoof => self.workspace_mode.allows_design_edits(),
+            _ => true,
+        }
+    }
+
+    fn execute_action(&mut self, id: actions::ActionId) {
+        if !self.action_enabled(id) {
+            return;
+        }
+
+        match id {
+            actions::ActionId::CommandSearch => self.open_command_search(),
+            actions::ActionId::NewProject => self.new_project(),
+            actions::ActionId::OpenProject => self.load_project_file(),
+            actions::ActionId::SaveProject => self.save_project_file(),
+            actions::ActionId::ExportArtifacts => self.export_current_artifacts(),
+            actions::ActionId::Undo => self.undo(),
+            actions::ActionId::Redo => self.redo(),
+            actions::ActionId::LoadShellDemo => self.reset_demo(),
+            actions::ActionId::LoadWallDemo => self.reset_wall_demo(),
+            actions::ActionId::WorkspaceDesign => self.set_workspace_mode(WorkspaceMode::Design),
+            actions::ActionId::WorkspacePlan => self.set_workspace_mode(WorkspaceMode::Plan),
+            actions::ActionId::ViewPlan => self.viewport_mode = ViewportMode::Plan,
+            actions::ActionId::ViewElevation => self.viewport_mode = ViewportMode::Elevation,
+            actions::ActionId::ViewRoof => self.viewport_mode = ViewportMode::RoofPlan,
+            actions::ActionId::View3d => self.viewport_mode = ViewportMode::Axonometric,
+            actions::ActionId::ViewRender => self.viewport_mode = ViewportMode::Render,
+            actions::ActionId::ToolWall => self.toggle_draw_wall_tool(),
+            actions::ActionId::ToolRoom => self.toggle_room_tool(),
+            actions::ActionId::ToolCeiling => self.toggle_ceiling_tool(),
+            actions::ActionId::ToolVault => self.toggle_vault_tool(),
+            actions::ActionId::ToolFloor => self.toggle_floor_tool(),
+            actions::ActionId::DeleteSelection => self.delete_selected(),
+            actions::ActionId::AddDoor => self.add_opening(OpeningKind::Door),
+            actions::ActionId::AddWindow => self.add_opening(OpeningKind::Window),
+            actions::ActionId::AddGarageDoor => self.add_opening(OpeningKind::GarageDoor),
+            actions::ActionId::AddGableRoof => self.add_roof(RoofForm::Gable),
+            actions::ActionId::AddShedRoof => self.add_roof(RoofForm::Shed),
+            actions::ActionId::AddHipRoof => self.add_roof(RoofForm::Hip),
+            actions::ActionId::ToolDimensionLinear => self.activate_dimension_tool(),
+            actions::ActionId::DimensionKind | actions::ActionId::DimensionAxis => {
+                self.activate_dimension_tool();
+            }
+            actions::ActionId::ToggleSection => self.show_section = !self.show_section,
+        }
+    }
+
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let command_search_pressed =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K));
+        if command_search_pressed {
+            self.open_command_search();
+            return;
+        }
+
+        if self.command_search.open {
+            return;
+        }
+
         if ctx.text_edit_focused() {
             return;
         }
@@ -2916,6 +3018,7 @@ impl FramerApp {
         CentralPanel::default()
             .frame(Frame::new().fill(theme::workspace_bg()))
             .show(ui, |ui| self.workspace(ui));
+        self.command_search_overlay(ui.ctx());
 
         // All panels have rendered; any inspector edit run has opened its
         // transaction. Settle it into a single undo step once the interaction

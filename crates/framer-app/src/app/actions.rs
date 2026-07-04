@@ -9,6 +9,7 @@ use super::design::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ActionId {
+    CommandSearch,
     NewProject,
     OpenProject,
     SaveProject,
@@ -143,6 +144,17 @@ const fn strip_route(
 }
 
 pub(crate) const ACTIONS: &[ActionMetadata] = &[
+    ActionMetadata {
+        id: ActionId::CommandSearch,
+        label: "Commands",
+        icon: Icon::Search,
+        tooltip: "Open command search (Cmd/Ctrl+K)",
+        owner: ActionOwner::Workspace,
+        primary_surface: CommandSurface::AppQuickAccess,
+        secondary_surfaces: SEARCH_SHORTCUT,
+        command_strip: None,
+        mutates_authored_intent: false,
+    },
     ActionMetadata {
         id: ActionId::NewProject,
         label: "New",
@@ -558,6 +570,7 @@ mod tests {
     use super::*;
 
     const ALL_ACTION_IDS: &[ActionId] = &[
+        ActionId::CommandSearch,
         ActionId::NewProject,
         ActionId::OpenProject,
         ActionId::SaveProject,
@@ -593,7 +606,8 @@ mod tests {
 
     fn assert_action_id_exhaustive(id: ActionId) {
         match id {
-            ActionId::NewProject
+            ActionId::CommandSearch
+            | ActionId::NewProject
             | ActionId::OpenProject
             | ActionId::SaveProject
             | ActionId::ExportArtifacts
@@ -725,6 +739,7 @@ mod tests {
     fn routing_matrix_keeps_non_modeling_actions_out_of_the_strip() {
         for id in [
             ActionId::NewProject,
+            ActionId::CommandSearch,
             ActionId::OpenProject,
             ActionId::SaveProject,
             ActionId::ExportArtifacts,

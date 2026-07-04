@@ -143,9 +143,14 @@ with documentation and mockups, then migrates the app without changing the `.fra
   - Commit: `feat(app): add contextual insertion surface`
 - **Task 4.3** — Add command search as the searchable backstop for commands that no longer
   occupy permanent chrome.
+  - Status: implemented as an app-header / Cmd/Ctrl+K command-search modal backed by
+    `actions::ACTIONS`. Search rows filter by label, owner, tooltip, and route, then execute
+    through the same `FramerApp` action paths as the visible command surfaces.
   - Files: `crates/framer-app/src/app/actions.rs`,
-    `crates/framer-app/src/app/panels.rs`
-  - Verify: `cargo test -p framer-app --all-features --locked`; manual keyboard/open/execute check
+    `crates/framer-app/src/app/mod.rs`, `crates/framer-app/src/app/panels.rs`,
+    `crates/framer-app/src/app/ui_harness_tests.rs`
+  - Verify: `cargo test -p framer-app command_search_executes_hidden_insertion_variant --locked`;
+    `cargo test -p framer-app --all-features --locked`; manual keyboard/open/execute check
   - Commit: `feat(app): add command search`
 
 ### Slice 5 — Visual and accessibility polish
@@ -165,7 +170,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 
 | Current surface/group | Current commands | Spec route |
 | --- | --- | --- |
-| App header quick access | New, Open, Save, Undo, Redo | App/quick-access bar |
+| App header quick access | New, Open, Save, Undo, Redo, Commands | App/quick-access bar |
 | Project menu | New, Open, Save, Export | Project menu; Export also Plan workspace |
 | Examples menu | Shell, Wall demo loaders | Examples picker / Project menu |
 | Workflow tab row | Design, Frame, Openings, Roofs, Annotate, Inspect, Plan | Workflow command strip tabs; Plan switches to Plan workspace |
@@ -178,6 +183,7 @@ with documentation and mockups, then migrates the app without changing the `.fra
 | Workflow strip: Annotate / Dimensions panel | Linear | Workflow command strip: Annotate panel |
 | Contextual options strip | Wall defaults/context; Room/Ceiling/Vault/Floor placement context; Dimension Kind and Axis | Contextual tool options strip |
 | Workflow strip: Plan / Generated panel | Section | Plan command tab or view-control bar |
+| Command search modal | Searchable `actions::ACTIONS` rows | Universal backstop for commands that no longer occupy permanent chrome |
 
 ## Final verification
 

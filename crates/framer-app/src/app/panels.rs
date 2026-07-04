@@ -83,6 +83,9 @@ impl FramerApp {
             header_divider(ui, head.divider);
             self.project_header_menu(ui, head);
             self.examples_header_menu(ui, head);
+            if header_command_button(ui, head, ActionId::CommandSearch, true, None).clicked() {
+                self.execute_action(ActionId::CommandSearch);
+            }
             let path_width = (ui.available_width() * 0.34).clamp(220.0, 460.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.project_path)
@@ -322,6 +325,83 @@ impl FramerApp {
                 ui.close();
             }
         });
+    }
+
+    pub(super) fn command_search_overlay(&mut self, ctx: &egui::Context) {
+        if !self.command_search.open {
+            return;
+        }
+
+        let mut open = self.command_search.open;
+        let mut close = false;
+        let mut execute = None;
+
+        egui::Window::new("Command Search")
+            .id(egui::Id::new("command-search"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                {
+                    close = true;
+                }
+
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.command_search.query)
+                        .hint_text("Search commands")
+                        .desired_width(ui.available_width()),
+                );
+                field.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::TextEdit,
+                        true,
+                        "Command search input",
+                    )
+                });
+                if self.command_search.focus_input {
+                    field.request_focus();
+                    self.command_search.focus_input = false;
+                }
+
+                ui.add_space(design::space::SM);
+                let query = self.command_search.query.trim().to_owned();
+                let matches: Vec<_> = actions::ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| command_search_matches(*action, &query))
+                    .take(12)
+                    .collect();
+                let enter_pressed = ui
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                if enter_pressed {
+                    execute = matches
+                        .iter()
+                        .find(|action| self.action_enabled(action.id))
+                        .map(|action| action.id);
+                }
+
+                ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for action in matches {
+                        let enabled = self.action_enabled(action.id);
+                        if command_search_action(ui, action, enabled).clicked() {
+                            execute = Some(action.id);
+                        }
+                    }
+                });
+            });
+
+        if close {
+            open = false;
+        }
+        self.command_search.open = open;
+        if let Some(id) = execute {
+            self.command_search.open = false;
+            self.command_search.query.clear();
+            self.execute_action(id);
+        }
     }
 
     fn toggle_dimension_tool(&mut self) {
@@ -2939,6 +3019,77 @@ fn should_capture_edit_base(
     text_focused: bool,
 ) -> bool {
     !is_pending && (pointer_down || any_click || text_focused)
+}
+
+fn action_owner_label(owner: actions::ActionOwner) -> &'static str {
+    match owner {
+        actions::ActionOwner::Project => "Project",
+        actions::ActionOwner::Edit => "Edit",
+        actions::ActionOwner::Samples => "Examples",
+        actions::ActionOwner::Workspace => "Workspace",
+        actions::ActionOwner::View => "View",
+        actions::ActionOwner::Structure => "Structure",
+        actions::ActionOwner::Openings => "Openings",
+        actions::ActionOwner::Roofs => "Roofs",
+        actions::ActionOwner::Dimensions => "Dimensions",
+        actions::ActionOwner::Plan => "Plan",
+    }
+}
+
+fn action_route_label(action: actions::ActionMetadata) -> &'static str {
+    match action.command_strip.map(|route| route.presentation) {
+        Some(actions::CommandPresentation::TopLevel) => "Workflow strip",
+        Some(actions::CommandPresentation::FlyoutVariant { flyout }) => flyout,
+        None => match action.primary_surface {
+            actions::CommandSurface::AppQuickAccess => "App header",
+            actions::CommandSurface::ProjectMenu => "Project menu",
+            actions::CommandSurface::ExamplesPicker => "Examples",
+            actions::CommandSurface::WorkspaceViewBar => "Workspace bar",
+            actions::CommandSurface::WorkflowCommandStrip => "Workflow strip",
+            actions::CommandSurface::CommandStripFlyout => "Flyout",
+            actions::CommandSurface::ContextToolbar => "Context toolbar",
+            actions::CommandSurface::ToolOptionsStrip => "Tool options",
+            actions::CommandSurface::Inspector => "Inspector",
+            actions::CommandSurface::PlanWorkspace => "Plan workspace",
+            actions::CommandSurface::CommandSearch => "Command search",
+            actions::CommandSurface::Shortcut => "Shortcut",
+        },
+    }
+}
+
+fn command_search_matches(action: actions::ActionMetadata, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let query = query.to_ascii_lowercase();
+    let route = action_route_label(action);
+    [
+        action.label,
+        action.tooltip,
+        action_owner_label(action.owner),
+        route,
+    ]
+    .into_iter()
+    .any(|value| value.to_ascii_lowercase().contains(&query))
+}
+
+fn command_search_action(ui: &mut Ui, action: actions::ActionMetadata, enabled: bool) -> Response {
+    let label = format!(
+        "{}    {} / {}",
+        action.label,
+        action_owner_label(action.owner),
+        action_route_label(action)
+    );
+    let response = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(label).min_size(Vec2::new(ui.available_width(), 30.0)),
+        )
+        .on_hover_text(action.tooltip);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
+    response
 }
 
 fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) -> Response {
