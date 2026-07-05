@@ -6,7 +6,7 @@ use framer_core::{
     FloorDeck, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
     RoofPlane, RoofPlaneFrame, Room, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin,
     WallJoinKind, concave_polygon_corners, level_wall_loop_outline, point_in_polygon,
-    polygon_area_square_inches, room_boundaries_on_level,
+    polygon_area_square_inches, room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2128,7 +2128,7 @@ fn generate_roof_plans(
 
 /// Resolve every surface region to its closed plan outline in one pass per level's
 /// wall graph. `Polygon` regions are their own outline; `Room` regions are
-/// resolved through [`room_boundaries_on_level`] so stacked levels with different
+/// resolved through [`room_boundaries_for_rooms`] so stacked levels with different
 /// walls do not bleed into each other. Each entry lines up with `regions`; `None`
 /// marks an open `Room` loop (a transient mid-edit condition, surfaced as a
 /// diagnostic) or an unresolvable room reference.
@@ -2155,7 +2155,7 @@ fn resolve_surface_regions(
         }
     }
 
-    let boundaries = resolve_room_boundaries(model, &rooms);
+    let boundaries = room_boundaries_for_rooms(model, &rooms);
     regions
         .iter()
         .zip(slots)
@@ -2166,31 +2166,6 @@ fn resolve_surface_regions(
                 .map(|boundary| boundary.vertices.clone()),
         })
         .collect()
-}
-
-fn resolve_room_boundaries(
-    model: &BuildingModel,
-    rooms: &[&Room],
-) -> Vec<Option<framer_core::RoomBoundary>> {
-    let mut batches: BTreeMap<ElementId, Vec<(usize, Point2)>> = BTreeMap::new();
-    for (slot, room) in rooms.iter().enumerate() {
-        batches
-            .entry(room.level.clone())
-            .or_default()
-            .push((slot, room.seed));
-    }
-
-    let mut resolved = vec![None; rooms.len()];
-    for (level, entries) in batches {
-        let seeds: Vec<Point2> = entries.iter().map(|(_, seed)| *seed).collect();
-        for ((slot, _), boundary) in entries
-            .into_iter()
-            .zip(room_boundaries_on_level(model, &level, &seeds))
-        {
-            resolved[slot] = boundary;
-        }
-    }
-    resolved
 }
 
 fn system_by_id<'a>(model: &'a BuildingModel, id: &ElementId) -> Option<&'a ConstructionSystem> {
@@ -2349,7 +2324,7 @@ fn room_schedule(
     diagnostics: &mut Vec<PlanDiagnostic>,
 ) -> Vec<RoomSchedule> {
     let rooms: Vec<&Room> = model.rooms.iter().collect();
-    let boundaries = resolve_room_boundaries(model, &rooms);
+    let boundaries = room_boundaries_for_rooms(model, &rooms);
     let mut schedule = Vec::with_capacity(model.rooms.len());
     for (room, boundary) in model.rooms.iter().zip(boundaries) {
         match boundary {

@@ -1245,25 +1245,8 @@ fn snap_kind_label(kind: SnapKind) -> Option<&'static str> {
 }
 
 fn room_boundaries_by_level(model: &BuildingModel) -> Vec<Option<framer_core::RoomBoundary>> {
-    let mut batches: BTreeMap<ElementId, Vec<(usize, Point2)>> = BTreeMap::new();
-    for (index, room) in model.rooms.iter().enumerate() {
-        batches
-            .entry(room.level.clone())
-            .or_default()
-            .push((index, room.seed));
-    }
-
-    let mut room_boundaries = vec![None; model.rooms.len()];
-    for (level, entries) in batches {
-        let seeds: Vec<Point2> = entries.iter().map(|(_, seed)| *seed).collect();
-        for ((index, _), boundary) in entries
-            .into_iter()
-            .zip(framer_core::room_boundaries_on_level(model, &level, &seeds))
-        {
-            room_boundaries[index] = boundary;
-        }
-    }
-    room_boundaries
+    let rooms: Vec<&framer_core::Room> = model.rooms.iter().collect();
+    framer_core::room_boundaries_for_rooms(model, &rooms)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{BuildingModel, ElementId, Length, Point2, Wall};
+use crate::{BuildingModel, ElementId, Length, Point2, Room, Wall};
 
 /// The derived geometry of a room: its boundary loop (counterclockwise), its
 /// perimeter, and its area. None of this is persisted — it is recomputed from
@@ -34,6 +34,10 @@ impl RoomBoundary {
 
 /// The boundary of the room enclosing `seed`, or `None` if `seed` is not inside
 /// any closed wall loop.
+///
+/// This legacy helper considers walls across all levels. Prefer
+/// [`room_boundary_on_level`] for authored room/surface lookups that belong to a
+/// specific level.
 pub fn room_boundary(model: &BuildingModel, seed: Point2) -> Option<RoomBoundary> {
     bounded_faces(model)
         .into_iter()
@@ -56,8 +60,11 @@ pub fn room_boundary_on_level(
 
 /// Resolve many room seeds against the wall graph at once: the bounded faces are
 /// computed a single time and each seed (in order) is matched to its enclosing
-/// face. Returns `None` for any seed not inside a closed loop. Prefer this over
-/// calling [`room_boundary`] in a loop.
+/// face. Returns `None` for any seed not inside a closed loop.
+///
+/// This legacy helper considers walls across all levels. Prefer
+/// [`room_boundaries_on_level`] or [`room_boundaries_for_rooms`] for authored
+/// room/surface lookups that belong to specific levels.
 pub fn room_boundaries(model: &BuildingModel, seeds: &[Point2]) -> Vec<Option<RoomBoundary>> {
     let faces = bounded_faces(model);
     boundaries_from_faces(&faces, seeds)
@@ -72,6 +79,34 @@ pub fn room_boundaries_on_level(
 ) -> Vec<Option<RoomBoundary>> {
     let faces = bounded_faces_on_level(model, level);
     boundaries_from_faces(&faces, seeds)
+}
+
+/// Resolve authored rooms through their own level's wall graph in one pass per
+/// distinct level. Results preserve `rooms` order; `None` marks a room whose seed
+/// is not enclosed on that room's level.
+pub fn room_boundaries_for_rooms(
+    model: &BuildingModel,
+    rooms: &[&Room],
+) -> Vec<Option<RoomBoundary>> {
+    let mut batches: BTreeMap<ElementId, Vec<(usize, Point2)>> = BTreeMap::new();
+    for (slot, room) in rooms.iter().enumerate() {
+        batches
+            .entry(room.level.clone())
+            .or_default()
+            .push((slot, room.seed));
+    }
+
+    let mut resolved = vec![None; rooms.len()];
+    for (level, entries) in batches {
+        let seeds: Vec<Point2> = entries.iter().map(|(_, seed)| *seed).collect();
+        for ((slot, _), boundary) in entries
+            .into_iter()
+            .zip(room_boundaries_on_level(model, &level, &seeds))
+        {
+            resolved[slot] = boundary;
+        }
+    }
+    resolved
 }
 
 fn boundaries_from_faces(faces: &[Vec<Point2>], seeds: &[Point2]) -> Vec<Option<RoomBoundary>> {
@@ -322,9 +357,11 @@ fn point_from_key((x, y): (i64, i64)) -> Point2 {
 
 /// The number of enclosed rooms (bounded faces) in the wall graph — the count of
 /// closed loops the walls form. Equivalent to the length of [`room_boundaries`]
-/// for a seed inside every face, but without needing seed points. The draw-wall
-/// tool uses this to detect when a freshly committed wall just closed a loop: if
-/// the count rises across an edit, a room was enclosed.
+/// for a seed inside every face, but without needing seed points.
+///
+/// This legacy helper considers walls across all levels. Prefer
+/// [`enclosed_room_count_on_level`] for authored/editing behavior that belongs to
+/// a specific level.
 pub fn enclosed_room_count(model: &BuildingModel) -> usize {
     bounded_faces(model).len()
 }
@@ -537,7 +574,7 @@ pub fn point_in_polygon(point: Point2, vertices: &[Point2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildingModel, CodeProfile, Length, Point2, Wall};
+    use crate::{BuildingModel, CodeProfile, Length, Level, Point2, Room, RoomUsage, Wall};
 
     fn p(x_in: f64, y_in: f64) -> Point2 {
         Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
@@ -809,6 +846,72 @@ mod tests {
         assert!(
             results[1].is_none(),
             "a seed inside only the level-1 loop must not resolve on level-2"
+        );
+    }
+
+    #[test]
+    fn room_boundaries_for_rooms_groups_by_room_level_and_preserves_order() {
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.walls.clear();
+        for (index, (a, b)) in [
+            (p(0.0, 0.0), p(144.0, 0.0)),
+            (p(144.0, 0.0), p(144.0, 96.0)),
+            (p(144.0, 96.0), p(0.0, 96.0)),
+            (p(0.0, 96.0), p(0.0, 0.0)),
+            (p(240.0, 0.0), p(384.0, 0.0)),
+            (p(384.0, 0.0), p(384.0, 96.0)),
+            (p(384.0, 96.0), p(240.0, 96.0)),
+            (p(240.0, 96.0), p(240.0, 0.0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            model.walls.push(wall(&format!("w-{index}"), a, b));
+        }
+        model.rooms = vec![
+            Room::new(
+                "room-left",
+                "Left",
+                RoomUsage::Living,
+                "level-1",
+                p(72.0, 48.0),
+            ),
+            Room::new(
+                "room-upper",
+                "Upper",
+                RoomUsage::Living,
+                "level-2",
+                p(72.0, 48.0),
+            ),
+            Room::new(
+                "room-right",
+                "Right",
+                RoomUsage::Living,
+                "level-1",
+                p(312.0, 48.0),
+            ),
+        ];
+        let rooms: Vec<&Room> = model.rooms.iter().collect();
+
+        let boundaries = room_boundaries_for_rooms(&model, &rooms);
+
+        assert_eq!(boundaries.len(), 3);
+        assert!(
+            boundaries[0]
+                .as_ref()
+                .is_some_and(|boundary| (boundary.area_square_feet() - 96.0).abs() < 1e-6)
+        );
+        assert!(
+            boundaries[1].is_none(),
+            "the level-2 room must not borrow level-1 walls"
+        );
+        assert!(
+            boundaries[2]
+                .as_ref()
+                .is_some_and(|boundary| (boundary.area_square_feet() - 96.0).abs() < 1e-6)
         );
     }
 
