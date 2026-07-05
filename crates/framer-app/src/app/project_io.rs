@@ -14,11 +14,19 @@ pub(super) fn write_text_file(path: &Path, contents: String) -> Result<(), Strin
 }
 
 pub(super) fn export_paths(project_path: &str) -> (PathBuf, PathBuf) {
+    let base = export_base(project_path);
+    (base.with_extension("svg"), base.with_extension("csv"))
+}
+
+pub(super) fn compliance_report_path(project_path: &str) -> PathBuf {
+    export_base(project_path).with_extension("compliance.csv")
+}
+
+fn export_base(project_path: &str) -> PathBuf {
     let trimmed = project_path.trim();
-    let base = if trimmed.is_empty() {
+    if trimmed.is_empty() {
         PathBuf::from("framer-export.framer")
     } else {
         PathBuf::from(trimmed)
-    };
-    (base.with_extension("svg"), base.with_extension("csv"))
+    }
 }

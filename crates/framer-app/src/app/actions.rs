@@ -14,6 +14,7 @@ pub(crate) enum ActionId {
     OpenProject,
     SaveProject,
     ExportArtifacts,
+    ExportComplianceReport,
     Undo,
     Redo,
     LoadShellDemo,
@@ -193,6 +194,17 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         label: "Export",
         icon: Icon::Export,
         tooltip: "Export plan artifacts from Plan workspace",
+        owner: ActionOwner::Project,
+        primary_surface: CommandSurface::PlanWorkspace,
+        secondary_surfaces: SEARCH_PROJECT,
+        command_strip: None,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
+        id: ActionId::ExportComplianceReport,
+        label: "Compliance CSV",
+        icon: Icon::Export,
+        tooltip: "Export the compliance report from Plan workspace",
         owner: ActionOwner::Project,
         primary_surface: CommandSurface::PlanWorkspace,
         secondary_surfaces: SEARCH_PROJECT,
@@ -575,6 +587,7 @@ mod tests {
         ActionId::OpenProject,
         ActionId::SaveProject,
         ActionId::ExportArtifacts,
+        ActionId::ExportComplianceReport,
         ActionId::Undo,
         ActionId::Redo,
         ActionId::LoadShellDemo,
@@ -611,6 +624,7 @@ mod tests {
             | ActionId::OpenProject
             | ActionId::SaveProject
             | ActionId::ExportArtifacts
+            | ActionId::ExportComplianceReport
             | ActionId::Undo
             | ActionId::Redo
             | ActionId::LoadShellDemo
@@ -743,6 +757,7 @@ mod tests {
             ActionId::OpenProject,
             ActionId::SaveProject,
             ActionId::ExportArtifacts,
+            ActionId::ExportComplianceReport,
             ActionId::Undo,
             ActionId::Redo,
             ActionId::LoadShellDemo,

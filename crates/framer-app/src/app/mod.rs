@@ -30,6 +30,7 @@ use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
     export_project_svg, generate_project_plan,
 };
+use framer_standards::ComplianceReport;
 
 use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
@@ -40,7 +41,7 @@ use model_edit::{
     next_roof_id, next_room_id, next_standards_pack_id, next_system_id, next_wall_id,
     translate_keeps_ortho, translate_keeps_positive_length,
 };
-use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
+use project_io::{DEFAULT_PROJECT_PATH, compliance_report_path, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
 
 pub(crate) struct FramerApp {
@@ -48,6 +49,7 @@ pub(crate) struct FramerApp {
     selected_wall: usize,
     selected: Selection,
     project_plan: Option<ProjectFramePlan>,
+    compliance_report: Option<ComplianceReport>,
     library_issues: Vec<framer_library::LibraryIssue>,
     library_issue_error: Option<String>,
     error: Option<String>,
@@ -496,6 +498,7 @@ impl Default for FramerApp {
             selected_wall: 0,
             selected: Selection::Wall,
             project_plan: None,
+            compliance_report: None,
             library_issues: Vec::new(),
             library_issue_error: None,
             error: None,
@@ -595,16 +598,22 @@ impl FramerApp {
 
         match generate_project_plan(&self.model) {
             Ok(mut plan) => {
+                let resolved_standards = self.model.resolved_standards();
+                let report = framer_standards::evaluate(&self.model, &resolved_standards, &plan);
+                plan.diagnostics
+                    .extend(framer_standards::diagnostics(&report));
                 append_library_diagnostics(
                     &mut plan,
                     &self.library_issues,
                     self.library_issue_error.as_deref(),
                 );
+                self.compliance_report = Some(report);
                 self.project_plan = Some(plan);
                 self.error = None;
             }
             Err(error) => {
                 self.project_plan = None;
+                self.compliance_report = None;
                 self.error = Some(error.to_string());
             }
         }
@@ -872,6 +881,157 @@ impl FramerApp {
         });
     }
 
+    fn export_compliance_report(&mut self) {
+        let Some(report) = &self.compliance_report else {
+            self.artifact_status =
+                Some("Export failed: regenerate a valid compliance report first".to_owned());
+            return;
+        };
+
+        let csv_path = compliance_report_path(&self.project_path);
+        self.artifact_status = Some(match write_text_file(&csv_path, report.to_csv()) {
+            Ok(()) => format!("Exported {}", csv_path.display()),
+            Err(error) => format!("Export failed: {error}"),
+        });
+    }
+
+    fn focus_compliance_source(&mut self, id: ElementId) {
+        self.file_status = Some(if self.select_model_element(&id) {
+            format!("Selected compliance source {}", id.0)
+        } else {
+            format!("No selectable compliance source for {}", id.0)
+        });
+    }
+
+    fn select_model_element(&mut self, id: &ElementId) -> bool {
+        if let Some((index, level)) = self
+            .model
+            .walls
+            .iter()
+            .enumerate()
+            .find_map(|(index, wall)| (&wall.id == id).then(|| (index, wall.level.clone())))
+        {
+            self.selected_wall = index;
+            self.set_active_level(level);
+            self.selected = Selection::Wall;
+            return true;
+        }
+
+        for (index, wall) in self.model.walls.iter().enumerate() {
+            if wall.openings.iter().any(|opening| &opening.id == id) {
+                self.selected_wall = index;
+                self.set_active_level(wall.level.clone());
+                self.selected = Selection::Opening(id.0.clone());
+                return true;
+            }
+            if wall.dimensions.iter().any(|dimension| &dimension.id == id) {
+                self.selected_wall = index;
+                self.set_active_level(wall.level.clone());
+                self.selected = Selection::Dimension(id.0.clone());
+                return true;
+            }
+            if wall.bracing.iter().any(|panel| &panel.id == id) {
+                self.selected_wall = index;
+                self.set_active_level(wall.level.clone());
+                self.selected = Selection::Wall;
+                return true;
+            }
+        }
+
+        if let Some(level) = self
+            .model
+            .levels
+            .iter()
+            .find_map(|level| (&level.id == id).then(|| level.id.clone()))
+        {
+            self.set_active_level(level.clone());
+            self.selected = Selection::Level(level.0);
+            return true;
+        }
+        if let Some(room) = self.model.rooms.iter().find(|room| &room.id == id) {
+            self.set_active_level(room.level.clone());
+            self.selected = Selection::Room(id.0.clone());
+            return true;
+        }
+        if let Some(plane) = self.model.roof_planes.iter().find(|plane| &plane.id == id) {
+            self.set_active_level(plane.level.clone());
+            self.selected = Selection::RoofPlane(id.0.clone());
+            return true;
+        }
+        if let Some(ceiling) = self.model.ceilings.iter().find(|ceiling| &ceiling.id == id) {
+            self.set_active_level(ceiling.level.clone());
+            self.selected = Selection::Ceiling(id.0.clone());
+            return true;
+        }
+        if let Some(deck) = self.model.floor_decks.iter().find(|deck| &deck.id == id) {
+            self.set_active_level(deck.level.clone());
+            self.selected = Selection::FloorDeck(id.0.clone());
+            return true;
+        }
+        if self.model.systems.iter().any(|system| &system.id == id) {
+            self.selected = Selection::System(id.0.clone());
+            return true;
+        }
+        if self
+            .model
+            .materials
+            .iter()
+            .any(|material| &material.id == id)
+        {
+            self.selected = Selection::Material(id.0.clone());
+            return true;
+        }
+        if self
+            .model
+            .furnishings
+            .iter()
+            .any(|furnishing| &furnishing.id == id)
+        {
+            self.selected = Selection::Furnishing(id.0.clone());
+            return true;
+        }
+        if self.model.mep_objects.iter().any(|object| &object.id == id) {
+            self.selected = Selection::MepObject(id.0.clone());
+            return true;
+        }
+        if self.model.standards_packs.iter().any(|pack| &pack.id == id) {
+            self.selected = Selection::StandardsPack(id.0.clone());
+            return true;
+        }
+        if let Some(instance) = self
+            .model
+            .furnishing_instances
+            .iter()
+            .find(|instance| &instance.id == id)
+        {
+            self.set_active_level(instance.level.clone());
+            self.selected = Selection::FurnishingInstance(id.0.clone());
+            return true;
+        }
+        if let Some(instance) = self
+            .model
+            .mep_instances
+            .iter()
+            .find(|instance| &instance.id == id)
+        {
+            self.set_active_level(instance.level.clone());
+            self.selected = Selection::MepInstance(id.0.clone());
+            return true;
+        }
+        if let Some(level) = self
+            .model
+            .braced_wall_lines
+            .iter()
+            .find_map(|line| (&line.id == id).then(|| line.level.clone()))
+        {
+            self.set_active_level(level.clone());
+            self.selected = Selection::Level(level.0);
+            return true;
+        }
+
+        false
+    }
+
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
         match mode {
             WorkspaceMode::Plan => self.command_tab = actions::WorkflowTab::Plan,
@@ -926,6 +1086,9 @@ impl FramerApp {
             actions::ActionId::Undo => self.history.can_undo(),
             actions::ActionId::Redo => self.history.can_redo(),
             actions::ActionId::ExportArtifacts => self.workspace_mode.shows_generated_plan(),
+            actions::ActionId::ExportComplianceReport => {
+                self.workspace_mode.shows_generated_plan() && self.compliance_report.is_some()
+            }
             actions::ActionId::DeleteSelection => self.is_selection_deletable(),
             actions::ActionId::AddDoor
             | actions::ActionId::AddWindow
@@ -969,6 +1132,7 @@ impl FramerApp {
             actions::ActionId::OpenProject => self.load_project_file(),
             actions::ActionId::SaveProject => self.save_project_file(),
             actions::ActionId::ExportArtifacts => self.export_current_artifacts(),
+            actions::ActionId::ExportComplianceReport => self.export_compliance_report(),
             actions::ActionId::Undo => self.undo(),
             actions::ActionId::Redo => self.redo(),
             actions::ActionId::LoadShellDemo => self.reset_demo(),
@@ -3583,6 +3747,61 @@ mod tests {
 
         let _ = fs::remove_file(svg_path);
         let _ = fs::remove_file(csv_path);
+    }
+
+    #[test]
+    fn app_regenerates_and_exports_compliance_report() {
+        let path =
+            std::env::temp_dir().join(format!("framer-compliance-export-{}.framer", process::id()));
+        let csv_path = path.with_extension("compliance.csv");
+        let mut app = FramerApp {
+            project_path: path.display().to_string(),
+            workspace_mode: WorkspaceMode::Plan,
+            ..FramerApp::default()
+        };
+
+        let report = app
+            .compliance_report
+            .as_ref()
+            .expect("rebuild should populate a derived compliance report");
+        assert!(!report.entries.is_empty());
+
+        app.export_compliance_report();
+
+        assert!(
+            matches!(app.artifact_status.as_deref(), Some(status) if status.starts_with("Exported "))
+        );
+        let csv = fs::read_to_string(&csv_path).unwrap();
+        assert!(csv.starts_with("rule,citation,pack,outcome,element,message,chain\n"));
+        assert!(csv.contains("irc2021."));
+
+        let _ = fs::remove_file(csv_path);
+    }
+
+    #[test]
+    fn compliance_source_focus_selects_existing_model_elements() {
+        let mut app = FramerApp::default();
+        let (wall_index, opening_id, wall_level) = app
+            .model
+            .walls
+            .iter()
+            .enumerate()
+            .find_map(|(index, wall)| {
+                wall.openings
+                    .first()
+                    .map(|opening| (index, opening.id.clone(), wall.level.clone()))
+            })
+            .expect("demo shell should include at least one opening");
+
+        app.focus_compliance_source(opening_id.clone());
+
+        assert_eq!(app.selected_wall, wall_index);
+        assert_eq!(app.selected, Selection::Opening(opening_id.0.clone()));
+        assert_eq!(app.active_level_id(), wall_level);
+        assert!(matches!(
+            app.file_status.as_deref(),
+            Some(status) if status.contains(opening_id.0.as_str())
+        ));
     }
 
     #[test]

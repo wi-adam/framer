@@ -442,8 +442,7 @@ established patterns in `framer-library` exactly).
 [command-surfaces.md](../specs/command-surfaces.md); all mutations via the existing
 undoable `edit()` path).
 
-**Status:** Implemented in the app authoring slice; compliance panel/report export remains
-PR 9.
+**Status:** Implemented in the app authoring slice (PR 8).
 
 - Site-context editor in the inspector: jurisdiction text field; SDC dropdown (incl.
   "Unknown"); integer fields for wind/snow; frost depth as a length field. Every change
@@ -461,6 +460,8 @@ PR 9.
 ## PR 9 — App: compliance panel + report export
 
 **Scope:** verification surface. Difficulty: medium.
+
+**Status:** Implemented in the app compliance/report export slice.
 
 - Compliance panel: entries grouped by outcome (Violations, Needs review, Advisories,
   Waived, Passed — collapsed by default for Passed), each row shows rule, citation,
