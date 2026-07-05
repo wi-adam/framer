@@ -861,7 +861,7 @@ impl FramerApp {
 
         let (svg_path, csv_path) = export_paths(&self.project_path);
         let svg = export_project_svg(&self.model, plan);
-        let csv = export_bom_csv(&plan.bom());
+        let csv = export_bom_csv(&plan.bom(), &plan.fasteners);
 
         let result = write_text_file(&svg_path, svg).and_then(|()| write_text_file(&csv_path, csv));
         self.artifact_status = Some(match result {
@@ -3397,6 +3397,7 @@ mod tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         };
 
         append_library_diagnostics(&mut plan, &issues, None);
@@ -3431,6 +3432,7 @@ mod tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         };
         append_library_diagnostics(&mut failed_plan, &issues, Some("resolver failed"));
 

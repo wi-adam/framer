@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConstructionSystem, ElementId, FloorDeck,
-    FramingDefaults, FramingSpec, HeaderRow, HeaderSpanTable, LayerFunction, Length, Material,
-    ModelError, Opening, Point2, ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, SiteContext,
-    Slope, SpanDirection, SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind,
-    concave_polygon_corners, level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
+    BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConnectionKind, ConstructionSystem,
+    ElementId, FastenerSchedule, FloorDeck, FramingDefaults, FramingSpec, HeaderRow,
+    HeaderSpanTable, LayerFunction, Length, Material, ModelError, Opening, Point2,
+    ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, SiteContext, Slope, SpanDirection,
+    SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind, concave_polygon_corners,
+    level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
     room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,17 @@ pub struct ProjectFramePlan {
     pub rooms: Vec<RoomSchedule>,
     #[serde(default)]
     pub layers: Vec<LayerBomItem>,
+    #[serde(default)]
+    pub fasteners: Vec<FastenerTakeoff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastenerTakeoff {
+    pub fastener: String,
+    pub connection: ConnectionKind,
+    pub quantity: u32,
+    pub rule: String,
+    pub citation: String,
 }
 
 /// A derived room takeoff row: identity plus the area/perimeter computed from the
@@ -261,6 +273,213 @@ fn layer_bom_from<'a>(layers: impl IntoIterator<Item = &'a LayerBomItem>) -> Vec
             },
         )
         .collect()
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConnectionCounts {
+    stud_to_plate: u32,
+    top_plate_lap: u32,
+    header_to_king_stud: u32,
+}
+
+struct FastenerAccumulator {
+    quantity: u32,
+    rule: String,
+    citation: String,
+}
+
+fn fastener_takeoff(
+    model: &BuildingModel,
+    plan: &ProjectFramePlan,
+    standards: &ResolvedStandards,
+    diagnostics: &mut Vec<PlanDiagnostic>,
+) -> Vec<FastenerTakeoff> {
+    let counts = connection_counts(model, plan);
+    let mut grouped = BTreeMap::<(String, ConnectionKind), FastenerAccumulator>::new();
+    let mut saw_sheathing_row = false;
+
+    for (_, schedule) in &standards.fastening {
+        for row in &schedule.rows {
+            if matches!(
+                row.connection,
+                ConnectionKind::SheathingEdge | ConnectionKind::SheathingField
+            ) {
+                saw_sheathing_row = true;
+                continue;
+            }
+
+            let quantity = fastener_quantity(
+                row.connection,
+                &row.schedule,
+                model,
+                &standards.defaults,
+                &counts,
+            );
+            if quantity == 0 {
+                continue;
+            }
+
+            let entry = grouped
+                .entry((row.fastener.clone(), row.connection))
+                .or_insert_with(|| FastenerAccumulator {
+                    quantity: 0,
+                    rule: schedule.rule.clone(),
+                    citation: schedule.citation.clone(),
+                });
+            entry.quantity = entry.quantity.saturating_add(quantity);
+        }
+    }
+
+    if saw_sheathing_row {
+        diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Info,
+            "standards.fastening.sheathing-not-counted",
+            None,
+            "Fastening schedule rows for sheathing edges/fields were skipped because panel layout is not generated yet.",
+        ));
+    }
+
+    grouped
+        .into_iter()
+        .map(
+            |(
+                (fastener, connection),
+                FastenerAccumulator {
+                    quantity,
+                    rule,
+                    citation,
+                },
+            )| FastenerTakeoff {
+                fastener,
+                connection,
+                quantity,
+                rule,
+                citation,
+            },
+        )
+        .collect()
+}
+
+fn connection_counts(model: &BuildingModel, plan: &ProjectFramePlan) -> ConnectionCounts {
+    let mut counts = ConnectionCounts::default();
+
+    for wall_plan in &plan.wall_plans {
+        counts.stud_to_plate = counts.stud_to_plate.saturating_add(
+            usize_to_u32(
+                wall_plan
+                    .members
+                    .iter()
+                    .filter(|member| is_wall_stud(member))
+                    .count(),
+            )
+            .saturating_mul(2),
+        );
+
+        let mut top_plate_lines = BTreeMap::<Length, u32>::new();
+        for member in wall_plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::TopPlate)
+        {
+            *top_plate_lines.entry(member.elevation).or_default() += 1;
+        }
+        counts.top_plate_lap = counts.top_plate_lap.saturating_add(
+            top_plate_lines
+                .values()
+                .map(|pieces| pieces.saturating_sub(1))
+                .sum(),
+        );
+    }
+
+    for wall in &model.walls {
+        let Some(wall_plan) = plan.wall_plan(&wall.id) else {
+            continue;
+        };
+        for opening in &wall.openings {
+            let has_header = wall_plan
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::Header && member.source == opening.id);
+            if has_header {
+                counts.header_to_king_stud = counts.header_to_king_stud.saturating_add(2);
+            }
+        }
+    }
+
+    counts
+}
+
+fn is_wall_stud(member: &FrameMember) -> bool {
+    member.orientation == MemberOrientation::Vertical
+        && matches!(
+            member.kind,
+            MemberKind::CornerPost
+                | MemberKind::PartitionStud
+                | MemberKind::BackingStud
+                | MemberKind::CommonStud
+                | MemberKind::KingStud
+                | MemberKind::JackStud
+                | MemberKind::CrippleStud
+        )
+}
+
+fn fastener_quantity(
+    connection: ConnectionKind,
+    schedule: &FastenerSchedule,
+    model: &BuildingModel,
+    defaults: &FramingDefaults,
+    counts: &ConnectionCounts,
+) -> u32 {
+    match schedule {
+        FastenerSchedule::Count(count) => {
+            connection_count(connection, counts).saturating_mul(*count)
+        }
+        FastenerSchedule::Spacing { on_center } => {
+            spacing_fastener_count(connection, *on_center, model, defaults)
+        }
+        FastenerSchedule::EdgeField { .. } => 0,
+    }
+}
+
+fn connection_count(connection: ConnectionKind, counts: &ConnectionCounts) -> u32 {
+    match connection {
+        ConnectionKind::StudToPlateEnd | ConnectionKind::StudToPlateToe => counts.stud_to_plate,
+        ConnectionKind::TopPlateLap => counts.top_plate_lap,
+        ConnectionKind::HeaderToKingStud => counts.header_to_king_stud,
+        ConnectionKind::DoubleTopPlate
+        | ConnectionKind::SolePlateToJoist
+        | ConnectionKind::SheathingEdge
+        | ConnectionKind::SheathingField => 0,
+    }
+}
+
+fn spacing_fastener_count(
+    connection: ConnectionKind,
+    on_center: Length,
+    model: &BuildingModel,
+    defaults: &FramingDefaults,
+) -> u32 {
+    match connection {
+        ConnectionKind::DoubleTopPlate if defaults.double_top_plate => {
+            model.walls.iter().fold(0u32, |total, wall| {
+                total.saturating_add(ceil_length_div(wall.length, on_center))
+            })
+        }
+        _ => 0,
+    }
+}
+
+fn ceil_length_div(length: Length, divisor: Length) -> u32 {
+    if length <= Length::ZERO || divisor <= Length::ZERO {
+        return 0;
+    }
+    let length = length.ticks();
+    let divisor = divisor.ticks();
+    usize_to_u32(((length + divisor - 1) / divisor) as usize)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Build the per-layer material takeoff for a single wall. Net face area is the
@@ -2302,6 +2521,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
         diagnostics: project_diagnostics(model),
         rooms: Vec::new(),
         layers: Vec::new(),
+        fasteners: Vec::new(),
     };
 
     for wall in &model.walls {
@@ -2341,6 +2561,9 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
             )
             .chain(plan.roof_plans.iter().flat_map(|roof| roof.layers.iter())),
     );
+    let mut fastener_diagnostics = Vec::new();
+    plan.fasteners = fastener_takeoff(model, &plan, &standards, &mut fastener_diagnostics);
+    plan.diagnostics.append(&mut fastener_diagnostics);
 
     Ok(plan)
 }
@@ -3214,7 +3437,7 @@ fn is_inside_opening_framing_assembly(
     })
 }
 
-pub fn export_bom_csv(bom: &[BomItem]) -> String {
+pub fn export_bom_csv(bom: &[BomItem], fasteners: &[FastenerTakeoff]) -> String {
     let mut items = bom.to_vec();
     items.sort_by_key(|item| (item.profile, item.kind, item.cut_length));
 
@@ -3240,6 +3463,32 @@ pub fn export_bom_csv(bom: &[BomItem]) -> String {
                 .join(","),
         );
         csv.push('\n');
+    }
+
+    if !fasteners.is_empty() {
+        let mut fastener_rows = fasteners.to_vec();
+        fastener_rows.sort_by(|a, b| (&a.fastener, a.connection).cmp(&(&b.fastener, b.connection)));
+
+        csv.push('\n');
+        csv.push_str("fastener_quantity,fastener,connection,rule,citation\n");
+        for item in fastener_rows {
+            let fields = [
+                item.quantity.to_string(),
+                item.fastener,
+                connection_kind_label(item.connection).to_owned(),
+                item.rule,
+                item.citation,
+            ];
+
+            csv.push_str(
+                &fields
+                    .iter()
+                    .map(|field| csv_field(field))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            csv.push('\n');
+        }
     }
     csv
 }
@@ -3306,6 +3555,19 @@ pub fn export_room_schedule_csv(rooms: &[RoomSchedule]) -> String {
         csv.push('\n');
     }
     csv
+}
+
+fn connection_kind_label(connection: ConnectionKind) -> &'static str {
+    match connection {
+        ConnectionKind::StudToPlateEnd => "stud to plate end",
+        ConnectionKind::StudToPlateToe => "stud to plate toe",
+        ConnectionKind::TopPlateLap => "top plate lap",
+        ConnectionKind::DoubleTopPlate => "double top plate",
+        ConnectionKind::SolePlateToJoist => "sole plate to joist",
+        ConnectionKind::HeaderToKingStud => "header to king stud",
+        ConnectionKind::SheathingEdge => "sheathing edge",
+        ConnectionKind::SheathingField => "sheathing field",
+    }
 }
 
 pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
@@ -3764,7 +4026,8 @@ pub enum SolverError {
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        BuildingModel, ElementId, FramingDefaults, Opening, Wall, load_project, save_project,
+        BuildingModel, ElementId, FasteningRow, FasteningSchedule, FramingDefaults, Opening,
+        StandardsPack, StandardsTables, Wall, load_project, save_project,
     };
 
     use super::*;
@@ -3804,6 +4067,44 @@ mod tests {
             max_span,
             jack_studs,
         }
+    }
+
+    fn add_fastening_pack(model: &mut BuildingModel, rule: &str, rows: Vec<FasteningRow>) {
+        let defaults = model.framing_defaults();
+        let pack_id = ElementId::new(format!("std-{}", rule.replace('.', "-")));
+        model.standards.push(pack_id.clone());
+        model.standards_packs.push(StandardsPack {
+            id: pack_id,
+            name: "Test fastening pack".to_owned(),
+            edition: "test".to_owned(),
+            source: None,
+            tables: StandardsTables {
+                defaults,
+                studs: Vec::new(),
+                headers: Vec::new(),
+                fastening: vec![FasteningSchedule {
+                    rule: rule.to_owned(),
+                    citation: "Test Fastening Schedule".to_owned(),
+                    rows,
+                }],
+                bracing: Vec::new(),
+            },
+            checks: Vec::new(),
+            overlays: Vec::new(),
+            tags: Vec::new(),
+            properties: std::collections::BTreeMap::new(),
+        });
+    }
+
+    fn fastener_row<'a>(
+        plan: &'a ProjectFramePlan,
+        fastener: &str,
+        connection: ConnectionKind,
+    ) -> &'a FastenerTakeoff {
+        plan.fasteners
+            .iter()
+            .find(|row| row.fastener == fastener && row.connection == connection)
+            .unwrap_or_else(|| panic!("expected {fastener:?} takeoff for {connection:?}"))
     }
 
     /// A closed 12ft × 8ft rectangle with one room seeded at its centre.
@@ -4829,12 +5130,132 @@ mod tests {
         let model = BuildingModel::demo_shell();
         let plan = generate_project_plan(&model).unwrap();
         let svg = export_project_svg(&model, &plan);
-        let csv = export_bom_csv(&plan.bom());
+        let csv = export_bom_csv(&plan.bom(), &plan.fasteners);
 
         assert!(svg.contains("data-wall=\"wall-front\""));
         assert!(svg.contains("data-join=\"join-front-right\""));
         assert!(svg.contains("data-wall-elevation=\"wall-right\""));
         assert!(csv.contains("corner post"));
+    }
+
+    #[test]
+    fn starter_fastening_schedule_emits_expected_takeoff_for_known_wall() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(Wall::new("wall", "Wall", Length::from_feet(8.0), &code));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let second = generate_project_plan(&model).unwrap();
+
+        assert_eq!(
+            plan.fasteners, second.fasteners,
+            "fastener takeoff should be deterministic"
+        );
+
+        let end_nails = fastener_row(&plan, "16d common nail", ConnectionKind::StudToPlateEnd);
+        let toe_nails = fastener_row(&plan, "8d common nail", ConnectionKind::StudToPlateToe);
+        let double_top = fastener_row(&plan, "16d common nail", ConnectionKind::DoubleTopPlate);
+
+        assert_eq!(end_nails.quantity, 28);
+        assert_eq!(end_nails.rule, "irc2021.r602.3-1.fastening");
+        assert_eq!(end_nails.citation, "IRC 2021 Table R602.3(1)");
+        assert_eq!(toe_nails.quantity, 56);
+        assert_eq!(double_top.quantity, 6);
+        assert!(
+            !plan
+                .fasteners
+                .iter()
+                .any(|row| row.connection == ConnectionKind::TopPlateLap)
+        );
+
+        let csv = export_bom_csv(&plan.bom(), &plan.fasteners);
+        assert!(csv.contains("\n\nfastener_quantity,fastener,connection,rule,citation\n"));
+        assert!(csv.contains(
+            "28,16d common nail,stud to plate end,irc2021.r602.3-1.fastening,IRC 2021 Table R602.3(1)"
+        ));
+        assert!(csv.contains(
+            "6,16d common nail,double top plate,irc2021.r602.3-1.fastening,IRC 2021 Table R602.3(1)"
+        ));
+    }
+
+    #[test]
+    fn fastening_schedule_counts_header_to_king_connections_from_generated_headers() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(36.0),
+            Length::from_inches(80.0),
+        ));
+        model.walls.push(wall);
+        add_fastening_pack(
+            &mut model,
+            "test.fastening.header",
+            vec![FasteningRow {
+                connection: ConnectionKind::HeaderToKingStud,
+                fastener: "10d common nail".to_owned(),
+                schedule: FastenerSchedule::Count(2),
+            }],
+        );
+
+        let plan = generate_project_plan(&model).unwrap();
+        let row = fastener_row(&plan, "10d common nail", ConnectionKind::HeaderToKingStud);
+
+        assert_eq!(row.quantity, 4);
+        assert_eq!(row.rule, "test.fastening.header");
+        assert_eq!(row.citation, "Test Fastening Schedule");
+    }
+
+    #[test]
+    fn sheathing_fastening_rows_emit_single_not_counted_diagnostic() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(Wall::new("wall", "Wall", Length::from_feet(8.0), &code));
+        add_fastening_pack(
+            &mut model,
+            "test.fastening.sheathing",
+            vec![
+                FasteningRow {
+                    connection: ConnectionKind::SheathingEdge,
+                    fastener: "8d sheathing nail".to_owned(),
+                    schedule: FastenerSchedule::EdgeField {
+                        edge: Length::from_whole_inches(6),
+                        field: Length::from_whole_inches(12),
+                    },
+                },
+                FasteningRow {
+                    connection: ConnectionKind::SheathingField,
+                    fastener: "8d sheathing nail".to_owned(),
+                    schedule: FastenerSchedule::EdgeField {
+                        edge: Length::from_whole_inches(6),
+                        field: Length::from_whole_inches(12),
+                    },
+                },
+            ],
+        );
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert_eq!(
+            plan.diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "standards.fastening.sheathing-not-counted")
+                .count(),
+            1
+        );
+        assert!(
+            !plan
+                .fasteners
+                .iter()
+                .any(|row| row.fastener == "8d sheathing nail")
+        );
     }
 
     /// A minimal single-framing-layer wall system using `member` at the given
@@ -5035,7 +5456,7 @@ mod tests {
 
         let first_svg = export_wall_elevation_svg(wall, &plan);
         let second_svg = export_wall_elevation_svg(wall, &plan);
-        let csv = export_bom_csv(&plan.bom());
+        let csv = export_bom_csv(&plan.bom(), &[]);
 
         assert_eq!(first_svg, second_svg);
         assert!(first_svg.contains("<svg"));
@@ -5200,7 +5621,7 @@ mod tests {
         assert!(csv.contains("mat-drywall"));
         assert!(csv.contains("Continuous insulation"));
         // The lumber CSV is left untouched.
-        assert!(export_bom_csv(&plan.bom()).starts_with("quantity,profile,kind"));
+        assert!(export_bom_csv(&plan.bom(), &[]).starts_with("quantity,profile,kind"));
     }
 
     // ---- Floor decks & flat ceilings (Slice 2) -----------------------------
@@ -5478,6 +5899,7 @@ mod tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         };
 
         let error = generate_surface_plans(&mut plan, &model).unwrap_err();
@@ -5512,6 +5934,7 @@ mod tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         };
 
         let error = generate_surface_plans(&mut plan, &model).unwrap_err();
@@ -7047,6 +7470,7 @@ mod tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         };
         generate_roof_plans(&mut plan, &model).unwrap();
 
