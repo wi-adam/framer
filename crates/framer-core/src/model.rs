@@ -822,7 +822,8 @@ impl BuildingModel {
             SurfaceRegion::Polygon(points) => Some(points.clone()),
             SurfaceRegion::Room(room_id) => {
                 let room = self.rooms.iter().find(|room| room.id == *room_id)?;
-                crate::topology::room_boundary(self, room.seed).map(|boundary| boundary.vertices)
+                crate::topology::room_boundary_on_level(self, &room.level, room.seed)
+                    .map(|boundary| boundary.vertices)
             }
         }
     }
@@ -1007,8 +1008,8 @@ struct DesiredJoin {
     point: Point2,
 }
 
-/// Every join implied by the walls' current geometry: a `Corner` where two walls
-/// share an endpoint, a `Tee` where one wall's endpoint lands on another's
+/// Every join implied by same-level walls' current geometry: a `Corner` where two
+/// walls share an endpoint, a `Tee` where one wall's endpoint lands on another's
 /// interior, a `Cross` where two walls cross interior-to-interior.
 fn derive_wall_joins(walls: &[Wall]) -> Vec<DesiredJoin> {
     let mut joins = Vec::new();
@@ -1029,6 +1030,9 @@ fn derive_wall_joins(walls: &[Wall]) -> Vec<DesiredJoin> {
 /// order: shared endpoint → `Corner`; endpoint-on-interior → `Tee` (through wall
 /// first); interior crossing → `Cross`.
 fn relate_walls(a: &Wall, b: &Wall) -> Option<DesiredJoin> {
+    if a.level != b.level {
+        return None;
+    }
     for point in [a.start, a.end] {
         if b.has_endpoint(point) {
             return Some(DesiredJoin {
@@ -5312,8 +5316,18 @@ mod tests {
         ));
     }
 
+    fn placed_wall_on_level(
+        id: &str,
+        level: &str,
+        start: Point2,
+        end: Point2,
+        code: &CodeProfile,
+    ) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement(level, start, end)
+    }
+
     fn placed_wall(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
-        Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", start, end)
+        placed_wall_on_level(id, "level-1", start, end, code)
     }
 
     #[test]
@@ -5439,6 +5453,44 @@ mod tests {
         assert_eq!(model.wall_joins.len(), 1);
         assert_eq!(model.wall_joins[0].kind, WallJoinKind::Cross);
         assert_eq!(model.wall_joins[0].point, rp(10.0, 4.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn reconcile_ignores_cross_level_wall_geometry() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model
+            .walls
+            .push(placed_wall("through", rp(0.0, 0.0), rp(20.0, 0.0), &code));
+        model.walls.push(placed_wall_on_level(
+            "corner",
+            "level-2",
+            rp(20.0, 0.0),
+            rp(20.0, 8.0),
+            &code,
+        ));
+        model.walls.push(placed_wall_on_level(
+            "tee-partition",
+            "level-2",
+            rp(5.0, 0.0),
+            rp(5.0, 8.0),
+            &code,
+        ));
+        model.walls.push(placed_wall_on_level(
+            "crossing",
+            "level-2",
+            rp(10.0, -4.0),
+            rp(10.0, 4.0),
+            &code,
+        ));
+
+        model.reconcile_joins();
+
+        assert!(model.wall_joins.is_empty());
         model.validate().unwrap();
     }
 

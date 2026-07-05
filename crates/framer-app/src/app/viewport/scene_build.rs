@@ -980,7 +980,7 @@ fn region_outline_plan(model: &BuildingModel, region: &SurfaceRegion) -> Option<
         SurfaceRegion::Polygon(points) => points.clone(),
         SurfaceRegion::Room(room_id) => {
             let room = model.rooms.iter().find(|room| room.id == *room_id)?;
-            framer_core::room_boundary(model, room.seed)?.vertices
+            framer_core::room_boundary_on_level(model, &room.level, room.seed)?.vertices
         }
     };
     (outline.len() >= 3).then_some(outline)
@@ -1038,7 +1038,8 @@ mod surface_tests {
     use eframe::egui::Rect;
     use framer_core::{
         BoardProfile, Ceiling, CodeProfile, ConstructionLayer, FloorDeck, FramingPattern,
-        FramingSpec, LayerFunction, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
+        FramingSpec, LayerFunction, Level, MemberFamily, Point2, Room, RoomUsage, Slope,
+        SystemKind,
     };
     use framer_solver::ProjectFramePlan;
 
@@ -1657,10 +1658,11 @@ mod surface_tests {
 
     #[test]
     fn room_region_surface_resolves_concave_loop_and_tiles_it() {
-        // The 3D mesher's Room arm: SurfaceRegion::Room -> room_boundary (a concave
-        // L) -> ear-clip -> surface. The deck's pick volume must carry the full
-        // 6-vertex L outline (not a convex hull), and its triangulation must tile
-        // the L's plan area (no fan spill into the notch).
+        // The 3D mesher's Room arm: SurfaceRegion::Room ->
+        // room_boundary_on_level (a concave L) -> ear-clip -> surface. The deck's
+        // pick volume must carry the full 6-vertex L outline (not a convex hull),
+        // and its triangulation must tile the L's plan area (no fan spill into the
+        // notch).
         let scene = build(&l_shaped_room_model(), &Selection::Wall);
         let deck = scene
             .picks
@@ -1692,6 +1694,65 @@ mod surface_tests {
         assert!(
             (area - 15552.0).abs() < 5.0,
             "L deck triangles cover {area} sq in, expected 15552"
+        );
+    }
+
+    fn stacked_unenclosed_room_deck_model() -> BuildingModel {
+        let ft = Length::from_feet;
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", ft(10.0)));
+        let outline = rect();
+        for i in 0..outline.len() {
+            let next = (i + 1) % outline.len();
+            model.walls.push(
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code).with_placement(
+                    "level-1",
+                    outline[i],
+                    outline[next],
+                ),
+            );
+        }
+        model.rooms.push(Room::new(
+            "room-2",
+            "Upper room",
+            RoomUsage::Living,
+            "level-2",
+            Point2::new(ft(6.0), ft(4.0)),
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-floor",
+            true,
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-2",
+            "Upper deck",
+            "level-2",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-2")),
+        ));
+        model
+    }
+
+    #[test]
+    fn room_region_mesh_resolves_against_the_room_level() {
+        let model = stacked_unenclosed_room_deck_model();
+
+        assert!(
+            region_outline_plan(&model, &model.floor_decks[0].region).is_none(),
+            "a level-2 room region must not borrow the level-1 enclosure"
+        );
+
+        let scene = build(&model, &Selection::Wall);
+        assert!(
+            !pick_clicks(&scene)
+                .iter()
+                .any(|click| matches!(click, ViewClick::FloorDeck { id } if id == "deck-2")),
+            "no floor-deck pick volume should be emitted for the unresolved level-2 room"
         );
     }
 }

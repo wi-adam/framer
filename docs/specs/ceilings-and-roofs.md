@@ -99,8 +99,8 @@ The observable contract. Testable statements; edge cases are explicit.
   planes into the model** as editable objects (hybrid: generate, then store). It generates
   gable, shed, rectangular hip, and simple equal-pitch L-footprint valley planes; after
   generation, the user edits the stored planes directly.
-- A user authors a flat ceiling with a **ceiling tool** that, like the room tool, requires an
-  enclosed region (reuses `topology::room_boundary`) and attaches the ceiling to that room.
+- A user authors a flat ceiling with a **ceiling tool** that, like the room tool, requires a
+  same-level enclosed region (reuses `topology::room_boundary`) and attaches the ceiling to that room.
 - Roof planes, ceilings, and floor decks appear in the **model tree** under their level
   (siblings of rooms), are **selectable** in 2-D and 3-D, and expose editable parameters in
   the **inspector** (pitch, overhangs, height, span, system).
@@ -303,8 +303,8 @@ non-axis-aligned framing member**.
   start/end elevation pair plus an in-plane axis in a roof-plane-local basis) so a rafter is "a
   member whose `z` varies linearly across the plane." Keep one `FrameMember` type (uniform BOM /
   provenance / diagnostics); do **not** fork a parallel `RoofMember`.
-- **Bearing & span** reuse `topology::room_boundaries` + `wall_interior_sides` to get the
-  enclosed outline and bearing edges. Flat ceilings/floor decks are nearly fully automatic
+- **Bearing & span** reuse level-scoped `topology::room_boundaries` + `wall_interior_sides`
+  to get the enclosed outline and bearing edges. Flat ceilings/floor decks are nearly fully automatic
   (default span = shorter direction; explicit override on the element).
 
 ### `framer-render` + app 3-D

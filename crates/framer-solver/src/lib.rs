@@ -4,9 +4,9 @@ use std::fmt::Write;
 use framer_core::{
     BoardProfile, BuildingModel, Ceiling, CeilingSlope, CodeProfile, ConstructionSystem, ElementId,
     FloorDeck, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
-    RoofPlane, RoofPlaneFrame, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin, WallJoinKind,
-    concave_polygon_corners, level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
-    room_boundaries,
+    RoofPlane, RoofPlaneFrame, Room, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin,
+    WallJoinKind, concave_polygon_corners, level_wall_loop_outline, point_in_polygon,
+    polygon_area_square_inches, room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2126,19 +2126,19 @@ fn generate_roof_plans(
     Ok(())
 }
 
-/// Resolve every surface region to its closed plan outline in a single pass over
-/// the wall graph. `Polygon` regions are their own outline; `Room` regions are
-/// resolved through one [`room_boundaries`] call so the bounded faces are derived
-/// just once for the whole project (rather than per element). Each entry lines up
-/// with `regions`; `None` marks an open `Room` loop (a transient mid-edit
-/// condition, surfaced as a diagnostic) or an unresolvable room reference.
+/// Resolve every surface region to its closed plan outline in one pass per level's
+/// wall graph. `Polygon` regions are their own outline; `Room` regions are
+/// resolved through [`room_boundaries_for_rooms`] so stacked levels with different
+/// walls do not bleed into each other. Each entry lines up with `regions`; `None`
+/// marks an open `Room` loop (a transient mid-edit condition, surfaced as a
+/// diagnostic) or an unresolvable room reference.
 fn resolve_surface_regions(
     model: &BuildingModel,
     regions: &[&SurfaceRegion],
 ) -> Vec<Option<Vec<Point2>>> {
-    // The seed of each `Room` region, in order, plus where its boundary will land
-    // in the batch result (`None` for `Polygon` regions and unknown rooms).
-    let mut seeds = Vec::new();
+    // The room backing each `Room` region, in order, plus where its boundary will
+    // land in the batch result (`None` for `Polygon` regions and unknown rooms).
+    let mut rooms = Vec::new();
     let mut slots = Vec::with_capacity(regions.len());
     for region in regions {
         match region {
@@ -2146,8 +2146,8 @@ fn resolve_surface_regions(
             SurfaceRegion::Room(room) => {
                 match model.rooms.iter().find(|candidate| candidate.id == *room) {
                     Some(found) => {
-                        slots.push(Some(seeds.len()));
-                        seeds.push(found.seed);
+                        slots.push(Some(rooms.len()));
+                        rooms.push(found);
                     }
                     None => slots.push(None),
                 }
@@ -2155,7 +2155,7 @@ fn resolve_surface_regions(
         }
     }
 
-    let boundaries = room_boundaries(model, &seeds);
+    let boundaries = room_boundaries_for_rooms(model, &rooms);
     regions
         .iter()
         .zip(slots)
@@ -2323,8 +2323,8 @@ fn room_schedule(
     model: &BuildingModel,
     diagnostics: &mut Vec<PlanDiagnostic>,
 ) -> Vec<RoomSchedule> {
-    let seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
-    let boundaries = room_boundaries(model, &seeds);
+    let rooms: Vec<&Room> = model.rooms.iter().collect();
+    let boundaries = room_boundaries_for_rooms(model, &rooms);
     let mut schedule = Vec::with_capacity(model.rooms.len());
     for (room, boundary) in model.rooms.iter().zip(boundaries) {
         match boundary {
@@ -3707,6 +3707,39 @@ mod tests {
     }
 
     #[test]
+    fn room_schedule_resolves_each_room_on_its_own_level() {
+        use framer_core::{Level, Point2, Room, RoomUsage};
+        let mut model = rectangle_with_room();
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.rooms.push(Room::new(
+            "room-2",
+            "Unenclosed upper room",
+            RoomUsage::Living,
+            "level-2",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        let upper = plan
+            .rooms
+            .iter()
+            .find(|room| room.room == ElementId::new("room-2"))
+            .expect("room-2 schedule row");
+        assert!(
+            !upper.closed,
+            "a level-2 room must not borrow the level-1 rectangle"
+        );
+        assert_eq!(upper.area_square_inches, 0);
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "room.boundary.open"
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("room-2")
+        }));
+    }
+
+    #[test]
     fn open_room_emits_warning_diagnostic() {
         use framer_core::{Point2, Room, RoomUsage};
         let code = CodeProfile::irc_2021_prescriptive();
@@ -5010,6 +5043,42 @@ mod tests {
             .map(|layer| layer.area_sq_in)
             .sum();
         assert!(project_plywood >= 144 * 96);
+    }
+
+    #[test]
+    fn room_surface_regions_resolve_against_the_room_level() {
+        use framer_core::{Level, Point2, Room, RoomUsage};
+        let mut model = rectangle_with_room();
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.systems.push(floor_system());
+        model.rooms.push(Room::new(
+            "room-2",
+            "Unenclosed upper room",
+            RoomUsage::Living,
+            "level-2",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-2",
+            "Upper deck",
+            "level-2",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-2")),
+        ));
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        let deck = plan.floor_plan(&ElementId::new("deck-2")).unwrap();
+        assert!(
+            deck.members.is_empty(),
+            "a level-2 room region must not frame over the level-1 rectangle"
+        );
+        assert!(deck.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "floor.boundary.open"
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("deck-2")
+        }));
     }
 
     /// The shipped `demo-shell` example (capped with a hip roof, a scissor-vault
