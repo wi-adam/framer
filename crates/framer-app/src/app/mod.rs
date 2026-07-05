@@ -748,8 +748,8 @@ impl FramerApp {
     }
 
     fn new_project(&mut self) {
-        let code = framer_core::CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = framer_core::FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(Wall::new(
             "wall-1",
             "Untitled wall",
@@ -1454,7 +1454,7 @@ impl FramerApp {
                 id,
                 format!("Wall {index}"),
                 Length::from_feet(1.0),
-                &app.model.code,
+                &app.model.framing_defaults(),
             )
             .with_placement(level, start, end);
             let joins = joins_for_new_wall(&app.model, &wall);
@@ -2535,7 +2535,7 @@ impl FramerApp {
         let Some(drag) = self.opening_drag.clone() else {
             return;
         };
-        let constraints = OpeningDragConstraints::from_code(&self.model.code)
+        let constraints = OpeningDragConstraints::from_code(&self.model.framing_defaults())
             .with_modifiers(self.snap_step, self.ortho);
         let Some(wall) = self.model.walls.get_mut(drag.wall_index) else {
             self.opening_drag = None;
@@ -3902,7 +3902,7 @@ mod tests {
     #[test]
     fn active_level_controls_roof_generation() {
         let mut app = FramerApp {
-            model: BuildingModel::new(framer_core::CodeProfile::irc_2021_prescriptive()),
+            model: BuildingModel::new(),
             ..FramerApp::default()
         };
         let level = add_second_level(&mut app);
@@ -4047,7 +4047,7 @@ mod tests {
     /// which `add_wall` requires.
     fn empty_draw_wall_app() -> FramerApp {
         let mut app = FramerApp {
-            model: BuildingModel::new(framer_core::CodeProfile::irc_2021_prescriptive()),
+            model: BuildingModel::new(),
             ..FramerApp::default()
         };
         app.toggle_draw_wall_tool();

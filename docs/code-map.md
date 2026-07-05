@@ -19,7 +19,7 @@ framer-core   ─┬─→ framer-solver  ─┐
 
 | Crate | Responsibility | Depends on | UI? |
 | --- | --- | --- | --- |
-| [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, furnishings/MEP objects, code profiles, validation, room topology, `.framer` serialization. | — | No |
+| [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, furnishings/MEP objects, standards packs, validation, room topology, `.framer` serialization. | — | No |
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
@@ -39,7 +39,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | File | Contains |
 | --- | --- |
 | `src/lib.rs` | Module wiring + the crate's public API (the `pub use` re-export list *is* the public surface). |
-| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~4.2k lines.) |
+| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, standards-stack references, and `ModelError` validation. |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
 | `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, pack validation, the IRC 2021 starter pack, and pure stack resolution. |
@@ -50,15 +50,18 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 ### Key types (file: `src/model.rs` unless noted)
 
 - **`BuildingModel`** — root authored container:
-  `code: CodeProfile`, `libraries: Vec<LibraryStamp>`, `materials: Vec<Material>`,
-  `systems: Vec<ConstructionSystem>`, `furnishings: Vec<Furnishing>`,
+  `site: SiteContext`, `standards: Vec<ElementId>`,
+  `standards_packs: Vec<StandardsPack>`, `libraries: Vec<LibraryStamp>`,
+  `materials: Vec<Material>`, `systems: Vec<ConstructionSystem>`,
+  `furnishings: Vec<Furnishing>`,
   `mep_objects: Vec<MepObject>`, `levels`, `walls`, `wall_joins`, `rooms`,
   `furnishing_instances: Vec<FurnishingInstance>`, `mep_instances: Vec<MepInstance>`,
-  `roof_planes: Vec<RoofPlane>`, `ceilings: Vec<Ceiling>`, `floor_decks: Vec<FloorDeck>`.
+  `roof_planes: Vec<RoofPlane>`, `ceilings: Vec<Ceiling>`,
+  `floor_decks: Vec<FloorDeck>`, `braced_wall_lines: Vec<BracedWallLine>`.
   This is the only thing persisted.
 - **`Wall`** — `id, name, level, start, end, length, height, system: ElementId, openings,
-  dimensions, tags`. A wall references a construction system **by id** (it does not embed its
-  assembly). `Wall::new` defaults `system` to `"system-wall-exterior-1"`.
+  dimensions, bracing, tags`. A wall references a construction system **by id** (it does not
+  embed its assembly). `Wall::new` defaults `system` to `"system-wall-exterior-1"`.
 - **`ConstructionSystem`** — `id, name, kind: SystemKind {Wall,Floor,Roof,Ceiling},
   source: Option<Provenance>, layers: Vec<ConstructionLayer>`. Layers are ordered
   **interior → exterior** and are *never sorted* (order is semantic). Helpers:
@@ -92,18 +95,23 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   ceiling needs a `Polygon` region (validation enforces it); `slope == None` is flat. A region with no
   `Ceiling` is a *cathedral* (`BuildingModel::roof_cathedral_flags`). See
   [ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
-- **`CodeProfile`** / `PrescriptiveCode::Irc2021` — starter prescriptive defaults
-  (`irc_2021_prescriptive()`). Not a complete code-compliance engine.
+- **`StandardsPack`** / **`FramingDefaults`** (`src/standards.rs`) — project-embedded standards
+  data, starter framing defaults, prescriptive tables, checks, overlays, and stack resolution.
+  `StandardsPack::irc_2021_starter()` is the built-in seed. Not a complete code-compliance
+  engine.
 - **`ElementId`** — stable semantic id (lowercase letters/digits/hyphens). **`ModelError`** —
   the validation error enum (dangling system refs, framing/layer mismatches, etc.).
 
 ### Entry points
 
-- `BuildingModel::new(code)` / `demo_wall()` / `demo_shell()` / `demo_two_bedroom()` —
+- `BuildingModel::new()` / `demo_wall()` / `demo_shell()` / `demo_two_bedroom()` —
   construct models; `new`/demos seed the starter material + system library
   (`BuildingModel::starter_library()`), sourced from
-  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib). Furnishing and
-  MEP object families remain in the starter catalog until placed/imported.
+  [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib), and seed the
+  embedded IRC 2021 starter standards pack. Furnishing and MEP object families remain in the
+  starter catalog until placed/imported.
+- `BuildingModel::resolved_standards()` / `framing_defaults()` — resolve the ordered standards
+  stack into the tables and defaults consumed by the solver and UI defaults.
 - `BuildingModel::validate()` — full model validation (called before every save).
 - `load_project(&str) -> BuildingModel` / `save_project(&BuildingModel) -> String` (`project.rs`).
 - `load_library(&str) -> Library` / `save_library(&Library) -> String` (`library.rs`).
@@ -116,9 +124,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framer` serialization (`src/project.rs`)
 
-- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 12`**.
-- The model is **v12-only**: `load_project` peeks a `SchemaHeader` first and returns
-  `ProjectError::UnsupportedSchemaVersion` for any non-v12 file. `#[serde(deny_unknown_fields)]`
+- Constants: `PROJECT_FORMAT = "framer.project"`, **`PROJECT_SCHEMA_VERSION = 13`**.
+- The model is **v13-only**: `load_project` peeks a `SchemaHeader` first and returns
+  `ProjectError::UnsupportedSchemaVersion` for any non-v13 file. `#[serde(deny_unknown_fields)]`
   rejects unknown keys.
 - Canonical output: `to_canonical_json()` re-stamps the version, calls
   `sort_deterministically()` (sort by id; layer order preserved), pretty-prints, appends a

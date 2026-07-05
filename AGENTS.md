@@ -15,7 +15,7 @@ the reverse):
 
 | Crate | Responsibility |
 | --- | --- |
-| [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, code profiles, room topology, validation, `.framer` serialization. **No UI.** |
+| [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, standards packs, room topology, validation, `.framer` serialization. **No UI.** |
 | [`crates/framer-library`](crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap for reusable `.framerlib` content. **No UI.** |
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
@@ -39,10 +39,10 @@ Docs index:
    derived *framing* (`ProjectFramePlan`, regenerated) → *presentation* (viewports,
    drawings, exports, disposable). Only authored intent is editable and persisted.
    See [architecture.md](docs/architecture.md#modeling-layers).
-3. **Determinism.** Same model + code profile → byte-identical `.framer` and
+3. **Determinism.** Same model + standards stack → byte-identical `.framer` and
    identical framing/render. Lengths are integer **ticks** (16 = 1 inch), no floats
    in the model; `.framer` is ID-sorted + canonical; the renderer is seeded (PCG).
-4. **`.framer` is schema v12 and v12-only.** Bumping the schema means updating
+4. **`.framer` is schema v13 and v13-only.** Bumping the schema means updating
    `PROJECT_SCHEMA_VERSION`, the three `examples/projects/*.framer`, the round-trip
    tests, [project-files.md](docs/project-files.md), and the version references in
    [crates/framer-core/README.md](crates/framer-core/README.md),
@@ -50,7 +50,7 @@ Docs index:
    [docs/code-map.md](docs/code-map.md).
 5. **CPU render is the reference;** the app's WGSL compute shader mirrors it. Change
    both together and keep `tests/gpu_parity.rs` green.
-6. **Code compliance is explicit, never implied.** The IRC 2021 profile is a
+6. **Code compliance is explicit, never implied.** The IRC 2021 standards pack is a
    *starter* shape; label unsupported conditions with diagnostics.
 
 ## How we work: spec-driven

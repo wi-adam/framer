@@ -574,7 +574,7 @@ pub fn point_in_polygon(point: Point2, vertices: &[Point2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildingModel, CodeProfile, Length, Level, Point2, Room, RoomUsage, Wall};
+    use crate::{BuildingModel, FramingDefaults, Length, Level, Point2, Room, RoomUsage, Wall};
 
     fn p(x_in: f64, y_in: f64) -> Point2 {
         Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
@@ -585,13 +585,13 @@ mod tests {
     }
 
     fn wall_on_level(id: &str, level: &str, a: Point2, b: Point2) -> Wall {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         Wall::new(id, id, Length::from_feet(1.0), &code).with_placement(level, a, b)
     }
 
     /// A closed `w_ft` × `h_ft` rectangle of four walls at the origin.
     fn rect_model(w_ft: f64, h_ft: f64) -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let (w, h) = (w_ft * 12.0, h_ft * 12.0);
         model.walls.push(wall("w-b", p(0.0, 0.0), p(w, 0.0)));
         model.walls.push(wall("w-r", p(w, 0.0), p(w, h)));
@@ -621,7 +621,7 @@ mod tests {
         // An empty model encloses nothing; an open L of two walls still encloses
         // nothing; closing the rectangle encloses one room; a mid-span partition
         // splits it into two.
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         assert_eq!(enclosed_room_count(&model), 0);
 
         model.walls.push(wall("w-b", p(0.0, 0.0), p(96.0, 0.0)));
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn open_chain_has_no_boundary() {
         // A U shape (three walls) never closes, so no bounded face exists.
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.walls.push(wall("w-l", p(0.0, 96.0), p(0.0, 0.0)));
         model.walls.push(wall("w-b", p(0.0, 0.0), p(120.0, 0.0)));
         model.walls.push(wall("w-r", p(120.0, 0.0), p(120.0, 96.0)));
@@ -654,7 +654,7 @@ mod tests {
         // Two 6ft × 8ft rooms side by side sharing the divider at x = 6ft. The
         // bottom and top runs are split at the divider so every meeting is a node
         // (corner-formed, no mid-span crossing).
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let (six, twelve, eight) = (72.0, 144.0, 96.0);
         // Bottom: two segments meeting at (6ft, 0).
         model.walls.push(wall("b1", p(0.0, 0.0), p(six, 0.0)));
@@ -703,7 +703,7 @@ mod tests {
     fn l_shaped_room_resolves_with_correct_area() {
         // A concave L-shaped loop (a 12×12 square with a 6×6 bite out of the
         // top-right): 12*12 - 6*6 = 108 sq ft. Six walls, all corner-joined.
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let (a, b) = (72.0, 144.0); // 6ft, 12ft in inches
         let pts = [p(0.0, 0.0), p(b, 0.0), p(b, a), p(a, a), p(a, b), p(0.0, b)];
         for index in 0..pts.len() {
@@ -721,7 +721,7 @@ mod tests {
 
     #[test]
     fn level_wall_loop_outline_reports_concave_l_footprint_corner() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let (a, b) = (72.0, 144.0);
         let pts = [p(0.0, 0.0), p(b, 0.0), p(b, a), p(a, a), p(a, b), p(0.0, b)];
         for index in 0..pts.len() {
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn room_boundaries_for_rooms_groups_by_room_level_and_preserves_order() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model
             .levels
             .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));

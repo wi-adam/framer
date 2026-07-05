@@ -12,23 +12,25 @@ Depends on: nothing in the workspace. Consumed by: `framer-solver`, `framer-rend
 | File | Purpose |
 | --- | --- |
 | `src/lib.rs` | Module wiring + public API (the `pub use` list is the public surface). |
-| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, code profiles, `ModelError`. |
+| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, standards-stack references, `ModelError`. |
 | `src/project.rs` | `.framer` serialization: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
+| `src/standards.rs` | Standards Engine v1 data: site context, standards packs, framing defaults, prescriptive tables, compliance checks, and stack resolution. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2` — the basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer for driving dimensions / overconstraint checks. |
 
 ## Key types & entry points
 
-- **`BuildingModel`** — root authored container (`code`, `materials`, `systems`, `levels`,
-  `walls`, `wall_joins`, `rooms`). The only thing persisted.
+- **`BuildingModel`** — root authored container (`site`, `standards`,
+  `standards_packs`, `materials`, `systems`, `levels`, `walls`, `wall_joins`,
+  `rooms`). The only thing persisted.
 - **`Wall`** references a **`ConstructionSystem` by id** (`system: ElementId`); systems hold an
   ordered (interior→exterior) stack of **`ConstructionLayer`**s; **`Material`**s are
   open/extensible (`properties: BTreeMap<String, PropertyValue>`).
-- Construct: `BuildingModel::new(code)`, `demo_wall()`, `demo_shell()`, `demo_two_bedroom()`.
+- Construct: `BuildingModel::new()`, `demo_wall()`, `demo_shell()`, `demo_two_bedroom()`.
 - Validate: `BuildingModel::validate()`.
 - Serialize: `load_project(&str)` / `save_project(&BuildingModel)`;
-  `PROJECT_SCHEMA_VERSION` (currently **12**, v12-only).
+  `PROJECT_SCHEMA_VERSION` (currently **13**, v13-only).
 - Topology: `room_boundaries(model)`, `room_boundary(model, seed)`.
 
 See [`docs/code-map.md`](../../docs/code-map.md#framer-core--the-domain-model) for full detail

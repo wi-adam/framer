@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use framer_core::{
-    BoardProfile, BuildingModel, Ceiling, CeilingSlope, CodeProfile, ConstructionSystem, ElementId,
-    FloorDeck, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
-    RoofPlane, RoofPlaneFrame, Room, Slope, SpanDirection, SurfaceRegion, Wall, WallJoin,
-    WallJoinKind, concave_polygon_corners, level_wall_loop_outline, point_in_polygon,
+    BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConstructionSystem, ElementId, FloorDeck,
+    FramingDefaults, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
+    ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, Slope, SpanDirection, SurfaceRegion, Wall,
+    WallJoin, WallJoinKind, concave_polygon_corners, level_wall_loop_outline, point_in_polygon,
     polygon_area_square_inches, room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
@@ -601,9 +601,11 @@ pub fn generate_wall_plan(
     wall: &Wall,
     system: &ConstructionSystem,
     materials: &[Material],
-    code: &CodeProfile,
+    standards: &ResolvedStandards,
+    standards_name: &str,
 ) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
+    let defaults = &standards.defaults;
 
     // Bundle the per-wall framing facts (member, spacing, through-wall band)
     // once; opening and cripple helpers take this rather than parallel params.
@@ -619,10 +621,10 @@ pub fn generate_wall_plan(
     let stud_spacing = framing.spacing;
 
     let mut members = Vec::new();
-    let mut diagnostics = starter_profile_diagnostics(wall, code);
+    let mut diagnostics = starter_profile_diagnostics(wall, standards_name);
     let plate_thickness = wall_plate.thickness();
     let stud_thickness = wall_stud.thickness();
-    let top_plate_count = if code.double_top_plate { 2 } else { 1 };
+    let top_plate_count = if defaults.double_top_plate { 2 } else { 1 };
     let stud_top = wall.height - plate_thickness * top_plate_count as i64;
     let stud_length = stud_top - plate_thickness;
 
@@ -727,7 +729,7 @@ pub fn generate_wall_plan(
             &mut members,
             &mut diagnostics,
             wall,
-            code,
+            defaults,
             framing,
             &opening,
             top_plate_count,
@@ -2267,6 +2269,10 @@ fn generate_surface_plans(
 
 pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, SolverError> {
     model.validate()?;
+    let standards = model.resolved_standards();
+    let standards_name = model
+        .base_standards_name()
+        .unwrap_or("Standards starter pack");
 
     let mut plan = ProjectFramePlan {
         wall_plans: Vec::with_capacity(model.walls.len()),
@@ -2289,11 +2295,12 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
             wall,
             system,
             &model.materials,
-            &model.code,
+            &standards,
+            standards_name,
         )?);
     }
 
-    add_join_members(&mut plan, model)?;
+    add_join_members(&mut plan, model, &standards)?;
     generate_surface_plans(&mut plan, model)?;
     generate_roof_plans(&mut plan, model)?;
     plan.rooms = room_schedule(model, &mut plan.diagnostics);
@@ -2378,9 +2385,17 @@ fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
     diagnostics
 }
 
-fn add_join_members(plan: &mut ProjectFramePlan, model: &BuildingModel) -> Result<(), SolverError> {
-    let plate_thickness = model.code.plate_profile.thickness();
-    let top_plate_count = if model.code.double_top_plate { 2 } else { 1 };
+fn add_join_members(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+    standards: &ResolvedStandards,
+) -> Result<(), SolverError> {
+    let plate_thickness = standards.defaults.plate_profile.thickness();
+    let top_plate_count = if standards.defaults.double_top_plate {
+        2
+    } else {
+        1
+    };
 
     let find_wall = |id: &ElementId| model.walls.iter().find(|candidate| candidate.id == *id);
 
@@ -2588,7 +2603,7 @@ fn add_opening_members(
     members: &mut Vec<FrameMember>,
     diagnostics: &mut Vec<PlanDiagnostic>,
     wall: &Wall,
-    code: &CodeProfile,
+    code: &FramingDefaults,
     framing: WallFraming,
     opening: &Opening,
     top_plate_count: usize,
@@ -2854,7 +2869,7 @@ fn frame_member(
     }
 }
 
-fn starter_profile_diagnostics(wall: &Wall, code: &CodeProfile) -> Vec<PlanDiagnostic> {
+fn starter_profile_diagnostics(wall: &Wall, standards_name: &str) -> Vec<PlanDiagnostic> {
     let mut diagnostics = vec![
         PlanDiagnostic::new(
             DiagnosticSeverity::Warning,
@@ -2862,7 +2877,7 @@ fn starter_profile_diagnostics(wall: &Wall, code: &CodeProfile) -> Vec<PlanDiagn
             Some(wall.id.clone()),
             format!(
                 "{} is starter rule data for deterministic framing defaults, not complete IRC compliance.",
-                code.display_name
+                standards_name
             ),
         ),
         PlanDiagnostic::new(
@@ -3483,16 +3498,22 @@ pub enum SolverError {
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        BuildingModel, CodeProfile, ElementId, Opening, Wall, load_project, save_project,
+        BuildingModel, ElementId, FramingDefaults, Opening, Wall, load_project, save_project,
     };
 
     use super::*;
 
+    const STARTER_STANDARDS_NAME: &str = "IRC 2021 Prescriptive (starter)";
+
+    fn starter_standards() -> ResolvedStandards {
+        BuildingModel::new().resolved_standards()
+    }
+
     /// A closed 12ft × 8ft rectangle with one room seeded at its centre.
     fn rectangle_with_room() -> BuildingModel {
         use framer_core::{Point2, Room, RoomUsage};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         let (w, h, z) = (
             Length::from_feet(12.0),
             Length::from_feet(8.0),
@@ -3517,7 +3538,7 @@ mod tests {
         model
     }
 
-    fn placed(id: &str, a: Point2, b: Point2, code: &CodeProfile) -> Wall {
+    fn placed(id: &str, a: Point2, b: Point2, code: &FramingDefaults) -> Wall {
         Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", a, b)
     }
 
@@ -3592,8 +3613,8 @@ mod tests {
     #[test]
     fn tee_join_frames_partition_end_stud_and_backing_no_corner_post() {
         use framer_core::{WallJoin, WallJoinKind};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(placed(
             "through",
             Point2::new(Length::ZERO, Length::ZERO),
@@ -3649,8 +3670,8 @@ mod tests {
     #[test]
     fn cross_join_frames_backing_on_both_walls() {
         use framer_core::{WallJoin, WallJoinKind};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(placed(
             "horizontal",
             Point2::new(Length::ZERO, Length::from_feet(4.0)),
@@ -3742,8 +3763,8 @@ mod tests {
     #[test]
     fn open_room_emits_warning_diagnostic() {
         use framer_core::{Point2, Room, RoomUsage};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(Wall::new("w-1", "Wall", Length::from_feet(12.0), &code));
@@ -3789,7 +3810,7 @@ mod tests {
 
     #[test]
     fn wall_with_door_generates_kings_jacks_and_header() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -3799,7 +3820,14 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         assert_eq!(
             plan.members
@@ -3822,7 +3850,7 @@ mod tests {
 
     #[test]
     fn members_sit_in_the_framing_layer_band() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -3852,7 +3880,14 @@ mod tests {
             framing.framing.as_ref().unwrap().member.nominal_depth()
         );
 
-        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
         assert!(!plan.members.is_empty());
         for member in &plan.members {
             assert_eq!(
@@ -3870,7 +3905,7 @@ mod tests {
 
     #[test]
     fn king_and_jack_studs_are_adjacent_not_overlapping() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -3880,7 +3915,14 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
         let left_king = find_member(&plan, "door-king-left");
         let left_jack = find_member(&plan, "door-jack-left");
         let right_jack = find_member(&plan, "door-jack-right");
@@ -3905,10 +3947,17 @@ mod tests {
 
     #[test]
     fn bom_groups_cut_lengths() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
         let bom = plan.bom();
 
         assert!(bom.iter().any(|item| {
@@ -3920,7 +3969,7 @@ mod tests {
 
     #[test]
     fn framing_member_sizes_studs_and_plates() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         let system = framing_system("system-2x6", BoardProfile::TwoBySix);
         wall.system = system.id.clone();
@@ -3932,7 +3981,14 @@ mod tests {
             Length::from_inches(80.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         for kind in [
             MemberKind::CommonStud,
@@ -3960,10 +4016,17 @@ mod tests {
 
     #[test]
     fn end_studs_align_faces_with_wall_edges() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
         let mut common_studs = plan
             .members
             .iter()
@@ -3983,10 +4046,17 @@ mod tests {
 
     #[test]
     fn eight_foot_wall_uses_actual_plate_thickness_for_stud_length() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         assert!(plan.members.iter().any(|member| {
             member.kind == MemberKind::CommonStud && member.cut_length == Length::from_inches(91.5)
@@ -3997,8 +4067,14 @@ mod tests {
     fn project_round_trip_regenerates_same_wall_plan() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let original =
-            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let original = generate_wall_plan(
+            &model.walls[0],
+            system,
+            &model.materials,
+            &model.resolved_standards(),
+            model.base_standards_name().unwrap(),
+        )
+        .unwrap();
 
         let serialized = save_project(&model).unwrap();
         let loaded = load_project(&serialized).unwrap();
@@ -4007,7 +4083,8 @@ mod tests {
             &loaded.walls[0],
             loaded_system,
             &loaded.materials,
-            &loaded.code,
+            &loaded.resolved_standards(),
+            loaded.base_standards_name().unwrap(),
         )
         .unwrap();
 
@@ -4038,7 +4115,7 @@ mod tests {
     fn corner_posts_align_faces_with_joined_wall_edges() {
         let model = BuildingModel::demo_shell();
         let plan = generate_project_plan(&model).unwrap();
-        let half_stud = model.code.stud_profile.thickness() / 2;
+        let half_stud = model.framing_defaults().stud_profile.thickness() / 2;
 
         for join in &model.wall_joins {
             for wall_id in [&join.first_wall, &join.second_wall] {
@@ -4048,8 +4125,11 @@ mod tests {
                     .find(|candidate| candidate.id == *wall_id)
                     .unwrap();
                 let join_x = wall.local_x_for_point(join.point).unwrap();
-                let expected_x =
-                    face_aligned_center(join_x, wall.length, model.code.stud_profile.thickness());
+                let expected_x = face_aligned_center(
+                    join_x,
+                    wall.length,
+                    model.framing_defaults().stud_profile.thickness(),
+                );
                 let wall_plan = plan.wall_plan(&wall.id).unwrap();
                 let member_id = format!("{}-{}-corner-post", join.id.0, wall.id.0);
                 let member = find_member(wall_plan, &member_id);
@@ -4098,7 +4178,7 @@ mod tests {
     fn opening_cripples_honor_system_spacing_not_code_default() {
         // A wall system framed at 24" o.c. — distinct from the code profile's
         // 16" default — must lay out its opening cripples at 24" o.c.
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         assert_eq!(
             code.default_stud_spacing,
             Length::from_whole_inches(16),
@@ -4123,7 +4203,14 @@ mod tests {
             Length::from_inches(36.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &system, &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         // Collect the distinct cripple x-positions for the upper band and assert
         // the on-center step is 24in (system spacing), not 16in (code default).
@@ -4161,7 +4248,7 @@ mod tests {
 
     #[test]
     fn window_generates_sill_and_cripples() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -4172,7 +4259,14 @@ mod tests {
             Length::from_inches(36.0),
         ));
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         assert!(
             plan.members
@@ -4190,8 +4284,14 @@ mod tests {
     fn generated_members_include_source_and_rule_provenance() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan =
-            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let plan = generate_wall_plan(
+            &model.walls[0],
+            system,
+            &model.materials,
+            &model.resolved_standards(),
+            model.base_standards_name().unwrap(),
+        )
+        .unwrap();
 
         let header = plan
             .members
@@ -4202,15 +4302,24 @@ mod tests {
         assert_eq!(header.source.0, "opening-door-1");
         assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
         assert!(header.provenance.summary.contains("no span/load lookup"));
-        assert_eq!(header.cross_section_depth, model.code.default_header_depth);
+        assert_eq!(
+            header.cross_section_depth,
+            model.framing_defaults().default_header_depth
+        );
     }
 
     #[test]
     fn garage_door_reports_unsupported_starter_assumption() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
-        let plan =
-            generate_wall_plan(&model.walls[0], system, &model.materials, &model.code).unwrap();
+        let plan = generate_wall_plan(
+            &model.walls[0],
+            system,
+            &model.materials,
+            &model.resolved_standards(),
+            model.base_standards_name().unwrap(),
+        )
+        .unwrap();
 
         assert!(plan.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Unsupported
@@ -4227,7 +4336,14 @@ mod tests {
         let model = BuildingModel::demo_wall();
         let wall = &model.walls[0];
         let system = model.system_for(wall).unwrap();
-        let plan = generate_wall_plan(wall, system, &model.materials, &model.code).unwrap();
+        let plan = generate_wall_plan(
+            wall,
+            system,
+            &model.materials,
+            &model.resolved_standards(),
+            model.base_standards_name().unwrap(),
+        )
+        .unwrap();
 
         let first_svg = export_wall_elevation_svg(wall, &plan);
         let second_svg = export_wall_elevation_svg(wall, &plan);
@@ -4265,7 +4381,7 @@ mod tests {
     fn layer_bom_area_goods_equal_net_face_area() {
         // 12ft x 8ft = 144" x 96" = 13_824 sq in gross; a 36" x 80" door removes
         // 2_880 sq in, leaving a 10_944 sq in net face.
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.height = Length::from_feet(8.0);
         wall.openings.push(Opening::door(
@@ -4279,7 +4395,14 @@ mod tests {
         let net_area = 144 * 96 - 36 * 80;
         assert_eq!(net_area, 10_944);
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         // Area goods (drywall, plywood sheathing, fiber-cement cladding) each report
         // exactly the net face area and carry no volume.
@@ -4307,7 +4430,7 @@ mod tests {
 
     #[test]
     fn layer_bom_volumetric_goods_equal_area_times_thickness() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.height = Length::from_feet(8.0);
         wall.openings.push(Opening::door(
@@ -4319,7 +4442,14 @@ mod tests {
         ));
         let net_area = 144 * 96 - 36 * 80;
 
-        let plan = generate_wall_plan(&wall, &wall_system(), &materials(), &code).unwrap();
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &starter_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
 
         // Continuous polyiso (2") reports area x thickness as cubic inches.
         let polyiso = find_layer(&plan.layers, "mat-polyiso");
@@ -4644,7 +4774,7 @@ mod tests {
     fn surface_plan_reports_missing_system_for_a_dangling_reference() {
         // generate_surface_plans is defensive against a deck whose system id does
         // not resolve (model validation normally catches this first).
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.floor_decks.push(FloorDeck::new(
             "deck-1",
             "Deck",
@@ -4676,7 +4806,7 @@ mod tests {
         // resolve (model validation normally catches this first), rather than framing
         // it at a silently-wrong elevation. The system resolves, so the level lookup
         // is reached.
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(ceiling_system());
         model.ceilings.push(Ceiling::new(
             "clg",
@@ -5203,8 +5333,8 @@ mod tests {
     #[test]
     fn floor_deck_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
         use framer_core::{Room, RoomUsage};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         // A single wall never encloses a loop, so the room stays open.
         model
             .walls
@@ -5239,8 +5369,8 @@ mod tests {
     #[test]
     fn ceiling_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
         use framer_core::{Room, RoomUsage};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         // A single wall never encloses a loop, so the room stays open.
         model
             .walls
@@ -5488,7 +5618,7 @@ mod tests {
     /// A gable over a 24ft × 24ft footprint: two opposing 12ft-run planes sharing
     /// a ridge at y = 12ft. `roof-a` (lower id) carries the shared ridge board.
     fn gable_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         let (w, mid, far) = (
             Length::from_feet(24.0),
@@ -5529,7 +5659,7 @@ mod tests {
     }
 
     fn rectangular_hip_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         let (w, d, mid_y, inset) = (
             Length::from_feet(24.0),
@@ -5599,7 +5729,7 @@ mod tests {
     }
 
     fn square_hip_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         let (side, mid) = (Length::from_feet(20.0), Length::from_feet(10.0));
         let peak = Point2::new(mid, mid);
@@ -5669,8 +5799,8 @@ mod tests {
     /// outside corner to that reentrant corner. Each plane clips its rafters
     /// against the diagonal, producing jack rafters that die into the valley.
     fn l_valley_model() -> BuildingModel {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         let p = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
         let footprint = [
@@ -6385,7 +6515,7 @@ mod tests {
 
     #[test]
     fn shed_roof_through_project_plan_has_no_ridge_board() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         model.roof_planes.push(shed_plane(pitch_9_12()));
 
@@ -6405,8 +6535,8 @@ mod tests {
 
     #[test]
     fn varying_plate_height_under_a_roof_is_flagged_unsupported() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         // Two walls on the roof's level at different heights: the bearing plate
         // height is ambiguous for v1.

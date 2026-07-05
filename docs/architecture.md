@@ -10,9 +10,9 @@ desktop CAD surface.
 ## Product Boundary
 
 Framer is not a general mesh modeler. It should preserve construction intent:
-walls, floors, roofs, posts, beams, openings, loads, code profile, member
-families, and material assumptions. Geometry is an output of that intent, not the
-primary source of truth.
+walls, floors, roofs, posts, beams, openings, loads, standards assumptions,
+member families, and material assumptions. Geometry is an output of that intent,
+not the primary source of truth.
 
 The early application should make this concrete for structures such as sheds,
 small buildings, garages, decks, and wood framed BBQ islands.
@@ -20,8 +20,8 @@ small buildings, garages, decks, and wood framed BBQ islands.
 ## Workspace
 
 - `crates/framer-core`: shared domain types, units, structure model, openings,
-  construction systems, the material/object libraries, code profiles, room
-  topology, and validation.
+  construction systems, the material/object libraries, standards-stack data,
+  room topology, and validation.
 - `crates/framer-library`: library resolution, exact content hashing,
   cache-first remote URL fetching, and vendor-on-use import/remap for reusable
   `.framerlib` content.
@@ -44,7 +44,7 @@ end-state interaction model.
 ## Modeling Layers
 
 1. **Intent model**: user-authored objects such as wall segments, openings,
-   levels, roof planes, floor systems, and code/material profiles.
+   levels, roof planes, floor systems, and standards/material assumptions.
 2. **Derived framing model**: studs, plates, headers, joists, rafters,
    sheathing zones, connector callouts, and blocking.
 3. **Presentation model**: drawings, annotations, schedules, BOM tables, exports,
@@ -64,7 +64,8 @@ The desktop app should expose the modeling layers as two conceptual modes:
    should persist only authored intent.
 2. **Plan Mode** regenerates and inspects derived output. It displays framing
    members, sheathing zones, blocking, diagnostics, drawings, BOM rows, and rule
-   explanations produced from the current design plus code/material profiles.
+   explanations produced from the current design plus standards/material
+   assumptions.
    Generated objects can be selected and explained, but they should not become
    the canonical source of truth.
 
@@ -82,9 +83,9 @@ geometry. Future height, roof, floor, rafter, pitch, and offset constraints
 should add variables and anchor expressions for their own authored objects
 rather than adding one-off overconstraint checks.
 
-## Code Profiles
+## Standards Engine
 
-Code profiles should be versioned data plus executable rules. A profile such as
+Standards packs should be versioned data plus executable rules. A pack such as
 `IRC 2021` should eventually include:
 
 - Prescriptive framing defaults, spacing limits, and member families.
@@ -92,9 +93,9 @@ Code profiles should be versioned data plus executable rules. A profile such as
 - Snow, wind, seismic, and local amendment inputs.
 - Explicit assumptions and unsupported-condition diagnostics.
 
-The current `IRC 2021 prescriptive starter profile` only stores defaults needed
-for the first straight-wall solver. It must not be represented as complete code
-compliance.
+The current `IRC 2021 Prescriptive (starter)` pack stores defaults and a small
+starter table set needed by the first wall solver. It must not be represented as
+complete code compliance.
 
 ## Geometry Strategy
 
@@ -128,9 +129,10 @@ multi-wall CAD shell:
   garage-door-style opening on different walls.
 - `framer-core` represents levels, wall segment placement, wall joins/corners,
   wall openings, rooms, a reusable material library, layered construction systems
-  (applied to walls by reference), furnishing/MEP object families and placed
-  instances, and deterministic project ordering. The `.framer` format is schema
-  **v12** and v12-only: older files are rejected with an explicit
+  (applied to walls by reference), standards packs and project site assumptions,
+  furnishing/MEP object families and placed instances, and deterministic project
+  ordering. The `.framer` format is schema **v13** and v13-only: older files are
+  rejected with an explicit
   unsupported-schema error rather than migrated. See the
   [Construction Systems spec](specs/construction-systems.md) and
   [Libraries spec](specs/libraries.md).
@@ -154,10 +156,10 @@ or opening from the Design Shell view opens the Wall view for layout on that wal
 Plan Mode exposes generated framing in the model tree, read-only authored
 summaries, selectable generated members, diagnostics, BOM review, and export.
 
-Unsupported conditions are shown explicitly. The starter profile does not claim
-complete IRC compliance, and garage doors are currently framed as wide rough
-openings with a diagnostic noting that garage-door-specific structural design is
-unsupported.
+Unsupported conditions are shown explicitly. The starter standards pack does not
+claim complete IRC compliance, and garage doors are currently framed as wide
+rough openings with a diagnostic noting that garage-door-specific structural
+design is unsupported.
 
 ## Data and Export
 
@@ -172,11 +174,12 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v12 `.framer` format is documented in
+The current v13 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
-(including the material library, construction systems, furnishing/MEP families,
-and placed object instances); derived framing plans, cached view state, and
-exports remain disposable outputs that are regenerated from the project.
+(including site context, standards packs, the material library, construction
+systems, furnishing/MEP families, and placed object instances); derived framing
+plans, cached view state, and exports remain disposable outputs that are
+regenerated from the project.
 
 Binary caches are acceptable only as disposable acceleration data. They must not
 be the only source of truth for a design.

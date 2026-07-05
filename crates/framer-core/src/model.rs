@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::standards::{
+    BracedPanel, BracedWallLine, FramingDefaults, ResolvedStandards, SiteContext, StandardsPack,
+    resolve_standards,
+};
 use crate::{
     ConstraintSystem, ConstraintVariable, Length, LinearConstraint, LinearExpression, Point2,
 };
@@ -48,7 +52,10 @@ pub struct Provenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildingModel {
-    pub code: CodeProfile,
+    #[serde(default)]
+    pub site: SiteContext,
+    pub standards: Vec<ElementId>,
+    pub standards_packs: Vec<StandardsPack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<LibraryStamp>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -76,13 +83,24 @@ pub struct BuildingModel {
     pub ceilings: Vec<Ceiling>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub floor_decks: Vec<FloorDeck>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub braced_wall_lines: Vec<BracedWallLine>,
+}
+
+impl Default for BuildingModel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BuildingModel {
-    pub fn new(code: CodeProfile) -> Self {
+    pub fn new() -> Self {
         let (materials, systems) = Self::starter_library();
+        let (standards, standards_packs) = default_standards_stack();
         Self {
-            code,
+            site: SiteContext::default(),
+            standards,
+            standards_packs,
             libraries: Vec::new(),
             materials,
             systems,
@@ -97,12 +115,14 @@ impl BuildingModel {
             roof_planes: Vec::new(),
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
+            braced_wall_lines: Vec::new(),
         }
     }
 
     pub fn demo_wall() -> Self {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut wall = Wall::new("wall-1", "Demo wall", Length::from_feet(28.0), &code);
+        let (standards, standards_packs) = default_standards_stack();
+        let defaults = standards_packs[0].tables.defaults.clone();
+        let mut wall = Wall::new("wall-1", "Demo wall", Length::from_feet(28.0), &defaults);
         wall.openings = vec![
             Opening::door(
                 "opening-door-1",
@@ -131,7 +151,9 @@ impl BuildingModel {
 
         let (materials, systems) = Self::starter_library();
         Self {
-            code,
+            site: SiteContext::default(),
+            standards,
+            standards_packs,
             libraries: Vec::new(),
             materials,
             systems,
@@ -146,17 +168,24 @@ impl BuildingModel {
             roof_planes: Vec::new(),
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
+            braced_wall_lines: Vec::new(),
         }
     }
 
     pub fn demo_shell() -> Self {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut front = Wall::new("wall-front", "Front wall", Length::from_feet(28.0), &code)
-            .with_placement(
-                "level-1",
-                Point2::new(Length::ZERO, Length::ZERO),
-                Point2::new(Length::from_feet(28.0), Length::ZERO),
-            );
+        let (standards, standards_packs) = default_standards_stack();
+        let defaults = standards_packs[0].tables.defaults.clone();
+        let mut front = Wall::new(
+            "wall-front",
+            "Front wall",
+            Length::from_feet(28.0),
+            &defaults,
+        )
+        .with_placement(
+            "level-1",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(28.0), Length::ZERO),
+        );
         front.openings = vec![
             Opening::door(
                 "opening-front-door",
@@ -175,12 +204,17 @@ impl BuildingModel {
             .with_kind(OpeningKind::GarageDoor),
         ];
 
-        let mut right = Wall::new("wall-right", "Right wall", Length::from_feet(20.0), &code)
-            .with_placement(
-                "level-1",
-                Point2::new(Length::from_feet(28.0), Length::ZERO),
-                Point2::new(Length::from_feet(28.0), Length::from_feet(20.0)),
-            );
+        let mut right = Wall::new(
+            "wall-right",
+            "Right wall",
+            Length::from_feet(20.0),
+            &defaults,
+        )
+        .with_placement(
+            "level-1",
+            Point2::new(Length::from_feet(28.0), Length::ZERO),
+            Point2::new(Length::from_feet(28.0), Length::from_feet(20.0)),
+        );
         right.openings.push(Opening::window(
             "opening-right-window",
             "Right window",
@@ -190,7 +224,7 @@ impl BuildingModel {
             Length::from_inches(36.0),
         ));
 
-        let mut back = Wall::new("wall-back", "Back wall", Length::from_feet(28.0), &code)
+        let mut back = Wall::new("wall-back", "Back wall", Length::from_feet(28.0), &defaults)
             .with_placement(
                 "level-1",
                 Point2::new(Length::from_feet(28.0), Length::from_feet(20.0)),
@@ -215,7 +249,7 @@ impl BuildingModel {
             ),
         ];
 
-        let mut left = Wall::new("wall-left", "Left wall", Length::from_feet(20.0), &code)
+        let mut left = Wall::new("wall-left", "Left wall", Length::from_feet(20.0), &defaults)
             .with_placement(
                 "level-1",
                 Point2::new(Length::ZERO, Length::from_feet(20.0)),
@@ -231,7 +265,9 @@ impl BuildingModel {
 
         let (materials, systems) = Self::starter_library();
         Self {
-            code,
+            site: SiteContext::default(),
+            standards,
+            standards_packs,
             libraries: Vec::new(),
             materials,
             systems,
@@ -275,6 +311,7 @@ impl BuildingModel {
             roof_planes: Vec::new(),
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
+            braced_wall_lines: Vec::new(),
         }
         .into_deterministic()
     }
@@ -283,10 +320,11 @@ impl BuildingModel {
     /// interior walls that meet the exterior (and each other) at tee joins. Used
     /// as the rooms/interior-walls example project.
     pub fn demo_two_bedroom() -> Self {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let (standards, standards_packs) = default_standards_stack();
+        let defaults = standards_packs[0].tables.defaults.clone();
         let ft = Length::from_feet;
         let wall = |id: &str, name: &str, start: Point2, end: Point2| {
-            Wall::new(id, name, ft(1.0), &code).with_placement("level-1", start, end)
+            Wall::new(id, name, ft(1.0), &defaults).with_placement("level-1", start, end)
         };
 
         let mut front = wall(
@@ -434,7 +472,9 @@ impl BuildingModel {
 
         let (materials, systems) = Self::starter_library();
         Self {
-            code,
+            site: SiteContext::default(),
+            standards,
+            standards_packs,
             libraries: Vec::new(),
             materials,
             systems,
@@ -449,8 +489,30 @@ impl BuildingModel {
             roof_planes: Vec::new(),
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
+            braced_wall_lines: Vec::new(),
         }
         .into_deterministic()
+    }
+
+    pub fn resolved_standards(&self) -> ResolvedStandards {
+        let stack: Vec<&StandardsPack> = self
+            .standards
+            .iter()
+            .filter_map(|id| self.standards_packs.iter().find(|pack| pack.id == *id))
+            .collect();
+        resolve_standards(&stack)
+    }
+
+    pub fn framing_defaults(&self) -> FramingDefaults {
+        self.resolved_standards().defaults
+    }
+
+    pub fn base_standards_name(&self) -> Option<&str> {
+        let base = self.standards.first()?;
+        self.standards_packs
+            .iter()
+            .find(|pack| pack.id == *base)
+            .map(|pack| pack.name.as_str())
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -464,6 +526,24 @@ impl BuildingModel {
 
         if self.levels.is_empty() {
             return Err(ModelError::MissingLevel);
+        }
+
+        let mut standards_lookup = BTreeSet::new();
+        for pack in &self.standards_packs {
+            validate_element_id(&pack.id)?;
+            insert_unique_id(&mut ids, &pack.id)?;
+            pack.validate()?;
+            standards_lookup.insert(pack.id.clone());
+        }
+        let mut standards_stack = BTreeSet::new();
+        for pack in &self.standards {
+            validate_element_id(pack)?;
+            if !standards_stack.insert(pack.clone()) {
+                return Err(ModelError::StandardsStackDuplicatePack { pack: pack.clone() });
+            }
+            if !standards_lookup.contains(pack) {
+                return Err(ModelError::StandardsStackReferencesUnknownPack { pack: pack.clone() });
+            }
         }
 
         let mut material_lookup = BTreeMap::new();
@@ -523,6 +603,22 @@ impl BuildingModel {
             }
             for dimension in &wall.dimensions {
                 insert_unique_id(&mut ids, &dimension.id)?;
+            }
+            for panel in &wall.bracing {
+                validate_element_id(&panel.id)?;
+                insert_unique_id(&mut ids, &panel.id)?;
+                if panel.length <= Length::ZERO {
+                    return Err(ModelError::BracingPanelInvalidLength {
+                        wall: wall.id.clone(),
+                        panel: panel.id.clone(),
+                    });
+                }
+                if panel.offset < Length::ZERO || panel.offset + panel.length > wall.length {
+                    return Err(ModelError::BracingPanelOutOfBounds {
+                        wall: wall.id.clone(),
+                        panel: panel.id.clone(),
+                    });
+                }
             }
         }
 
@@ -595,6 +691,18 @@ impl BuildingModel {
                 return Err(ModelError::MepInstanceReferencesUnknownFamily {
                     instance: instance.id.clone(),
                     family: instance.family.clone(),
+                });
+            }
+        }
+
+        for line in &self.braced_wall_lines {
+            validate_element_id(&line.id)?;
+            validate_element_id(&line.level)?;
+            insert_unique_id(&mut ids, &line.id)?;
+            if !level_ids.contains(&line.level) {
+                return Err(ModelError::BracedWallLineReferencesUnknownLevel {
+                    braced_wall_line: line.id.clone(),
+                    level: line.level.clone(),
                 });
             }
         }
@@ -718,6 +826,8 @@ impl BuildingModel {
     }
 
     pub fn sort_deterministically(&mut self) {
+        self.standards_packs
+            .sort_by(|left, right| left.id.cmp(&right.id));
         self.libraries.sort_by(|left, right| {
             left.uid
                 .cmp(&right.uid)
@@ -752,6 +862,8 @@ impl BuildingModel {
         }
         self.ceilings.sort_by(|left, right| left.id.cmp(&right.id));
         self.floor_decks
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        self.braced_wall_lines
             .sort_by(|left, right| left.id.cmp(&right.id));
     }
 
@@ -1153,41 +1265,6 @@ impl Level {
         self.height = height;
         self
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CodeProfile {
-    pub code: PrescriptiveCode,
-    pub display_name: String,
-    pub default_wall_height: Length,
-    pub default_stud_spacing: Length,
-    pub double_top_plate: bool,
-    pub default_header_depth: Length,
-    pub stud_profile: BoardProfile,
-    pub plate_profile: BoardProfile,
-    pub header_profile: BoardProfile,
-}
-
-impl CodeProfile {
-    pub fn irc_2021_prescriptive() -> Self {
-        Self {
-            code: PrescriptiveCode::Irc2021,
-            display_name: "IRC 2021 prescriptive starter profile".to_owned(),
-            default_wall_height: Length::from_feet(8.0),
-            default_stud_spacing: Length::from_whole_inches(16),
-            double_top_plate: true,
-            default_header_depth: Length::from_whole_inches(9),
-            stud_profile: BoardProfile::TwoByFour,
-            plate_profile: BoardProfile::TwoByFour,
-            header_profile: BoardProfile::TwoByTen,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PrescriptiveCode {
-    Irc2021,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -2711,6 +2788,8 @@ pub struct Wall {
     pub system: ElementId,
     pub openings: Vec<Opening>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bracing: Vec<BracedPanel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<DimensionConstraint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -2721,7 +2800,7 @@ impl Wall {
         id: impl Into<String>,
         name: impl Into<String>,
         length: Length,
-        code: &CodeProfile,
+        defaults: &FramingDefaults,
     ) -> Self {
         Self {
             id: ElementId::new(id),
@@ -2730,9 +2809,10 @@ impl Wall {
             start: Point2::new(Length::ZERO, Length::ZERO),
             end: Point2::new(length, Length::ZERO),
             length,
-            height: code.default_wall_height,
+            height: defaults.default_wall_height,
             system: ElementId::new("system-wall-exterior-1"),
             openings: Vec::new(),
+            bracing: Vec::new(),
             dimensions: Vec::new(),
             tags: Vec::new(),
         }
@@ -2847,6 +2927,7 @@ impl Wall {
 
     pub fn sort_deterministically(&mut self) {
         self.openings.sort_by(|left, right| left.id.cmp(&right.id));
+        self.bracing.sort_by(|left, right| left.id.cmp(&right.id));
         self.dimensions
             .sort_by(|left, right| left.id.cmp(&right.id));
     }
@@ -4001,6 +4082,10 @@ pub enum ModelError {
     StandardsInvalidRuleId { rule: String },
     #[error("standards rule id {rule:?} is duplicated within one pack")]
     StandardsDuplicateRuleId { rule: String },
+    #[error("standards stack references pack {pack:?} more than once")]
+    StandardsStackDuplicatePack { pack: ElementId },
+    #[error("standards stack references unknown pack {pack:?}")]
+    StandardsStackReferencesUnknownPack { pack: ElementId },
     #[error("standards waive overlay for {target:?} must include a non-empty reason")]
     StandardsOverlayMissingReason { target: String },
     #[error("standards table rows for rule {rule:?} must be strictly ordered by their natural key")]
@@ -4031,10 +4116,24 @@ pub enum ModelError {
         expected_scope: String,
         found_scope: String,
     },
+    #[error("braced wall line {braced_wall_line:?} references unknown level {level:?}")]
+    BracedWallLineReferencesUnknownLevel {
+        braced_wall_line: ElementId,
+        level: ElementId,
+    },
+    #[error("bracing panel {panel:?} on wall {wall:?} must have a positive length")]
+    BracingPanelInvalidLength { wall: ElementId, panel: ElementId },
+    #[error("bracing panel {panel:?} on wall {wall:?} must fit within the wall length")]
+    BracingPanelOutOfBounds { wall: ElementId, panel: ElementId },
 }
 
 fn default_levels() -> Vec<Level> {
     vec![Level::new("level-1", "Level 1", Length::ZERO)]
+}
+
+fn default_standards_stack() -> (Vec<ElementId>, Vec<StandardsPack>) {
+    let pack = StandardsPack::irc_2021_starter();
+    (vec![pack.id.clone()], vec![pack])
 }
 
 fn default_level_id() -> ElementId {
@@ -4166,7 +4265,7 @@ mod tests {
     use super::*;
 
     fn wall_with_window(center: Length, width: Length) -> Wall {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -4216,8 +4315,7 @@ mod tests {
     /// A model carrying one framing-correct system of each surface kind (roof,
     /// floor, ceiling), referencing the starter library's `mat-spf`.
     fn surface_systems_model() -> BuildingModel {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code);
+        let mut model = BuildingModel::new();
         for (id, kind, family) in [
             ("system-roof", SystemKind::Roof, MemberFamily::Rafter),
             ("system-floor", SystemKind::Floor, MemberFamily::FloorJoist),
@@ -4536,7 +4634,7 @@ mod tests {
                     format!("w-{i}"),
                     "Wall",
                     Length::from_whole_inches(6),
-                    &roomed.code,
+                    &roomed.framing_defaults(),
                 )
                 .with_placement("level-1", corners[i], corners[next]),
             );
@@ -5180,7 +5278,7 @@ mod tests {
 
     #[test]
     fn opening_validation_rejects_out_of_bounds() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5198,8 +5296,8 @@ mod tests {
 
     #[test]
     fn model_validation_rejects_duplicate_ids() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(Wall::new(
             "wall",
             "First wall",
@@ -5220,9 +5318,104 @@ mod tests {
     }
 
     #[test]
+    fn model_validation_rejects_duplicate_standards_stack_entry() {
+        let mut model = BuildingModel::new();
+        model.standards.push(model.standards[0].clone());
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::StandardsStackDuplicatePack { pack })
+                if pack == ElementId::new("std-irc-2021")
+        ));
+    }
+
+    #[test]
+    fn model_validation_rejects_unknown_standards_stack_entry() {
+        let mut model = BuildingModel::new();
+        model.standards.push(ElementId::new("std-missing"));
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::StandardsStackReferencesUnknownPack { pack })
+                if pack == ElementId::new("std-missing")
+        ));
+    }
+
+    #[test]
+    fn model_validation_treats_standards_pack_ids_as_global_ids() {
+        let mut model = BuildingModel::new();
+        model.standards[0] = ElementId::new("level-1");
+        model.standards_packs[0].id = ElementId::new("level-1");
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { id }) if id == ElementId::new("level-1")
+        ));
+    }
+
+    #[test]
+    fn model_validation_rejects_braced_wall_line_unknown_level() {
+        let mut model = BuildingModel::new();
+        model.braced_wall_lines.push(BracedWallLine {
+            id: ElementId::new("bwl-front"),
+            name: "Front braced wall line".to_owned(),
+            level: ElementId::new("level-missing"),
+            start: Point2::new(Length::ZERO, Length::ZERO),
+            end: Point2::new(Length::from_feet(10.0), Length::ZERO),
+        });
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::BracedWallLineReferencesUnknownLevel { braced_wall_line, level })
+                if braced_wall_line == ElementId::new("bwl-front")
+                    && level == ElementId::new("level-missing")
+        ));
+    }
+
+    #[test]
+    fn model_validation_rejects_invalid_bracing_panel_length() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
+        wall.bracing.push(BracedPanel {
+            id: ElementId::new("panel-zero"),
+            offset: Length::ZERO,
+            length: Length::ZERO,
+            method: crate::standards::BracingMethod::Wsp,
+        });
+        model.walls.push(wall);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::BracingPanelInvalidLength { wall, panel })
+                if wall == ElementId::new("wall") && panel == ElementId::new("panel-zero")
+        ));
+    }
+
+    #[test]
+    fn model_validation_rejects_out_of_bounds_bracing_panel() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
+        wall.bracing.push(BracedPanel {
+            id: ElementId::new("panel-long"),
+            offset: Length::from_feet(7.0),
+            length: Length::from_feet(2.0),
+            method: crate::standards::BracingMethod::Wsp,
+        });
+        model.walls.push(wall);
+
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::BracingPanelOutOfBounds { wall, panel })
+                if wall == ElementId::new("wall") && panel == ElementId::new("panel-long")
+        ));
+    }
+
+    #[test]
     fn deterministic_sort_uses_stable_ids() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         let mut wall_b = Wall::new("wall-b", "B", Length::from_feet(8.0), &code);
         wall_b.openings.push(Opening::window(
             "opening-b",
@@ -5254,7 +5447,7 @@ mod tests {
 
     #[test]
     fn wall_dimensions_validate_opening_anchors() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.dimensions.push(DimensionConstraint::new(
             "dim",
@@ -5336,8 +5529,7 @@ mod tests {
 
     #[test]
     fn room_validation_rejects_unknown_level() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code);
+        let mut model = BuildingModel::new();
         model.rooms.push(Room::new(
             "room-1",
             "Room",
@@ -5357,19 +5549,19 @@ mod tests {
         level: &str,
         start: Point2,
         end: Point2,
-        code: &CodeProfile,
+        code: &FramingDefaults,
     ) -> Wall {
         Wall::new(id, id, Length::from_feet(1.0), code).with_placement(level, start, end)
     }
 
-    fn placed_wall(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
+    fn placed_wall(id: &str, start: Point2, end: Point2, code: &FramingDefaults) -> Wall {
         placed_wall_on_level(id, "level-1", start, end, code)
     }
 
     #[test]
     fn tee_join_validates_when_partition_meets_through_wall_midspan() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "through",
             Point2::new(Length::ZERO, Length::ZERO),
@@ -5396,8 +5588,8 @@ mod tests {
 
     #[test]
     fn cross_join_validates_when_point_interior_to_both() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "horizontal",
             Point2::new(Length::ZERO, Length::from_feet(4.0)),
@@ -5428,8 +5620,8 @@ mod tests {
 
     #[test]
     fn reconcile_creates_corner_for_shared_endpoint() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
@@ -5447,8 +5639,8 @@ mod tests {
 
     #[test]
     fn reconcile_creates_tee_with_through_then_partition() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("through", rp(0.0, 0.0), rp(20.0, 0.0), &code));
@@ -5472,8 +5664,8 @@ mod tests {
 
     #[test]
     fn reconcile_detects_cross() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "horizontal",
             rp(0.0, 4.0),
@@ -5494,8 +5686,8 @@ mod tests {
 
     #[test]
     fn reconcile_ignores_cross_level_wall_geometry() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .levels
             .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
@@ -5532,8 +5724,8 @@ mod tests {
 
     #[test]
     fn reconcile_drops_stale_join_when_walls_separate() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
@@ -5554,8 +5746,8 @@ mod tests {
 
     #[test]
     fn reconcile_preserves_join_id_across_point_move() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
@@ -5584,8 +5776,8 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_moves_free_end_and_resyncs_length() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
@@ -5600,8 +5792,8 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_drags_shared_node_along_collinear_run() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         // A collinear run a—b sharing the node at (10,0); moving it stays ortho.
         model
             .walls
@@ -5622,8 +5814,8 @@ mod tests {
 
     #[test]
     fn translate_wall_moves_both_ends_and_stretches_neighbour() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         // L-corner at (0,0): horizontal `a` and vertical `b`.
         model
             .walls
@@ -5650,8 +5842,8 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_unknown_wall_is_noop() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
@@ -5665,8 +5857,8 @@ mod tests {
 
     #[test]
     fn tee_join_rejected_when_point_is_a_shared_endpoint() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         // Two walls meeting at a shared endpoint (a corner) but mislabelled Tee.
         model.walls.push(placed_wall(
             "a",
@@ -5733,7 +5925,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_moves_opening_anchor() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -5768,7 +5960,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_between_opening_edges_resizes_opening() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -5867,7 +6059,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_can_move_first_anchor_when_second_anchor_is_fixed() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -6068,7 +6260,7 @@ mod tests {
 
     #[test]
     fn duplicate_wall_length_dimension_overconstrains() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.dimensions.push(driving_dimension(
             "length",
@@ -6113,7 +6305,7 @@ mod tests {
 
     #[test]
     fn new_driving_dimension_can_be_overconstrained_even_when_measured_value_matches() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",

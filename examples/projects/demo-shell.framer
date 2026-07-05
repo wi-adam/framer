@@ -1,24 +1,189 @@
 {
   "format": "framer.project",
-  "schema_version": 12,
+  "schema_version": 13,
   "authored": {
-    "code": {
-      "code": "Irc2021",
-      "display_name": "IRC 2021 prescriptive starter profile",
-      "default_wall_height": {
-        "ticks": 1536
-      },
-      "default_stud_spacing": {
-        "ticks": 256
-      },
-      "double_top_plate": true,
-      "default_header_depth": {
-        "ticks": 144
-      },
-      "stud_profile": "TwoByFour",
-      "plate_profile": "TwoByFour",
-      "header_profile": "TwoByTen"
+    "site": {
+      "jurisdiction": ""
     },
+    "standards": [
+      "std-irc-2021"
+    ],
+    "standards_packs": [
+      {
+        "id": "std-irc-2021",
+        "name": "IRC 2021 Prescriptive (starter)",
+        "edition": "2021",
+        "tables": {
+          "defaults": {
+            "default_wall_height": {
+              "ticks": 1536
+            },
+            "default_stud_spacing": {
+              "ticks": 256
+            },
+            "double_top_plate": true,
+            "default_header_depth": {
+              "ticks": 144
+            },
+            "stud_profile": "TwoByFour",
+            "plate_profile": "TwoByFour",
+            "header_profile": "TwoByTen"
+          },
+          "studs": [
+            {
+              "rule": "irc2021.r602.3-5.studs",
+              "citation": "IRC 2021 Table R602.3(5)",
+              "rows": [
+                {
+                  "profile": "TwoByFour",
+                  "spacing": {
+                    "ticks": 256
+                  },
+                  "max_height_bearing": {
+                    "ticks": 1920
+                  },
+                  "max_height_nonbearing": {
+                    "ticks": 2688
+                  }
+                },
+                {
+                  "profile": "TwoByFour",
+                  "spacing": {
+                    "ticks": 384
+                  },
+                  "max_height_bearing": {
+                    "ticks": 1920
+                  },
+                  "max_height_nonbearing": {
+                    "ticks": 2304
+                  }
+                },
+                {
+                  "profile": "TwoBySix",
+                  "spacing": {
+                    "ticks": 256
+                  },
+                  "max_height_bearing": {
+                    "ticks": 2688
+                  },
+                  "max_height_nonbearing": {
+                    "ticks": 3840
+                  }
+                },
+                {
+                  "profile": "TwoBySix",
+                  "spacing": {
+                    "ticks": 384
+                  },
+                  "max_height_bearing": {
+                    "ticks": 2304
+                  },
+                  "max_height_nonbearing": {
+                    "ticks": 3456
+                  }
+                }
+              ]
+            }
+          ],
+          "headers": [
+            {
+              "rule": "irc2021.r602.7-1.headers",
+              "citation": "IRC 2021 Table R602.7(1)",
+              "rows": [
+                {
+                  "profile": "TwoByTen",
+                  "plies": 1,
+                  "max_ground_snow_psf": 30,
+                  "max_building_width": {
+                    "ticks": 6912
+                  },
+                  "max_span": {
+                    "ticks": 768
+                  },
+                  "jack_studs": 1
+                },
+                {
+                  "profile": "TwoByTen",
+                  "plies": 2,
+                  "max_ground_snow_psf": 30,
+                  "max_building_width": {
+                    "ticks": 6912
+                  },
+                  "max_span": {
+                    "ticks": 1152
+                  },
+                  "jack_studs": 1
+                },
+                {
+                  "profile": "TwoByTwelve",
+                  "plies": 1,
+                  "max_ground_snow_psf": 30,
+                  "max_building_width": {
+                    "ticks": 6912
+                  },
+                  "max_span": {
+                    "ticks": 960
+                  },
+                  "jack_studs": 1
+                },
+                {
+                  "profile": "TwoByTwelve",
+                  "plies": 2,
+                  "max_ground_snow_psf": 30,
+                  "max_building_width": {
+                    "ticks": 6912
+                  },
+                  "max_span": {
+                    "ticks": 1536
+                  },
+                  "jack_studs": 2
+                }
+              ]
+            }
+          ],
+          "fastening": [
+            {
+              "rule": "irc2021.r602.3-1.fastening",
+              "citation": "IRC 2021 Table R602.3(1)",
+              "rows": [
+                {
+                  "connection": "StudToPlateEnd",
+                  "fastener": "16d common nail",
+                  "schedule": {
+                    "Count": 2
+                  }
+                },
+                {
+                  "connection": "StudToPlateToe",
+                  "fastener": "8d common nail",
+                  "schedule": {
+                    "Count": 4
+                  }
+                },
+                {
+                  "connection": "TopPlateLap",
+                  "fastener": "16d common nail",
+                  "schedule": {
+                    "Count": 8
+                  }
+                },
+                {
+                  "connection": "DoubleTopPlate",
+                  "fastener": "16d common nail",
+                  "schedule": {
+                    "Spacing": {
+                      "on_center": {
+                        "ticks": 256
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
     "materials": [
       {
         "id": "mat-asphalt-shingle",

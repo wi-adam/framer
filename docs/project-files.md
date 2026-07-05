@@ -5,7 +5,7 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v12 format stores only the canonical intent model. Generated framing plans,
+The v13 format stores only the canonical intent model. Generated framing plans,
 cached viewport data, drawings, BOM exports, and other disposable artifacts are
 regenerated from the authored model and must not be written into the canonical
 file.
@@ -28,14 +28,16 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V12 Shape
+## V13 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 12,
+  "schema_version": 13,
   "authored": {
-    "code": {},
+    "site": { "jurisdiction": "" },
+    "standards": [],
+    "standards_packs": [],
     "libraries": [],
     "materials": [],
     "systems": [],
@@ -49,20 +51,25 @@ for the single-wall example.
     "mep_instances": [],
     "roof_planes": [],
     "ceilings": [],
-    "floor_decks": []
+    "floor_decks": [],
+    "braced_wall_lines": []
   }
 }
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `12` when saving from the current app.
+- `schema_version` must be `13` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `cache`, `exports`, or presentation data to project files.
+- `site` stores jurisdiction and environmental inputs used by standards checks.
+- `standards` is the ordered standards-pack stack. `standards_packs` embeds the
+  self-contained pack definitions referenced by that stack. New projects seed
+  both with the IRC 2021 starter pack.
 - `libraries`, `materials`, `systems`, `furnishings`, `mep_objects`, `rooms`,
-  `furnishing_instances`, `mep_instances`, `roof_planes`, `ceilings`, and
-  `floor_decks` are omitted when empty; `wall_joins` defaults to an empty list;
-  `levels` defaults to a single `level-1`.
+  `furnishing_instances`, `mep_instances`, `roof_planes`, `ceilings`,
+  `floor_decks`, and `braced_wall_lines` are omitted when empty; `wall_joins`
+  defaults to an empty list; `levels` defaults to a single `level-1`.
 - `levels` carry an optional `height` (the top plane is `elevation + height`);
   a zero height is omitted. `systems` carry a `kind` of `Wall`, `Floor`, `Roof`,
   or `Ceiling`, each with exactly one framing layer. A framing layer's optional
@@ -76,10 +83,10 @@ for the single-wall example.
   ceiling, which keeps the region's two forms. A sloped ceiling requires an
   explicit polygon region.
 
-### Schema versioning is v12-only
+### Schema versioning is v13-only
 
-The current build is **v12-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `12` with an explicit
+The current build is **v13-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `13` with an explicit
 `unsupported Framer project schema version N` error — older files are *not*
 migrated in place. Convert old files with an older Framer build, or re-author
 them.
@@ -147,7 +154,7 @@ project does not read any `.framerlib`; projects remain self-contained.
 Portable project packages use the `.framerpkg` extension. A package is a
 deterministic ZIP with stored entries, sorted paths, and zeroed timestamps:
 
-- `project.framer`: the canonical v12 project JSON.
+- `project.framer`: the canonical v13 project JSON.
 - `manifest.json`: `{ "format": "framer.package", "schema_version": 1, ... }`.
 - `assets/blake3-<hex>`: optional content-addressed binary assets referenced by
   material appearances.
@@ -158,9 +165,12 @@ back to the material's authored color and the project still opens.
 
 ## Authored Model
 
-The v12 authored model holds:
+The v13 authored model holds:
 
-- `code`: the prescriptive code profile (starter framing defaults).
+- `site`: project jurisdiction and environmental assumptions.
+- `standards`: ordered standards-pack stack. Later packs override earlier packs.
+- `standards_packs`: embedded standards-pack definitions, including framing
+  defaults, prescriptive tables, compliance checks, and overlays.
 - `libraries`: optional descriptive stamps for library versions that supplied
   vendored definitions.
 - `materials`: the project's material library (see below).
@@ -181,8 +191,10 @@ The v12 authored model holds:
   requires an explicit polygon region).
 - `floor_decks`: level-owned structural floor decks over a `region` with a joist
   `span` direction.
-- Per wall: `openings` (wall openings) and `dimensions` (wall-local dimension
-  constraints).
+- `braced_wall_lines`: optional authored braced wall lines, used by standards
+  checks.
+- Per wall: `openings` (wall openings), `dimensions` (wall-local dimension
+  constraints), and `bracing` (optional braced panels).
 
 Each wall stores a local framing length, a project placement, and a **reference to
 a construction system** (it does not embed its assembly):
@@ -195,8 +207,8 @@ a construction system** (it does not embed its assembly):
 - `system`: the `id` of a `ConstructionSystem` in the project `systems` list. The
   generated framing uses that system's framing layer, so changing it re-sizes the
   wall's studs, plates, corner posts, and per-layer takeoff.
-- `openings`, `dimensions`, and optional `tags` (a free-form string list, omitted
-  when empty).
+- `openings`, `dimensions`, `bracing`, and optional `tags` (free-form string
+  lists are omitted when empty).
 
 ```json
 {
@@ -209,6 +221,30 @@ a construction system** (it does not embed its assembly):
   "height": { "ticks": 1536 },
   "system": "system-wall-exterior-1",
   "openings": []
+}
+```
+
+Braced panels are wall-local spans. They are omitted when a wall has no authored
+bracing:
+
+```json
+{
+  "id": "panel-front-1",
+  "offset": { "ticks": 384 },
+  "length": { "ticks": 768 },
+  "method": "Wsp"
+}
+```
+
+Braced wall lines are level-owned project-coordinate segments:
+
+```json
+{
+  "id": "bwl-front",
+  "name": "Front braced wall line",
+  "level": "level-1",
+  "start": { "x": { "ticks": 0 }, "y": { "ticks": 0 } },
+  "end": { "x": { "ticks": 3072 }, "y": { "ticks": 0 } }
 }
 ```
 
@@ -548,19 +584,21 @@ Each room stores:
 
 ## Stable IDs
 
-Material, system, furnishing, MEP object, placed object instance, level, wall,
-join, opening, dimension, and room IDs are stable semantic identifiers. They must
-be non-empty and contain only lowercase letters, digits, or hyphens. Examples:
+Standards pack, material, system, furnishing, MEP object, placed object
+instance, level, wall, join, opening, dimension, bracing panel, braced wall line,
+and room IDs are stable semantic identifiers. They must be non-empty and contain
+only lowercase letters, digits, or hyphens. Examples:
 
 - `mat-drywall`, `system-wall-exterior-1`
 - `furnishing-workbench`, `mep-load-center`, `furnishing-instance-1`
 - `level-1`, `wall-1`, `join-front-right`
-- `opening-door-1`, `opening-window-1`, `dimension-1`, `room-bed-1`
+- `opening-door-1`, `opening-window-1`, `dimension-1`, `panel-front-1`,
+  `bwl-front`, `room-bed-1`
 
 Do not rewrite existing IDs when changing properties or names. Add a new stable ID
 only when adding a new authored object.
 
-The checked-in IRC 2021 profile is named `IRC 2021 prescriptive starter profile`
+The checked-in IRC 2021 standards pack is named `IRC 2021 Prescriptive (starter)`
 because it is only a starter data shape for the early wall solver. It is not a
 complete code-compliance claim.
 
@@ -574,11 +612,12 @@ design is not implemented.
 Framer canonicalizes project files before saving:
 
 - Materials are sorted by `id`.
-- Systems, furnishings, MEP objects, furnishing instances, and MEP instances are
-  sorted by `id`; **layers within a system are not sorted** (layer order is
-  semantic: interior → exterior).
+- Standards packs, systems, furnishings, MEP objects, furnishing instances, MEP
+  instances, and braced wall lines are sorted by `id`; **layers within a system
+  are not sorted** (layer order is semantic: interior → exterior), and the
+  `standards` stack order is semantic.
 - Levels, walls, wall joins, and rooms are sorted by `id`.
-- Openings and dimensions within each wall are sorted by `id`.
+- Openings, dimensions, and bracing panels within each wall are sorted by `id`.
 - A material's `properties` map is ordered (a `BTreeMap`), so property insertion
   order does not affect output.
 - JSON is pretty-printed with a trailing newline.
@@ -595,7 +634,7 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`12`). The build is v12-only; do not
+3. Preserve `format` and `schema_version` (`13`). The build is v13-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, cached view data,
@@ -603,11 +642,14 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 6. Use exact tick values for dimensions and thicknesses.
 7. Apply construction and object families by *reference*: point a wall's `system`
    at a system `id`, a layer's `material` at a material `id`, and a placed
-   object instance's `family` at a matching furnishing or MEP family `id`. Do not
-   dangle references — every referenced `system`/`material`/`family` must exist.
-   Keep layer order interior → exterior.
+   object instance's `family` at a matching furnishing or MEP family `id`, and a
+   standards stack entry at a matching `standards_packs` `id`. Do not dangle
+   references — every referenced `system`/`material`/`family`/standards pack must
+   exist. Keep layer order interior → exterior and keep standards stack order
+   semantic.
 8. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
-9. Do not present the starter IRC 2021 profile as complete code compliance.
+9. Do not present the starter IRC 2021 standards pack as complete code
+   compliance.
 10. Represent plan adjustments as authored design changes or explicit override
     records if the schema supports them; do not add generated members directly.
 11. Validate after edits.

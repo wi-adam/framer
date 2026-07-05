@@ -101,7 +101,7 @@ impl Scene3d {
 
         // Fall back to the code stud depth only when a wall has no system (a
         // degenerate model); resolved per-wall below.
-        let fallback_depth = model.code.stud_profile.nominal_depth();
+        let fallback_depth = model.framing_defaults().stud_profile.nominal_depth();
         // Which side of each wall faces the room interior, derived from topology
         // once per frame. Layers (and members) lay out interior -> exterior from
         // this, so reversing a wall no longer mirrors the assembly.
@@ -1037,9 +1037,8 @@ mod surface_tests {
     use super::*;
     use eframe::egui::Rect;
     use framer_core::{
-        BoardProfile, Ceiling, CodeProfile, ConstructionLayer, FloorDeck, FramingPattern,
-        FramingSpec, LayerFunction, Level, MemberFamily, Point2, Room, RoomUsage, Slope,
-        SystemKind,
+        BoardProfile, Ceiling, ConstructionLayer, FloorDeck, FramingPattern, FramingSpec,
+        LayerFunction, Level, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
     };
     use framer_solver::ProjectFramePlan;
 
@@ -1102,7 +1101,7 @@ mod surface_tests {
     /// A model with one sloped roof plane, one flat ceiling, and one floor deck
     /// over a 12×8 footprint (Polygon regions, so no walls are needed).
     fn surface_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         for level in &mut model.levels {
             if level.id.0 == "level-1" {
                 level.height = Length::from_whole_inches(108);
@@ -1374,7 +1373,7 @@ mod surface_tests {
     /// framing, and roofing, so the weather face and the underside read as distinct
     /// colors.
     fn cathedral_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         for level in &mut model.levels {
             if level.id.0 == "level-1" {
                 level.height = Length::from_whole_inches(108);
@@ -1553,7 +1552,7 @@ mod surface_tests {
         // the un-culled axonometric pipeline lights it from both sides. Pin that: the
         // flat floor deck's horizontal triangles must include both an up- and a
         // down-facing normal at its elevation.
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.systems.push(finish_system(
             "system-floor",
             SystemKind::Floor,
@@ -1616,7 +1615,7 @@ mod surface_tests {
     /// attached via `SurfaceRegion::Room`.
     fn l_shaped_room_model() -> BuildingModel {
         let ft = Length::from_feet;
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let pts = [
             Point2::new(ft(0.0), ft(0.0)),
             Point2::new(ft(12.0), ft(0.0)),
@@ -1628,7 +1627,7 @@ mod surface_tests {
         for i in 0..pts.len() {
             let next = (i + 1) % pts.len();
             model.walls.push(
-                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.framing_defaults())
                     .with_placement("level-1", pts[i], pts[next]),
             );
         }
@@ -1699,7 +1698,7 @@ mod surface_tests {
 
     fn stacked_unenclosed_room_deck_model() -> BuildingModel {
         let ft = Length::from_feet;
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model
             .levels
             .push(Level::new("level-2", "Level 2", ft(10.0)));
@@ -1707,11 +1706,8 @@ mod surface_tests {
         for i in 0..outline.len() {
             let next = (i + 1) % outline.len();
             model.walls.push(
-                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code).with_placement(
-                    "level-1",
-                    outline[i],
-                    outline[next],
-                ),
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.framing_defaults())
+                    .with_placement("level-1", outline[i], outline[next]),
             );
         }
         model.rooms.push(Room::new(

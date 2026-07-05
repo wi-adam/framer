@@ -1,4 +1,4 @@
-use framer_core::{BuildingModel, CodeProfile, Length, Opening, Point2, Wall, WallEnd};
+use framer_core::{BuildingModel, FramingDefaults, Length, Opening, Point2, Wall, WallEnd};
 
 const OPENING_MIN_SIZE: Length = Length::from_whole_inches(12);
 
@@ -97,7 +97,7 @@ pub(super) struct OpeningDragConstraints {
 }
 
 impl OpeningDragConstraints {
-    pub(super) fn from_code(code: &CodeProfile) -> Self {
+    pub(super) fn from_code(code: &FramingDefaults) -> Self {
         Self {
             edge_clearance: code.stud_profile.thickness() * 2,
             top_clearance: opening_top_clearance(code),
@@ -370,7 +370,7 @@ pub(super) fn apply_opening_drag(
     changed
 }
 
-pub(super) fn opening_top_clearance(code: &CodeProfile) -> Length {
+pub(super) fn opening_top_clearance(code: &FramingDefaults) -> Length {
     let top_plate_count = if code.double_top_plate { 2 } else { 1 };
     code.plate_profile.thickness() * top_plate_count + Length::from_ticks(1)
 }
@@ -565,13 +565,13 @@ fn clamp_length(value: Length, min: Length, max: Length) -> Length {
 
 #[cfg(test)]
 mod tests {
-    use framer_core::{CodeProfile, Opening};
+    use framer_core::{FramingDefaults, Opening};
 
     use super::*;
 
     #[test]
     fn opening_drag_moves_center_and_bottom_in_two_axes() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn opening_drag_resizes_from_corner_without_moving_opposite_corner() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn opening_drag_clamps_to_wall_bounds() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn opening_drag_stops_below_top_plates_for_header_space() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn opening_drag_stops_before_neighbor_opening() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "left-window",
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn snap_rounds_move_to_step() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -757,8 +757,7 @@ mod tests {
     #[test]
     fn next_room_id_is_globally_unique() {
         use framer_core::{Point2, Room, RoomUsage};
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code);
+        let mut model = framer_core::BuildingModel::new();
         model.rooms.push(Room::new(
             "room-1",
             "One",
@@ -775,8 +774,8 @@ mod tests {
 
     #[test]
     fn next_wall_id_is_globally_unique() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         model
             .walls
             .push(Wall::new("wall-1", "One", Length::from_feet(8.0), &code));
@@ -794,14 +793,14 @@ mod tests {
         Point2::new(Length::from_feet(x), Length::from_feet(y))
     }
 
-    fn placed(id: &str, start: Point2, end: Point2, code: &CodeProfile) -> Wall {
+    fn placed(id: &str, start: Point2, end: Point2, code: &FramingDefaults) -> Wall {
         Wall::new(id, id, Length::from_feet(1.0), code).with_placement("level-1", start, end)
     }
 
     #[test]
     fn endpoint_move_clamps_perpendicular_neighbour_at_a_corner() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         // L-corner at (10,0): horizontal `a` meets vertical `b`.
         model
             .walls
@@ -818,8 +817,8 @@ mod tests {
 
     #[test]
     fn endpoint_move_allows_collinear_and_free_ends() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         // Collinear run a—b sharing the node at (10,0).
         model
             .walls
@@ -837,8 +836,8 @@ mod tests {
 
     #[test]
     fn translate_keeps_ortho_allows_perpendicular_clamps_along_axis() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         model
             .walls
             .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
@@ -869,8 +868,8 @@ mod tests {
 
     #[test]
     fn endpoint_move_rejects_collapsing_a_wall_onto_its_fixed_end() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         model
             .walls
             .push(placed("a", ftp(0.0, 0.0), ftp(10.0, 0.0), &code));
@@ -891,8 +890,8 @@ mod tests {
 
     #[test]
     fn translate_rejects_collapsing_a_neighbour() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = framer_core::BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = framer_core::BuildingModel::new();
         // `a` horizontal at y=0; `b` vertical from the shared corner up to (0,8).
         model
             .walls
@@ -924,7 +923,7 @@ mod tests {
 
     #[test]
     fn ortho_locks_move_to_dominant_axis() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
         wall.openings.push(Opening::door(
             "door",

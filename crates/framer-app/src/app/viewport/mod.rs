@@ -417,7 +417,11 @@ impl FramerApp {
 
     fn workspace_header(&mut self, ui: &mut Ui) {
         let t = design::active();
-        let code_name = self.model.code.display_name.clone();
+        let standards_name = self
+            .model
+            .base_standards_name()
+            .unwrap_or("Standards starter pack")
+            .to_owned();
         Frame::new()
             .fill(t.panel)
             .inner_margin(Margin::symmetric(6, 6))
@@ -428,7 +432,7 @@ impl FramerApp {
                     self.viewport_tabs(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(code_name.as_str())
+                            RichText::new(standards_name.as_str())
                                 .size(design::text_size::LABEL)
                                 .color(t.text_muted),
                         );
@@ -546,7 +550,11 @@ impl FramerApp {
 
     fn wall_tool_options(&self, ui: &mut Ui) {
         let wall_system_name = self.default_wall_system_name();
-        let wall_height = self.model.code.default_wall_height.to_string();
+        let wall_height = self
+            .model
+            .framing_defaults()
+            .default_wall_height
+            .to_string();
         let level_name = self.active_level_name();
 
         option_strip_title(ui, "Wall options");
@@ -1640,7 +1648,11 @@ mod tests {
             .inches() as f32;
         // The full system is thicker than the framing layer alone, so layering
         // genuinely deepens the wall in the side axis.
-        let stud_depth = model.code.stud_profile.nominal_depth().inches() as f32;
+        let stud_depth = model
+            .framing_defaults()
+            .stud_profile
+            .nominal_depth()
+            .inches() as f32;
         assert!(total > stud_depth);
 
         assert!(!scene.vertices.is_empty());

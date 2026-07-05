@@ -13,15 +13,14 @@ pub use library::{
 };
 pub use model::{
     Appearance, AssemblyFace, AssetRef, BoardProfile, BuildingModel, Ceiling, CeilingSlope,
-    CodeProfile, ConstructionLayer, ConstructionSystem, DimensionAnchor, DimensionAxis,
-    DimensionConstraint, DimensionDirection, DimensionHorizontalReference, DimensionKind,
-    DimensionVerticalReference, ElementId, FloorDeck, FramingPattern, FramingSpec, Furnishing,
-    FurnishingInstance, LayerFunction, Level, LibraryStamp, Material, MaterialSource, MemberFamily,
-    MepInstance, MepObject, MepObjectKind, ModelError, ObjectSize, Opening, OpeningKind,
-    PrescriptiveCode, PropertyValue, Provenance, QuarterTurn, RoofOpening, RoofPlane,
-    RoofPlaneFrame, Room, RoomUsage, Sheathing, Slope, SpanDirection, SurfaceRegion, SystemKind,
-    TextureRole, Wall, WallEnd, WallExposure, WallJoin, WallJoinKind, is_blake3_hash,
-    surface_frame,
+    ConstructionLayer, ConstructionSystem, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionDirection, DimensionHorizontalReference, DimensionKind, DimensionVerticalReference,
+    ElementId, FloorDeck, FramingPattern, FramingSpec, Furnishing, FurnishingInstance,
+    LayerFunction, Level, LibraryStamp, Material, MaterialSource, MemberFamily, MepInstance,
+    MepObject, MepObjectKind, ModelError, ObjectSize, Opening, OpeningKind, PropertyValue,
+    Provenance, QuarterTurn, RoofOpening, RoofPlane, RoofPlaneFrame, Room, RoomUsage, Sheathing,
+    Slope, SpanDirection, SurfaceRegion, SystemKind, TextureRole, Wall, WallEnd, WallExposure,
+    WallJoin, WallJoinKind, is_blake3_hash, surface_frame,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,
