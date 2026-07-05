@@ -3750,7 +3750,12 @@ mod tests {
         assert!(save_project_document(&app.model).is_ok());
 
         app.move_standards_pack_in_stack(local.0.clone(), -1);
-        assert_eq!(app.model.standards, vec![local.clone(), base]);
+        assert_eq!(app.model.standards, vec![local.clone(), base.clone()]);
+
+        app.move_standards_pack_in_stack(local.0.clone(), 1);
+        assert_eq!(app.model.standards, vec![base.clone(), local.clone()]);
+        app.move_standards_pack_in_stack(local.0.clone(), 1);
+        assert_eq!(app.model.standards, vec![base, local.clone()]);
 
         app.remove_standards_pack_from_stack(local.0.clone());
         assert!(!app.model.standards.iter().any(|id| id == &local));

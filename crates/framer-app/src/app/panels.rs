@@ -1532,21 +1532,6 @@ impl FramerApp {
         };
         let selected_library_status =
             selected_library_status(&self.model, &selection, &self.library_issues);
-        let resolved_rules = self
-            .model
-            .resolved_standards()
-            .rules
-            .into_iter()
-            .map(|rule| {
-                (
-                    rule.rule,
-                    rule.citation,
-                    rule.pack.0,
-                    rule.waived,
-                    rule.severity.is_some(),
-                )
-            })
-            .collect::<Vec<_>>();
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
@@ -2203,6 +2188,21 @@ impl FramerApp {
                     .iter()
                     .position(|stack_id| stack_id.0 == id);
                 let stack_len = self.model.standards.len();
+                let resolved_rules = self
+                    .model
+                    .resolved_standards()
+                    .rules
+                    .into_iter()
+                    .map(|rule| {
+                        (
+                            rule.rule,
+                            rule.citation,
+                            rule.pack.0,
+                            rule.waived,
+                            rule.severity.is_some(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 if let Some(pack) = self
                     .model
                     .standards_packs
