@@ -5365,6 +5365,21 @@ mod tests {
     }
 
     #[test]
+    fn base_standards_name_uses_first_resolvable_standards_pack() {
+        let mut model = BuildingModel::new();
+        let base_name = model.standards_packs[0].name.clone();
+        let mut overlay = StandardsPack::irc_2021_starter();
+        overlay.id = ElementId::new("std-local-overlay");
+        overlay.name = "Local overlay".to_owned();
+
+        model.standards.push(overlay.id.clone());
+        model.standards_packs.push(overlay);
+
+        model.validate().unwrap();
+        assert_eq!(model.base_standards_name(), Some(base_name.as_str()));
+    }
+
+    #[test]
     fn model_validation_treats_standards_pack_ids_as_global_ids() {
         let mut model = BuildingModel::new();
         model.standards[0] = ElementId::new("level-1");
