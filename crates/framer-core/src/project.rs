@@ -818,8 +818,9 @@ mod tests {
             &code,
         ));
         let empty_json = save_project(&empty).unwrap();
-        assert!(!empty_json.contains("\"bracing\""));
-        assert!(!empty_json.contains("\"braced_wall_lines\""));
+        let empty_value: serde_json::Value = serde_json::from_str(&empty_json).unwrap();
+        assert!(empty_value["authored"]["walls"][0].get("bracing").is_none());
+        assert!(empty_value["authored"].get("braced_wall_lines").is_none());
 
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
