@@ -3,10 +3,11 @@ use std::fmt::Write;
 
 use framer_core::{
     BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConstructionSystem, ElementId, FloorDeck,
-    FramingDefaults, FramingSpec, LayerFunction, Length, Material, ModelError, Opening, Point2,
-    ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, Slope, SpanDirection, SurfaceRegion, Wall,
-    WallJoin, WallJoinKind, concave_polygon_corners, level_wall_loop_outline, point_in_polygon,
-    polygon_area_square_inches, room_boundaries_for_rooms,
+    FramingDefaults, FramingSpec, HeaderRow, HeaderSpanTable, LayerFunction, Length, Material,
+    ModelError, Opening, Point2, ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, SiteContext,
+    Slope, SpanDirection, SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind,
+    concave_polygon_corners, level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
+    room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -604,6 +605,24 @@ pub fn generate_wall_plan(
     standards: &ResolvedStandards,
     standards_name: &str,
 ) -> Result<WallFramePlan, SolverError> {
+    generate_wall_plan_with_site(
+        wall,
+        system,
+        materials,
+        standards,
+        standards_name,
+        &SiteContext::default(),
+    )
+}
+
+fn generate_wall_plan_with_site(
+    wall: &Wall,
+    system: &ConstructionSystem,
+    materials: &[Material],
+    standards: &ResolvedStandards,
+    standards_name: &str,
+    site: &SiteContext,
+) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
     let defaults = &standards.defaults;
 
@@ -622,6 +641,7 @@ pub fn generate_wall_plan(
 
     let mut members = Vec::new();
     let mut diagnostics = starter_profile_diagnostics(wall, standards_name);
+    let use_header_tables = wall_uses_header_tables(wall, system);
     let plate_thickness = wall_plate.thickness();
     let stud_thickness = wall_stud.thickness();
     let top_plate_count = if defaults.double_top_plate { 2 } else { 1 };
@@ -725,15 +745,15 @@ pub fn generate_wall_plan(
     let mut openings = wall.openings.clone();
     openings.sort_by_key(Opening::left);
     for opening in openings {
-        add_opening_members(
-            &mut members,
-            &mut diagnostics,
-            wall,
+        let context = OpeningMemberContext {
             defaults,
             framing,
-            &opening,
+            standards,
+            site,
+            use_header_tables,
             top_plate_count,
-        );
+        };
+        add_opening_members(&mut members, &mut diagnostics, wall, &opening, context);
     }
 
     let layers = wall_layer_bom(wall, system, materials);
@@ -2291,12 +2311,13 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
                 wall: wall.id.clone(),
                 system: wall.system.clone(),
             })?;
-        plan.wall_plans.push(generate_wall_plan(
+        plan.wall_plans.push(generate_wall_plan_with_site(
             wall,
             system,
             &model.materials,
             &standards,
             standards_name,
+            &model.site,
         )?);
     }
 
@@ -2599,29 +2620,226 @@ fn face_aligned_center(x: Length, length: Length, member_depth: Length) -> Lengt
     x.max(half_depth).min(length - half_depth)
 }
 
+fn wall_uses_header_tables(wall: &Wall, system: &ConstructionSystem) -> bool {
+    system.exposure() == WallExposure::Exterior
+        || wall
+            .tags
+            .iter()
+            .any(|tag| tag == "bearing" || tag == "load-bearing")
+}
+
+struct HeaderSpec {
+    profile: BoardProfile,
+    depth: Length,
+    plies: u8,
+    jack_studs: u8,
+    rule_id: String,
+    summary: String,
+    fallback_diagnostic: Option<String>,
+}
+
+struct SelectedHeader<'a> {
+    table: &'a HeaderSpanTable,
+    row: &'a HeaderRow,
+}
+
+fn header_spec_for_opening(
+    standards: &ResolvedStandards,
+    site: &SiteContext,
+    opening: &Opening,
+    defaults: &FramingDefaults,
+    use_header_tables: bool,
+) -> HeaderSpec {
+    if !use_header_tables {
+        return fallback_header_spec(defaults, None);
+    }
+
+    if let Some(selection) = select_header_row(standards, site, opening.width) {
+        let row = selection.row;
+        let plies = row.plies.max(1);
+        let jack_studs = row.jack_studs.max(1);
+        return HeaderSpec {
+            profile: row.profile,
+            depth: row.profile.nominal_depth(),
+            plies,
+            jack_studs,
+            rule_id: selection.table.rule.clone(),
+            summary: format!(
+                "{}-ply {} <= {} span - {}",
+                plies,
+                row.profile.label(),
+                row.max_span,
+                selection.table.citation
+            ),
+            fallback_diagnostic: None,
+        };
+    }
+
+    let citations = standards
+        .headers
+        .iter()
+        .map(|(_, table)| table.citation.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut message = format!(
+        "No resolved header span table row covers {} rough span {}",
+        opening.name, opening.width
+    );
+    if let Some(snow_load) = site.ground_snow_load_psf {
+        let _ = write!(message, " at {snow_load} psf ground snow load");
+    } else {
+        message.push_str(" with unknown ground snow load using the highest snow band");
+    }
+    if citations.is_empty() {
+        message.push_str("; no header span table is resolved");
+    } else {
+        let _ = write!(message, " in {citations}");
+    }
+    let _ = write!(
+        message,
+        "; falling back to {} at {}.",
+        defaults.header_profile.label(),
+        defaults.default_header_depth
+    );
+
+    fallback_header_spec(defaults, Some(message))
+}
+
+fn fallback_header_spec(
+    defaults: &FramingDefaults,
+    fallback_diagnostic: Option<String>,
+) -> HeaderSpec {
+    HeaderSpec {
+        profile: defaults.header_profile,
+        depth: defaults.default_header_depth,
+        plies: 1,
+        jack_studs: 1,
+        rule_id: "opening.header.default-profile".to_owned(),
+        summary: format!(
+            "Header uses the configured starter profile {} with default depth {}; no span/load lookup is available.",
+            defaults.header_profile.label(),
+            defaults.default_header_depth
+        ),
+        fallback_diagnostic,
+    }
+}
+
+fn select_header_row<'a>(
+    standards: &'a ResolvedStandards,
+    site: &SiteContext,
+    span: Length,
+) -> Option<SelectedHeader<'a>> {
+    let mut best: Option<SelectedHeader<'a>> = None;
+
+    for (_, table) in &standards.headers {
+        let Some(widest_band) = table.rows.iter().map(|row| row.max_building_width).max() else {
+            continue;
+        };
+        let highest_snow_band = site
+            .ground_snow_load_psf
+            .is_none()
+            .then(|| table.rows.iter().map(|row| row.max_ground_snow_psf).max())
+            .flatten();
+
+        for row in &table.rows {
+            // building width: conservative band
+            if row.max_building_width != widest_band {
+                continue;
+            }
+            if let Some(highest_snow_band) = highest_snow_band
+                && row.max_ground_snow_psf != highest_snow_band
+            {
+                continue;
+            }
+            if let Some(snow_load) = site.ground_snow_load_psf
+                && row.max_ground_snow_psf < snow_load
+            {
+                continue;
+            }
+            if row.max_span < span {
+                continue;
+            }
+            let is_better = match &best {
+                None => true,
+                Some(best) => header_row_cmp(row, table, best.row, best.table).is_lt(),
+            };
+            if is_better {
+                best = Some(SelectedHeader { table, row });
+            }
+        }
+    }
+
+    best
+}
+
+fn header_row_cmp(
+    left: &HeaderRow,
+    left_table: &HeaderSpanTable,
+    right: &HeaderRow,
+    right_table: &HeaderSpanTable,
+) -> std::cmp::Ordering {
+    left.max_span
+        .cmp(&right.max_span)
+        .then_with(|| left.plies.cmp(&right.plies))
+        .then_with(|| {
+            left.profile
+                .nominal_depth()
+                .cmp(&right.profile.nominal_depth())
+        })
+        .then_with(|| left.profile.cmp(&right.profile))
+        .then_with(|| left_table.rule.cmp(&right_table.rule))
+}
+
+#[derive(Clone, Copy)]
+struct OpeningMemberContext<'a> {
+    defaults: &'a FramingDefaults,
+    framing: WallFraming,
+    standards: &'a ResolvedStandards,
+    site: &'a SiteContext,
+    use_header_tables: bool,
+    top_plate_count: usize,
+}
+
 fn add_opening_members(
     members: &mut Vec<FrameMember>,
     diagnostics: &mut Vec<PlanDiagnostic>,
     wall: &Wall,
-    code: &FramingDefaults,
-    framing: WallFraming,
     opening: &Opening,
-    top_plate_count: usize,
+    context: OpeningMemberContext<'_>,
 ) {
+    let code = context.defaults;
+    let framing = context.framing;
     let wall_stud = framing.member;
     let band = framing.band;
     let plate_thickness = code.plate_profile.thickness();
     let stud_base = plate_thickness;
-    let stud_top = wall.height - plate_thickness * top_plate_count as i64;
+    let stud_top = wall.height - plate_thickness * context.top_plate_count as i64;
     let header_bottom = opening.top();
-    let header_depth = code.default_header_depth.min(stud_top - header_bottom);
+    let header_spec = header_spec_for_opening(
+        context.standards,
+        context.site,
+        opening,
+        code,
+        context.use_header_tables,
+    );
+    let header_depth = header_spec.depth.min(stud_top - header_bottom);
     let header_top = header_bottom + header_depth;
     let left = opening.left();
     let right = opening.right();
     let stud_thickness = wall_stud.thickness();
-    let side_positions = OpeningSidePositions::new(left, right, stud_thickness);
+    let side_positions =
+        OpeningSidePositions::new(left, right, stud_thickness, header_spec.jack_studs);
 
-    if header_depth < code.default_header_depth {
+    if let Some(message) = header_spec.fallback_diagnostic.as_ref() {
+        diagnostics.push(PlanDiagnostic::new(
+            DiagnosticSeverity::Unsupported,
+            "standards.header.out-of-domain",
+            Some(opening.id.clone()),
+            message.clone(),
+        ));
+    }
+
+    if header_depth < header_spec.depth {
         diagnostics.push(PlanDiagnostic::new(
             DiagnosticSeverity::Warning,
             "opening.header.depth-clipped",
@@ -2633,22 +2851,15 @@ fn add_opening_members(
         ));
     }
 
-    for (side, king_x, jack_x) in [
-        ("left", side_positions.left_king, side_positions.left_jack),
-        (
-            "right",
-            side_positions.right_king,
-            side_positions.right_jack,
-        ),
-    ] {
+    for side in [OpeningSide::Left, OpeningSide::Right] {
         members.push(frame_member(
-            format!("{}-king-{}", opening.id.0, side),
+            format!("{}-king-{}", opening.id.0, side.label()),
             &opening.id,
             MemberKind::KingStud,
             wall_stud,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
-                king_x,
+                side_positions.king_x(side),
                 stud_base,
                 stud_top - stud_base,
                 stud_thickness,
@@ -2657,56 +2868,56 @@ fn add_opening_members(
             RuleProvenance::new(
                 "opening.king-studs.each-side",
                 format!(
-                    "A king stud is generated at the {side} rough opening edge for {}.",
+                    "A king stud is generated at the {} rough opening edge for {}.",
+                    side.label(),
                     opening.name
                 ),
             ),
         ));
 
-        members.push(frame_member(
-            format!("{}-jack-{}", opening.id.0, side),
-            &opening.id,
-            MemberKind::JackStud,
-            wall_stud,
-            FrameMemberPlacement::new(
-                MemberOrientation::Vertical,
-                jack_x,
-                stud_base,
-                header_bottom - stud_base,
-                stud_thickness,
-            ),
-            band,
-            RuleProvenance::new(
-                "opening.jack-studs.header-bearing",
-                format!(
-                    "A jack stud is generated at the {side} rough opening edge to support the starter-profile header.",
+        for jack_index in 0..header_spec.jack_studs {
+            members.push(frame_member(
+                jack_member_id(opening, side, jack_index),
+                &opening.id,
+                MemberKind::JackStud,
+                wall_stud,
+                FrameMemberPlacement::new(
+                    MemberOrientation::Vertical,
+                    side_positions.jack_x(side, jack_index),
+                    stud_base,
+                    header_bottom - stud_base,
+                    stud_thickness,
                 ),
-            ),
-        ));
+                band,
+                RuleProvenance::new(
+                    "opening.jack-studs.header-bearing",
+                    format!(
+                        "{} jack stud(s) are generated at the {} rough opening edge to support the selected header.",
+                        header_spec.jack_studs,
+                        side.label()
+                    ),
+                ),
+            ));
+        }
     }
 
-    members.push(frame_member(
-        format!("{}-header", opening.id.0),
-        &opening.id,
-        MemberKind::Header,
-        code.header_profile,
-        FrameMemberPlacement::new(
-            MemberOrientation::Horizontal,
-            side_positions.left_jack_left_face,
-            header_bottom,
-            opening.width + stud_thickness * 2,
-            header_depth,
-        ),
-        band,
-        RuleProvenance::new(
-            "opening.header.default-profile",
-            format!(
-                "Header uses the configured starter profile {} with default depth {}; no span/load lookup is performed yet.",
-                code.header_profile.label(),
-                header_depth
+    for ply_index in 0..header_spec.plies {
+        members.push(frame_member(
+            header_member_id(opening, ply_index),
+            &opening.id,
+            MemberKind::Header,
+            header_spec.profile,
+            FrameMemberPlacement::new(
+                MemberOrientation::Horizontal,
+                side_positions.left_jack_left_face,
+                header_bottom,
+                opening.width + stud_thickness * i64::from(header_spec.jack_studs) * 2,
+                header_depth,
             ),
-        ),
-    ));
+            band,
+            RuleProvenance::new(header_spec.rule_id.clone(), header_spec.summary.clone()),
+        ));
+    }
 
     if opening.has_sill() {
         members.push(frame_member(
@@ -2744,24 +2955,79 @@ fn add_opening_members(
     add_cripples(members, framing, opening, "upper", header_top, stud_top);
 }
 
+#[derive(Clone, Copy)]
+enum OpeningSide {
+    Left,
+    Right,
+}
+
+impl OpeningSide {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
 struct OpeningSidePositions {
     left_king: Length,
-    left_jack: Length,
     left_jack_left_face: Length,
-    right_jack: Length,
     right_king: Length,
+    opening_left: Length,
+    opening_right: Length,
+    stud_thickness: Length,
 }
 
 impl OpeningSidePositions {
-    fn new(opening_left: Length, opening_right: Length, stud_thickness: Length) -> Self {
+    fn new(
+        opening_left: Length,
+        opening_right: Length,
+        stud_thickness: Length,
+        jack_studs: u8,
+    ) -> Self {
         let half_stud = stud_thickness / 2;
+        let jack_pack = stud_thickness * i64::from(jack_studs);
         Self {
-            left_king: opening_left - stud_thickness - half_stud,
-            left_jack: opening_left - half_stud,
-            left_jack_left_face: opening_left - stud_thickness,
-            right_jack: opening_right + half_stud,
-            right_king: opening_right + stud_thickness + half_stud,
+            left_king: opening_left - jack_pack - half_stud,
+            left_jack_left_face: opening_left - jack_pack,
+            right_king: opening_right + jack_pack + half_stud,
+            opening_left,
+            opening_right,
+            stud_thickness,
         }
+    }
+
+    fn king_x(&self, side: OpeningSide) -> Length {
+        match side {
+            OpeningSide::Left => self.left_king,
+            OpeningSide::Right => self.right_king,
+        }
+    }
+
+    fn jack_x(&self, side: OpeningSide, jack_index: u8) -> Length {
+        let half_stud = self.stud_thickness / 2;
+        let offset = self.stud_thickness * i64::from(jack_index);
+        match side {
+            OpeningSide::Left => self.opening_left - half_stud - offset,
+            OpeningSide::Right => self.opening_right + half_stud + offset,
+        }
+    }
+}
+
+fn jack_member_id(opening: &Opening, side: OpeningSide, jack_index: u8) -> String {
+    if jack_index == 0 {
+        format!("{}-jack-{}", opening.id.0, side.label())
+    } else {
+        format!("{}-jack-{}-{}", opening.id.0, side.label(), jack_index + 1)
+    }
+}
+
+fn header_member_id(opening: &Opening, ply_index: u8) -> String {
+    if ply_index == 0 {
+        format!("{}-header", opening.id.0)
+    } else {
+        format!("{}-header-{}", opening.id.0, ply_index + 1)
     }
 }
 
@@ -2895,7 +3161,7 @@ fn starter_profile_diagnostics(wall: &Wall, standards_name: &str) -> Vec<PlanDia
                 "opening.garage-door.starter-header",
                 Some(opening.id.clone()),
                 format!(
-                    "{} is modeled as a wide rough opening with starter-profile king, jack, and header members; garage-door-specific structural design is unsupported.",
+                    "{} is modeled as a wide rough opening with starter-rule king, jack, and header members; garage-door-specific structural design is unsupported.",
                     opening.name
                 ),
             ));
@@ -3509,6 +3775,37 @@ mod tests {
         BuildingModel::new().resolved_standards()
     }
 
+    fn standards_with_header_rows(rows: Vec<HeaderRow>) -> ResolvedStandards {
+        let mut standards = starter_standards();
+        standards.headers = vec![(
+            ElementId::new("std-test"),
+            HeaderSpanTable {
+                rule: "test.headers".to_owned(),
+                citation: "Test Header Table".to_owned(),
+                rows,
+            },
+        )];
+        standards
+    }
+
+    fn header_row(
+        profile: BoardProfile,
+        plies: u8,
+        max_ground_snow_psf: u32,
+        max_building_width: Length,
+        max_span: Length,
+        jack_studs: u8,
+    ) -> HeaderRow {
+        HeaderRow {
+            profile,
+            plies,
+            max_ground_snow_psf,
+            max_building_width,
+            max_span,
+            jack_studs,
+        }
+    }
+
     /// A closed 12ft × 8ft rectangle with one room seeded at its centre.
     fn rectangle_with_room() -> BuildingModel {
         use framer_core::{Point2, Room, RoomUsage};
@@ -3864,6 +4161,376 @@ mod tests {
     }
 
     #[test]
+    fn header_sizing_uses_widest_band_and_tie_breaks() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(56.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![
+            header_row(
+                BoardProfile::TwoByFour,
+                1,
+                30,
+                Length::from_feet(24.0),
+                Length::from_feet(5.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByTwelve,
+                2,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(5.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByTen,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(5.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByEight,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(5.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoBySix,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(8.0),
+                1,
+            ),
+        ]);
+        let site = SiteContext {
+            ground_snow_load_psf: Some(20),
+            ..SiteContext::default()
+        };
+
+        let plan = generate_wall_plan_with_site(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+            &site,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, BoardProfile::TwoByEight);
+        assert_eq!(
+            header.cross_section_depth,
+            BoardProfile::TwoByEight.nominal_depth()
+        );
+        assert_eq!(header.provenance.rule_id, "test.headers");
+        assert!(header.provenance.summary.contains("Test Header Table"));
+    }
+
+    #[test]
+    fn header_sizing_unknown_snow_uses_highest_snow_band() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![
+            header_row(
+                BoardProfile::TwoByEight,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByTwelve,
+                1,
+                70,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+        ]);
+
+        let plan = generate_wall_plan(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_member(&plan, "door-header").profile,
+            BoardProfile::TwoByTwelve
+        );
+    }
+
+    #[test]
+    fn header_sizing_known_snow_rejects_underrated_rows() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![
+            header_row(
+                BoardProfile::TwoByEight,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByTwelve,
+                1,
+                70,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+        ]);
+        let site = SiteContext {
+            ground_snow_load_psf: Some(50),
+            ..SiteContext::default()
+        };
+
+        let plan = generate_wall_plan_with_site(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+            &site,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_member(&plan, "door-header").profile,
+            BoardProfile::TwoByTwelve
+        );
+    }
+
+    #[test]
+    fn header_sizing_out_of_domain_falls_back_and_diagnoses() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(16.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_feet(7.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![header_row(
+            BoardProfile::TwoByEight,
+            1,
+            30,
+            Length::from_feet(36.0),
+            Length::from_feet(4.0),
+            1,
+        )]);
+        let site = SiteContext {
+            ground_snow_load_psf: Some(20),
+            ..SiteContext::default()
+        };
+
+        let plan = generate_wall_plan_with_site(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+            &site,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, code.header_profile);
+        assert_eq!(header.cross_section_depth, code.default_header_depth);
+        assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "standards.header.out-of-domain"
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("door")
+                && matches!(diagnostic.severity, DiagnosticSeverity::Unsupported)
+                && diagnostic.message.contains("Test Header Table")
+                && diagnostic.message.contains("7' 0\"")
+        }));
+    }
+
+    #[test]
+    fn bearing_interior_wall_uses_header_tables() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        let system = framing_system("system-interior", BoardProfile::TwoByFour);
+        wall.system = system.id.clone();
+        wall.tags = vec!["bearing".to_owned()];
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![header_row(
+            BoardProfile::TwoByEight,
+            1,
+            30,
+            Length::from_feet(36.0),
+            Length::from_feet(6.0),
+            1,
+        )]);
+
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, BoardProfile::TwoByEight);
+        assert_eq!(header.provenance.rule_id, "test.headers");
+    }
+
+    #[test]
+    fn nonbearing_interior_wall_uses_fallback_header_profile() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        let system = framing_system("system-interior", BoardProfile::TwoByFour);
+        wall.system = system.id.clone();
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![header_row(
+            BoardProfile::TwoByEight,
+            1,
+            30,
+            Length::from_feet(36.0),
+            Length::from_feet(6.0),
+            1,
+        )]);
+
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, code.header_profile);
+        assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
+    }
+
+    #[test]
+    fn starter_header_table_drives_plies_jacks_and_provenance() {
+        let model = BuildingModel::demo_wall();
+        let system = model.system_for(&model.walls[0]).unwrap();
+        let plan = generate_wall_plan(
+            &model.walls[0],
+            system,
+            &model.materials,
+            &model.resolved_standards(),
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+        let opening = model.walls[0]
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == "opening-garage-1")
+            .expect("garage opening");
+        let stud_thickness = model.framing_defaults().stud_profile.thickness();
+        let half_stud = stud_thickness / 2;
+        let garage_headers = plan
+            .members
+            .iter()
+            .filter(|member| {
+                member.source.0 == "opening-garage-1" && member.kind == MemberKind::Header
+            })
+            .collect::<Vec<_>>();
+        let garage_jacks = plan
+            .members
+            .iter()
+            .filter(|member| {
+                member.source.0 == "opening-garage-1" && member.kind == MemberKind::JackStud
+            })
+            .count();
+        let header = find_member(&plan, "opening-garage-1-header");
+        let left_jack = find_member(&plan, "opening-garage-1-jack-left");
+        let left_jack_2 = find_member(&plan, "opening-garage-1-jack-left-2");
+        let right_jack = find_member(&plan, "opening-garage-1-jack-right");
+        let right_jack_2 = find_member(&plan, "opening-garage-1-jack-right-2");
+        let left_king = find_member(&plan, "opening-garage-1-king-left");
+        let right_king = find_member(&plan, "opening-garage-1-king-right");
+
+        assert_eq!(garage_headers.len(), 2);
+        assert!(
+            garage_headers
+                .iter()
+                .any(|member| member.id == "opening-garage-1-header")
+        );
+        assert!(
+            garage_headers
+                .iter()
+                .any(|member| member.id == "opening-garage-1-header-2")
+        );
+        for header in garage_headers {
+            assert_eq!(header.profile, BoardProfile::TwoByTwelve);
+            assert_eq!(header.provenance.rule_id, "irc2021.r602.7-1.headers");
+            assert!(header.provenance.summary.contains("2-ply 2x12"));
+            assert!(
+                header
+                    .provenance
+                    .summary
+                    .contains("IRC 2021 Table R602.7(1)")
+            );
+        }
+        assert_eq!(garage_jacks, 4);
+        assert_eq!(left_jack.x, opening.left() - half_stud);
+        assert_eq!(left_jack_2.x, opening.left() - half_stud - stud_thickness);
+        assert_eq!(right_jack.x, opening.right() + half_stud);
+        assert_eq!(right_jack_2.x, opening.right() + half_stud + stud_thickness);
+        assert_eq!(left_king.x, opening.left() - stud_thickness * 2 - half_stud);
+        assert_eq!(
+            right_king.x,
+            opening.right() + stud_thickness * 2 + half_stud
+        );
+        assert_eq!(header.x, opening.left() - stud_thickness * 2);
+        assert_eq!(header.cut_length, opening.width + stud_thickness * 4);
+    }
+
+    #[test]
     fn members_sit_in_the_framing_layer_band() {
         let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
@@ -4020,7 +4687,8 @@ mod tests {
             assert_eq!(member.profile, BoardProfile::TwoBySix, "{kind:?}");
         }
 
-        // The header still follows the code profile until span lookups exist.
+        // The default starter table still selects the same nominal header
+        // profile for this small rough opening.
         let header = plan
             .members
             .iter()
@@ -4315,11 +4983,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(header.source.0, "opening-door-1");
-        assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
-        assert!(header.provenance.summary.contains("no span/load lookup"));
+        assert_eq!(header.provenance.rule_id, "irc2021.r602.7-1.headers");
+        assert!(
+            header
+                .provenance
+                .summary
+                .contains("IRC 2021 Table R602.7(1)")
+        );
         assert_eq!(
             header.cross_section_depth,
-            model.framing_defaults().default_header_depth
+            model.framing_defaults().header_profile.nominal_depth()
         );
     }
 
@@ -4372,7 +5045,7 @@ mod tests {
             first_svg
                 .lines()
                 .any(|line| line.contains(r#"id="opening-door-1-header""#)
-                    && line.contains(r#"height="9""#))
+                    && line.contains(r#"height="10""#))
         );
         assert!(csv.starts_with("quantity,profile,kind"));
         assert!(csv.contains("total_length_inches"));
