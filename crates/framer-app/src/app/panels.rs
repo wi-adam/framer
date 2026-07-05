@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{
     self, Align, Color32, ComboBox, Frame, Layout, Margin, PopupCloseBehavior, Response, RichText,
@@ -2188,21 +2188,7 @@ impl FramerApp {
                     .iter()
                     .position(|stack_id| stack_id.0 == id);
                 let stack_len = self.model.standards.len();
-                let resolved_rules = self
-                    .model
-                    .resolved_standards()
-                    .rules
-                    .into_iter()
-                    .map(|rule| {
-                        (
-                            rule.rule,
-                            rule.citation,
-                            rule.pack.0,
-                            rule.waived,
-                            rule.severity.is_some(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let resolved_rules = standards_rule_rows(&self.model);
                 if let Some(pack) = self
                     .model
                     .standards_packs
@@ -3690,10 +3676,95 @@ fn standards_pack_stack_controls(
     }
 }
 
+type StandardsRuleRow = (String, String, String, Option<String>, bool);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandardsRuleMetadata {
+    citation: String,
+    pack: String,
+    waived: Option<String>,
+    has_check: bool,
+}
+
+fn standards_rule_rows(model: &framer_core::BuildingModel) -> Vec<StandardsRuleRow> {
+    let mut rules = BTreeMap::<String, StandardsRuleMetadata>::new();
+    for pack_id in &model.standards {
+        let Some(pack) = model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == *pack_id)
+        else {
+            continue;
+        };
+        for table in &pack.tables.studs {
+            insert_standards_rule_metadata(&mut rules, pack, &table.rule, &table.citation, false);
+        }
+        for table in &pack.tables.headers {
+            insert_standards_rule_metadata(&mut rules, pack, &table.rule, &table.citation, false);
+        }
+        for schedule in &pack.tables.fastening {
+            insert_standards_rule_metadata(
+                &mut rules,
+                pack,
+                &schedule.rule,
+                &schedule.citation,
+                false,
+            );
+        }
+        for table in &pack.tables.bracing {
+            insert_standards_rule_metadata(&mut rules, pack, &table.rule, &table.citation, false);
+        }
+        for check in &pack.checks {
+            insert_standards_rule_metadata(&mut rules, pack, &check.rule, &check.citation, true);
+        }
+        for overlay in &pack.overlays {
+            match overlay {
+                framer_core::RuleOverlay::Waive { target, reason } => {
+                    if let Some(entry) = rules.get_mut(target) {
+                        entry.waived = Some(reason.clone());
+                    }
+                }
+                framer_core::RuleOverlay::Severity { .. } => {}
+            }
+        }
+    }
+
+    rules
+        .into_iter()
+        .map(|(rule, metadata)| {
+            (
+                rule,
+                metadata.citation,
+                metadata.pack,
+                metadata.waived,
+                metadata.has_check,
+            )
+        })
+        .collect()
+}
+
+fn insert_standards_rule_metadata(
+    rules: &mut BTreeMap<String, StandardsRuleMetadata>,
+    pack: &framer_core::StandardsPack,
+    rule: &str,
+    citation: &str,
+    has_check: bool,
+) {
+    rules.insert(
+        rule.to_owned(),
+        StandardsRuleMetadata {
+            citation: citation.to_owned(),
+            pack: pack.id.0.clone(),
+            waived: None,
+            has_check,
+        },
+    );
+}
+
 fn standards_waiver_editor(
     ui: &mut Ui,
     pack_id: &str,
-    rules: &[(String, String, String, Option<String>, bool)],
+    rules: &[StandardsRuleRow],
     actions: &mut DeferredStandardsActions,
 ) {
     if rules.is_empty() {
@@ -6052,6 +6123,33 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn standards_rule_rows_match_full_resolution_metadata() {
+        let mut app = FramerApp::default();
+        app.waive_standards_rule(
+            "irc2021.r602.3-5.studs".to_owned(),
+            "accepted by AHJ".to_owned(),
+        );
+
+        let expected = app
+            .model
+            .resolved_standards()
+            .rules
+            .into_iter()
+            .map(|rule| {
+                (
+                    rule.rule,
+                    rule.citation,
+                    rule.pack.0,
+                    rule.waived,
+                    rule.severity.is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(standards_rule_rows(&app.model), expected);
     }
 
     #[test]

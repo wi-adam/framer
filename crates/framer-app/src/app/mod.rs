@@ -3768,6 +3768,11 @@ mod tests {
 
         app.add_standards_pack_to_stack(local.0.clone());
         assert_eq!(app.model.standards.last(), Some(&local));
+        let readded_stack = app.model.standards.clone();
+        app.add_standards_pack_to_stack(local.0.clone());
+        assert_eq!(app.model.standards, readded_stack);
+        app.add_standards_pack_to_stack("std-does-not-exist".to_owned());
+        assert_eq!(app.model.standards, readded_stack);
         assert!(save_project_document(&app.model).is_ok());
     }
 
