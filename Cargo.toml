@@ -5,6 +5,7 @@ members = [
     "crates/framer-library",
     "crates/framer-render",
     "crates/framer-solver",
+    "crates/framer-standards",
 ]
 resolver = "3"
 
@@ -23,6 +24,7 @@ framer-core = { path = "crates/framer-core" }
 framer-library = { path = "crates/framer-library" }
 framer-render = { path = "crates/framer-render" }
 framer-solver = { path = "crates/framer-solver" }
+framer-standards = { path = "crates/framer-standards" }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 pollster = "0.4.0"
 rayon = "1.11.0"

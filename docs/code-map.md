@@ -9,11 +9,12 @@ actual files, types, and functions. When the two disagree, the code wins — fix
 
 ## Workspace at a glance
 
-Five crates in a strict dependency order (UI depends on logic, never the reverse):
+Six crates in a strict dependency order (UI depends on logic, never the reverse):
 
 ```
-framer-core   ─┬─→ framer-solver  ─┐
-               ├─→ framer-render  ─┼─→ framer-app
+framer-core   ─┬─→ framer-solver ─┬─→ framer-app
+               │                  └─→ framer-standards
+               ├─→ framer-render ─┤
                └─→ framer-library ─┘
 ```
 
@@ -22,6 +23,7 @@ framer-core   ─┬─→ framer-solver  ─┐
 | [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, furnishings/MEP objects, standards packs, validation, room topology, `.framer` serialization. | — | No |
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
+| [`framer-standards`](../crates/framer-standards) | UI-free standards evaluator: compliance facts, Kleene logic, deterministic reports, CSV export, and diagnostics lowering. | core, solver | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
 | [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
 
@@ -230,6 +232,26 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
 - `generate_wall_plan(wall, code, system, materials)` — single-wall framing.
 - Exports: `export_bom_csv`, `export_layer_bom_csv`, `export_room_schedule_csv`,
   `export_wall_elevation_svg`, `export_project_svg`.
+
+---
+
+## framer-standards — compliance evaluation
+
+UI-agnostic and I/O-free. It evaluates authored standards checks against a
+`BuildingModel`, resolved standards tables, and the regenerated `ProjectFramePlan`.
+
+| File | Contains |
+| --- | --- |
+| `src/lib.rs` | `Tri` Kleene logic, `FactValue`, entity scoping, `fact_value`, `evaluate`, `ComplianceReport::to_csv`, and `diagnostics` lowering into solver diagnostics. |
+
+### Entry points
+
+- `evaluate(model, resolved, plan) -> ComplianceReport` — evaluates active, non-waived checks
+  from the resolved standards stack and returns sorted, deterministic entries.
+- `fact_value(fact, entity, model, resolved, plan)` — frozen v1 fact table for wall, opening,
+  room, and placeholder braced-wall-line facts.
+- `diagnostics(&report)` — lowers only violation, advisory, and needs-review outcomes into
+  `PlanDiagnostic`; pass, waived, and not-applicable entries stay report-only.
 
 ---
 
