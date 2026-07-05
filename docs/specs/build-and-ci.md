@@ -81,7 +81,7 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 - CI must mechanically enforce the [architecture invariants](../architecture.md): determinism
   (round-trip + golden + parity tests), UI-free core/solver/render (they build and test without
-  the app), and the v12 `.framer` round-trip fixtures.
+  the app), and the v13 `.framer` round-trip fixtures.
 - The local gate, the commit skill, and CI must stay in lockstep — changing one means changing
   the others.
 

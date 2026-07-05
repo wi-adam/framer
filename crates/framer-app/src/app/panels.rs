@@ -112,7 +112,13 @@ impl FramerApp {
                     design::toggle_theme(ui.ctx());
                 }
                 widgets::ghost_icon_button(ui, Icon::Help, head.text_secondary, "Framer help");
-                header_profile(ui, head, self.model.code.display_name.as_str());
+                header_profile(
+                    ui,
+                    head,
+                    self.model
+                        .base_standards_name()
+                        .unwrap_or("Standards starter pack"),
+                );
             });
         });
     }
@@ -1679,7 +1685,7 @@ impl FramerApp {
                 }
             }
             Selection::Opening(id) => {
-                let top_clearance = opening_top_clearance(&self.model.code);
+                let top_clearance = opening_top_clearance(&self.model.framing_defaults());
                 let driven_fields = self
                     .model
                     .walls
@@ -5343,8 +5349,8 @@ fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
 mod tests {
     use super::*;
     use framer_core::{
-        CodeProfile, DimensionAxis, DimensionDirection, DimensionHorizontalReference,
-        DimensionVerticalReference,
+        DimensionAxis, DimensionDirection, DimensionHorizontalReference,
+        DimensionVerticalReference, FramingDefaults,
     };
 
     #[test]
@@ -5701,7 +5707,7 @@ mod tests {
     }
 
     fn wall_with_window(center: Length, width: Length) -> Wall {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",

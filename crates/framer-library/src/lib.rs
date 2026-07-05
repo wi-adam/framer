@@ -2005,9 +2005,9 @@ pub enum LibraryImportError {
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        Appearance, AssetRef, BoardProfile, CodeProfile, ConstructionLayer, FramingPattern,
-        FramingSpec, Furnishing, LayerFunction, Length, MepObject, MepObjectKind, ModelError,
-        SystemKind, TextureRole, load_project, save_project,
+        Appearance, AssetRef, BoardProfile, ConstructionLayer, FramingPattern, FramingSpec,
+        Furnishing, LayerFunction, Length, MepObject, MepObjectKind, ModelError, SystemKind,
+        TextureRole, load_project, save_project,
     };
 
     use super::*;
@@ -2119,7 +2119,7 @@ mod tests {
     fn textured_project() -> (BuildingModel, BTreeMap<String, Vec<u8>>) {
         let bytes = b"not-a-real-png-but-content-addressed".to_vec();
         let hash = asset_content_hash(&bytes);
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let mut material = Material::solid_color("mat-textured", "Textured", [48, 96, 144]);
         material.appearance = Appearance::Textured {
             color: [48, 96, 144],
@@ -2746,7 +2746,7 @@ mod tests {
         let library_hash = library_content_hash(&library).unwrap();
         let expected_material_hash = material_content_hash(&library.materials[0]).unwrap();
         let expected_system_hash = system_content_hash(&library.systems[0]).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         let imported_material = import_material(
             &mut project,
@@ -2784,7 +2784,7 @@ mod tests {
     fn importing_system_vendors_material_closure_and_remaps_references() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         let imported = import_system(
             &mut project,
@@ -2827,7 +2827,7 @@ mod tests {
     fn importing_furnishing_and_mep_object_vendors_family_definitions() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         let furnishing = import_furnishing(
             &mut project,
@@ -2862,7 +2862,7 @@ mod tests {
     fn newly_imported_items_have_no_lifecycle_issues() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         import_system(
             &mut project,
@@ -2879,7 +2879,7 @@ mod tests {
     fn newly_imported_family_definitions_have_no_lifecycle_issues() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         import_furnishing(
             &mut project,
@@ -2903,7 +2903,7 @@ mod tests {
     fn local_material_edits_emit_divergence_until_detached() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported =
             import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
         let local_id = imported.materials[0].clone();
@@ -2929,7 +2929,7 @@ mod tests {
     fn local_system_edits_emit_divergence_after_clean_import() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported = import_system(
             &mut project,
             &library,
@@ -2963,7 +2963,7 @@ mod tests {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
 
-        let mut material_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut material_project = BuildingModel::new();
         let imported_material = import_material(
             &mut material_project,
             &library,
@@ -2986,7 +2986,7 @@ mod tests {
             LibraryItem::Material(local_material_id)
         );
 
-        let mut system_project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut system_project = BuildingModel::new();
         let imported_system = import_system(
             &mut system_project,
             &library,
@@ -3010,7 +3010,7 @@ mod tests {
     fn family_definitions_report_lifecycle_and_detach() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported = import_furnishing(
             &mut project,
             &library,
@@ -3039,7 +3039,7 @@ mod tests {
     fn mep_object_resync_updates_source_content() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported = import_mep_object(
             &mut project,
             &library,
@@ -3082,7 +3082,7 @@ mod tests {
     fn updated_library_content_emits_out_of_date_and_resync_updates_material() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported =
             import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
         let local_id = imported.materials[0].clone();
@@ -3118,7 +3118,7 @@ mod tests {
     fn resync_system_preserves_project_ids_and_updates_material_closure() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported = import_system(
             &mut project,
             &library,
@@ -3190,7 +3190,7 @@ mod tests {
     fn detach_system_clears_source_and_reports_false_when_already_detached() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported = import_system(
             &mut project,
             &library,
@@ -3228,7 +3228,7 @@ mod tests {
     fn resync_rejects_mismatched_library_uid() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let imported_material =
             import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
         let imported_system = import_system(
@@ -3267,7 +3267,7 @@ mod tests {
     fn repeated_imports_from_same_library_version_share_one_stamp() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         import_material(&mut project, &library, &hash, &ElementId::new("mat-cedar")).unwrap();
         import_system(
@@ -3303,7 +3303,7 @@ mod tests {
     fn import_collision_uses_lowest_free_suffix() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         project.materials.push(Material::solid_color(
             "acme-walls-mat-cedar",
             "Existing",
@@ -3327,7 +3327,7 @@ mod tests {
     fn failed_material_import_rolls_back_project_mutation() {
         let mut library = fixture_library();
         library.materials[0].id = ElementId::new("Bad Material");
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let before = save_project(&project).unwrap();
 
         let result = import_material(
@@ -3351,7 +3351,7 @@ mod tests {
     fn failed_system_import_rolls_back_project_mutation() {
         let mut library = fixture_library();
         library.systems[0].id = ElementId::new("Bad System");
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
         let before = save_project(&project).unwrap();
 
         let result = import_system(
@@ -3374,7 +3374,7 @@ mod tests {
     #[test]
     fn import_errors_are_explicit_for_missing_items_and_resolvers() {
         let library = fixture_library();
-        let mut project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut project = BuildingModel::new();
 
         assert!(matches!(
             import_material(
@@ -3455,7 +3455,7 @@ mod tests {
 
     #[test]
     fn project_remains_self_contained_without_library_resolution() {
-        let project = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let project = BuildingModel::new();
         let saved = save_project(&project).unwrap();
         let reloaded = load_project(&saved).unwrap();
 

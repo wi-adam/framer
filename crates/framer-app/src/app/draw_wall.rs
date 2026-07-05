@@ -516,19 +516,21 @@ fn squared(value: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framer_core::{BuildingModel, CodeProfile, ElementId, Length, Point2, Wall, WallJoinKind};
+    use framer_core::{
+        BuildingModel, ElementId, FramingDefaults, Length, Point2, Wall, WallJoinKind,
+    };
 
     fn p(x_in: f64, y_in: f64) -> Point2 {
         Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
     }
 
     fn wall_from(id: &str, start: Point2, end: Point2) -> Wall {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
         Wall::new(id, id, Length::from_feet(10.0), &code).with_placement("level-1", start, end)
     }
 
     fn empty_model() -> BuildingModel {
-        BuildingModel::new(CodeProfile::irc_2021_prescriptive())
+        BuildingModel::new()
     }
 
     #[test]

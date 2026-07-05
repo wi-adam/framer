@@ -417,7 +417,7 @@ fn push_wall(
     let system = model.system_for(wall);
     let depth = system
         .map(|system| system.total_thickness())
-        .unwrap_or_else(|| model.code.stud_profile.nominal_depth())
+        .unwrap_or_else(|| model.framing_defaults().stud_profile.nominal_depth())
         .inches() as f32;
     let half = depth * 0.5;
     let basis = WallBasis::new(wall);
@@ -846,7 +846,7 @@ fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
 mod tests {
     use super::*;
     use crate::geom::Hit;
-    use framer_core::{AssetRef, CodeProfile, Length, Opening, Point2, TextureRole};
+    use framer_core::{AssetRef, FramingDefaults, Length, Opening, Point2, TextureRole};
 
     fn material_histogram(scene: &Scene) -> std::collections::HashMap<u32, usize> {
         let mut h = std::collections::HashMap::new();
@@ -857,8 +857,8 @@ mod tests {
     }
 
     fn wall_model(exposure: WallExposure, openings: Vec<Opening>) -> BuildingModel {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.start = Point2::new(Length::ZERO, Length::ZERO);
         wall.end = Point2::new(Length::from_feet(12.0), Length::ZERO);
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn empty_model_still_has_ground_and_camera() {
-        let model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let model = BuildingModel::new();
         let scene = scene_from_model(&model, &RenderOptions::default());
         let hist = material_histogram(&scene);
         assert_eq!(hist.get(&MAT_GROUND).copied().unwrap_or(0), 2);
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn asset_backed_materials_without_resolved_assets_lower_to_fallback_diffuse() {
-        let model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let model = BuildingModel::new();
         let assets = RenderAssets::new();
         let mut palette = PaletteBuilder::new(&model, &assets);
         let hash = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1213,7 +1213,7 @@ mod tests {
     /// over a 12×8 footprint on a 9ft-tall level, each with a distinctly colored
     /// finish so the rendered material can be checked.
     fn roofed_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         // 9ft top plane so the ceiling (12" below it) lands at 8ft.
         for level in &mut model.levels {
             if level.id.0 == "level-1" {
@@ -1377,7 +1377,7 @@ mod tests {
     /// and a floor deck attached to that room via `SurfaceRegion::Room`.
     fn l_shaped_room_model() -> BuildingModel {
         let ft = Length::from_feet;
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let pts = [
             Point2::new(ft(0.0), ft(0.0)),
             Point2::new(ft(12.0), ft(0.0)),
@@ -1389,7 +1389,7 @@ mod tests {
         for i in 0..pts.len() {
             let next = (i + 1) % pts.len();
             model.walls.push(
-                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.framing_defaults())
                     .with_placement("level-1", pts[i], pts[next]),
             );
         }
@@ -1476,19 +1476,19 @@ mod tests {
 
     fn stacked_unenclosed_room_deck_model() -> BuildingModel {
         let ft = Length::from_feet;
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model
             .levels
             .push(Level::new("level-2", "Level 2", ft(10.0)));
         for (i, window) in rect12x8().windows(2).enumerate() {
             model.walls.push(
-                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.framing_defaults())
                     .with_placement("level-1", window[0], window[1]),
             );
         }
         let outline = rect12x8();
         model.walls.push(
-            Wall::new("w-close", "Wall", ft(1.0), &model.code)
+            Wall::new("w-close", "Wall", ft(1.0), &model.framing_defaults())
                 .with_placement("level-1", outline[3], outline[0]),
         );
         model.rooms.push(Room::new(
@@ -1548,7 +1548,7 @@ mod tests {
     /// (soffit), a framing layer, and roofing, so its weather face and its interior
     /// underside resolve to distinct colors.
     fn cathedral_model() -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         for level in &mut model.levels {
             if level.id.0 == "level-1" {
                 level.height = Length::from_whole_inches(108);

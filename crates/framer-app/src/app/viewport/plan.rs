@@ -312,7 +312,11 @@ fn draw_wall_layers(
         // Degenerate model with no resolvable system: fall back to the code stud
         // depth so the wall still reads as a thick band.
         None => {
-            let total = model.code.stud_profile.nominal_depth().inches();
+            let total = model
+                .framing_defaults()
+                .stud_profile
+                .nominal_depth()
+                .inches();
             let (side0, side1) = layer_band_span(interior_sign, total, 0.0, total);
             let quad = band_quad(
                 &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
@@ -383,7 +387,13 @@ fn wall_plan_thickness(model: &BuildingModel, wall: &Wall) -> f64 {
     model
         .system_for(wall)
         .map(|system| system.total_thickness().inches())
-        .unwrap_or_else(|| model.code.stud_profile.nominal_depth().inches())
+        .unwrap_or_else(|| {
+            model
+                .framing_defaults()
+                .stud_profile
+                .nominal_depth()
+                .inches()
+        })
 }
 
 pub(super) fn draw_project_plan(
@@ -1252,17 +1262,23 @@ fn room_boundaries_by_level(model: &BuildingModel) -> Vec<Option<framer_core::Ro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framer_core::{CodeProfile, Level, Room, RoomUsage};
+    use framer_core::{FramingDefaults, Level, Room, RoomUsage};
 
     fn p(x_ft: f64, y_ft: f64) -> Point2 {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
     }
 
-    fn wall(code: &CodeProfile, id: &str, level: &str, a: Point2, b: Point2) -> Wall {
+    fn wall(code: &FramingDefaults, id: &str, level: &str, a: Point2, b: Point2) -> Wall {
         Wall::new(id, id, Length::from_feet(1.0), code).with_placement(level, a, b)
     }
 
-    fn rect_walls(code: &CodeProfile, prefix: &str, level: &str, x0: f64, x1: f64) -> Vec<Wall> {
+    fn rect_walls(
+        code: &FramingDefaults,
+        prefix: &str,
+        level: &str,
+        x0: f64,
+        x1: f64,
+    ) -> Vec<Wall> {
         vec![
             wall(code, &format!("{prefix}-b"), level, p(x0, 0.0), p(x1, 0.0)),
             wall(code, &format!("{prefix}-r"), level, p(x1, 0.0), p(x1, 8.0)),
@@ -1273,8 +1289,8 @@ mod tests {
 
     #[test]
     fn room_boundaries_by_level_batches_and_preserves_room_order() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .levels
             .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));

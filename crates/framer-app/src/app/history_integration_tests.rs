@@ -6,7 +6,7 @@
 //! no-op edits, re-solves on restore, and is cleared by load/reset.
 
 use eframe::egui;
-use framer_core::{CodeProfile, Length, OpeningKind, Point2, Wall};
+use framer_core::{FramingDefaults, Length, OpeningKind, Point2, Wall};
 
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
@@ -1057,7 +1057,7 @@ fn cmd_shift_z_redoes_via_keyboard() {
 /// Replace the app's model with a minimal L of two walls sharing a corner at the
 /// origin, so wall `a` has a *free* end at (10ft, 0) that can be dragged.
 fn install_corner_model(app: &mut FramerApp) {
-    let code = CodeProfile::irc_2021_prescriptive();
+    let code = FramingDefaults::irc_2021_starter();
     let pt = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
     let wall = |id: &str, start, end| {
         Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", start, end)
@@ -1111,7 +1111,7 @@ fn wall_endpoint_drag_extends_a_free_end_as_one_undo_step() {
 #[test]
 fn wall_endpoint_drag_drags_shared_node_along_a_collinear_run() {
     let mut app = FramerApp::default();
-    let code = CodeProfile::irc_2021_prescriptive();
+    let code = FramingDefaults::irc_2021_starter();
     let pt = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
     let wall = |id: &str, start, end| {
         Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", start, end)

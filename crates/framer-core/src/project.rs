@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 12;
-/// The model is v12-only — older on-disk shapes and pre-provenance schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 13;
+/// The model is v13-only — older on-disk shapes and pre-standards schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v12-only model,
+    // Peek the format/version header before deserializing into the v13-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v12-only) deserialization.
+/// and schema versions before attempting the full (v13-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -114,7 +114,7 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Appearance, AssetRef, BuildingModel, CodeProfile, ElementId, Furnishing,
+        Appearance, AssetRef, BuildingModel, ElementId, FramingDefaults, Furnishing,
         FurnishingInstance, Length, LibraryStamp, Material, MaterialSource, MepInstance, MepObject,
         MepObjectKind, ModelError, Opening, Point2, Provenance, QuarterTurn, TextureRole, Wall,
     };
@@ -126,7 +126,7 @@ mod tests {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 12,\n"));
+        assert!(json.contains("  \"schema_version\": 13,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -145,9 +145,9 @@ mod tests {
 
     #[test]
     fn save_project_is_deterministic_for_reordered_authored_objects() {
-        let code = CodeProfile::irc_2021_prescriptive();
+        let code = FramingDefaults::irc_2021_starter();
 
-        let mut first = BuildingModel::new(code.clone());
+        let mut first = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "opening-b",
@@ -166,7 +166,7 @@ mod tests {
         ));
         first.walls.push(wall.clone());
 
-        let mut second = BuildingModel::new(code);
+        let mut second = BuildingModel::new();
         wall.openings.reverse();
         second.walls.push(wall);
 
@@ -205,11 +205,11 @@ mod tests {
             ..material_source.clone()
         };
 
-        let mut first = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut first = BuildingModel::new();
         first.libraries = vec![second_stamp.clone(), first_stamp.clone()];
         first.materials[0].source = MaterialSource::Library(material_source.clone());
         first.systems[0].source = Some(system_source.clone());
-        let mut second = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut second = BuildingModel::new();
         second.libraries = vec![first_stamp, second_stamp];
         second.materials[0].source = MaterialSource::Library(material_source);
         second.systems[0].source = Some(system_source);
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn object_families_and_placements_round_trip() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.furnishings.push(Furnishing::new(
             "furnishing-base-cabinet",
             "Base cabinet",
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn object_placements_reject_missing_families_and_levels() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.furnishing_instances.push(FurnishingInstance::new(
             "furnishing-instance-1",
             "Missing chair",
@@ -313,7 +313,7 @@ mod tests {
             Err(ModelError::FurnishingInstanceReferencesUnknownLevel { .. })
         ));
 
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.mep_instances.push(MepInstance::new(
             "mep-instance-1",
             "Missing panel",
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn object_families_reject_non_positive_sizes() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.furnishings.push(Furnishing::new(
             "furnishing-zero",
             "Zero-width furnishing",
@@ -383,19 +383,11 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 12,
+  "schema_version": 13,
   "authored": {
-    "code": {
-      "code": "Irc2021",
-      "display_name": "IRC 2021 prescriptive starter profile",
-      "default_wall_height": {"ticks": 1536},
-      "default_stud_spacing": {"ticks": 256},
-      "double_top_plate": true,
-      "default_header_depth": {"ticks": 144},
-      "stud_profile": "TwoByFour",
-      "plate_profile": "TwoByFour",
-      "header_profile": "TwoByTen"
-    },
+    "site": {"jurisdiction": ""},
+    "standards": [],
+    "standards_packs": [],
     "walls": []
   },
   "generated": {}
@@ -407,8 +399,8 @@ mod tests {
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
         // A v9 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v12 model.
-        // The pre-v12 body remains self-contained, but schema support is v12-only.
+        // unsupported-schema error, NOT serde errors from the current v13 model.
+        // The pre-v13 body remains self-contained, but schema support is v13-only.
         let source = r#"{
   "format": "framer.project",
   "schema_version": 9,
@@ -438,12 +430,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_immediately_previous_schema_version() {
-        // The immediately-previous schema (v11) is no longer loadable: the bump
-        // to v12 is a hard cutover, not migrated in place. The header peek rejects
+        // The immediately-previous schema (v12) is no longer loadable: the bump
+        // to v13 is a hard cutover, not migrated in place. The header peek rejects
         // it before the body is deserialized, so a minimal body suffices.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 11,
+  "schema_version": 12,
   "authored": {
     "walls": []
   }
@@ -452,7 +444,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 11,
+                found: 12,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -526,8 +518,8 @@ mod tests {
     fn wall_system_and_tags_round_trip() {
         use crate::ElementId;
 
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.system = ElementId::new("system-wall-interior-1");
         wall.tags = vec!["load-bearing".to_owned(), "shear".to_owned()];
@@ -560,9 +552,7 @@ mod tests {
     fn material_properties_round_trip_deterministically() {
         use crate::{Appearance, Material, PropertyValue};
 
-        let code = CodeProfile::irc_2021_prescriptive();
-
-        let mut first = BuildingModel::new(code.clone());
+        let mut first = BuildingModel::new();
         let mut material = Material::solid_color("mat-custom", "Custom", [10, 20, 30]);
         material
             .properties
@@ -577,7 +567,7 @@ mod tests {
 
         // The same material with its property map inserted in a different order
         // must serialize identically (BTreeMap => ordered).
-        let mut second = BuildingModel::new(code);
+        let mut second = BuildingModel::new();
         let mut reordered = Material::solid_color("mat-custom", "Custom", [10, 20, 30]);
         reordered
             .properties
@@ -605,7 +595,7 @@ mod tests {
 
     #[test]
     fn asset_backed_material_appearances_round_trip_and_validate() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let texture = AssetRef::new(
             "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "image/png",
@@ -723,7 +713,7 @@ mod tests {
     }
 
     fn project_with_asset_appearance(appearance: Appearance) -> BuildingModel {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         let mut material = Material::solid_color("mat-asset", "Asset material", [10, 20, 30]);
         material.appearance = appearance;
         model.materials.push(material);
@@ -732,7 +722,7 @@ mod tests {
 
     #[test]
     fn library_provenance_round_trips_with_identity_table() {
-        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        let mut model = BuildingModel::new();
         model.libraries.push(LibraryStamp {
             uid: "11111111-1111-4111-8111-111111111111".to_owned(),
             version_id: "019e9150-0000-7000-8000-000000000001".to_owned(),
@@ -770,8 +760,8 @@ mod tests {
 
     #[test]
     fn validation_rejects_dangling_wall_system() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.system = ElementId::new("system-does-not-exist");
         model.walls.push(wall);
@@ -788,8 +778,8 @@ mod tests {
     fn room_round_trips_through_save_and_load() {
         use crate::{Point2, Room, RoomUsage};
 
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code.clone());
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
         model
             .walls
             .push(Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code));
@@ -802,7 +792,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 12,"));
+        assert!(json.contains("\"schema_version\": 13,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 
@@ -816,6 +806,47 @@ mod tests {
     }
 
     #[test]
+    fn bracing_round_trips_through_save_and_load() {
+        use crate::{BracedPanel, BracedWallLine, BracingMethod, Point2};
+
+        let code = FramingDefaults::irc_2021_starter();
+        let mut empty = BuildingModel::new();
+        empty.walls.push(Wall::new(
+            "wall-empty",
+            "Wall",
+            Length::from_feet(12.0),
+            &code,
+        ));
+        let empty_json = save_project(&empty).unwrap();
+        assert!(!empty_json.contains("\"bracing\""));
+        assert!(!empty_json.contains("\"braced_wall_lines\""));
+
+        let mut model = BuildingModel::new();
+        let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
+        wall.bracing.push(BracedPanel {
+            id: ElementId::new("panel-front-1"),
+            offset: Length::from_feet(2.0),
+            length: Length::from_feet(4.0),
+            method: BracingMethod::Wsp,
+        });
+        model.walls.push(wall);
+        model.braced_wall_lines.push(BracedWallLine {
+            id: ElementId::new("bwl-front"),
+            name: "Front braced wall line".to_owned(),
+            level: ElementId::new("level-1"),
+            start: Point2::new(Length::ZERO, Length::ZERO),
+            end: Point2::new(Length::from_feet(12.0), Length::ZERO),
+        });
+
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"bracing\": ["));
+        assert!(json.contains("\"braced_wall_lines\": ["));
+
+        let reloaded = load_project(&json).unwrap();
+        assert_eq!(reloaded, model.into_deterministic());
+    }
+
+    #[test]
     fn roof_ceiling_floor_round_trip_through_save_and_load() {
         use crate::{
             BoardProfile, Ceiling, CeilingSlope, ConstructionLayer, ConstructionSystem, ElementId,
@@ -823,8 +854,7 @@ mod tests {
             Point2, RoofOpening, RoofPlane, Slope, SpanDirection, SurfaceRegion, SystemKind,
         };
 
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code);
+        let mut model = BuildingModel::new();
 
         let surface_system =
             |id: &str, kind: SystemKind, family: MemberFamily| ConstructionSystem {
@@ -965,8 +995,7 @@ mod tests {
 
     #[test]
     fn level_height_skips_default_and_round_trips_when_set() {
-        let code = CodeProfile::irc_2021_prescriptive();
-        let mut model = BuildingModel::new(code);
+        let mut model = BuildingModel::new();
 
         // A default (zero) level height is omitted from the canonical JSON.
         let default_json = save_project(&model).unwrap();
