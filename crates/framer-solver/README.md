@@ -8,15 +8,16 @@ Depends on: `framer-core`. Consumed by: `framer-app`.
 ## Module
 
 One file, `src/lib.rs`. It generates per-wall framing, adds join members, builds the room
-schedule and per-layer material takeoff, and provides SVG/CSV exporters.
+schedule, per-layer material takeoff, and fastening takeoff, and provides SVG/CSV exporters.
 
 ## Key types & entry points
 
 - **`generate_project_plan(&BuildingModel) -> Result<ProjectFramePlan, SolverError>`** — the
   single entry point the app calls.
 - **`ProjectFramePlan`** → `wall_plans: Vec<WallFramePlan>`, `rooms: Vec<RoomSchedule>`,
-  `diagnostics`; `bom() -> Vec<BomItem>` (member cut list) and `layer_bom() -> Vec<LayerBomItem>`
-  (per-layer material takeoff from each wall's `ConstructionSystem`).
+  `diagnostics`, `fasteners: Vec<FastenerTakeoff>`; `bom() -> Vec<BomItem>` (member cut list)
+  and `layer_bom() -> Vec<LayerBomItem>` (per-layer material takeoff from each wall's
+  `ConstructionSystem`).
 - **`FrameMember`** — a generated member with `kind: MemberKind`, `profile: BoardProfile`, and
   `provenance: RuleProvenance` (every member traces back to the rule that made it).
 - Exports: `export_bom_csv`, `export_layer_bom_csv`, `export_room_schedule_csv`,
@@ -31,5 +32,5 @@ See [`docs/code-map.md`](../../docs/code-map.md#framer-solver--deterministic-fra
 cargo test -p framer-solver
 ```
 
-Covers framing determinism, BOM grouping/cut lengths, per-layer material takeoff
-(area/volume), and the connected-shell whole-project plan.
+Covers framing determinism, BOM grouping/cut lengths, fastening takeoff, per-layer material
+takeoff (area/volume), and the connected-shell whole-project plan.

@@ -686,11 +686,11 @@ Use:
   the plan view, starter-catalog `Place` actions to place furnishing/MEP instances,
   and the `Dimension` tool in the wall view to create driving or reference dimensions.
 - `Plan` to inspect generated framing, diagnostics, BOM rows (including the
-  per-layer material takeoff), read-only authored summaries, and selectable
-  generated members.
+  fastening and per-layer material takeoffs), read-only authored summaries, and
+  selectable generated members.
 - `Export` in Plan Mode to write disposable sidecar artifacts next to the project
   path: `<project>.svg` for the shell plan plus wall elevations and `<project>.csv`
-  for the grouped whole-project BOM/cut list.
+  for the grouped whole-project BOM/cut list plus fastener takeoff section.
 
 The SVG and CSV exports are regenerated outputs. Do not copy them back into the
 canonical project document.

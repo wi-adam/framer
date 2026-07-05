@@ -1053,6 +1053,7 @@ mod surface_tests {
             diagnostics: Vec::new(),
             rooms: Vec::new(),
             layers: Vec::new(),
+            fasteners: Vec::new(),
         }
     }
 
