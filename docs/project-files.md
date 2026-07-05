@@ -696,8 +696,9 @@ Use:
   fastening and per-layer material takeoffs), read-only authored summaries, and
   selectable generated members.
 - `Export` in Plan Mode to write disposable sidecar artifacts next to the project
-  path: `<project>.svg` for the shell plan plus wall elevations and `<project>.csv`
-  for the grouped whole-project BOM/cut list plus fastener takeoff section.
+  path: `<project>.svg` for the shell plan plus wall elevations, `<project>.csv`
+  for the grouped whole-project BOM/cut list plus fastener takeoff section, and
+  `<project>.compliance.csv` for the derived standards compliance report.
 
 The SVG and CSV exports are regenerated outputs. Do not copy them back into the
 canonical project document.

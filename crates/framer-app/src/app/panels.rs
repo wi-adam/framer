@@ -13,6 +13,7 @@ use framer_core::{
     WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
+use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
 
 use super::actions::{self, ActionId, WorkflowTab};
 use super::design::{Icon, widgets};
@@ -126,6 +127,7 @@ impl FramerApp {
 
     fn project_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
         let can_export = self.workspace_mode.shows_generated_plan();
+        let can_export_compliance = self.action_enabled(ActionId::ExportComplianceReport);
         let (response, _) = MenuButton::new(header_menu_text("Project", head)).ui(ui, |ui| {
             ui.set_min_width(176.0);
             if header_menu_action(ui, ActionId::NewProject, true).clicked() {
@@ -143,6 +145,12 @@ impl FramerApp {
             ui.separator();
             if header_menu_action(ui, ActionId::ExportArtifacts, can_export).clicked() {
                 self.export_current_artifacts();
+                ui.close();
+            }
+            if header_menu_action(ui, ActionId::ExportComplianceReport, can_export_compliance)
+                .clicked()
+            {
+                self.export_compliance_report();
                 ui.close();
             }
         });
@@ -2744,6 +2752,10 @@ impl FramerApp {
             ui.separator();
             diagnostics_panel(ui, self.error.as_deref(), self.project_plan.as_ref());
             ui.separator();
+            if let Some(source) = compliance_panel(ui, self.compliance_report.as_ref()) {
+                self.focus_compliance_source(source);
+            }
+            ui.separator();
             bom_panel(ui, self.project_plan.as_ref());
             if self
                 .project_plan
@@ -5236,6 +5248,161 @@ fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
     ui.label(&diagnostic.message);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComplianceGroup {
+    Violations,
+    NeedsReview,
+    Advisories,
+    Waived,
+    Passed,
+    NotApplicable,
+}
+
+impl ComplianceGroup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Violations => "Violations",
+            Self::NeedsReview => "Needs review",
+            Self::Advisories => "Advisories",
+            Self::Waived => "Waived",
+            Self::Passed => "Passed",
+            Self::NotApplicable => "Not applicable",
+        }
+    }
+
+    fn default_open(self) -> bool {
+        !matches!(self, Self::Passed | Self::NotApplicable)
+    }
+
+    fn contains(self, outcome: &Outcome) -> bool {
+        self == compliance_outcome_group(outcome)
+    }
+}
+
+fn compliance_outcome_group(outcome: &Outcome) -> ComplianceGroup {
+    match outcome {
+        Outcome::Violation => ComplianceGroup::Violations,
+        Outcome::NeedsReview => ComplianceGroup::NeedsReview,
+        Outcome::Advisory => ComplianceGroup::Advisories,
+        Outcome::Waived { .. } => ComplianceGroup::Waived,
+        Outcome::Pass => ComplianceGroup::Passed,
+        Outcome::NotApplicable => ComplianceGroup::NotApplicable,
+    }
+}
+
+const COMPLIANCE_GROUPS: &[ComplianceGroup] = &[
+    ComplianceGroup::Violations,
+    ComplianceGroup::NeedsReview,
+    ComplianceGroup::Advisories,
+    ComplianceGroup::Waived,
+    ComplianceGroup::Passed,
+    ComplianceGroup::NotApplicable,
+];
+
+fn compliance_panel(ui: &mut Ui, report: Option<&ComplianceReport>) -> Option<ElementId> {
+    panel_subheader(ui, "Compliance");
+    let Some(report) = report else {
+        ui.label("No compliance report");
+        return None;
+    };
+    if report.entries.is_empty() {
+        ui.label("No compliance entries");
+        return None;
+    }
+
+    let mut focused = None;
+    for group in COMPLIANCE_GROUPS {
+        let entries = report
+            .entries
+            .iter()
+            .filter(|entry| group.contains(&entry.outcome))
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            continue;
+        }
+
+        egui::CollapsingHeader::new(format!("{} ({})", group.label(), entries.len()))
+            .default_open(group.default_open())
+            .show(ui, |ui| {
+                for entry in entries {
+                    if let Some(source) = compliance_entry_row(ui, entry) {
+                        focused = Some(source);
+                    }
+                }
+            });
+    }
+    focused
+}
+
+fn compliance_entry_row(ui: &mut Ui, entry: &ComplianceEntry) -> Option<ElementId> {
+    let mut focused = None;
+    let row = ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                compliance_outcome_color(&entry.outcome),
+                compliance_outcome_label(&entry.outcome),
+            );
+            ui.label(
+                RichText::new(&entry.rule)
+                    .strong()
+                    .color(if entry.element.is_some() {
+                        theme::active_blue()
+                    } else {
+                        theme::text_primary()
+                    }),
+            );
+            ui.label(
+                RichText::new(&entry.citation)
+                    .size(design::text_size::LABEL)
+                    .color(theme::text_secondary()),
+            );
+            if let Some(source) = &entry.element {
+                ui.small(source.0.as_str());
+            }
+        });
+        ui.label(
+            RichText::new(&entry.message)
+                .size(design::text_size::BODY)
+                .color(theme::text_primary()),
+        );
+    });
+    if let Some(source) = &entry.element {
+        let response = ui
+            .interact(
+                row.response.rect,
+                ui.id()
+                    .with(format!("compliance-entry-{}-{}", entry.rule, source.0)),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Select source element");
+        if response.clicked() {
+            focused = Some(source.clone());
+        }
+    }
+    ui.add_space(4.0);
+    focused
+}
+
+fn compliance_outcome_label(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Pass => "Pass",
+        Outcome::Violation => "Violation",
+        Outcome::Advisory => "Advisory",
+        Outcome::NeedsReview => "Needs review",
+        Outcome::NotApplicable => "Not applicable",
+        Outcome::Waived { .. } => "Waived",
+    }
+}
+
+fn compliance_outcome_color(outcome: &Outcome) -> Color32 {
+    match outcome {
+        Outcome::Pass => theme::success(),
+        Outcome::Violation => theme::danger(),
+        Outcome::Advisory | Outcome::NeedsReview => theme::warning(),
+        Outcome::NotApplicable | Outcome::Waived { .. } => theme::text_muted(),
+    }
+}
+
 fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
     panel_subheader(ui, "BOM");
     if let Some(plan) = plan {
@@ -6150,6 +6317,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(standards_rule_rows(&app.model), expected);
+    }
+
+    #[test]
+    fn compliance_groups_cover_every_outcome_once() {
+        let outcomes = [
+            Outcome::Violation,
+            Outcome::NeedsReview,
+            Outcome::Advisory,
+            Outcome::Waived {
+                reason: "accepted by AHJ".to_owned(),
+            },
+            Outcome::Pass,
+            Outcome::NotApplicable,
+        ];
+
+        for outcome in outcomes {
+            let matches = COMPLIANCE_GROUPS
+                .iter()
+                .filter(|group| group.contains(&outcome))
+                .count();
+            assert_eq!(matches, 1, "{outcome:?} should map to exactly one group");
+        }
+        assert!(!ComplianceGroup::Passed.default_open());
+        assert!(!ComplianceGroup::NotApplicable.default_open());
     }
 
     #[test]

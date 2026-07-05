@@ -1289,6 +1289,7 @@ dependencies = [
  "framer-library",
  "framer-render",
  "framer-solver",
+ "framer-standards",
  "pollster",
 ]
 
