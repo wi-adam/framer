@@ -3995,6 +3995,42 @@ pub enum ModelError {
     SurfaceRegionPolygonTooFewPoints { element: ElementId },
     #[error("surface region polygon of {element:?} must not be self-intersecting")]
     SurfaceRegionPolygonSelfIntersecting { element: ElementId },
+    #[error(
+        "standards rule id {rule:?} must start with a lowercase letter or digit and contain only lowercase letters, digits, hyphens, or dots"
+    )]
+    StandardsInvalidRuleId { rule: String },
+    #[error("standards rule id {rule:?} is duplicated within one pack")]
+    StandardsDuplicateRuleId { rule: String },
+    #[error("standards waive overlay for {target:?} must include a non-empty reason")]
+    StandardsOverlayMissingReason { target: String },
+    #[error("standards table rows for rule {rule:?} must be strictly ordered by their natural key")]
+    StandardsTableRowsNotStrictlyOrdered { rule: String },
+    #[error(
+        "standards predicate for rule {rule:?} compares fact {fact} as {expected} but operand is {found}"
+    )]
+    StandardsPredicateTypeMismatch {
+        rule: String,
+        fact: String,
+        expected: String,
+        found: String,
+    },
+    #[error(
+        "standards predicate for rule {rule:?} uses operator {op} with flag fact {fact}; flags only support equality"
+    )]
+    StandardsPredicateInvalidOperator {
+        rule: String,
+        fact: String,
+        op: String,
+    },
+    #[error(
+        "standards predicate for rule {rule:?} uses fact {fact} from {found_scope} in {expected_scope} scope"
+    )]
+    StandardsPredicateScopeMismatch {
+        rule: String,
+        fact: String,
+        expected_scope: String,
+        found_scope: String,
+    },
 }
 
 fn default_levels() -> Vec<Level> {
