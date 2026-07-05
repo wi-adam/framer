@@ -40,10 +40,11 @@ objects use it instead of silently falling back to the first level.
 
 ## Follow-up
 
-Region hit-testing still resolves enclosed loops through the global room-boundary graph.
-This slice assigns newly authored region-backed objects to the active level, but truly
-level-filtered room/ceiling/floor/vault picking should be handled as a separate topology/UI
-slice.
+Region hit-testing still resolved enclosed loops through the global room-boundary graph in
+this slice. The follow-up landed as
+[2026-07-05 level-filtered regions](2026-07-05-level-filtered-regions.md), which routes
+room/ceiling/floor/vault picking and room-backed surface resolution through same-level
+topology.
 
 ## Final verification
 

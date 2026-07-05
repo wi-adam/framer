@@ -123,7 +123,8 @@ Each reads `theme(ui)` so it restyles for free:
   `Snap ▾` · Grid/Ortho toggles · layer/display controls · diagnostics · zoom.
 - **Active drafting state:** `Grid`, `Ortho`, `Snap`, cursor readout, and `Level`
   are backed by `FramerApp` presentation state. The active level drives newly authored
-  level-owned objects; fully level-filtered region picking remains a follow-up.
+  level-owned objects and same-level region picking for room, ceiling, floor, and vault
+  tools.
 
 ## Phasing (each phase compiles & runs; existing tests stay green)
 
@@ -136,6 +137,8 @@ Each reads `theme(ui)` so it restyles for free:
    existing viewport; promote the 3D view cube into a shared on-canvas nav widget.
    Active level is implemented by the
    [2026-07-04 active-level drafting](../plans/2026-07-04-active-level-drafting.md)
+   slice and same-level region picking by the
+   [2026-07-05 level-filtered regions](../plans/2026-07-05-level-filtered-regions.md)
    slice.
 4. **Polish** — marking/context actions (select/move/duplicate/delete), scale bar,
    hover/disabled states, command-strip density pass against the CAD workbench mock.

@@ -487,13 +487,17 @@ pub(super) fn draw_project_plan(
     let interior_sides = matches!(layers.wall_display, WallDisplay::Full)
         .then(|| framer_core::wall_interior_sides(model));
 
-    // Room fills + labels, drawn under the walls. Boundaries are derived from the
-    // wall loop each frame (never stored); resolve them all in one graph pass.
+    // Room fills + labels, drawn under the walls. Boundaries are derived from each
+    // room's same-level wall loop every frame (never stored), so stacked levels do
+    // not bleed into each other.
     // When the Rooms layer is hidden, skip the graph pass entirely — the empty
     // boundary list makes the draw/pick loop below a no-op.
-    let room_seeds: Vec<Point2> = model.rooms.iter().map(|room| room.seed).collect();
     let room_boundaries = if layers.rooms {
-        framer_core::room_boundaries(model, &room_seeds)
+        model
+            .rooms
+            .iter()
+            .map(|room| framer_core::room_boundary_on_level(model, &room.level, room.seed))
+            .collect()
     } else {
         Vec::new()
     };

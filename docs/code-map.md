@@ -42,7 +42,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~4.2k lines.) |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
-| `src/topology.rs` | Derives room boundaries/areas from the wall graph; `wall_interior_sides`. |
+| `src/topology.rs` | Derives room boundaries/areas from the wall graph; level-scoped room-boundary helpers for stacked drafting; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2`. The basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer (`ConstraintSystem`) for driving dimensions / overconstraint checks. |
 
@@ -106,7 +106,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - `BuildingModel::validate()` — full model validation (called before every save).
 - `load_project(&str) -> BuildingModel` / `save_project(&BuildingModel) -> String` (`project.rs`).
 - `load_library(&str) -> Library` / `save_library(&Library) -> String` (`library.rs`).
-- `room_boundaries(model)` / `room_boundary(model, seed)` (`topology.rs`).
+- `room_boundaries(model)` / `room_boundary(model, seed)` plus level-scoped
+  `room_boundaries_on_level(model, level, seeds)` /
+  `room_boundary_on_level(model, level, seed)` (`topology.rs`).
 - Mutation helpers on `BuildingModel`: `move_wall_endpoint`, `translate_wall`, `remove_wall`,
   `reconcile_joins` (re-derive joins after geometry edits), `system_for(wall)`,
   `material(&ElementId)`, `sort_deterministically` / `into_deterministic`.
@@ -260,11 +262,11 @@ mirrors this exact math.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
 | `actions.rs` | UI-only command metadata (`ActionId`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; model mutations still live on `FramerApp`. |
 | `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts, status bar — the egui panel bodies. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation). |
-| `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + auto-join derivation. |
+| `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + same-level auto-join derivation. |
 | `history.rs` | `History<Snapshot>` undo/redo stack (+ `history_integration_tests.rs`). |
 | `project_io.rs` | File-write + export-path helpers (orchestration lives in `mod.rs`). |
 | `render_job.rs` | Background-thread **CPU** render job (progressive accumulation, fallback path). |
@@ -290,7 +292,7 @@ selected-object lifecycle actions.
 | File | Contains |
 | --- | --- |
 | `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, and the wall display mode (outline/width/full) + layer-visibility guards. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |

@@ -1326,9 +1326,12 @@ impl FramerApp {
                     // enclosed rooms (bounded faces) rises — the user just drew a
                     // full room, so finish the run and leave the tool, the way
                     // Revit and Chief Architect end a closed wall sketch.
-                    let faces_before = framer_core::enclosed_room_count(&self.model);
+                    let level = self.active_level_id();
+                    let faces_before =
+                        framer_core::enclosed_room_count_on_level(&self.model, &level);
                     self.add_wall(start, point);
-                    if framer_core::enclosed_room_count(&self.model) > faces_before {
+                    if framer_core::enclosed_room_count_on_level(&self.model, &level) > faces_before
+                    {
                         self.finish_draw_wall_on_enclosure();
                         return;
                     }
@@ -1974,7 +1977,8 @@ impl FramerApp {
         if !self.room_tool_active {
             return;
         }
-        if framer_core::room_boundary(&self.model, point).is_some() {
+        let level = self.active_level_id();
+        if framer_core::room_boundary_on_level(&self.model, &level, point).is_some() {
             self.add_room(point);
         } else {
             self.dimension_status =
@@ -2016,7 +2020,8 @@ impl FramerApp {
         if !self.vault_tool_active {
             return;
         }
-        match framer_core::room_boundary(&self.model, point) {
+        let level = self.active_level_id();
+        match framer_core::room_boundary_on_level(&self.model, &level, point) {
             Some(boundary) => self.add_vault(&boundary.vertices),
             None => {
                 self.dimension_status =
@@ -2073,24 +2078,27 @@ impl FramerApp {
     /// `None` when `point` is not inside any closed loop.
     fn surface_region_at(&self, point: Point2) -> Option<framer_core::SurfaceRegion> {
         use framer_core::SurfaceRegion;
+        let level = self.active_level_id();
         // Resolve the loop under `point` and every room's loop in ONE batched pass:
-        // `room_boundaries` derives the bounded faces a single time. `point` is the
-        // first seed; the rooms follow in order.
-        let mut seeds = Vec::with_capacity(self.model.rooms.len() + 1);
-        seeds.push(point);
-        seeds.extend(self.model.rooms.iter().map(|room| room.seed));
-        let mut boundaries = framer_core::room_boundaries(&self.model, &seeds).into_iter();
-        let boundary = boundaries.next().flatten()?; // the loop under `point`
-        let room = self
+        // `room_boundaries_on_level` derives the active level's bounded faces a
+        // single time. `point` is the first seed; same-level rooms follow in order.
+        let rooms: Vec<_> = self
             .model
             .rooms
             .iter()
-            .zip(boundaries)
-            .find_map(|(room, other)| {
-                other
-                    .filter(|other| other.vertices == boundary.vertices)
-                    .map(|_| room.id.clone())
-            });
+            .filter(|room| room.level == level)
+            .collect();
+        let mut seeds = Vec::with_capacity(rooms.len() + 1);
+        seeds.push(point);
+        seeds.extend(rooms.iter().map(|room| room.seed));
+        let mut boundaries =
+            framer_core::room_boundaries_on_level(&self.model, &level, &seeds).into_iter();
+        let boundary = boundaries.next().flatten()?; // the loop under `point`
+        let room = rooms.iter().zip(boundaries).find_map(|(room, other)| {
+            other
+                .filter(|other| other.vertices == boundary.vertices)
+                .map(|_| room.id.clone())
+        });
         Some(match room {
             Some(id) => SurfaceRegion::Room(id),
             None => SurfaceRegion::Polygon(boundary.vertices),
@@ -3911,6 +3919,125 @@ mod tests {
                 .roof_planes
                 .iter()
                 .all(|plane| plane.level == level)
+        );
+    }
+
+    fn draw_demo_shell_footprint(app: &mut FramerApp) {
+        app.add_wall(pt(0.0, 0.0), pt(336.0, 0.0));
+        app.add_wall(pt(336.0, 0.0), pt(336.0, 240.0));
+        app.add_wall(pt(336.0, 240.0), pt(0.0, 240.0));
+        app.add_wall(pt(0.0, 240.0), pt(0.0, 0.0));
+    }
+
+    #[test]
+    fn active_level_region_tools_ignore_enclosures_on_other_levels() {
+        let mut app = FramerApp::default();
+        let seed = pt(168.0, 120.0);
+        add_second_level(&mut app);
+
+        let rooms_before = app.model.rooms.len();
+        let ceilings_before = app.model.ceilings.len();
+        let floors_before = app.model.floor_decks.len();
+
+        app.toggle_room_tool();
+        app.handle_place_room(seed);
+        assert_eq!(
+            app.model.rooms.len(),
+            rooms_before,
+            "the level-1 demo shell must not accept a level-2 room click"
+        );
+
+        app.toggle_ceiling_tool();
+        app.handle_place_ceiling(seed);
+        assert_eq!(
+            app.model.ceilings.len(),
+            ceilings_before,
+            "the level-1 demo shell must not accept a level-2 ceiling click"
+        );
+
+        app.toggle_floor_tool();
+        app.handle_place_floor(seed);
+        assert_eq!(
+            app.model.floor_decks.len(),
+            floors_before,
+            "the level-1 demo shell must not accept a level-2 floor click"
+        );
+
+        app.toggle_vault_tool();
+        app.handle_place_vault(seed);
+        assert_eq!(
+            app.model.ceilings.len(),
+            ceilings_before,
+            "the level-1 demo shell must not accept a level-2 vault click"
+        );
+        assert_eq!(
+            app.dimension_status.as_deref(),
+            Some("No enclosed area here — close a wall loop first")
+        );
+    }
+
+    #[test]
+    fn surface_region_at_prefers_same_level_room_when_footprints_stack() {
+        let mut app = FramerApp::default();
+        let seed = pt(168.0, 120.0);
+
+        app.add_room(seed);
+        let level_1_room = match &app.selected {
+            Selection::Room(id) => id.clone(),
+            other => panic!("expected a level-1 room selected, got {other:?}"),
+        };
+
+        let level_2 = add_second_level(&mut app);
+        draw_demo_shell_footprint(&mut app);
+        app.add_room(seed);
+        let level_2_room = match &app.selected {
+            Selection::Room(id) => id.clone(),
+            other => panic!("expected a level-2 room selected, got {other:?}"),
+        };
+
+        let region = app
+            .surface_region_at(seed)
+            .expect("the active level footprint is enclosed");
+        assert!(
+            matches!(&region, framer_core::SurfaceRegion::Room(id) if id.0 == level_2_room),
+            "stacked footprints should attach to the active-level room, got {region:?}"
+        );
+        assert_ne!(level_1_room, level_2_room);
+        assert_eq!(app.model.rooms.last().unwrap().level, level_2);
+    }
+
+    #[test]
+    fn draw_wall_enclosure_delta_is_active_level_scoped() {
+        let mut app = FramerApp::default();
+        let level_2 = add_second_level(&mut app);
+
+        app.toggle_draw_wall_tool();
+        assert!(app.draw_wall_tool.active);
+        click_wall_point(&mut app, 0.0, 0.0);
+        click_wall_point(&mut app, 336.0, 0.0);
+        click_wall_point(&mut app, 336.0, 240.0);
+        click_wall_point(&mut app, 0.0, 240.0);
+        assert!(app.draw_wall_tool.active);
+
+        click_wall_point(&mut app, 0.0, 0.0);
+
+        assert!(!app.draw_wall_tool.active);
+        assert_eq!(
+            framer_core::enclosed_room_count_on_level(&app.model, &level_2),
+            1
+        );
+        assert_eq!(
+            app.dimension_status.as_deref(),
+            Some("Room enclosed — draw-wall tool off")
+        );
+        let level_1_walls = ["wall-front", "wall-right", "wall-back", "wall-left"];
+        assert!(
+            app.model.wall_joins.iter().all(|join| {
+                let first_is_level_1 = level_1_walls.contains(&join.first_wall.0.as_str());
+                let second_is_level_1 = level_1_walls.contains(&join.second_wall.0.as_str());
+                first_is_level_1 == second_is_level_1
+            }),
+            "new level-2 walls must not auto-join to the pre-existing level-1 shell"
         );
     }
 

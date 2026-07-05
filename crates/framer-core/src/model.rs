@@ -822,7 +822,8 @@ impl BuildingModel {
             SurfaceRegion::Polygon(points) => Some(points.clone()),
             SurfaceRegion::Room(room_id) => {
                 let room = self.rooms.iter().find(|room| room.id == *room_id)?;
-                crate::topology::room_boundary(self, room.seed).map(|boundary| boundary.vertices)
+                crate::topology::room_boundary_on_level(self, &room.level, room.seed)
+                    .map(|boundary| boundary.vertices)
             }
         }
     }

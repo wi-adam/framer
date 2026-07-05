@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{BuildingModel, ElementId, Length, Point2};
+use crate::{BuildingModel, ElementId, Length, Point2, Wall};
 
 /// The derived geometry of a room: its boundary loop (counterclockwise), its
 /// perimeter, and its area. None of this is persisted — it is recomputed from
@@ -41,12 +41,40 @@ pub fn room_boundary(model: &BuildingModel, seed: Point2) -> Option<RoomBoundary
         .map(RoomBoundary::from_vertices)
 }
 
+/// The boundary of the room enclosing `seed` on `level`, or `None` if that
+/// level's walls do not enclose the point.
+pub fn room_boundary_on_level(
+    model: &BuildingModel,
+    level: &ElementId,
+    seed: Point2,
+) -> Option<RoomBoundary> {
+    bounded_faces_on_level(model, level)
+        .into_iter()
+        .find(|vertices| point_in_polygon(seed, vertices))
+        .map(RoomBoundary::from_vertices)
+}
+
 /// Resolve many room seeds against the wall graph at once: the bounded faces are
 /// computed a single time and each seed (in order) is matched to its enclosing
 /// face. Returns `None` for any seed not inside a closed loop. Prefer this over
 /// calling [`room_boundary`] in a loop.
 pub fn room_boundaries(model: &BuildingModel, seeds: &[Point2]) -> Vec<Option<RoomBoundary>> {
     let faces = bounded_faces(model);
+    boundaries_from_faces(&faces, seeds)
+}
+
+/// Resolve many room seeds against one level's wall graph at once. Prefer this
+/// over calling [`room_boundary_on_level`] in a loop.
+pub fn room_boundaries_on_level(
+    model: &BuildingModel,
+    level: &ElementId,
+    seeds: &[Point2],
+) -> Vec<Option<RoomBoundary>> {
+    let faces = bounded_faces_on_level(model, level);
+    boundaries_from_faces(&faces, seeds)
+}
+
+fn boundaries_from_faces(faces: &[Vec<Point2>], seeds: &[Point2]) -> Vec<Option<RoomBoundary>> {
     seeds
         .iter()
         .map(|seed| {
@@ -158,10 +186,19 @@ impl RoomBoundary {
 
 /// All bounded faces of the wall graph, each as a counterclockwise vertex loop.
 fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
+    bounded_faces_for_walls(model.walls.iter())
+}
+
+fn bounded_faces_on_level(model: &BuildingModel, level: &ElementId) -> Vec<Vec<Point2>> {
+    bounded_faces_for_walls(model.walls.iter().filter(|wall| &wall.level == level))
+}
+
+fn bounded_faces_for_walls<'a>(walls: impl IntoIterator<Item = &'a Wall>) -> Vec<Vec<Point2>> {
     // Pass 1: nodes are the unique wall endpoints (these are also the mid-span
     // junction points, since a Tee partition's endpoint lands on a through wall).
     let mut nodes: Vec<Point2> = Vec::new();
-    for wall in &model.walls {
+    let walls: Vec<&Wall> = walls.into_iter().collect();
+    for wall in &walls {
         if wall.start == wall.end {
             continue;
         }
@@ -184,7 +221,7 @@ fn bounded_faces(model: &BuildingModel) -> Vec<Vec<Point2>> {
     // `i` is always `i ^ 1`. The face traversal below relies on this.
     let mut half_edges: Vec<(usize, usize)> = Vec::new();
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
-    for wall in &model.walls {
+    for wall in &walls {
         if wall.start == wall.end {
             continue;
         }
@@ -290,6 +327,11 @@ fn point_from_key((x, y): (i64, i64)) -> Point2 {
 /// the count rises across an edit, a room was enclosed.
 pub fn enclosed_room_count(model: &BuildingModel) -> usize {
     bounded_faces(model).len()
+}
+
+/// The number of enclosed rooms on one level's wall graph.
+pub fn enclosed_room_count_on_level(model: &BuildingModel, level: &ElementId) -> usize {
+    bounded_faces_on_level(model, level).len()
 }
 
 /// For each wall whose interior side can be determined from the enclosed rooms,
@@ -502,8 +544,12 @@ mod tests {
     }
 
     fn wall(id: &str, a: Point2, b: Point2) -> Wall {
+        wall_on_level(id, "level-1", a, b)
+    }
+
+    fn wall_on_level(id: &str, level: &str, a: Point2, b: Point2) -> Wall {
         let code = CodeProfile::irc_2021_prescriptive();
-        Wall::new(id, id, Length::from_feet(1.0), &code).with_placement("level-1", a, b)
+        Wall::new(id, id, Length::from_feet(1.0), &code).with_placement(level, a, b)
     }
 
     /// A closed `w_ft` × `h_ft` rectangle of four walls at the origin.
@@ -677,6 +723,93 @@ mod tests {
                 .is_some_and(|b| (b.area_square_feet() - 96.0).abs() < 1e-6)
         );
         assert!(results[1].is_none());
+    }
+
+    #[test]
+    fn level_scoped_room_boundary_ignores_other_levels() {
+        let mut model = rect_model(12.0, 8.0);
+        let level_2 = ElementId::new("level-2");
+        let seed = p(72.0, 48.0);
+
+        assert!(
+            room_boundary(&model, seed).is_some(),
+            "the global helper still sees the level-1 rectangle"
+        );
+        assert!(
+            room_boundary_on_level(&model, &level_2, seed).is_none(),
+            "level-2 has no walls yet"
+        );
+        assert_eq!(enclosed_room_count_on_level(&model, &level_2), 0);
+
+        model
+            .walls
+            .push(wall_on_level("l2-b", "level-2", p(0.0, 0.0), p(240.0, 0.0)));
+        model.walls.push(wall_on_level(
+            "l2-r",
+            "level-2",
+            p(240.0, 0.0),
+            p(240.0, 168.0),
+        ));
+        model.walls.push(wall_on_level(
+            "l2-t",
+            "level-2",
+            p(240.0, 168.0),
+            p(0.0, 168.0),
+        ));
+        model
+            .walls
+            .push(wall_on_level("l2-l", "level-2", p(0.0, 168.0), p(0.0, 0.0)));
+
+        let boundary = room_boundary_on_level(&model, &level_2, seed)
+            .expect("seed is inside the level-2 rectangle");
+        assert!((boundary.area_square_feet() - 280.0).abs() < 1e-6);
+        assert_eq!(enclosed_room_count_on_level(&model, &level_2), 1);
+    }
+
+    #[test]
+    fn level_scoped_room_boundaries_batch_matches_seeds_in_order() {
+        let mut model = rect_model(12.0, 8.0);
+        model.walls.push(wall_on_level(
+            "l2-b",
+            "level-2",
+            p(360.0, 0.0),
+            p(480.0, 0.0),
+        ));
+        model.walls.push(wall_on_level(
+            "l2-r",
+            "level-2",
+            p(480.0, 0.0),
+            p(480.0, 120.0),
+        ));
+        model.walls.push(wall_on_level(
+            "l2-t",
+            "level-2",
+            p(480.0, 120.0),
+            p(360.0, 120.0),
+        ));
+        model.walls.push(wall_on_level(
+            "l2-l",
+            "level-2",
+            p(360.0, 120.0),
+            p(360.0, 0.0),
+        ));
+
+        let results = room_boundaries_on_level(
+            &model,
+            &ElementId::new("level-2"),
+            &[p(420.0, 60.0), p(72.0, 48.0)],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0]
+                .as_ref()
+                .is_some_and(|b| (b.area_square_feet() - 100.0).abs() < 1e-6)
+        );
+        assert!(
+            results[1].is_none(),
+            "a seed inside only the level-1 loop must not resolve on level-2"
+        );
     }
 
     #[test]

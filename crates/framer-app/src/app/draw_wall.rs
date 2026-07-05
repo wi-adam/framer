@@ -415,11 +415,15 @@ fn project_onto_segment(point: Point2, a: Point2, b: Point2) -> Point2 {
 /// Ids of every wall that has `point` as one of its endpoints, in model order.
 /// Used to record a corner join between a newly drawn wall and each wall it
 /// meets at a shared endpoint.
-pub(super) fn walls_sharing_endpoint(model: &BuildingModel, point: Point2) -> Vec<ElementId> {
+pub(super) fn walls_sharing_endpoint(
+    model: &BuildingModel,
+    level: &ElementId,
+    point: Point2,
+) -> Vec<ElementId> {
     model
         .walls
         .iter()
-        .filter(|wall| wall.start == point || wall.end == point)
+        .filter(|wall| &wall.level == level && (wall.start == point || wall.end == point))
         .map(|wall| wall.id.clone())
         .collect()
 }
@@ -433,7 +437,7 @@ pub(super) fn joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) -> Vec<
     let mut joins: Vec<WallJoin> = Vec::new();
     let mut joined: Vec<ElementId> = Vec::new();
     for endpoint in [new_wall.start, new_wall.end] {
-        for other in walls_sharing_endpoint(model, endpoint) {
+        for other in walls_sharing_endpoint(model, &new_wall.level, endpoint) {
             if joined.contains(&other) {
                 continue;
             }
@@ -448,7 +452,7 @@ pub(super) fn joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) -> Vec<
             ));
             joined.push(other);
         }
-        for through in walls_with_interior_point(model, endpoint) {
+        for through in walls_with_interior_point(model, &new_wall.level, endpoint) {
             if joined.contains(&through) {
                 continue;
             }
@@ -470,11 +474,15 @@ pub(super) fn joins_for_new_wall(model: &BuildingModel, new_wall: &Wall) -> Vec<
 
 /// Ids of every wall whose interior (not an endpoint) contains `point` — the
 /// through walls for a new wall meeting them mid-span.
-fn walls_with_interior_point(model: &BuildingModel, point: Point2) -> Vec<ElementId> {
+fn walls_with_interior_point(
+    model: &BuildingModel,
+    level: &ElementId,
+    point: Point2,
+) -> Vec<ElementId> {
     model
         .walls
         .iter()
-        .filter(|wall| wall.point_on_interior(point))
+        .filter(|wall| &wall.level == level && wall.point_on_interior(point))
         .map(|wall| wall.id.clone())
         .collect()
 }
@@ -785,8 +793,15 @@ mod tests {
         model
             .walls
             .push(wall_from("wall-2", p(120.0, 0.0), p(120.0, 96.0)));
+        model.walls.push(
+            wall_from("wall-3", p(120.0, 0.0), p(240.0, 0.0)).with_placement(
+                "level-2",
+                p(120.0, 0.0),
+                p(240.0, 0.0),
+            ),
+        );
 
-        let touching = walls_sharing_endpoint(&model, p(120.0, 0.0));
+        let touching = walls_sharing_endpoint(&model, &ElementId::new("level-1"), p(120.0, 0.0));
 
         assert_eq!(
             touching,

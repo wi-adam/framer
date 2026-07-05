@@ -980,7 +980,7 @@ fn region_outline_plan(model: &BuildingModel, region: &SurfaceRegion) -> Option<
         SurfaceRegion::Polygon(points) => points.clone(),
         SurfaceRegion::Room(room_id) => {
             let room = model.rooms.iter().find(|room| room.id == *room_id)?;
-            framer_core::room_boundary(model, room.seed)?.vertices
+            framer_core::room_boundary_on_level(model, &room.level, room.seed)?.vertices
         }
     };
     (outline.len() >= 3).then_some(outline)

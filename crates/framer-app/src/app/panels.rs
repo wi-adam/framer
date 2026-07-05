@@ -1499,7 +1499,9 @@ impl FramerApp {
                     .rooms
                     .iter()
                     .find(|room| room.id.0 == id)
-                    .and_then(|room| framer_core::room_boundary(&self.model, room.seed));
+                    .and_then(|room| {
+                        framer_core::room_boundary_on_level(&self.model, &room.level, room.seed)
+                    });
                 if let Some(room) = self.model.rooms.iter_mut().find(|room| room.id.0 == id) {
                     ui.label(&room.id.0);
                     if can_edit {
@@ -2300,7 +2302,13 @@ impl FramerApp {
                             .rooms
                             .iter()
                             .find(|room| room.id == *room_id)
-                            .and_then(|room| framer_core::room_boundary(&self.model, room.seed))
+                            .and_then(|room| {
+                                framer_core::room_boundary_on_level(
+                                    &self.model,
+                                    &room.level,
+                                    room.seed,
+                                )
+                            })
                             .map(|boundary| boundary.vertices),
                     });
                 if let Some(ceiling) = self.model.ceilings.iter_mut().find(|c| c.id.0 == id) {
