@@ -3779,6 +3779,29 @@ mod tests {
     }
 
     #[test]
+    fn compliance_export_requires_regenerated_report() {
+        let path = std::env::temp_dir().join(format!(
+            "framer-compliance-export-missing-{}.framer",
+            process::id()
+        ));
+        let csv_path = path.with_extension("compliance.csv");
+        let _ = fs::remove_file(&csv_path);
+        let mut app = FramerApp {
+            project_path: path.display().to_string(),
+            compliance_report: None,
+            ..FramerApp::default()
+        };
+
+        app.export_compliance_report();
+
+        assert_eq!(
+            app.artifact_status.as_deref(),
+            Some("Export failed: regenerate a valid compliance report first")
+        );
+        assert!(!csv_path.exists());
+    }
+
+    #[test]
     fn rebuild_lowers_standards_report_issues_into_plan_diagnostics() {
         let mut app = FramerApp::default();
         app.model.walls[0].height = Length::from_feet(20.0);

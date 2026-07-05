@@ -5275,15 +5275,18 @@ impl ComplianceGroup {
     }
 
     fn contains(self, outcome: &Outcome) -> bool {
-        matches!(
-            (self, outcome),
-            (Self::Violations, Outcome::Violation)
-                | (Self::NeedsReview, Outcome::NeedsReview)
-                | (Self::Advisories, Outcome::Advisory)
-                | (Self::Waived, Outcome::Waived { .. })
-                | (Self::Passed, Outcome::Pass)
-                | (Self::NotApplicable, Outcome::NotApplicable)
-        )
+        self == compliance_outcome_group(outcome)
+    }
+}
+
+fn compliance_outcome_group(outcome: &Outcome) -> ComplianceGroup {
+    match outcome {
+        Outcome::Violation => ComplianceGroup::Violations,
+        Outcome::NeedsReview => ComplianceGroup::NeedsReview,
+        Outcome::Advisory => ComplianceGroup::Advisories,
+        Outcome::Waived { .. } => ComplianceGroup::Waived,
+        Outcome::Pass => ComplianceGroup::Passed,
+        Outcome::NotApplicable => ComplianceGroup::NotApplicable,
     }
 }
 
