@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use framer_core::{
     Appearance, AssemblyFace, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck,
     LayerFunction, Length, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion,
-    Wall, WallExposure, room_boundary, triangulate_simple_polygon,
+    Wall, WallExposure, room_boundary_on_level, triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -638,7 +638,7 @@ fn resolve_region_outline(model: &BuildingModel, region: &SurfaceRegion) -> Opti
         SurfaceRegion::Polygon(points) => Some(points.clone()),
         SurfaceRegion::Room(room_id) => {
             let room = model.rooms.iter().find(|room| room.id == *room_id)?;
-            room_boundary(model, room.seed).map(|boundary| boundary.vertices)
+            room_boundary_on_level(model, &room.level, room.seed).map(|boundary| boundary.vertices)
         }
     }
 }
@@ -1158,8 +1158,8 @@ mod tests {
     // === roof / ceiling / floor surfaces ===
 
     use framer_core::{
-        BoardProfile, ConstructionLayer, FramingPattern, FramingSpec, Material as CoreMaterial,
-        MemberFamily, Room, RoomUsage, Slope, SystemKind,
+        BoardProfile, ConstructionLayer, FramingPattern, FramingSpec, Level,
+        Material as CoreMaterial, MemberFamily, Room, RoomUsage, Slope, SystemKind,
     };
 
     /// A 12ft × 8ft rectangle, used as both the roof outline and the deck/ceiling
@@ -1425,7 +1425,7 @@ mod tests {
     #[test]
     fn room_region_surface_tiles_a_concave_outline() {
         // Drives the production path the concave triangulator was added for:
-        // SurfaceRegion::Room -> room_boundary (a concave L loop) ->
+        // SurfaceRegion::Room -> room_boundary_on_level (a concave L loop) ->
         // triangulate_simple_polygon -> emitted floor triangles. A naive vertex-0
         // fan would spill outside the L's notch, inflating the covered area.
         let scene = scene_from_model(&l_shaped_room_model(), &RenderOptions::default());
@@ -1471,6 +1471,75 @@ mod tests {
         assert!(
             (area - 15552.0).abs() < 5.0,
             "L floor triangles cover {area} sq in, expected 15552"
+        );
+    }
+
+    fn stacked_unenclosed_room_deck_model() -> BuildingModel {
+        let ft = Length::from_feet;
+        let mut model = BuildingModel::new(CodeProfile::irc_2021_prescriptive());
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", ft(10.0)));
+        for (i, window) in rect12x8().windows(2).enumerate() {
+            model.walls.push(
+                Wall::new(format!("w-{i}"), "Wall", ft(1.0), &model.code)
+                    .with_placement("level-1", window[0], window[1]),
+            );
+        }
+        let outline = rect12x8();
+        model.walls.push(
+            Wall::new("w-close", "Wall", ft(1.0), &model.code)
+                .with_placement("level-1", outline[3], outline[0]),
+        );
+        model.rooms.push(Room::new(
+            "room-2",
+            "Upper room",
+            RoomUsage::Living,
+            "level-2",
+            Point2::new(ft(6.0), ft(4.0)),
+        ));
+        model.materials.push(CoreMaterial::solid_color(
+            "mat-upper-deck",
+            "Upper deck",
+            [25, 90, 150],
+        ));
+        model.systems.push(finish_system(
+            "system-floor",
+            SystemKind::Floor,
+            LayerFunction::InteriorFinish,
+            "mat-upper-deck",
+            true,
+        ));
+        model.floor_decks.push(FloorDeck::new(
+            "deck-2",
+            "Upper deck",
+            "level-2",
+            "system-floor",
+            SurfaceRegion::Room(ElementId::new("room-2")),
+        ));
+        model
+    }
+
+    #[test]
+    fn room_region_surface_resolves_against_the_room_level() {
+        let scene = scene_from_model(
+            &stacked_unenclosed_room_deck_model(),
+            &RenderOptions::default(),
+        );
+        let upper_level_z = Length::from_feet(10.0).inches() as f32;
+        let upper_deck: Vec<&Triangle> = scene
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                let v1 = triangle.v0 + triangle.edge1;
+                let v2 = triangle.v0 + triangle.edge2;
+                let zs = [triangle.v0.z, v1.z, v2.z];
+                zs.iter().all(|z| (*z - upper_level_z).abs() < 0.5)
+            })
+            .collect();
+        assert!(
+            upper_deck.is_empty(),
+            "a level-2 room region must not render over a level-1 enclosure"
         );
     }
 
