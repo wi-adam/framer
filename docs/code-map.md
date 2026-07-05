@@ -260,9 +260,9 @@ mirrors this exact math.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`) and route through `ViewClick::Place*`; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. |
 | `actions.rs` | UI-only command metadata (`ActionId`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; model mutations still live on `FramerApp`. |
-| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, tabbed workflow command strip with insertion flyouts, status bar — the egui panel bodies. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
+| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts, status bar — the egui panel bodies. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + auto-join derivation. |
 | `history.rs` | `History<Snapshot>` undo/redo stack (+ `history_integration_tests.rs`). |
@@ -284,7 +284,8 @@ styling goes here, not inline; command routing policy belongs in
 strip, selection context toolbar, and one viewport per frame based on `ViewportMode`. The
 workspace/view bar owns Design/Plan switching and Shell/Plan, Wall/Elevation, Roof, 3D, and
 Render view tabs; the tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
-placement context, and the selection context toolbar owns selected-object lifecycle actions.
+placement context, including the active drafting level, and the selection context toolbar owns
+selected-object lifecycle actions.
 
 | File | Contains |
 | --- | --- |

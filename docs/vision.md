@@ -313,6 +313,13 @@ goals relate.
   rafters, joists, BOM, and 3D geometry — gable/shed roofs, flat ceilings, and
   floor decks first, with structural judgment surfaced as diagnostics. Part of
   M3 (Floors And Roofs). See [specs/ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
+- **G-015 Standards Engine:** layered, distributable building-standards packs —
+  prescriptive tables that drive generation plus declarative compliance checks
+  verified against the model and plan, with jurisdiction overlays, site-context
+  (seismic/wind/snow) applicability, authored wall bracing, and a rule-by-rule
+  compliance report with citations. Ships pre-canned packs (IRC 2021 first);
+  users augment, override, or fully define their own. Subsumes G-008's rule
+  tables. See [specs/standards-engine.md](specs/standards-engine.md).
 
 ## Definition Of Done
 

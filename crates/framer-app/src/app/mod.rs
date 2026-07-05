@@ -56,6 +56,7 @@ pub(crate) struct FramerApp {
     artifact_status: Option<String>,
     dimension_status: Option<String>,
     command_tab: actions::WorkflowTab,
+    command_search: CommandSearchState,
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     view_3d: View3dState,
@@ -95,6 +96,9 @@ pub(crate) struct FramerApp {
     /// Visual-layering state for the Plan and 3D views (wall display mode +
     /// per-layer visibility), driven by the Layers popover.
     layers: ViewLayers,
+    /// Active drafting level for newly authored level-owned objects. Presentation
+    /// state only: never serialized and clamped to the current model on rebuild.
+    active_level: Option<ElementId>,
     ortho: bool,
     snap_step: Option<Length>,
     cursor_model: Option<Point2>,
@@ -172,6 +176,13 @@ enum RoofForm {
     Gable,
     Shed,
     Hip,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CommandSearchState {
+    open: bool,
+    focus_input: bool,
+    query: String,
 }
 
 /// One generated roof-plane outline: its plan-projected polygon and the index of
@@ -491,6 +502,7 @@ impl Default for FramerApp {
             artifact_status: None,
             dimension_status: None,
             command_tab: actions::WorkflowTab::Frame,
+            command_search: CommandSearchState::default(),
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             view_3d: View3dState::default(),
@@ -512,6 +524,7 @@ impl Default for FramerApp {
             render_smoke: None,
             show_section: true,
             layers: ViewLayers::default(),
+            active_level: Some(ElementId::new("level-1")),
             ortho: true,
             snap_step: Some(Length::from_whole_inches(1)),
             cursor_model: None,
@@ -548,6 +561,7 @@ impl FramerApp {
             self.selected_wall = 0;
             self.selected = Selection::Wall;
         }
+        self.reconcile_active_level();
 
         // Drop per-wall cameras whose wall no longer exists, so `elevation_views`
         // stays in sync with the model however a wall is removed (keys are wall
@@ -677,6 +691,50 @@ impl FramerApp {
         self.elevation_views.clear();
     }
 
+    fn reset_active_level(&mut self) {
+        self.active_level = self.model.levels.first().map(|level| level.id.clone());
+    }
+
+    fn has_level(&self, id: &ElementId) -> bool {
+        self.model.levels.iter().any(|level| &level.id == id)
+    }
+
+    fn reconcile_active_level(&mut self) {
+        if self
+            .active_level
+            .as_ref()
+            .is_some_and(|active| self.has_level(active))
+        {
+            return;
+        }
+        self.reset_active_level();
+    }
+
+    fn active_level_id(&self) -> ElementId {
+        self.active_level
+            .as_ref()
+            .filter(|active| self.has_level(active))
+            .cloned()
+            .or_else(|| self.model.levels.first().map(|level| level.id.clone()))
+            .unwrap_or_else(|| ElementId::new("level-1"))
+    }
+
+    fn active_level_name(&self) -> String {
+        let active = self.active_level_id();
+        self.model
+            .levels
+            .iter()
+            .find(|level| level.id == active)
+            .map(|level| level.name.clone())
+            .unwrap_or_else(|| active.0)
+    }
+
+    fn set_active_level(&mut self, level: ElementId) {
+        if self.has_level(&level) {
+            self.active_level = Some(level);
+        }
+    }
+
     /// Clears all transient interaction tools. Called whenever the document is
     /// replaced wholesale (new/open/reset), so no in-progress draw, dimension, or
     /// drag gesture carries into a different document.
@@ -705,6 +763,7 @@ impl FramerApp {
         self.file_status = Some("Created new project".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -720,6 +779,7 @@ impl FramerApp {
         self.file_status = Some("Reset to multi-wall demo shell".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -735,6 +795,7 @@ impl FramerApp {
         self.file_status = Some("Reset to Phase 1 demo wall".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -776,6 +837,7 @@ impl FramerApp {
                 self.selected_wall = 0;
                 self.selected = Selection::Wall;
                 self.workspace_mode = WorkspaceMode::Design;
+                self.reset_active_level();
                 self.history.clear();
                 self.reset_2d_cameras();
                 self.rebuild();
@@ -832,7 +894,121 @@ impl FramerApp {
         }
     }
 
+    fn open_command_search(&mut self) {
+        self.command_search.open = true;
+        self.command_search.focus_input = true;
+        self.command_search.query.clear();
+    }
+
+    fn is_selection_deletable(&self) -> bool {
+        matches!(
+            self.selected,
+            Selection::Opening(_)
+                | Selection::Wall
+                | Selection::Room(_)
+                | Selection::RoofPlane(_)
+                | Selection::Ceiling(_)
+                | Selection::FloorDeck(_)
+                | Selection::System(_)
+                | Selection::Material(_)
+                | Selection::Furnishing(_)
+                | Selection::MepObject(_)
+                | Selection::FurnishingInstance(_)
+                | Selection::MepInstance(_)
+        )
+    }
+
+    fn action_enabled(&self, id: actions::ActionId) -> bool {
+        match id {
+            actions::ActionId::Undo => self.history.can_undo(),
+            actions::ActionId::Redo => self.history.can_redo(),
+            actions::ActionId::ExportArtifacts => self.workspace_mode.shows_generated_plan(),
+            actions::ActionId::DeleteSelection => self.is_selection_deletable(),
+            actions::ActionId::AddDoor
+            | actions::ActionId::AddWindow
+            | actions::ActionId::AddGarageDoor
+            | actions::ActionId::AddGableRoof
+            | actions::ActionId::AddShedRoof
+            | actions::ActionId::AddHipRoof => self.workspace_mode.allows_design_edits(),
+            actions::ActionId::CommandSearch
+            | actions::ActionId::NewProject
+            | actions::ActionId::OpenProject
+            | actions::ActionId::SaveProject
+            | actions::ActionId::LoadShellDemo
+            | actions::ActionId::LoadWallDemo
+            | actions::ActionId::WorkspaceDesign
+            | actions::ActionId::WorkspacePlan
+            | actions::ActionId::ViewPlan
+            | actions::ActionId::ViewElevation
+            | actions::ActionId::ViewRoof
+            | actions::ActionId::View3d
+            | actions::ActionId::ViewRender
+            | actions::ActionId::ToolWall
+            | actions::ActionId::ToolRoom
+            | actions::ActionId::ToolCeiling
+            | actions::ActionId::ToolVault
+            | actions::ActionId::ToolFloor
+            | actions::ActionId::ToolDimensionLinear
+            | actions::ActionId::DimensionKind
+            | actions::ActionId::DimensionAxis
+            | actions::ActionId::ToggleSection => true,
+        }
+    }
+
+    fn execute_action(&mut self, id: actions::ActionId) {
+        if !self.action_enabled(id) {
+            return;
+        }
+
+        match id {
+            actions::ActionId::CommandSearch => self.open_command_search(),
+            actions::ActionId::NewProject => self.new_project(),
+            actions::ActionId::OpenProject => self.load_project_file(),
+            actions::ActionId::SaveProject => self.save_project_file(),
+            actions::ActionId::ExportArtifacts => self.export_current_artifacts(),
+            actions::ActionId::Undo => self.undo(),
+            actions::ActionId::Redo => self.redo(),
+            actions::ActionId::LoadShellDemo => self.reset_demo(),
+            actions::ActionId::LoadWallDemo => self.reset_wall_demo(),
+            actions::ActionId::WorkspaceDesign => self.set_workspace_mode(WorkspaceMode::Design),
+            actions::ActionId::WorkspacePlan => self.set_workspace_mode(WorkspaceMode::Plan),
+            actions::ActionId::ViewPlan => self.viewport_mode = ViewportMode::Plan,
+            actions::ActionId::ViewElevation => self.viewport_mode = ViewportMode::Elevation,
+            actions::ActionId::ViewRoof => self.viewport_mode = ViewportMode::RoofPlan,
+            actions::ActionId::View3d => self.viewport_mode = ViewportMode::Axonometric,
+            actions::ActionId::ViewRender => self.viewport_mode = ViewportMode::Render,
+            actions::ActionId::ToolWall => self.toggle_draw_wall_tool(),
+            actions::ActionId::ToolRoom => self.toggle_room_tool(),
+            actions::ActionId::ToolCeiling => self.toggle_ceiling_tool(),
+            actions::ActionId::ToolVault => self.toggle_vault_tool(),
+            actions::ActionId::ToolFloor => self.toggle_floor_tool(),
+            actions::ActionId::DeleteSelection => self.delete_selected(),
+            actions::ActionId::AddDoor => self.add_opening(OpeningKind::Door),
+            actions::ActionId::AddWindow => self.add_opening(OpeningKind::Window),
+            actions::ActionId::AddGarageDoor => self.add_opening(OpeningKind::GarageDoor),
+            actions::ActionId::AddGableRoof => self.add_roof(RoofForm::Gable),
+            actions::ActionId::AddShedRoof => self.add_roof(RoofForm::Shed),
+            actions::ActionId::AddHipRoof => self.add_roof(RoofForm::Hip),
+            actions::ActionId::ToolDimensionLinear => self.activate_dimension_tool(),
+            actions::ActionId::DimensionKind | actions::ActionId::DimensionAxis => {
+                self.activate_dimension_tool();
+            }
+            actions::ActionId::ToggleSection => self.show_section = !self.show_section,
+        }
+    }
+
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let command_search_pressed =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K));
+        if command_search_pressed {
+            self.open_command_search();
+            return;
+        }
+
+        if self.command_search.open {
+            return;
+        }
+
         if ctx.text_edit_focused() {
             return;
         }
@@ -1270,12 +1446,7 @@ impl FramerApp {
         }
         self.edit("Draw wall", |app| {
             let (id, index) = next_wall_id(&app.model);
-            let level = app
-                .model
-                .levels
-                .first()
-                .map(|level| level.id.0.clone())
-                .unwrap_or_else(|| "level-1".to_owned());
+            let level = app.active_level_id().0;
             let wall = Wall::new(
                 id,
                 format!("Wall {index}"),
@@ -1323,12 +1494,7 @@ impl FramerApp {
         }
         self.edit("Add room", |app| {
             let (id, index) = next_room_id(&app.model);
-            let level = app
-                .model
-                .levels
-                .first()
-                .map(|level| level.id.0.clone())
-                .unwrap_or_else(|| "level-1".to_owned());
+            let level = app.active_level_id().0;
             let room = Room::new(
                 id.clone(),
                 format!("Room {index}"),
@@ -1879,7 +2045,7 @@ impl FramerApp {
         let slope = framer_core::CeilingSlope::new(pitch, 0);
         self.edit("Add vault", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let mut first_id = None;
             for half in [low_half, high_half] {
                 let (id, index) = next_ceiling_id(&app.model);
@@ -1941,7 +2107,7 @@ impl FramerApp {
         self.edit("Add ceiling", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
             let (id, index) = next_ceiling_id(&app.model);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let ceiling = framer_core::Ceiling::new(
                 id.clone(),
                 format!("Ceiling {index}"),
@@ -1964,7 +2130,7 @@ impl FramerApp {
         self.edit("Add floor", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Floor);
             let (id, index) = next_floor_id(&app.model);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let deck = framer_core::FloorDeck::new(
                 id.clone(),
                 format!("Floor {index}"),
@@ -1977,16 +2143,6 @@ impl FramerApp {
         });
     }
 
-    /// The id of the project's first level, or `"level-1"` when there is none —
-    /// the same fallback walls and rooms use when assigning a new object's level.
-    fn first_level_id(&self) -> String {
-        self.model
-            .levels
-            .first()
-            .map(|level| level.id.0.clone())
-            .unwrap_or_else(|| "level-1".to_owned())
-    }
-
     /// Auto-generate a roof of `form` over the project's wall footprint as one undo
     /// step (the hybrid roof tool: generate planes, then store them as editable
     /// objects), seeding a Roof system if the project has none. Switches to the
@@ -1996,7 +2152,7 @@ impl FramerApp {
         if !self.workspace_mode.allows_design_edits() {
             return;
         }
-        let level = self.first_level_id();
+        let level = self.active_level_id().0;
         let Some((specs, springing)) = self.footprint_roof_specs(&level, form) else {
             self.dimension_status =
                 Some("Draw walls to enclose a footprint before adding a roof".to_owned());
@@ -2916,6 +3072,7 @@ impl FramerApp {
         CentralPanel::default()
             .frame(Frame::new().fill(theme::workspace_bg()))
             .show(ui, |ui| self.workspace(ui));
+        self.command_search_overlay(ui.ctx());
 
         // All panels have rendered; any inspector edit run has opened its
         // transaction. Settle it into a single undo step once the interaction
@@ -3676,6 +3833,85 @@ mod tests {
 
     fn pt(x_in: f64, y_in: f64) -> Point2 {
         Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
+    }
+
+    fn add_second_level(app: &mut FramerApp) -> ElementId {
+        let level = framer_core::Level::new("level-2", "Level 2", Length::from_feet(10.0));
+        let id = level.id.clone();
+        app.model.levels.push(level);
+        app.set_active_level(id.clone());
+        id
+    }
+
+    #[test]
+    fn active_level_falls_back_when_the_selected_level_disappears() {
+        let mut app = FramerApp::default();
+        let level = add_second_level(&mut app);
+        assert_eq!(app.active_level_id(), level);
+
+        app.model.levels.retain(|candidate| candidate.id != level);
+        app.rebuild();
+
+        assert_eq!(app.active_level_id(), ElementId::new("level-1"));
+    }
+
+    #[test]
+    fn active_level_controls_new_walls_rooms_and_surfaces() {
+        let mut app = FramerApp::default();
+        let level = add_second_level(&mut app);
+        let outline = vec![
+            pt(360.0, 360.0),
+            pt(480.0, 360.0),
+            pt(480.0, 480.0),
+            pt(360.0, 480.0),
+        ];
+        let region = framer_core::SurfaceRegion::Polygon(outline.clone());
+
+        app.add_wall(pt(360.0, 360.0), pt(480.0, 360.0));
+        assert_eq!(app.model.walls.last().unwrap().level, level);
+
+        app.add_room(pt(420.0, 420.0));
+        assert_eq!(app.model.rooms.last().unwrap().level, level);
+
+        app.add_ceiling(region.clone());
+        assert_eq!(app.model.ceilings.last().unwrap().level, level);
+
+        app.add_vault(&outline);
+        assert!(
+            app.model
+                .ceilings
+                .iter()
+                .rev()
+                .take(2)
+                .all(|ceiling| ceiling.level == level),
+            "both vault halves land on the active level"
+        );
+
+        app.add_floor(region);
+        assert_eq!(app.model.floor_decks.last().unwrap().level, level);
+    }
+
+    #[test]
+    fn active_level_controls_roof_generation() {
+        let mut app = FramerApp {
+            model: BuildingModel::new(framer_core::CodeProfile::irc_2021_prescriptive()),
+            ..FramerApp::default()
+        };
+        let level = add_second_level(&mut app);
+
+        app.add_wall(pt(0.0, 0.0), pt(240.0, 0.0));
+        app.add_wall(pt(240.0, 0.0), pt(240.0, 120.0));
+        app.add_wall(pt(240.0, 120.0), pt(0.0, 120.0));
+        app.add_wall(pt(0.0, 120.0), pt(0.0, 0.0));
+        app.add_roof(RoofForm::Gable);
+
+        assert!(!app.model.roof_planes.is_empty());
+        assert!(
+            app.model
+                .roof_planes
+                .iter()
+                .all(|plane| plane.level == level)
+        );
     }
 
     /// A draw-wall session over an empty model. Starting empty avoids the demo
