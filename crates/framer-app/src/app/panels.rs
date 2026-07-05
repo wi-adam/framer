@@ -2846,8 +2846,12 @@ impl FramerApp {
             .fold(
                 (0, 0, 0),
                 |(unsupported, warnings, info), diagnostic| match diagnostic.severity {
-                    DiagnosticSeverity::Unsupported => (unsupported + 1, warnings, info),
-                    DiagnosticSeverity::Warning => (unsupported, warnings + 1, info),
+                    DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => {
+                        (unsupported + 1, warnings, info)
+                    }
+                    DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => {
+                        (unsupported, warnings + 1, info)
+                    }
                     DiagnosticSeverity::Info => (unsupported, warnings, info + 1),
                 },
             )
@@ -4502,11 +4506,21 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
 
         let unsupported = diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Unsupported)
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.severity,
+                    DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation
+                )
+            })
             .count();
         let warnings = diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.severity,
+                    DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview
+                )
+            })
             .count();
         let info = diagnostics
             .iter()
@@ -4540,8 +4554,8 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
 fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
     let color = match diagnostic.severity {
         DiagnosticSeverity::Info => theme::active_blue(),
-        DiagnosticSeverity::Warning => theme::warning(),
-        DiagnosticSeverity::Unsupported => theme::danger(),
+        DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => theme::warning(),
+        DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => theme::danger(),
     };
     ui.colored_label(
         color,

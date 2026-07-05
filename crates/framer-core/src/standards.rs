@@ -610,7 +610,52 @@ impl StandardsPack {
                 }],
                 bracing: Vec::new(),
             },
-            checks: Vec::new(),
+            checks: vec![
+                ComplianceCheck {
+                    rule: "irc2021.r602.3-5.stud-height".to_owned(),
+                    citation: "IRC 2021 Table R602.3(5)".to_owned(),
+                    title: "Wall stud height".to_owned(),
+                    severity: CheckSeverity::Required,
+                    applies: Applicability::Always,
+                    scope: CheckScope::Walls {
+                        exterior_only: None,
+                        tags: Vec::new(),
+                    },
+                    requirement: Predicate::Compare {
+                        fact: Fact::WallHeight,
+                        op: CompareOp::Le,
+                        value: FactOperand::Fact(Fact::WallStudMaxHeight),
+                    },
+                },
+                ComplianceCheck {
+                    rule: "irc2021.r602.7.header-span".to_owned(),
+                    citation: "IRC 2021 R602.7(1)".to_owned(),
+                    title: "Opening header span".to_owned(),
+                    severity: CheckSeverity::Required,
+                    applies: Applicability::Always,
+                    scope: CheckScope::Openings { tags: Vec::new() },
+                    requirement: Predicate::Compare {
+                        fact: Fact::OpeningRoughWidth,
+                        op: CompareOp::Le,
+                        value: FactOperand::Fact(Fact::OpeningHeaderMaxSpan),
+                    },
+                },
+                ComplianceCheck {
+                    rule: "irc2021.r305.1.ceiling-height".to_owned(),
+                    citation: "IRC 2021 R305.1".to_owned(),
+                    title: "Habitable room ceiling height".to_owned(),
+                    severity: CheckSeverity::Advisory,
+                    applies: Applicability::Always,
+                    scope: CheckScope::Rooms {
+                        tags: vec!["habitable".to_owned()],
+                    },
+                    requirement: Predicate::Compare {
+                        fact: Fact::RoomCeilingHeight,
+                        op: CompareOp::Ge,
+                        value: FactOperand::LengthLiteral(Length::from_feet(7.0)),
+                    },
+                },
+            ],
             overlays: Vec::new(),
             tags: Vec::new(),
             properties: BTreeMap::new(),
@@ -1006,6 +1051,7 @@ mod tests {
         }];
         pack.tables.headers.clear();
         pack.tables.fastening.clear();
+        pack.checks.clear();
         pack
     }
 
@@ -1211,7 +1257,48 @@ mod tests {
                             {"connection": "DoubleTopPlate", "fastener": "16d common nail", "schedule": {"Spacing": {"on_center": {"ticks": 256}}}}
                         ]
                     }]
-                }
+                },
+                "checks": [
+                    {
+                        "rule": "irc2021.r602.3-5.stud-height",
+                        "citation": "IRC 2021 Table R602.3(5)",
+                        "title": "Wall stud height",
+                        "severity": "Required",
+                        "applies": "Always",
+                        "scope": {"Walls": {}},
+                        "requirement": {"Compare": {
+                            "fact": "WallHeight",
+                            "op": "Le",
+                            "value": {"Fact": "WallStudMaxHeight"}
+                        }}
+                    },
+                    {
+                        "rule": "irc2021.r602.7.header-span",
+                        "citation": "IRC 2021 R602.7(1)",
+                        "title": "Opening header span",
+                        "severity": "Required",
+                        "applies": "Always",
+                        "scope": {"Openings": {}},
+                        "requirement": {"Compare": {
+                            "fact": "OpeningRoughWidth",
+                            "op": "Le",
+                            "value": {"Fact": "OpeningHeaderMaxSpan"}
+                        }}
+                    },
+                    {
+                        "rule": "irc2021.r305.1.ceiling-height",
+                        "citation": "IRC 2021 R305.1",
+                        "title": "Habitable room ceiling height",
+                        "severity": "Advisory",
+                        "applies": "Always",
+                        "scope": {"Rooms": {"tags": ["habitable"]}},
+                        "requirement": {"Compare": {
+                            "fact": "RoomCeilingHeight",
+                            "op": "Ge",
+                            "value": {"LengthLiteral": {"ticks": 1344}}
+                        }}
+                    }
+                ]
             })
         );
     }

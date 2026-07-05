@@ -1,0 +1,11 @@
+[package]
+name = "framer-standards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+framer-core.workspace = true
+framer-solver.workspace = true
+serde.workspace = true

@@ -731,6 +731,15 @@ pub struct PlanDiagnostic {
     pub code: String,
     pub source: Option<ElementId>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleRef {
+    pub pack: ElementId,
+    pub rule: String,
+    pub citation: String,
 }
 
 impl PlanDiagnostic {
@@ -745,6 +754,7 @@ impl PlanDiagnostic {
             code: code.into(),
             source,
             message: message.into(),
+            rule: None,
         }
     }
 }
@@ -754,6 +764,8 @@ pub enum DiagnosticSeverity {
     Info,
     Warning,
     Unsupported,
+    Violation,
+    NeedsReview,
 }
 
 /// The framing detail of a construction system: the single `Framing` layer's
@@ -3362,23 +3374,15 @@ fn frame_member(
 }
 
 fn starter_profile_diagnostics(wall: &Wall, standards_name: &str) -> Vec<PlanDiagnostic> {
-    let mut diagnostics = vec![
-        PlanDiagnostic::new(
-            DiagnosticSeverity::Warning,
-            "code-profile.starter-only",
-            Some(wall.id.clone()),
-            format!(
-                "{} is starter rule data for deterministic framing defaults, not complete IRC compliance.",
-                standards_name
-            ),
+    let mut diagnostics = vec![PlanDiagnostic::new(
+        DiagnosticSeverity::Info,
+        "solver.scope.wall-segment-alpha",
+        Some(wall.id.clone()),
+        format!(
+            "This wall segment is framed with deterministic {} rules. Project generation aggregates connected wall segments and authored joins; engineered load paths, hold-downs, floors, and roofs remain future work.",
+            standards_name
         ),
-        PlanDiagnostic::new(
-            DiagnosticSeverity::Info,
-            "solver.scope.wall-segment-alpha",
-            Some(wall.id.clone()),
-            "This wall segment is framed with deterministic starter rules. Project generation aggregates connected wall segments and authored joins; engineered load paths, hold-downs, floors, and roofs remain future work.",
-        ),
-    ];
+    )];
 
     for opening in &wall.openings {
         if matches!(opening.kind, framer_core::OpeningKind::GarageDoor) {
@@ -4395,10 +4399,16 @@ mod tests {
             .wall_plan(&ElementId::new("wall-1"))
             .expect("demo wall plan");
 
+        assert!(
+            wall_plan
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "code-profile.starter-only")
+        );
         assert!(wall_plan.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "code-profile.starter-only"
+            diagnostic.code == "solver.scope.wall-segment-alpha"
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("wall-1")
-                && matches!(diagnostic.severity, DiagnosticSeverity::Warning)
+                && matches!(diagnostic.severity, DiagnosticSeverity::Info)
                 && diagnostic.message.contains(STARTER_STANDARDS_NAME)
         }));
     }

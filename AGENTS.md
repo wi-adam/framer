@@ -10,7 +10,7 @@ path-traced rendering. Product source of truth: [docs/vision.md](docs/vision.md)
 
 ## Repo map
 
-Rust workspace, five crates (strict dependency order — UI depends on logic, never
+Rust workspace, six crates (strict dependency order — UI depends on logic, never
 the reverse):
 
 | Crate | Responsibility |
@@ -18,6 +18,7 @@ the reverse):
 | [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, standards packs, room topology, validation, `.framer` serialization. **No UI.** |
 | [`crates/framer-library`](crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap for reusable `.framerlib` content. **No UI.** |
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
+| [`crates/framer-standards`](crates/framer-standards) | UI-free compliance facts, evaluator, report CSV, and diagnostics lowering over resolved standards + solver output. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
 | [`crates/framer-app`](crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`). |
 

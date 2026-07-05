@@ -2950,6 +2950,7 @@ fn append_library_diagnostics(
             code: "library.lifecycle.check-failed".to_owned(),
             source: None,
             message: format!("Library lifecycle status could not be checked: {error}."),
+            rule: None,
         });
         return;
     }
@@ -2987,6 +2988,7 @@ fn append_library_diagnostics(
             code: code.to_owned(),
             source: Some(issue.item_id().clone()),
             message,
+            rule: None,
         });
     }
 }

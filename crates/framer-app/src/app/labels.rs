@@ -39,5 +39,7 @@ pub(super) fn diagnostic_code_prefix(severity: DiagnosticSeverity) -> &'static s
         DiagnosticSeverity::Info => "Info",
         DiagnosticSeverity::Warning => "Warning",
         DiagnosticSeverity::Unsupported => "Unsupported",
+        DiagnosticSeverity::Violation => "Violation",
+        DiagnosticSeverity::NeedsReview => "Needs review",
     }
 }
