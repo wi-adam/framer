@@ -96,6 +96,9 @@ pub(crate) struct FramerApp {
     /// Visual-layering state for the Plan and 3D views (wall display mode +
     /// per-layer visibility), driven by the Layers popover.
     layers: ViewLayers,
+    /// Active drafting level for newly authored level-owned objects. Presentation
+    /// state only: never serialized and clamped to the current model on rebuild.
+    active_level: Option<ElementId>,
     ortho: bool,
     snap_step: Option<Length>,
     cursor_model: Option<Point2>,
@@ -521,6 +524,7 @@ impl Default for FramerApp {
             render_smoke: None,
             show_section: true,
             layers: ViewLayers::default(),
+            active_level: Some(ElementId::new("level-1")),
             ortho: true,
             snap_step: Some(Length::from_whole_inches(1)),
             cursor_model: None,
@@ -557,6 +561,7 @@ impl FramerApp {
             self.selected_wall = 0;
             self.selected = Selection::Wall;
         }
+        self.reconcile_active_level();
 
         // Drop per-wall cameras whose wall no longer exists, so `elevation_views`
         // stays in sync with the model however a wall is removed (keys are wall
@@ -686,6 +691,50 @@ impl FramerApp {
         self.elevation_views.clear();
     }
 
+    fn reset_active_level(&mut self) {
+        self.active_level = self.model.levels.first().map(|level| level.id.clone());
+    }
+
+    fn has_level(&self, id: &ElementId) -> bool {
+        self.model.levels.iter().any(|level| &level.id == id)
+    }
+
+    fn reconcile_active_level(&mut self) {
+        if self
+            .active_level
+            .as_ref()
+            .is_some_and(|active| self.has_level(active))
+        {
+            return;
+        }
+        self.reset_active_level();
+    }
+
+    fn active_level_id(&self) -> ElementId {
+        self.active_level
+            .as_ref()
+            .filter(|active| self.has_level(active))
+            .cloned()
+            .or_else(|| self.model.levels.first().map(|level| level.id.clone()))
+            .unwrap_or_else(|| ElementId::new("level-1"))
+    }
+
+    fn active_level_name(&self) -> String {
+        let active = self.active_level_id();
+        self.model
+            .levels
+            .iter()
+            .find(|level| level.id == active)
+            .map(|level| level.name.clone())
+            .unwrap_or_else(|| active.0)
+    }
+
+    fn set_active_level(&mut self, level: ElementId) {
+        if self.has_level(&level) {
+            self.active_level = Some(level);
+        }
+    }
+
     /// Clears all transient interaction tools. Called whenever the document is
     /// replaced wholesale (new/open/reset), so no in-progress draw, dimension, or
     /// drag gesture carries into a different document.
@@ -714,6 +763,7 @@ impl FramerApp {
         self.file_status = Some("Created new project".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -729,6 +779,7 @@ impl FramerApp {
         self.file_status = Some("Reset to multi-wall demo shell".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -744,6 +795,7 @@ impl FramerApp {
         self.file_status = Some("Reset to Phase 1 demo wall".to_owned());
         self.artifact_status = None;
         self.dimension_status = None;
+        self.reset_active_level();
         self.reset_tools();
         self.workspace_mode = WorkspaceMode::Design;
         self.history.clear();
@@ -785,6 +837,7 @@ impl FramerApp {
                 self.selected_wall = 0;
                 self.selected = Selection::Wall;
                 self.workspace_mode = WorkspaceMode::Design;
+                self.reset_active_level();
                 self.history.clear();
                 self.reset_2d_cameras();
                 self.rebuild();
@@ -1393,12 +1446,7 @@ impl FramerApp {
         }
         self.edit("Draw wall", |app| {
             let (id, index) = next_wall_id(&app.model);
-            let level = app
-                .model
-                .levels
-                .first()
-                .map(|level| level.id.0.clone())
-                .unwrap_or_else(|| "level-1".to_owned());
+            let level = app.active_level_id().0;
             let wall = Wall::new(
                 id,
                 format!("Wall {index}"),
@@ -1446,12 +1494,7 @@ impl FramerApp {
         }
         self.edit("Add room", |app| {
             let (id, index) = next_room_id(&app.model);
-            let level = app
-                .model
-                .levels
-                .first()
-                .map(|level| level.id.0.clone())
-                .unwrap_or_else(|| "level-1".to_owned());
+            let level = app.active_level_id().0;
             let room = Room::new(
                 id.clone(),
                 format!("Room {index}"),
@@ -2002,7 +2045,7 @@ impl FramerApp {
         let slope = framer_core::CeilingSlope::new(pitch, 0);
         self.edit("Add vault", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let mut first_id = None;
             for half in [low_half, high_half] {
                 let (id, index) = next_ceiling_id(&app.model);
@@ -2064,7 +2107,7 @@ impl FramerApp {
         self.edit("Add ceiling", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Ceiling);
             let (id, index) = next_ceiling_id(&app.model);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let ceiling = framer_core::Ceiling::new(
                 id.clone(),
                 format!("Ceiling {index}"),
@@ -2087,7 +2130,7 @@ impl FramerApp {
         self.edit("Add floor", |app| {
             let system = app.ensure_surface_system(framer_core::SystemKind::Floor);
             let (id, index) = next_floor_id(&app.model);
-            let level = app.first_level_id();
+            let level = app.active_level_id().0;
             let deck = framer_core::FloorDeck::new(
                 id.clone(),
                 format!("Floor {index}"),
@@ -2100,16 +2143,6 @@ impl FramerApp {
         });
     }
 
-    /// The id of the project's first level, or `"level-1"` when there is none —
-    /// the same fallback walls and rooms use when assigning a new object's level.
-    fn first_level_id(&self) -> String {
-        self.model
-            .levels
-            .first()
-            .map(|level| level.id.0.clone())
-            .unwrap_or_else(|| "level-1".to_owned())
-    }
-
     /// Auto-generate a roof of `form` over the project's wall footprint as one undo
     /// step (the hybrid roof tool: generate planes, then store them as editable
     /// objects), seeding a Roof system if the project has none. Switches to the
@@ -2119,7 +2152,7 @@ impl FramerApp {
         if !self.workspace_mode.allows_design_edits() {
             return;
         }
-        let level = self.first_level_id();
+        let level = self.active_level_id().0;
         let Some((specs, springing)) = self.footprint_roof_specs(&level, form) else {
             self.dimension_status =
                 Some("Draw walls to enclose a footprint before adding a roof".to_owned());
@@ -3800,6 +3833,85 @@ mod tests {
 
     fn pt(x_in: f64, y_in: f64) -> Point2 {
         Point2::new(Length::from_inches(x_in), Length::from_inches(y_in))
+    }
+
+    fn add_second_level(app: &mut FramerApp) -> ElementId {
+        let level = framer_core::Level::new("level-2", "Level 2", Length::from_feet(10.0));
+        let id = level.id.clone();
+        app.model.levels.push(level);
+        app.set_active_level(id.clone());
+        id
+    }
+
+    #[test]
+    fn active_level_falls_back_when_the_selected_level_disappears() {
+        let mut app = FramerApp::default();
+        let level = add_second_level(&mut app);
+        assert_eq!(app.active_level_id(), level);
+
+        app.model.levels.retain(|candidate| candidate.id != level);
+        app.rebuild();
+
+        assert_eq!(app.active_level_id(), ElementId::new("level-1"));
+    }
+
+    #[test]
+    fn active_level_controls_new_walls_rooms_and_surfaces() {
+        let mut app = FramerApp::default();
+        let level = add_second_level(&mut app);
+        let outline = vec![
+            pt(360.0, 360.0),
+            pt(480.0, 360.0),
+            pt(480.0, 480.0),
+            pt(360.0, 480.0),
+        ];
+        let region = framer_core::SurfaceRegion::Polygon(outline.clone());
+
+        app.add_wall(pt(360.0, 360.0), pt(480.0, 360.0));
+        assert_eq!(app.model.walls.last().unwrap().level, level);
+
+        app.add_room(pt(420.0, 420.0));
+        assert_eq!(app.model.rooms.last().unwrap().level, level);
+
+        app.add_ceiling(region.clone());
+        assert_eq!(app.model.ceilings.last().unwrap().level, level);
+
+        app.add_vault(&outline);
+        assert!(
+            app.model
+                .ceilings
+                .iter()
+                .rev()
+                .take(2)
+                .all(|ceiling| ceiling.level == level),
+            "both vault halves land on the active level"
+        );
+
+        app.add_floor(region);
+        assert_eq!(app.model.floor_decks.last().unwrap().level, level);
+    }
+
+    #[test]
+    fn active_level_controls_roof_generation() {
+        let mut app = FramerApp {
+            model: BuildingModel::new(framer_core::CodeProfile::irc_2021_prescriptive()),
+            ..FramerApp::default()
+        };
+        let level = add_second_level(&mut app);
+
+        app.add_wall(pt(0.0, 0.0), pt(240.0, 0.0));
+        app.add_wall(pt(240.0, 0.0), pt(240.0, 120.0));
+        app.add_wall(pt(240.0, 120.0), pt(0.0, 120.0));
+        app.add_wall(pt(0.0, 120.0), pt(0.0, 0.0));
+        app.add_roof(RoofForm::Gable);
+
+        assert!(!app.model.roof_planes.is_empty());
+        assert!(
+            app.model
+                .roof_planes
+                .iter()
+                .all(|plane| plane.level == level)
+        );
     }
 
     /// A draw-wall session over an empty model. Starting empty avoids the demo

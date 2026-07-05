@@ -121,6 +121,9 @@ Each reads `theme(ui)` so it restyles for free:
   context toolbar on selection, axis gizmo, ViewCube, scale bar, navigation widget.
 - **Status / view-control bar:** ✓ Ready · `Level ▾` · X/Y/Z live readout ·
   `Snap ▾` · Grid/Ortho toggles · layer/display controls · diagnostics · zoom.
+- **Active drafting state:** `Grid`, `Ortho`, `Snap`, cursor readout, and `Level`
+  are backed by `FramerApp` presentation state. The active level drives newly authored
+  level-owned objects; fully level-filtered region picking remains a follow-up.
 
 ## Phasing (each phase compiles & runs; existing tests stay green)
 
@@ -131,6 +134,9 @@ Each reads `theme(ui)` so it restyles for free:
 3. **Wire real state** — add `grid`, `ortho`, `snap_step`, live cursor X/Y/Z, active
    level; make Grid/Ortho/Snap + Snap/Level/2D-3D dropdowns drive drafting and the
    existing viewport; promote the 3D view cube into a shared on-canvas nav widget.
+   Active level is implemented by the
+   [2026-07-04 active-level drafting](../plans/2026-07-04-active-level-drafting.md)
+   slice.
 4. **Polish** — marking/context actions (select/move/duplicate/delete), scale bar,
    hover/disabled states, command-strip density pass against the CAD workbench mock.
 
@@ -138,8 +144,8 @@ Each reads `theme(ui)` so it restyles for free:
 
 - `cargo fmt --all -- --check` and `cargo test --workspace` per phase. Existing
   dimension/IO/workspace-mode tests are the regression net and must stay green.
-- New backing logic (snap stepping, theme persistence, cursor mapping) gets focused
-  unit tests.
+- New backing logic (snap stepping, active level, theme persistence, cursor mapping) gets
+  focused unit tests.
 - Manual run + screenshot compare against the mockup.
 
 ## Constraints carried from the vision
