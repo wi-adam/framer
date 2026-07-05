@@ -3487,8 +3487,8 @@ mod tests {
     use std::{fs, process};
 
     use framer_core::{
-        DimensionHorizontalReference, DimensionVerticalReference, Furnishing, FurnishingInstance,
-        MepInstance, MepObject, MepObjectKind, RuleOverlay,
+        BracedWallLine, DimensionHorizontalReference, DimensionVerticalReference, Furnishing,
+        FurnishingInstance, MepInstance, MepObject, MepObjectKind, RuleOverlay,
     };
 
     use super::*;
@@ -3781,17 +3781,32 @@ mod tests {
     #[test]
     fn compliance_source_focus_selects_existing_model_elements() {
         let mut app = FramerApp::default();
-        let (wall_index, opening_id, wall_level) = app
+        let (wall_index, wall_id, opening_id, wall_level) = app
             .model
             .walls
             .iter()
             .enumerate()
             .find_map(|(index, wall)| {
-                wall.openings
-                    .first()
-                    .map(|opening| (index, opening.id.clone(), wall.level.clone()))
+                wall.openings.first().map(|opening| {
+                    (
+                        index,
+                        wall.id.clone(),
+                        opening.id.clone(),
+                        wall.level.clone(),
+                    )
+                })
             })
             .expect("demo shell should include at least one opening");
+
+        app.focus_compliance_source(wall_id.clone());
+
+        assert_eq!(app.selected_wall, wall_index);
+        assert_eq!(app.selected, Selection::Wall);
+        assert_eq!(app.active_level_id(), wall_level);
+        assert!(matches!(
+            app.file_status.as_deref(),
+            Some(status) if status.contains(wall_id.0.as_str())
+        ));
 
         app.focus_compliance_source(opening_id.clone());
 
@@ -3801,6 +3816,24 @@ mod tests {
         assert!(matches!(
             app.file_status.as_deref(),
             Some(status) if status.contains(opening_id.0.as_str())
+        ));
+
+        let braced_line_id = ElementId::new("bwl-test");
+        app.model.braced_wall_lines.push(BracedWallLine {
+            id: braced_line_id.clone(),
+            name: "Test braced line".to_owned(),
+            level: wall_level.clone(),
+            start: pt_ft(0.0, 0.0),
+            end: pt_ft(24.0, 0.0),
+        });
+
+        app.focus_compliance_source(braced_line_id.clone());
+
+        assert_eq!(app.selected, Selection::Level(wall_level.0.clone()));
+        assert_eq!(app.active_level_id(), wall_level);
+        assert!(matches!(
+            app.file_status.as_deref(),
+            Some(status) if status.contains(braced_line_id.0.as_str())
         ));
     }
 
