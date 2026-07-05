@@ -37,8 +37,8 @@ use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
     next_ceiling_id, next_dimension_id, next_floor_id, next_material_id, next_opening_id,
-    next_roof_id, next_room_id, next_system_id, next_wall_id, translate_keeps_ortho,
-    translate_keeps_positive_length,
+    next_roof_id, next_room_id, next_standards_pack_id, next_system_id, next_wall_id,
+    translate_keeps_ortho, translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, export_paths, write_text_file};
 use viewport::{View2dState, View3dState, WallDragEvent};
@@ -123,6 +123,7 @@ struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
+    Site,
     Level(String),
     Wall,
     Opening(String),
@@ -137,6 +138,7 @@ enum Selection {
     Material(String),
     Furnishing(String),
     MepObject(String),
+    StandardsPack(String),
     FurnishingInstance(String),
     MepInstance(String),
 }
@@ -913,6 +915,7 @@ impl FramerApp {
                 | Selection::Material(_)
                 | Selection::Furnishing(_)
                 | Selection::MepObject(_)
+                | Selection::StandardsPack(_)
                 | Selection::FurnishingInstance(_)
                 | Selection::MepInstance(_)
         )
@@ -1086,6 +1089,7 @@ impl FramerApp {
             Selection::Material(_) => self.delete_selected_material(),
             Selection::Furnishing(_) => self.delete_selected_furnishing(),
             Selection::MepObject(_) => self.delete_selected_mep_object(),
+            Selection::StandardsPack(_) => self.delete_selected_standards_pack(),
             Selection::FurnishingInstance(_) => self.delete_selected_furnishing_instance(),
             Selection::MepInstance(_) => self.delete_selected_mep_instance(),
             _ => {}
@@ -1222,6 +1226,196 @@ impl FramerApp {
                 app.selected = Selection::Wall;
             }
         });
+    }
+
+    fn delete_selected_standards_pack(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let Selection::StandardsPack(id) = self.selected.clone() else {
+            return;
+        };
+        if self.model.standards.iter().any(|pack| pack.0 == id) {
+            self.error = Some(format!(
+                "Cannot delete standards pack '{id}': remove it from the stack first"
+            ));
+            return;
+        }
+        self.edit("Delete standards pack", |app| {
+            let before = app.model.standards_packs.len();
+            app.model.standards_packs.retain(|pack| pack.id.0 != id);
+            if app.model.standards_packs.len() != before {
+                app.selected = Selection::Site;
+            }
+        });
+    }
+
+    fn add_project_standards_pack(&mut self) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add standards pack", |app| {
+            let (id, index) = next_standards_pack_id(&app.model);
+            let pack = project_local_standards_pack(&app.model, id.clone(), index);
+            app.model.standards_packs.push(pack);
+            app.model.standards.push(ElementId::new(id.clone()));
+            app.model.sort_deterministically();
+            app.selected = Selection::StandardsPack(id);
+        });
+    }
+
+    fn insert_starter_standards_pack(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let loaded = match framer_library::starter_library() {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.file_status = Some(format!("Library import failed: {error}"));
+                return;
+            }
+        };
+
+        let mut result = None;
+        self.edit("Insert library standards pack", |app| {
+            let imported = framer_library::import_standards_pack(
+                &mut app.model,
+                &loaded.library,
+                &loaded.content_hash,
+                &ElementId::new(&id),
+            );
+            if let Ok(imported) = &imported
+                && let Some(pack) = &imported.standards_pack
+            {
+                if !app.model.standards.iter().any(|id| id == pack) {
+                    app.model.standards.push(pack.clone());
+                }
+                app.selected = Selection::StandardsPack(pack.0.clone());
+            }
+            result = Some(imported);
+        });
+        self.file_status = Some(match result.expect("import closure should run") {
+            Ok(imported) => {
+                let id = imported
+                    .standards_pack
+                    .map(|id| id.0)
+                    .unwrap_or_else(|| "standards pack".to_owned());
+                format!("Inserted {id} from starter library")
+            }
+            Err(error) => format!("Library import failed: {error}"),
+        });
+    }
+
+    fn move_standards_pack_in_stack(&mut self, id: String, dir: isize) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Reorder standards stack", |app| {
+            let Some(index) = app.model.standards.iter().position(|pack| pack.0 == id) else {
+                return;
+            };
+            let new_index = if dir < 0 {
+                index.checked_sub(1)
+            } else {
+                (index + 1 < app.model.standards.len()).then_some(index + 1)
+            };
+            if let Some(new_index) = new_index {
+                app.model.standards.swap(index, new_index);
+                app.selected = Selection::StandardsPack(id);
+            }
+        });
+    }
+
+    fn remove_standards_pack_from_stack(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Remove standards pack from stack", |app| {
+            let before = app.model.standards.len();
+            app.model.standards.retain(|pack| pack.0 != id);
+            if app.model.standards.len() != before {
+                app.selected = Selection::StandardsPack(id);
+            }
+        });
+    }
+
+    fn add_standards_pack_to_stack(&mut self, id: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        self.edit("Add standards pack to stack", |app| {
+            let pack_id = ElementId::new(id.clone());
+            if app
+                .model
+                .standards
+                .iter()
+                .any(|existing| existing == &pack_id)
+                || !app
+                    .model
+                    .standards_packs
+                    .iter()
+                    .any(|pack| pack.id == pack_id)
+            {
+                return;
+            }
+            app.model.standards.push(pack_id);
+            app.selected = Selection::StandardsPack(id);
+        });
+    }
+
+    fn waive_standards_rule(&mut self, target: String, reason: String) {
+        if !self.workspace_mode.allows_design_edits() {
+            return;
+        }
+        let reason = reason.trim().to_owned();
+        if reason.is_empty() {
+            return;
+        }
+        self.edit("Waive standards rule", |app| {
+            let pack_id = app.ensure_project_local_standards_pack();
+            if let Some(pack) = app
+                .model
+                .standards_packs
+                .iter_mut()
+                .find(|pack| pack.id == pack_id)
+            {
+                if let Some(framer_core::RuleOverlay::Waive {
+                    reason: existing, ..
+                }) = pack.overlays.iter_mut().find(|overlay| match overlay {
+                    framer_core::RuleOverlay::Waive {
+                        target: existing, ..
+                    } => existing == &target,
+                    framer_core::RuleOverlay::Severity { .. } => false,
+                }) {
+                    *existing = reason;
+                } else {
+                    pack.overlays
+                        .push(framer_core::RuleOverlay::Waive { target, reason });
+                }
+            }
+            app.selected = Selection::StandardsPack(pack_id.0);
+        });
+    }
+
+    fn ensure_project_local_standards_pack(&mut self) -> ElementId {
+        if let Some(id) = self.model.standards.iter().rev().find(|id| {
+            is_project_local_standards_pack_id(id)
+                && self
+                    .model
+                    .standards_packs
+                    .iter()
+                    .any(|pack| pack.id == **id && pack.source.is_none())
+        }) {
+            return id.clone();
+        }
+
+        let (id, index) = next_standards_pack_id(&self.model);
+        let pack_id = ElementId::new(id.clone());
+        let pack = project_local_standards_pack(&self.model, id, index);
+        self.model.standards_packs.push(pack);
+        self.model.standards.push(pack_id.clone());
+        self.model.sort_deterministically();
+        pack_id
     }
 
     fn delete_selected_furnishing_instance(&mut self) {
@@ -1409,10 +1603,12 @@ impl FramerApp {
             | Selection::Material(_)
             | Selection::Furnishing(_)
             | Selection::MepObject(_)
+            | Selection::StandardsPack(_)
             | Selection::FurnishingInstance(_)
             | Selection::MepInstance(_) => {
                 self.selected = Selection::Wall;
             }
+            Selection::Site => {}
             Selection::Dimension(_) => unreachable!("dimension selections exit above"),
         }
     }
@@ -2939,6 +3135,34 @@ fn collect_library_lifecycle_issues(
         .map_err(|error| error.to_string())
 }
 
+fn is_project_local_standards_pack_id(id: &ElementId) -> bool {
+    id.0.starts_with("std-local-")
+}
+
+fn project_local_standards_pack(
+    model: &BuildingModel,
+    id: String,
+    index: usize,
+) -> framer_core::StandardsPack {
+    framer_core::StandardsPack {
+        id: ElementId::new(id),
+        name: format!("Project standards {index}"),
+        edition: "Project".to_owned(),
+        source: None,
+        tables: framer_core::StandardsTables {
+            defaults: model.framing_defaults(),
+            studs: Vec::new(),
+            headers: Vec::new(),
+            fastening: Vec::new(),
+            bracing: Vec::new(),
+        },
+        checks: Vec::new(),
+        overlays: Vec::new(),
+        tags: Vec::new(),
+        properties: Default::default(),
+    }
+}
+
 fn append_library_diagnostics(
     plan: &mut ProjectFramePlan,
     issues: &[framer_library::LibraryIssue],
@@ -3100,7 +3324,7 @@ mod tests {
 
     use framer_core::{
         DimensionHorizontalReference, DimensionVerticalReference, Furnishing, FurnishingInstance,
-        MepInstance, MepObject, MepObjectKind,
+        MepInstance, MepObject, MepObjectKind, RuleOverlay,
     };
 
     use super::*;
@@ -3481,6 +3705,178 @@ mod tests {
         app.add_opening(OpeningKind::Door);
 
         assert_eq!(app.model.walls[0].openings.len(), opening_count);
+    }
+
+    #[test]
+    fn plan_mode_does_not_mutate_standards_from_authoring_actions() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        let before = (
+            app.model.standards.clone(),
+            app.model.standards_packs.clone(),
+        );
+
+        app.add_project_standards_pack();
+        app.insert_starter_standards_pack("std-irc-2021".to_owned());
+        app.remove_standards_pack_from_stack("std-irc-2021".to_owned());
+        app.waive_standards_rule(
+            "irc2021.r602.3-5.studs".to_owned(),
+            "engineered alternative".to_owned(),
+        );
+
+        assert_eq!(app.model.standards, before.0);
+        assert_eq!(app.model.standards_packs, before.1);
+    }
+
+    #[test]
+    fn standards_stack_edit_ops_add_reorder_remove_and_readd_pack() {
+        let mut app = FramerApp::default();
+        let base = app.model.standards[0].clone();
+
+        app.add_project_standards_pack();
+
+        let local = match &app.selected {
+            Selection::StandardsPack(id) => ElementId::new(id.clone()),
+            other => panic!("new standards pack should be selected, got {other:?}"),
+        };
+        assert!(local.0.starts_with("std-local-"));
+        assert_eq!(app.model.standards, vec![base.clone(), local.clone()]);
+        assert!(
+            app.model
+                .standards_packs
+                .iter()
+                .any(|pack| pack.id == local && pack.source.is_none())
+        );
+        assert!(save_project_document(&app.model).is_ok());
+
+        app.move_standards_pack_in_stack(local.0.clone(), -1);
+        assert_eq!(app.model.standards, vec![local.clone(), base]);
+
+        app.remove_standards_pack_from_stack(local.0.clone());
+        assert!(!app.model.standards.iter().any(|id| id == &local));
+        assert!(
+            app.model
+                .standards_packs
+                .iter()
+                .any(|pack| pack.id == local)
+        );
+
+        app.add_standards_pack_to_stack(local.0.clone());
+        assert_eq!(app.model.standards.last(), Some(&local));
+        assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn starter_standards_pack_import_vendors_and_stacks_pack() {
+        let mut app = FramerApp::default();
+        let before_packs = app.model.standards_packs.len();
+        let before_stack = app.model.standards.len();
+
+        app.insert_starter_standards_pack("std-irc-2021".to_owned());
+
+        let imported = match &app.selected {
+            Selection::StandardsPack(id) => ElementId::new(id.clone()),
+            other => panic!("imported standards pack should be selected, got {other:?}"),
+        };
+        assert_eq!(app.model.standards_packs.len(), before_packs + 1);
+        assert_eq!(app.model.standards.len(), before_stack + 1);
+        assert!(app.model.standards.iter().any(|id| id == &imported));
+        let pack = app
+            .model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == imported)
+            .expect("imported pack exists");
+        assert!(pack.source.is_some());
+        assert!(
+            matches!(app.file_status.as_deref(), Some(status) if status.starts_with("Inserted "))
+        );
+        assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn standards_waiver_creates_project_local_overlay_pack_and_updates_reason() {
+        let mut app = FramerApp::default();
+        let rule = "irc2021.r602.3-5.studs".to_owned();
+
+        app.waive_standards_rule(rule.clone(), "   ".to_owned());
+        assert_eq!(app.model.standards_packs.len(), 1);
+
+        app.waive_standards_rule(rule.clone(), "accepted by AHJ".to_owned());
+
+        let local = match &app.selected {
+            Selection::StandardsPack(id) => ElementId::new(id.clone()),
+            other => panic!("local waiver pack should be selected, got {other:?}"),
+        };
+        assert!(local.0.starts_with("std-local-"));
+        assert_eq!(app.model.standards.last(), Some(&local));
+        let pack = app
+            .model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == local)
+            .expect("local waiver pack exists");
+        assert_eq!(pack.overlays.len(), 1);
+        assert!(matches!(
+            &pack.overlays[0],
+            RuleOverlay::Waive { target, reason }
+                if target == &rule && reason == "accepted by AHJ"
+        ));
+        assert_eq!(
+            app.model
+                .resolved_standards()
+                .rules
+                .iter()
+                .find(|resolved| resolved.rule == rule)
+                .and_then(|resolved| resolved.waived.as_deref()),
+            Some("accepted by AHJ")
+        );
+
+        app.waive_standards_rule(rule.clone(), "revised alternate design".to_owned());
+        let pack = app
+            .model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == local)
+            .expect("local waiver pack exists");
+        assert_eq!(pack.overlays.len(), 1);
+        assert!(matches!(
+            &pack.overlays[0],
+            RuleOverlay::Waive { target, reason }
+                if target == &rule && reason == "revised alternate design"
+        ));
+        assert!(save_project_document(&app.model).is_ok());
+    }
+
+    #[test]
+    fn standards_pack_delete_refuses_active_stack_entry() {
+        let mut app = FramerApp::default();
+        let active = app.model.standards[0].0.clone();
+        app.selected = Selection::StandardsPack(active.clone());
+
+        app.delete_selected();
+
+        assert!(
+            app.model
+                .standards_packs
+                .iter()
+                .any(|pack| pack.id.0 == active)
+        );
+        assert!(
+            matches!(app.error.as_deref(), Some(error) if error.contains("remove it from the stack first"))
+        );
+
+        app.error = None;
+        app.remove_standards_pack_from_stack(active.clone());
+        app.delete_selected();
+
+        assert!(
+            !app.model
+                .standards_packs
+                .iter()
+                .any(|pack| pack.id.0 == active)
+        );
+        assert!(save_project_document(&app.model).is_ok());
     }
 
     #[test]

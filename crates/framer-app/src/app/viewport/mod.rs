@@ -410,6 +410,8 @@ impl FramerApp {
                     | Selection::Material(_)
                     | Selection::Furnishing(_)
                     | Selection::MepObject(_)
+                    | Selection::Site
+                    | Selection::StandardsPack(_)
                     | Selection::FurnishingInstance(_)
                     | Selection::MepInstance(_)
             )

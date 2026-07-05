@@ -9,7 +9,8 @@ use framer_core::{
     CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
     DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
     FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
-    Provenance, QuarterTurn, Slope, SurfaceRegion, Wall, WallJoin, WallJoinKind,
+    Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall, WallJoin,
+    WallJoinKind,
 };
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 
@@ -517,6 +518,54 @@ impl FramerApp {
                         .iter()
                         .map(|deck| (deck.id.0.clone(), deck.name.clone(), deck.level.0.clone()))
                         .collect();
+                    let standards_packs: Vec<_> = self
+                        .model
+                        .standards_packs
+                        .iter()
+                        .map(|pack| {
+                            (
+                                pack.id.0.clone(),
+                                pack.name.clone(),
+                                pack.source.is_some(),
+                                self.model
+                                    .standards
+                                    .iter()
+                                    .position(|stack_id| stack_id == &pack.id),
+                            )
+                        })
+                        .collect();
+
+                    let site_selected = matches!(self.selected, Selection::Site);
+                    if ui
+                        .selectable_label(site_selected, "Site & standards")
+                        .clicked()
+                    {
+                        self.selected = Selection::Site;
+                    }
+                    ui.indent("site-standards", |ui| {
+                        for (pack_id, pack_name, from_library, stack_index) in &standards_packs {
+                            let selected = matches!(
+                                &self.selected,
+                                Selection::StandardsPack(id) if id == pack_id
+                            );
+                            let label = match stack_index {
+                                Some(index) => format!("{}. {pack_name}", index + 1),
+                                None => format!("{pack_name} (inactive)"),
+                            };
+                            if ui
+                                .horizontal(|ui| {
+                                    let clicked = ui.selectable_label(selected, label).clicked();
+                                    if *from_library {
+                                        library_badge(ui);
+                                    }
+                                    clicked
+                                })
+                                .inner
+                            {
+                                self.selected = Selection::StandardsPack(pack_id.clone());
+                            }
+                        }
+                    });
 
                     for (level_id, level_name) in levels {
                         let level_selected =
@@ -1356,6 +1405,7 @@ impl FramerApp {
         //   - library lifecycle actions for the selected system/material.
         let mut deferred_resync_library: Option<framer_library::LibraryItem> = None;
         let mut deferred_detach_library: Option<framer_library::LibraryItem> = None;
+        let mut deferred_standards = DeferredStandardsActions::default();
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
@@ -1482,10 +1532,44 @@ impl FramerApp {
         };
         let selected_library_status =
             selected_library_status(&self.model, &selection, &self.library_issues);
+        let resolved_rules = self
+            .model
+            .resolved_standards()
+            .rules
+            .into_iter()
+            .map(|rule| {
+                (
+                    rule.rule,
+                    rule.citation,
+                    rule.pack.0,
+                    rule.waived,
+                    rule.severity.is_some(),
+                )
+            })
+            .collect::<Vec<_>>();
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
         match selection {
+            Selection::Site => {
+                if can_edit {
+                    widgets::section(ui, "site-context", "Site context", true, |ui| {
+                        changed |= site_context_editor(ui, &mut self.model.site);
+                    });
+                    widgets::section(ui, "standards-stack", "Standards stack", true, |ui| {
+                        standards_stack_panel(
+                            ui,
+                            &self.model,
+                            &mut self.selected,
+                            &mut deferred_standards,
+                        );
+                    });
+                } else {
+                    site_context_summary(ui, &self.model.site);
+                    ui.separator();
+                    standards_stack_summary(ui, &self.model);
+                }
+            }
             Selection::Level(id) => {
                 if let Some(level) = self.model.levels.iter_mut().find(|level| level.id.0 == id) {
                     if can_edit {
@@ -2112,6 +2196,66 @@ impl FramerApp {
                     ui.label("MEP object no longer exists");
                 }
             }
+            Selection::StandardsPack(id) => {
+                let stack_index = self
+                    .model
+                    .standards
+                    .iter()
+                    .position(|stack_id| stack_id.0 == id);
+                let stack_len = self.model.standards.len();
+                if let Some(pack) = self
+                    .model
+                    .standards_packs
+                    .iter_mut()
+                    .find(|pack| pack.id.0 == id)
+                {
+                    inspector_object_id(ui, &pack.id.0);
+                    if can_edit {
+                        changed |= text_edit(ui, "Name", &mut pack.name);
+                        changed |= text_edit(ui, "Edition", &mut pack.edition);
+                        if let Some(status) = selected_library_status.as_ref() {
+                            widgets::section(
+                                ui,
+                                "standards-library-source",
+                                "Library",
+                                true,
+                                |ui| {
+                                    library_lifecycle_controls(
+                                        ui,
+                                        status,
+                                        &mut deferred_resync_library,
+                                        &mut deferred_detach_library,
+                                    );
+                                },
+                            );
+                        }
+                        widgets::section(ui, "standards-stack-membership", "Stack", true, |ui| {
+                            standards_pack_stack_controls(
+                                ui,
+                                &id,
+                                stack_index,
+                                stack_len,
+                                &mut deferred_standards,
+                            );
+                        });
+                        widgets::section(ui, "standards-waivers", "Waivers", true, |ui| {
+                            standards_waiver_editor(
+                                ui,
+                                &pack.id.0,
+                                &resolved_rules,
+                                &mut deferred_standards,
+                            );
+                        });
+                        widgets::section(ui, "standards-tags", "Tags", false, |ui| {
+                            changed |= tags_editor(ui, &mut pack.tags);
+                        });
+                    } else {
+                        standards_pack_summary(ui, pack, stack_index);
+                    }
+                } else {
+                    ui.label("Standards pack no longer exists");
+                }
+            }
             Selection::FurnishingInstance(id) => {
                 if let Some(instance) = self
                     .model
@@ -2576,6 +2720,24 @@ impl FramerApp {
         if let Some(item) = deferred_detach_library {
             self.detach_library_item(item);
         }
+        if deferred_standards.add_project_pack {
+            self.add_project_standards_pack();
+        }
+        if let Some(id) = deferred_standards.insert_starter_pack {
+            self.insert_starter_standards_pack(id);
+        }
+        if let Some(id) = deferred_standards.add_existing_pack {
+            self.add_standards_pack_to_stack(id);
+        }
+        if let Some((id, dir)) = deferred_standards.move_stack {
+            self.move_standards_pack_in_stack(id, dir);
+        }
+        if let Some(id) = deferred_standards.remove_stack {
+            self.remove_standards_pack_from_stack(id);
+        }
+        if let Some((rule, reason)) = deferred_standards.waive_rule {
+            self.waive_standards_rule(rule, reason);
+        }
         if let Some(system_id) = deferred_select_system {
             self.selected = Selection::System(system_id);
         }
@@ -2813,6 +2975,7 @@ impl FramerApp {
 
     fn selection_status(&self) -> String {
         match &self.selected {
+            Selection::Site => "Site & standards".to_owned(),
             Selection::Level(id) => format!("Level: {id}"),
             Selection::Wall => "Wall segment".to_owned(),
             Selection::Opening(id) => format!("Opening: {id}"),
@@ -2827,6 +2990,7 @@ impl FramerApp {
             Selection::Material(id) => format!("Material: {id}"),
             Selection::Furnishing(id) => format!("Furnishing: {id}"),
             Selection::MepObject(id) => format!("MEP object: {id}"),
+            Selection::StandardsPack(id) => format!("Standards pack: {id}"),
             Selection::FurnishingInstance(id) => format!("Furnishing instance: {id}"),
             Selection::MepInstance(id) => format!("MEP instance: {id}"),
         }
@@ -2990,6 +3154,7 @@ fn short_status(status: &str) -> String {
 /// so a single label per selected-object kind is the right granularity.
 fn inspector_edit_label(selection: &Selection) -> &'static str {
     match selection {
+        Selection::Site => "Edit site context",
         Selection::Level(_) => "Edit level",
         Selection::Wall => "Edit wall",
         Selection::Opening(_) => "Edit opening",
@@ -3004,6 +3169,7 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Material(_) => "Edit material",
         Selection::Furnishing(_) => "Edit furnishing",
         Selection::MepObject(_) => "Edit MEP object",
+        Selection::StandardsPack(_) => "Edit standards pack",
         Selection::FurnishingInstance(_) => "Edit furnishing placement",
         Selection::MepInstance(_) => "Edit MEP placement",
     }
@@ -3017,6 +3183,16 @@ enum DeferredRemove {
     Dimension(String),
     FurnishingInstance(String),
     MepInstance(String),
+}
+
+#[derive(Default)]
+struct DeferredStandardsActions {
+    add_project_pack: bool,
+    insert_starter_pack: Option<String>,
+    add_existing_pack: Option<String>,
+    move_stack: Option<(String, isize)>,
+    remove_stack: Option<String>,
+    waive_rule: Option<(String, String)>,
 }
 
 /// Whether to snapshot a pre-edit baseline this frame for the inspector's undo
@@ -3292,6 +3468,409 @@ fn panel_subheader(ui: &mut Ui, title: &str) {
     ui.add_space(3.0);
 }
 
+fn site_context_editor(ui: &mut Ui, site: &mut framer_core::SiteContext) -> bool {
+    let mut changed = false;
+    changed |= text_edit(ui, "Jurisdiction", &mut site.jurisdiction);
+    changed |= property_row(ui, "SDC", |ui| {
+        let before = site.seismic;
+        ComboBox::from_id_salt("site-seismic")
+            .selected_text(
+                site.seismic
+                    .map(seismic_design_category_label)
+                    .unwrap_or("Unknown"),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut site.seismic, None, "Unknown");
+                for &category in SEISMIC_DESIGN_CATEGORIES {
+                    ui.selectable_value(
+                        &mut site.seismic,
+                        Some(category),
+                        seismic_design_category_label(category),
+                    );
+                }
+            });
+        site.seismic != before
+    });
+    changed |= optional_u32_drag(ui, "Wind", &mut site.wind_speed_mph, 70, 300, 115, "mph");
+    changed |= optional_u32_drag(
+        ui,
+        "Snow",
+        &mut site.ground_snow_load_psf,
+        0,
+        500,
+        30,
+        "psf",
+    );
+    changed |= optional_length_drag(ui, "Frost", &mut site.frost_depth, 0.0, 120.0, 24.0, "in");
+    changed
+}
+
+fn site_context_summary(ui: &mut Ui, site: &framer_core::SiteContext) {
+    summary_row(
+        ui,
+        "Jurisdiction",
+        if site.jurisdiction.is_empty() {
+            "Unknown"
+        } else {
+            site.jurisdiction.as_str()
+        },
+    );
+    summary_row(
+        ui,
+        "SDC",
+        site.seismic
+            .map(seismic_design_category_label)
+            .unwrap_or("Unknown"),
+    );
+    summary_row(
+        ui,
+        "Wind",
+        site.wind_speed_mph
+            .map(|value| format!("{value} mph"))
+            .unwrap_or_else(|| "Unknown".to_owned()),
+    );
+    summary_row(
+        ui,
+        "Snow",
+        site.ground_snow_load_psf
+            .map(|value| format!("{value} psf"))
+            .unwrap_or_else(|| "Unknown".to_owned()),
+    );
+    summary_row(
+        ui,
+        "Frost",
+        site.frost_depth
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "Unknown".to_owned()),
+    );
+}
+
+fn standards_stack_panel(
+    ui: &mut Ui,
+    model: &framer_core::BuildingModel,
+    selected: &mut Selection,
+    actions: &mut DeferredStandardsActions,
+) {
+    if model.standards.is_empty() {
+        ui.label(RichText::new("No active standards packs").color(theme::text_muted()));
+    }
+    for (index, id) in model.standards.iter().enumerate() {
+        let Some(pack) = model.standards_packs.iter().find(|pack| pack.id == *id) else {
+            continue;
+        };
+        ui.horizontal(|ui| {
+            let row_selected =
+                matches!(selected, Selection::StandardsPack(selected_id) if selected_id == &id.0);
+            if ui
+                .selectable_label(row_selected, format!("{}. {}", index + 1, pack.name))
+                .clicked()
+            {
+                *selected = Selection::StandardsPack(id.0.clone());
+            }
+            if pack.source.is_some() {
+                library_badge(ui);
+            }
+            if ui
+                .add_enabled(index > 0, |ui: &mut Ui| {
+                    widgets::icon_button(ui, Icon::ChevronUp, "Move earlier in stack")
+                })
+                .clicked()
+            {
+                actions.move_stack = Some((id.0.clone(), -1));
+            }
+            if ui
+                .add_enabled(index + 1 < model.standards.len(), |ui: &mut Ui| {
+                    widgets::icon_button(ui, Icon::ChevronDown, "Move later in stack")
+                })
+                .clicked()
+            {
+                actions.move_stack = Some((id.0.clone(), 1));
+            }
+            if widgets::icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
+                actions.remove_stack = Some(id.0.clone());
+            }
+        });
+    }
+
+    let inactive = model
+        .standards_packs
+        .iter()
+        .filter(|pack| !model.standards.iter().any(|id| id == &pack.id))
+        .collect::<Vec<_>>();
+    if !inactive.is_empty() {
+        ui.separator();
+        ui.strong("Inactive packs");
+        for pack in inactive {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(
+                        matches!(selected, Selection::StandardsPack(id) if id == &pack.id.0),
+                        &pack.name,
+                    )
+                    .clicked()
+                {
+                    *selected = Selection::StandardsPack(pack.id.0.clone());
+                }
+                if pack.source.is_some() {
+                    library_badge(ui);
+                }
+                if widgets::icon_button(ui, Icon::Plus, "Add to stack").clicked() {
+                    actions.add_existing_pack = Some(pack.id.0.clone());
+                }
+            });
+        }
+    }
+
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        if widgets::icon_button(ui, Icon::Plus, "New project pack").clicked() {
+            actions.add_project_pack = true;
+        }
+        if let Ok(loaded) = framer_library::starter_library_ref() {
+            for pack in &loaded.library.standards {
+                if ui.button(format!("Import {}", pack.name)).clicked() {
+                    actions.insert_starter_pack = Some(pack.id.0.clone());
+                }
+            }
+        }
+    });
+}
+
+fn standards_stack_summary(ui: &mut Ui, model: &framer_core::BuildingModel) {
+    for (index, id) in model.standards.iter().enumerate() {
+        let name = model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == *id)
+            .map(|pack| pack.name.as_str())
+            .unwrap_or(id.0.as_str());
+        let label = format!("Pack {}", index + 1);
+        summary_row(ui, &label, name);
+    }
+}
+
+fn standards_pack_stack_controls(
+    ui: &mut Ui,
+    id: &str,
+    stack_index: Option<usize>,
+    stack_len: usize,
+    actions: &mut DeferredStandardsActions,
+) {
+    match stack_index {
+        Some(index) => {
+            summary_row(ui, "Position", format!("{} of {stack_len}", index + 1));
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(index > 0, |ui: &mut Ui| {
+                        widgets::icon_button(ui, Icon::ChevronUp, "Move earlier in stack")
+                    })
+                    .clicked()
+                {
+                    actions.move_stack = Some((id.to_owned(), -1));
+                }
+                if ui
+                    .add_enabled(index + 1 < stack_len, |ui: &mut Ui| {
+                        widgets::icon_button(ui, Icon::ChevronDown, "Move later in stack")
+                    })
+                    .clicked()
+                {
+                    actions.move_stack = Some((id.to_owned(), 1));
+                }
+                if widgets::icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
+                    actions.remove_stack = Some(id.to_owned());
+                }
+            });
+        }
+        None => {
+            summary_row(ui, "Status", "Inactive");
+            if widgets::icon_button(ui, Icon::Plus, "Add to stack").clicked() {
+                actions.add_existing_pack = Some(id.to_owned());
+            }
+        }
+    }
+}
+
+fn standards_waiver_editor(
+    ui: &mut Ui,
+    pack_id: &str,
+    rules: &[(String, String, String, Option<String>, bool)],
+    actions: &mut DeferredStandardsActions,
+) {
+    if rules.is_empty() {
+        ui.label(RichText::new("No resolved rules").color(theme::text_muted()));
+        return;
+    }
+
+    for (rule, citation, source_pack, waived, has_check) in rules {
+        ui.separator();
+        ui.label(RichText::new(rule).strong());
+        ui.label(
+            RichText::new(format!("{citation} · pack {source_pack}"))
+                .size(design::text_size::LABEL)
+                .color(theme::text_secondary()),
+        );
+        if let Some(reason) = waived {
+            ui.label(
+                RichText::new(format!("Waived: {reason}"))
+                    .size(design::text_size::LABEL)
+                    .color(theme::text_muted()),
+            );
+        } else if !*has_check {
+            ui.label(
+                RichText::new("Table-driven rule")
+                    .size(design::text_size::LABEL)
+                    .color(theme::text_muted()),
+            );
+        }
+
+        let id = ui.id().with(format!("waive-{pack_id}-{rule}"));
+        let mut draft = ui.data_mut(|data| data.get_temp::<String>(id).unwrap_or_default());
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut draft)
+                    .hint_text("Waiver reason")
+                    .desired_width(180.0),
+            );
+            let enabled = !draft.trim().is_empty();
+            if ui
+                .add_enabled(enabled, egui::Button::new("Waive"))
+                .on_hover_text("Create a project-local waive overlay")
+                .clicked()
+            {
+                actions.waive_rule = Some((rule.clone(), draft.trim().to_owned()));
+                draft.clear();
+            }
+        });
+        ui.data_mut(|data| data.insert_temp(id, draft));
+    }
+}
+
+fn standards_pack_summary(
+    ui: &mut Ui,
+    pack: &framer_core::StandardsPack,
+    stack_index: Option<usize>,
+) {
+    summary_row(ui, "Name", &pack.name);
+    summary_row(ui, "Edition", &pack.edition);
+    summary_row(
+        ui,
+        "Status",
+        stack_index
+            .map(|index| format!("Stack position {}", index + 1))
+            .unwrap_or_else(|| "Inactive".to_owned()),
+    );
+    summary_row(ui, "Overlays", pack.overlays.len().to_string());
+}
+
+fn optional_u32_drag(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<u32>,
+    min: u32,
+    max: u32,
+    default: u32,
+    suffix: &str,
+) -> bool {
+    property_row(ui, label, |ui| {
+        let mut changed = false;
+        if let Some(current) = value {
+            let response = ui.add(
+                egui::DragValue::new(current)
+                    .range(min..=max)
+                    .speed(1.0)
+                    .suffix(format!(" {suffix}")),
+            );
+            changed |= response.changed();
+            if widgets::icon_button(ui, Icon::Delete, "Clear value").clicked() {
+                *value = None;
+                changed = true;
+            }
+        } else {
+            ui.label(RichText::new("Unknown").color(theme::text_muted()));
+            if widgets::icon_button(ui, Icon::Plus, "Set value").clicked() {
+                *value = Some(default.clamp(min, max));
+                changed = true;
+            }
+        }
+        changed
+    })
+}
+
+fn optional_length_drag(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<Length>,
+    min_inches: f64,
+    max_inches: f64,
+    default_inches: f64,
+    display_unit: &str,
+) -> bool {
+    property_row(ui, label, |ui| {
+        let mut changed = false;
+        if let Some(current) = value {
+            let mut display_value = if display_unit == "ft" {
+                current.feet()
+            } else {
+                current.inches()
+            };
+            let response = ui.add(
+                egui::DragValue::new(&mut display_value)
+                    .range(if display_unit == "ft" {
+                        min_inches / 12.0..=max_inches / 12.0
+                    } else {
+                        min_inches..=max_inches
+                    })
+                    .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
+                    .suffix(format!(" {display_unit}")),
+            );
+            if response.changed() {
+                let next_inches = if display_unit == "ft" {
+                    display_value * 12.0
+                } else {
+                    display_value
+                };
+                *current = Length::from_inches(next_inches.clamp(min_inches, max_inches));
+                changed = true;
+            }
+            if widgets::icon_button(ui, Icon::Delete, "Clear value").clicked() {
+                *value = None;
+                changed = true;
+            }
+        } else {
+            ui.label(RichText::new("Unknown").color(theme::text_muted()));
+            if widgets::icon_button(ui, Icon::Plus, "Set value").clicked() {
+                *value = Some(Length::from_inches(
+                    default_inches.clamp(min_inches, max_inches),
+                ));
+                changed = true;
+            }
+        }
+        changed
+    })
+}
+
+const SEISMIC_DESIGN_CATEGORIES: &[SeismicDesignCategory] = &[
+    SeismicDesignCategory::A,
+    SeismicDesignCategory::B,
+    SeismicDesignCategory::C,
+    SeismicDesignCategory::D0,
+    SeismicDesignCategory::D1,
+    SeismicDesignCategory::D2,
+    SeismicDesignCategory::E,
+];
+
+fn seismic_design_category_label(category: SeismicDesignCategory) -> &'static str {
+    match category {
+        SeismicDesignCategory::A => "A",
+        SeismicDesignCategory::B => "B",
+        SeismicDesignCategory::C => "C",
+        SeismicDesignCategory::D0 => "D0",
+        SeismicDesignCategory::D1 => "D1",
+        SeismicDesignCategory::D2 => "D2",
+        SeismicDesignCategory::E => "E",
+    }
+}
+
 /// A one-line description of a ceiling/floor-deck surface region for the inspector.
 fn surface_region_summary(region: &framer_core::SurfaceRegion) -> String {
     match region {
@@ -3312,6 +3891,7 @@ fn span_direction_label(span: framer_core::SpanDirection) -> &'static str {
 
 fn selection_badge(selection: &Selection) -> &'static str {
     match selection {
+        Selection::Site => "Site",
         Selection::Level(_) => "Level",
         Selection::Wall => "Wall",
         Selection::Opening(_) => "Opening",
@@ -3326,6 +3906,7 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Material(_) => "Material",
         Selection::Furnishing(_) => "Furnishing",
         Selection::MepObject(_) => "MEP",
+        Selection::StandardsPack(_) => "Standards",
         Selection::FurnishingInstance(_) => "Placed Furnishing",
         Selection::MepInstance(_) => "Placed MEP",
     }
@@ -3601,6 +4182,14 @@ fn selected_library_status(
             let source = object.source.clone()?;
             (
                 framer_library::LibraryItem::MepObject(object.id.clone()),
+                source,
+            )
+        }
+        Selection::StandardsPack(id) => {
+            let pack = model.standards_packs.iter().find(|pack| pack.id.0 == *id)?;
+            let source = pack.source.clone()?;
+            (
+                framer_library::LibraryItem::StandardsPack(pack.id.clone()),
                 source,
             )
         }
