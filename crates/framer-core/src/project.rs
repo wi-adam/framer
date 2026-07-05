@@ -806,6 +806,47 @@ mod tests {
     }
 
     #[test]
+    fn bracing_round_trips_through_save_and_load() {
+        use crate::{BracedPanel, BracedWallLine, BracingMethod, Point2};
+
+        let code = FramingDefaults::irc_2021_starter();
+        let mut empty = BuildingModel::new();
+        empty.walls.push(Wall::new(
+            "wall-empty",
+            "Wall",
+            Length::from_feet(12.0),
+            &code,
+        ));
+        let empty_json = save_project(&empty).unwrap();
+        assert!(!empty_json.contains("\"bracing\""));
+        assert!(!empty_json.contains("\"braced_wall_lines\""));
+
+        let mut model = BuildingModel::new();
+        let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
+        wall.bracing.push(BracedPanel {
+            id: ElementId::new("panel-front-1"),
+            offset: Length::from_feet(2.0),
+            length: Length::from_feet(4.0),
+            method: BracingMethod::Wsp,
+        });
+        model.walls.push(wall);
+        model.braced_wall_lines.push(BracedWallLine {
+            id: ElementId::new("bwl-front"),
+            name: "Front braced wall line".to_owned(),
+            level: ElementId::new("level-1"),
+            start: Point2::new(Length::ZERO, Length::ZERO),
+            end: Point2::new(Length::from_feet(12.0), Length::ZERO),
+        });
+
+        let json = save_project(&model).unwrap();
+        assert!(json.contains("\"bracing\": ["));
+        assert!(json.contains("\"braced_wall_lines\": ["));
+
+        let reloaded = load_project(&json).unwrap();
+        assert_eq!(reloaded, model.into_deterministic());
+    }
+
+    #[test]
     fn roof_ceiling_floor_round_trip_through_save_and_load() {
         use crate::{
             BoardProfile, Ceiling, CeilingSlope, ConstructionLayer, ConstructionSystem, ElementId,

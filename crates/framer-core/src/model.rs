@@ -504,7 +504,12 @@ impl BuildingModel {
     }
 
     pub fn framing_defaults(&self) -> FramingDefaults {
-        self.resolved_standards().defaults
+        self.standards
+            .iter()
+            .rev()
+            .find_map(|id| self.standards_packs.iter().find(|pack| pack.id == *id))
+            .map(|pack| pack.tables.defaults.clone())
+            .unwrap_or_else(FramingDefaults::irc_2021_starter)
     }
 
     pub fn base_standards_name(&self) -> Option<&str> {
