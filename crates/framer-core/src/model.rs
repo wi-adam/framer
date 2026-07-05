@@ -5347,6 +5347,24 @@ mod tests {
     }
 
     #[test]
+    fn framing_defaults_use_last_resolvable_standards_pack() {
+        let mut model = BuildingModel::new();
+        let mut overlay = StandardsPack::irc_2021_starter();
+        overlay.id = ElementId::new("std-local-overlay");
+        overlay.name = "Local overlay".to_owned();
+        overlay.tables.defaults.default_wall_height = Length::from_feet(9.0);
+        overlay.tables.defaults.stud_profile = BoardProfile::TwoBySix;
+
+        model.standards.push(overlay.id.clone());
+        model.standards_packs.push(overlay);
+
+        model.validate().unwrap();
+        let defaults = model.framing_defaults();
+        assert_eq!(defaults.default_wall_height, Length::from_feet(9.0));
+        assert_eq!(defaults.stud_profile, BoardProfile::TwoBySix);
+    }
+
+    #[test]
     fn model_validation_treats_standards_pack_ids_as_global_ids() {
         let mut model = BuildingModel::new();
         model.standards[0] = ElementId::new("level-1");
