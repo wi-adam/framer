@@ -2961,6 +2961,7 @@ fn append_library_diagnostics(
             framer_library::LibraryItem::System(_) => "system",
             framer_library::LibraryItem::Furnishing(_) => "furnishing",
             framer_library::LibraryItem::MepObject(_) => "MEP object",
+            framer_library::LibraryItem::StandardsPack(_) => "standards pack",
         };
         let code = match issue.kind {
             framer_library::LibraryIssueKind::Diverged => "library.item.diverged",

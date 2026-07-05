@@ -39,9 +39,10 @@ The observable contract (prefer testable statements):
   `materials` / `systems`, with zero library I/O. A missing library disables "check for
   updates" / "insert new", never "open".
 - **"Using" a library item vendors it** — copies the full definition into the project's own
-  typed collections (`materials`, `systems`, `furnishings`, `mep_objects`), id-remapped to
-  stay unique, and stamps it with provenance (origin library coordinate, immutable version,
-  content hash). After import the project is self-contained.
+  typed collections (`materials`, `systems`, `furnishings`, `mep_objects`,
+  `standards_packs`), id-remapped to stay unique, and stamps it with provenance (origin
+  library coordinate, immutable version, content hash). After import the project is
+  self-contained.
 - **Importing a definition is an atomic subgraph copy.** Importing a `ConstructionSystem` also
   vendors and remaps every definition it references (each layer's `material` and any
   `FramingSpec.cavity_material`), so no reference dangles and `validate()` passes fail-closed.
@@ -203,7 +204,7 @@ A new, independently-versioned format that mirrors `BuildingModel`'s collection 
 **same serde types round-trip** at both ends:
 
 ```jsonc
-{ "format": "framer.library", "schema_version": 2,
+{ "format": "framer.library", "schema_version": 3,
   "uid": "0a8f5c2e-…",           // stable library identity (UUID), immutable across the library's life
   "version_id": "018f3b9a-…",    // this published version's identity (UUIDv7 → embeds publish time)
   "version": "1.4.0",            // human semver label
@@ -211,14 +212,16 @@ A new, independently-versioned format that mirrors `BuildingModel`'s collection 
   "materials": [ /* full Material objects, library-local ids */ ],
   "systems":   [ /* full ConstructionSystem objects */ ],
   "furnishings": [ /* full Furnishing family objects */ ],
-  "mep_objects": [ /* full MepObject family objects */ ] }
+  "mep_objects": [ /* full MepObject family objects */ ],
+  "standards": [ /* full StandardsPack objects, library-local ids */ ] }
 ```
 
 It gets its own `to_canonical_json` (re-stamp version, sort by id, pretty-print, trailing
 newline) and a header-peek-and-reject loader, mirroring `ProjectDocument` /`SchemaHeader` in
 `framer-core/src/project.rs`. `Library::validate()` reuses `ConstructionSystem` validation
-against the library's own material set so a library is self-consistent before publish. The
-built-in starter library replaces the triplicated `starter_library()` copies.
+against the library's own material set and runs `StandardsPack::validate()` for each pack so a
+library is self-consistent before publish. The built-in starter library replaces the triplicated
+`starter_library()` copies and now carries the IRC 2021 starter standards pack.
 
 ### ElementId remap (the collision crux)
 
@@ -228,20 +231,22 @@ namespace-remap in author-time app code: prefix the library id (`mat-cedar` from
 `acme-walls-mat-cedar`; lowest-free `-2`, `-3` on residual clash), rewriting the imported
 subgraph's internal references in lockstep. `ConstructionLayer` has no id — only `system.id` is
 owned — so the only rewrites are `system.id` plus each `ConstructionLayer.material` and
-`FramingSpec.cavity_material`. **The solver and renderer see nothing new**: a flat,
-locally-unique, fully-resolved `BuildingModel`, exactly as today.
+`FramingSpec.cavity_material`. Standards packs are single-item copies: only `pack.id` is
+remapped because checks and scopes reference facts, tags, and enums rather than project element
+ids. **The solver and renderer see nothing new**: a flat, locally-unique, fully-resolved
+`BuildingModel`, exactly as today.
 
 ### Update lifecycle
 
 Lifecycle state is derived, never persisted. `framer-library` recomputes an imported material,
-system, furnishing, or MEP object's provenance-excluded item hash in the original library-local
-id space, using `source_id` and matching vendored material provenance to reverse
-project-local remaps where a system carries a material closure. A fresh import therefore reads
-"current" even though its project ids differ from the library ids. If the recomputed project
-hash differs from the stamped item hash, the item is **divergent**. If an available current
-library with the same `uid` carries a different source-item hash, the item is **out of date**.
-If the available library no longer carries `source_id`, the item is **source missing**. These
-are surfaced as derived Plan diagnostics; missing libraries simply mean
+system, furnishing, MEP object, or standards pack's provenance-excluded item hash in the
+original library-local id space, using `source_id` and matching vendored material provenance to
+reverse project-local remaps where a system carries a material closure. A fresh import therefore
+reads "current" even though its project ids differ from the library ids. If the recomputed
+project hash differs from the stamped item hash, the item is **divergent**. If an available
+current library with the same `uid` carries a different source-item hash, the item is **out of
+date**. If the available library no longer carries `source_id`, the item is **source missing**.
+These are surfaced as derived Plan diagnostics; missing libraries simply mean
 out-of-date/source-missing checks are unavailable.
 
 Re-sync is an explicit author-time operation. It replaces the selected vendored definition from
@@ -251,8 +256,8 @@ closure it references, preserving existing local material ids where possible and
 for newly introduced source materials. Detach clears provenance from the selected item, making
 it project-owned content; it does not delete or rewrite unrelated vendored closure items.
 
-Furnishing and MEP object re-sync/detach follow the same selected-definition contract as
-materials. Existing placed instances keep their local `family` id when the family is re-synced;
+Furnishing, MEP object, and standards-pack re-sync/detach follow the same selected-definition
+contract as materials. Existing placed instances keep their local `family` id when the family is re-synced;
 detaching a family leaves its instances unchanged.
 
 ### Resolver, assets, bundle (`framer-library` crate)

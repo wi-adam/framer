@@ -3647,6 +3647,9 @@ fn library_contains_source(
             .mep_objects
             .iter()
             .any(|object| object.id == *source_id),
+        framer_library::LibraryItem::StandardsPack(_) => {
+            library.standards.iter().any(|pack| pack.id == *source_id)
+        }
     }
 }
 
@@ -3707,7 +3710,8 @@ fn library_item_id(item: &framer_library::LibraryItem) -> &ElementId {
         framer_library::LibraryItem::Material(id)
         | framer_library::LibraryItem::System(id)
         | framer_library::LibraryItem::Furnishing(id)
-        | framer_library::LibraryItem::MepObject(id) => id,
+        | framer_library::LibraryItem::MepObject(id)
+        | framer_library::LibraryItem::StandardsPack(id) => id,
     }
 }
 
@@ -3717,6 +3721,7 @@ fn library_item_kind_label(item: &framer_library::LibraryItem) -> &'static str {
         framer_library::LibraryItem::System(_) => "system",
         framer_library::LibraryItem::Furnishing(_) => "furnishing",
         framer_library::LibraryItem::MepObject(_) => "MEP object",
+        framer_library::LibraryItem::StandardsPack(_) => "standards pack",
     }
 }
 

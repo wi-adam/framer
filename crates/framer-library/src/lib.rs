@@ -9,7 +9,7 @@ use std::{
 use framer_core::{
     Appearance, BuildingModel, ConstructionSystem, ElementId, Furnishing, Library, LibraryError,
     LibraryStamp, Material, MaterialSource, MepObject, ModelError, ProjectError, Provenance,
-    is_blake3_hash, load_library, load_project, save_library, save_project,
+    StandardsPack, is_blake3_hash, load_library, load_project, save_library, save_project,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -274,6 +274,7 @@ pub enum LibraryItem {
     System(ElementId),
     Furnishing(ElementId),
     MepObject(ElementId),
+    StandardsPack(ElementId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +283,7 @@ pub struct ImportResult {
     pub system: Option<ElementId>,
     pub furnishing: Option<ElementId>,
     pub mep_object: Option<ElementId>,
+    pub standards_pack: Option<ElementId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,7 +383,8 @@ impl LibraryIssue {
             LibraryItem::Material(id)
             | LibraryItem::System(id)
             | LibraryItem::Furnishing(id)
-            | LibraryItem::MepObject(id) => id,
+            | LibraryItem::MepObject(id)
+            | LibraryItem::StandardsPack(id) => id,
         }
     }
 }
@@ -429,6 +432,9 @@ pub fn import_item(
         LibraryItem::MepObject(id) => {
             import_mep_object(project, library, library_content_hash, &id)
         }
+        LibraryItem::StandardsPack(id) => {
+            import_standards_pack(project, library, library_content_hash, &id)
+        }
     }
 }
 
@@ -441,6 +447,7 @@ pub fn detach_item(
         LibraryItem::System(id) => detach_system(project, &id),
         LibraryItem::Furnishing(id) => detach_furnishing(project, &id),
         LibraryItem::MepObject(id) => detach_mep_object(project, &id),
+        LibraryItem::StandardsPack(id) => detach_standards_pack(project, &id),
     }
 }
 
@@ -458,6 +465,9 @@ pub fn resync_item(
         }
         LibraryItem::MepObject(id) => {
             resync_mep_object(project, library, library_content_hash, &id)
+        }
+        LibraryItem::StandardsPack(id) => {
+            resync_standards_pack(project, library, library_content_hash, &id)
         }
     }
 }
@@ -580,6 +590,7 @@ pub fn import_material(
         system: None,
         furnishing: None,
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -623,6 +634,7 @@ pub fn resync_material(
         system: None,
         furnishing: None,
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -713,6 +725,7 @@ pub fn import_system(
         system: Some(remapped_system),
         furnishing: None,
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -788,6 +801,7 @@ pub fn resync_system(
         system: Some(project_id.clone()),
         furnishing: None,
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -840,6 +854,7 @@ pub fn import_furnishing(
         system: None,
         furnishing: Some(remapped),
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -881,6 +896,7 @@ pub fn resync_furnishing(
         system: None,
         furnishing: Some(local_id),
         mep_object: None,
+        standards_pack: None,
     })
 }
 
@@ -933,6 +949,7 @@ pub fn import_mep_object(
         system: None,
         furnishing: None,
         mep_object: Some(remapped),
+        standards_pack: None,
     })
 }
 
@@ -974,6 +991,7 @@ pub fn resync_mep_object(
         system: None,
         furnishing: None,
         mep_object: Some(local_id),
+        standards_pack: None,
     })
 }
 
@@ -995,6 +1013,101 @@ pub fn detach_mep_object(
     }
 
     staged.mep_objects[object_index].source = None;
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+    Ok(true)
+}
+
+pub fn import_standards_pack(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    source_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let source = library_standards_pack(library, source_id)?.clone();
+    let prefix = library_id_prefix(library);
+    let mut staged = project.clone();
+    let mut used = collect_project_ids(&staged);
+    let remapped = mint_project_id(&prefix, &source.id, &mut used);
+    let pack = vendor_standards_pack(library, &source, remapped.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    staged.standards_packs.push(pack);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: None,
+        mep_object: None,
+        standards_pack: Some(remapped),
+    })
+}
+
+pub fn resync_standards_pack(
+    project: &mut BuildingModel,
+    library: &Library,
+    library_content_hash: &str,
+    project_id: &ElementId,
+) -> Result<ImportResult, LibraryImportError> {
+    let mut staged = project.clone();
+    let pack_index = staged
+        .standards_packs
+        .iter()
+        .position(|pack| pack.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectStandardsPackNotFound {
+            id: project_id.clone(),
+        })?;
+    let source = staged.standards_packs[pack_index]
+        .source
+        .clone()
+        .ok_or_else(|| LibraryImportError::ItemHasNoLibrarySource {
+            id: project_id.clone(),
+        })?;
+    ensure_library_matches(&source, library)?;
+
+    let source_pack = library_standards_pack(library, &source.source_id)?.clone();
+    let local_id = staged.standards_packs[pack_index].id.clone();
+    staged.standards_packs[pack_index] =
+        vendor_standards_pack(library, &source_pack, local_id.clone())?;
+
+    ensure_library_stamp(&mut staged, library, library_content_hash);
+    prune_unused_library_stamps(&mut staged);
+    staged.sort_deterministically();
+    staged.validate()?;
+    *project = staged;
+
+    Ok(ImportResult {
+        materials: Vec::new(),
+        system: None,
+        furnishing: None,
+        mep_object: None,
+        standards_pack: Some(local_id),
+    })
+}
+
+pub fn detach_standards_pack(
+    project: &mut BuildingModel,
+    project_id: &ElementId,
+) -> Result<bool, LibraryImportError> {
+    let mut staged = project.clone();
+    let pack_index = staged
+        .standards_packs
+        .iter()
+        .position(|pack| pack.id == *project_id)
+        .ok_or_else(|| LibraryImportError::ProjectStandardsPackNotFound {
+            id: project_id.clone(),
+        })?;
+
+    if staged.standards_packs[pack_index].source.is_none() {
+        return Ok(false);
+    }
+
+    staged.standards_packs[pack_index].source = None;
     prune_unused_library_stamps(&mut staged);
     staged.sort_deterministically();
     staged.validate()?;
@@ -1156,6 +1269,42 @@ pub fn library_lifecycle_issues(
         }
     }
 
+    for pack in &project.standards_packs {
+        let Some(source) = &pack.source else {
+            continue;
+        };
+        let current_hash = vendored_standards_pack_content_hash(pack, source)?;
+        if current_hash != source.content_hash {
+            issues.push(library_issue(
+                LibraryIssueKind::Diverged,
+                LibraryItem::StandardsPack(pack.id.clone()),
+                source,
+                Some(current_hash),
+            ));
+        }
+        if let Some(library) = current_by_uid.get(source.library_uid.as_str()) {
+            match find_library_standards_pack(library, &source.source_id) {
+                Some(source_pack) => {
+                    let library_hash = standards_pack_content_hash(source_pack)?;
+                    if library_hash != source.content_hash {
+                        issues.push(library_issue(
+                            LibraryIssueKind::OutOfDate,
+                            LibraryItem::StandardsPack(pack.id.clone()),
+                            source,
+                            Some(library_hash),
+                        ));
+                    }
+                }
+                None => issues.push(library_issue(
+                    LibraryIssueKind::SourceMissing,
+                    LibraryItem::StandardsPack(pack.id.clone()),
+                    source,
+                    None,
+                )),
+            }
+        }
+    }
+
     Ok(issues)
 }
 
@@ -1185,6 +1334,12 @@ pub fn mep_object_content_hash(object: &MepObject) -> Result<String, LibraryImpo
     let mut object = object.clone();
     object.source = None;
     hash_json(&object)
+}
+
+pub fn standards_pack_content_hash(pack: &StandardsPack) -> Result<String, LibraryImportError> {
+    let mut pack = pack.clone();
+    pack.source = None;
+    hash_json(&pack)
 }
 
 pub fn starter_library_ref() -> Result<&'static LoadedLibrary, LibraryImportError> {
@@ -1274,6 +1429,18 @@ fn vendor_mep_object(
     Ok(object)
 }
 
+fn vendor_standards_pack(
+    library: &Library,
+    source: &StandardsPack,
+    remapped: ElementId,
+) -> Result<StandardsPack, LibraryImportError> {
+    let mut pack = source.clone();
+    let content_hash = standards_pack_content_hash(source)?;
+    pack.id = remapped;
+    pack.source = Some(provenance(library, &source.id, content_hash));
+    Ok(pack)
+}
+
 fn library_issue(
     kind: LibraryIssueKind,
     item: LibraryItem,
@@ -1356,6 +1523,16 @@ fn vendored_mep_object_content_hash(
     hash_json(&object)
 }
 
+fn vendored_standards_pack_content_hash(
+    pack: &StandardsPack,
+    source: &Provenance,
+) -> Result<String, LibraryImportError> {
+    let mut pack = pack.clone();
+    pack.id = source.source_id.clone();
+    pack.source = None;
+    hash_json(&pack)
+}
+
 fn provenance(library: &Library, source_id: &ElementId, content_hash: String) -> Provenance {
     Provenance {
         library_uid: library.uid.clone(),
@@ -1424,6 +1601,11 @@ fn prune_unused_library_stamps(project: &mut BuildingModel) {
                 .as_ref()
                 .map(|source| (source.library_uid.clone(), source.version_id.clone()))
         }))
+        .chain(project.standards_packs.iter().filter_map(|pack| {
+            pack.source
+                .as_ref()
+                .map(|source| (source.library_uid.clone(), source.version_id.clone()))
+        }))
         .collect::<BTreeSet<_>>();
     project
         .libraries
@@ -1467,6 +1649,13 @@ fn find_library_mep_object<'a>(
         .find(|object| object.id == *source_id)
 }
 
+fn find_library_standards_pack<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Option<&'a StandardsPack> {
+    library.standards.iter().find(|pack| pack.id == *source_id)
+}
+
 fn library_material<'a>(
     library: &'a Library,
     source_id: &ElementId,
@@ -1502,6 +1691,17 @@ fn library_mep_object<'a>(
 ) -> Result<&'a MepObject, LibraryImportError> {
     find_library_mep_object(library, source_id).ok_or_else(|| {
         LibraryImportError::MepObjectNotFound {
+            id: source_id.clone(),
+        }
+    })
+}
+
+fn library_standards_pack<'a>(
+    library: &'a Library,
+    source_id: &ElementId,
+) -> Result<&'a StandardsPack, LibraryImportError> {
+    find_library_standards_pack(library, source_id).ok_or_else(|| {
+        LibraryImportError::StandardsPackNotFound {
             id: source_id.clone(),
         }
     })
@@ -1832,6 +2032,7 @@ fn read_library_source(path: &Path) -> Result<String, LibraryImportError> {
 
 fn collect_project_ids(project: &BuildingModel) -> BTreeSet<ElementId> {
     let mut ids = BTreeSet::new();
+    ids.extend(project.standards_packs.iter().map(|pack| pack.id.clone()));
     ids.extend(project.levels.iter().map(|level| level.id.clone()));
     ids.extend(project.materials.iter().map(|material| material.id.clone()));
     ids.extend(project.systems.iter().map(|system| system.id.clone()));
@@ -1868,6 +2069,22 @@ fn collect_project_ids(project: &BuildingModel) -> BTreeSet<ElementId> {
             .mep_instances
             .iter()
             .map(|instance| instance.id.clone()),
+    );
+    ids.extend(project.roof_planes.iter().map(|roof| roof.id.clone()));
+    ids.extend(
+        project
+            .roof_planes
+            .iter()
+            .flat_map(|roof| roof.openings.iter().map(|opening| opening.id.clone())),
+    );
+    ids.extend(project.ceilings.iter().map(|ceiling| ceiling.id.clone()));
+    ids.extend(project.floor_decks.iter().map(|deck| deck.id.clone()));
+    ids.extend(project.braced_wall_lines.iter().map(|line| line.id.clone()));
+    ids.extend(
+        project
+            .walls
+            .iter()
+            .flat_map(|wall| wall.bracing.iter().map(|panel| panel.id.clone())),
     );
     ids
 }
@@ -1938,6 +2155,8 @@ pub enum LibraryImportError {
     FurnishingNotFound { id: ElementId },
     #[error("MEP object {id:?} was not found in the library")]
     MepObjectNotFound { id: ElementId },
+    #[error("standards pack {id:?} was not found in the library")]
+    StandardsPackNotFound { id: ElementId },
     #[error("system {system:?} references missing material {material:?}")]
     MissingReferencedMaterial {
         system: ElementId,
@@ -1972,6 +2191,8 @@ pub enum LibraryImportError {
     ProjectFurnishingNotFound { id: ElementId },
     #[error("project MEP object {id:?} was not found")]
     ProjectMepObjectNotFound { id: ElementId },
+    #[error("project standards pack {id:?} was not found")]
+    ProjectStandardsPackNotFound { id: ElementId },
     #[error("project item {id:?} is not library-backed")]
     ItemHasNoLibrarySource { id: ElementId },
     #[error("library uid mismatch: item references {expected:?}, got {actual:?}")]
@@ -2101,6 +2322,7 @@ mod tests {
                 Length::from_whole_inches(4),
                 Length::from_whole_inches(24),
             )],
+            standards: vec![StandardsPack::irc_2021_starter()],
         }
     }
 
@@ -2222,7 +2444,7 @@ mod tests {
 
         assert_eq!(
             loaded.content_hash,
-            "blake3:8b688c3aa82cf916df7d26caf33b135696c81ee399329d608a98563ae39a56ce"
+            "blake3:213e6ce4530fb5f07d60fea2120440a0f44cf299fbe2bbcec1ab6505b383063c"
         );
     }
 
@@ -2246,6 +2468,25 @@ mod tests {
         assert!(matches!(
             load_verified_library(&bad),
             Err(LibraryImportError::ContentHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn load_verified_library_rejects_v2_library_schema() {
+        let bytes = LibraryBytes {
+            source: r#"{
+  "format": "framer.library",
+  "schema_version": 2
+}"#
+            .to_owned(),
+            expected_hash: None,
+        };
+
+        assert!(matches!(
+            load_verified_library(&bytes),
+            Err(LibraryImportError::Library(
+                LibraryError::UnsupportedSchemaVersion { found: 2, .. }
+            ))
         ));
     }
 
@@ -2742,10 +2983,12 @@ mod tests {
                 .to_owned(),
         };
         library.materials[0].source = MaterialSource::Library(stale_source.clone());
-        library.systems[0].source = Some(stale_source);
+        library.systems[0].source = Some(stale_source.clone());
+        library.standards[0].source = Some(stale_source);
         let library_hash = library_content_hash(&library).unwrap();
         let expected_material_hash = material_content_hash(&library.materials[0]).unwrap();
         let expected_system_hash = system_content_hash(&library.systems[0]).unwrap();
+        let expected_pack_hash = standards_pack_content_hash(&library.standards[0]).unwrap();
         let mut project = BuildingModel::new();
 
         let imported_material = import_material(
@@ -2776,6 +3019,23 @@ mod tests {
         assert_eq!(
             system.source.as_ref().unwrap().content_hash,
             expected_system_hash
+        );
+
+        let imported_pack = import_standards_pack(
+            &mut project,
+            &library,
+            &library_hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+        let pack = project
+            .standards_packs
+            .iter()
+            .find(|pack| Some(&pack.id) == imported_pack.standards_pack.as_ref())
+            .unwrap();
+        assert_eq!(
+            pack.source.as_ref().unwrap().content_hash,
+            expected_pack_hash
         );
         project.validate().unwrap();
     }
@@ -2859,6 +3119,90 @@ mod tests {
     }
 
     #[test]
+    fn importing_standards_pack_vendors_single_definition() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new();
+        let before = (
+            project.materials.len(),
+            project.systems.len(),
+            project.furnishings.len(),
+            project.mep_objects.len(),
+            project.standards_packs.len(),
+            project.standards.clone(),
+        );
+
+        let imported = import_standards_pack(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            imported.standards_pack,
+            Some(ElementId::new("acme-walls-std-irc-2021"))
+        );
+        assert!(imported.materials.is_empty());
+        assert!(imported.system.is_none());
+        assert!(imported.furnishing.is_none());
+        assert!(imported.mep_object.is_none());
+        assert_eq!(project.materials.len(), before.0);
+        assert_eq!(project.systems.len(), before.1);
+        assert_eq!(project.furnishings.len(), before.2);
+        assert_eq!(project.mep_objects.len(), before.3);
+        assert_eq!(project.standards_packs.len(), before.4 + 1);
+        assert_eq!(project.standards, before.5);
+
+        let pack = project
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == ElementId::new("acme-walls-std-irc-2021"))
+            .unwrap();
+        let source = pack.source.as_ref().expect("vendored pack has provenance");
+        assert_eq!(source.source_id, ElementId::new("std-irc-2021"));
+        assert_eq!(
+            source.content_hash,
+            standards_pack_content_hash(&library.standards[0]).unwrap()
+        );
+        assert_eq!(project.libraries.len(), 1);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn standards_pack_import_round_trips_as_self_contained_project_content() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new();
+        let imported = import_standards_pack(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+        let local_id = imported.standards_pack.unwrap();
+
+        let reloaded = load_project(&save_project(&project).unwrap()).unwrap();
+
+        let pack = reloaded
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == local_id)
+            .unwrap();
+        assert_eq!(
+            pack.source.as_ref().unwrap().source_id,
+            ElementId::new("std-irc-2021")
+        );
+        assert!(
+            library_lifecycle_issues(&reloaded, &[library])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn newly_imported_items_have_no_lifecycle_issues() {
         let library = fixture_library();
         let hash = library_content_hash(&library).unwrap();
@@ -2893,6 +3237,13 @@ mod tests {
             &library,
             &hash,
             &ElementId::new("mep-load-center"),
+        )
+        .unwrap();
+        import_standards_pack(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
         )
         .unwrap();
 
@@ -2995,7 +3346,7 @@ mod tests {
         )
         .unwrap();
         let local_system_id = imported_system.system.unwrap();
-        let mut system_missing = library;
+        let mut system_missing = library.clone();
         system_missing
             .systems
             .retain(|system| system.id != ElementId::new("system-rainscreen"));
@@ -3004,6 +3355,29 @@ mod tests {
         assert_eq!(system_issues.len(), 1);
         assert_eq!(system_issues[0].kind, LibraryIssueKind::SourceMissing);
         assert_eq!(system_issues[0].item, LibraryItem::System(local_system_id));
+
+        let mut standards_project = BuildingModel::new();
+        let imported_pack = import_standards_pack(
+            &mut standards_project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+        let local_pack_id = imported_pack.standards_pack.unwrap();
+        let mut standards_missing = library;
+        standards_missing
+            .standards
+            .retain(|pack| pack.id != ElementId::new("std-irc-2021"));
+
+        let standards_issues =
+            library_lifecycle_issues(&standards_project, &[standards_missing]).unwrap();
+        assert_eq!(standards_issues.len(), 1);
+        assert_eq!(standards_issues[0].kind, LibraryIssueKind::SourceMissing);
+        assert_eq!(
+            standards_issues[0].item,
+            LibraryItem::StandardsPack(local_pack_id)
+        );
     }
 
     #[test]
@@ -3033,6 +3407,50 @@ mod tests {
                 .is_empty()
         );
         assert!(project.libraries.is_empty());
+    }
+
+    #[test]
+    fn standards_pack_reports_lifecycle_and_detach() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new();
+        let imported = import_standards_pack(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+        let local_id = imported.standards_pack.unwrap();
+
+        let pack = project
+            .standards_packs
+            .iter_mut()
+            .find(|pack| pack.id == local_id)
+            .unwrap();
+        pack.name = "Locally edited standards".to_owned();
+        let issues = library_lifecycle_issues(&project, &[]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::Diverged);
+        assert_eq!(issues[0].item, LibraryItem::StandardsPack(local_id.clone()));
+
+        assert!(detach_standards_pack(&mut project, &local_id).unwrap());
+        assert!(
+            project
+                .standards_packs
+                .iter()
+                .find(|pack| pack.id == local_id)
+                .unwrap()
+                .source
+                .is_none()
+        );
+        assert!(
+            library_lifecycle_issues(&project, &[library])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(project.libraries.is_empty());
+        assert!(!detach_standards_pack(&mut project, &local_id).unwrap());
     }
 
     #[test]
@@ -3071,6 +3489,48 @@ mod tests {
             object.source.as_ref().unwrap().version_id,
             updated.version_id
         );
+        assert!(
+            library_lifecycle_issues(&project, &[updated])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn standards_pack_resync_updates_source_content() {
+        let library = fixture_library();
+        let hash = library_content_hash(&library).unwrap();
+        let mut project = BuildingModel::new();
+        let imported = import_standards_pack(
+            &mut project,
+            &library,
+            &hash,
+            &ElementId::new("std-irc-2021"),
+        )
+        .unwrap();
+        let local_id = imported.standards_pack.unwrap();
+
+        let mut updated = library.clone();
+        updated.version_id = "019e9150-0000-7000-8000-000000000102".to_owned();
+        updated.version = "1.1.0".to_owned();
+        updated.standards[0].checks[0].title = "Updated stud height".to_owned();
+        let updated_hash = library_content_hash(&updated).unwrap();
+
+        let issues = library_lifecycle_issues(&project, &[updated.clone()]).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, LibraryIssueKind::OutOfDate);
+        assert_eq!(issues[0].item, LibraryItem::StandardsPack(local_id.clone()));
+
+        resync_standards_pack(&mut project, &updated, &updated_hash, &local_id).unwrap();
+        let pack = project
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id == local_id)
+            .unwrap();
+        assert_eq!(pack.checks[0].title, "Updated stud height");
+        assert_eq!(pack.source.as_ref().unwrap().version_id, updated.version_id);
+        assert_eq!(project.libraries.len(), 1);
+        assert_eq!(project.libraries[0].version_id, updated.version_id);
         assert!(
             library_lifecycle_issues(&project, &[updated])
                 .unwrap()
@@ -3415,6 +3875,16 @@ mod tests {
             ),
             Err(LibraryImportError::MepObjectNotFound { id })
                 if id == ElementId::new("mep-missing")
+        ));
+        assert!(matches!(
+            import_standards_pack(
+                &mut project,
+                &library,
+                "blake3:test",
+                &ElementId::new("std-missing"),
+            ),
+            Err(LibraryImportError::StandardsPackNotFound { id })
+                if id == ElementId::new("std-missing")
         ));
 
         let mut dangling = fixture_library();
