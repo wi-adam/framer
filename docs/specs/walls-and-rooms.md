@@ -139,8 +139,8 @@ existing `plan_inverse_point()` / camera `unapply()`.
   start (polyline mode) until Esc/right-click. On a snap, auto-create the right
   `WallJoin` (`Corner` at an endpoint, `Tee` at mid-span). **One undo step per
   committed segment.**
-- **Room tool:** click inside an area → `topology` locates the enclosing face →
-  `add_room()` with `seed` = click point, auto-name ("Room N"), default usage.
+- **Room tool:** click inside an area → `topology` locates the same-level enclosing
+  face → `add_room()` with `seed` = click point, auto-name ("Room N"), default usage.
   Click outside any closed loop → inline "no enclosed area here." Rooms render as
   translucent fills with name + area labels.
 - **Wall delete + cascade** (now mandatory once walls can be added): removes the
