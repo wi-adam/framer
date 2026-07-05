@@ -493,11 +493,7 @@ pub(super) fn draw_project_plan(
     // When the Rooms layer is hidden, skip the graph pass entirely — the empty
     // boundary list makes the draw/pick loop below a no-op.
     let room_boundaries = if layers.rooms {
-        model
-            .rooms
-            .iter()
-            .map(|room| framer_core::room_boundary_on_level(model, &room.level, room.seed))
-            .collect()
+        room_boundaries_by_level(model)
     } else {
         Vec::new()
     };
@@ -1245,5 +1241,107 @@ fn snap_kind_label(kind: SnapKind) -> Option<&'static str> {
         SnapKind::OnWall => Some("wall"),
         SnapKind::Alignment => Some("align"),
         SnapKind::Intersection | SnapKind::Grid | SnapKind::Free => None,
+    }
+}
+
+fn room_boundaries_by_level(model: &BuildingModel) -> Vec<Option<framer_core::RoomBoundary>> {
+    let mut batches: BTreeMap<ElementId, Vec<(usize, Point2)>> = BTreeMap::new();
+    for (index, room) in model.rooms.iter().enumerate() {
+        batches
+            .entry(room.level.clone())
+            .or_default()
+            .push((index, room.seed));
+    }
+
+    let mut room_boundaries = vec![None; model.rooms.len()];
+    for (level, entries) in batches {
+        let seeds: Vec<Point2> = entries.iter().map(|(_, seed)| *seed).collect();
+        for ((index, _), boundary) in entries
+            .into_iter()
+            .zip(framer_core::room_boundaries_on_level(model, &level, &seeds))
+        {
+            room_boundaries[index] = boundary;
+        }
+    }
+    room_boundaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use framer_core::{CodeProfile, Level, Room, RoomUsage};
+
+    fn p(x_ft: f64, y_ft: f64) -> Point2 {
+        Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
+    }
+
+    fn wall(code: &CodeProfile, id: &str, level: &str, a: Point2, b: Point2) -> Wall {
+        Wall::new(id, id, Length::from_feet(1.0), code).with_placement(level, a, b)
+    }
+
+    fn rect_walls(code: &CodeProfile, prefix: &str, level: &str, x0: f64, x1: f64) -> Vec<Wall> {
+        vec![
+            wall(code, &format!("{prefix}-b"), level, p(x0, 0.0), p(x1, 0.0)),
+            wall(code, &format!("{prefix}-r"), level, p(x1, 0.0), p(x1, 8.0)),
+            wall(code, &format!("{prefix}-t"), level, p(x1, 8.0), p(x0, 8.0)),
+            wall(code, &format!("{prefix}-l"), level, p(x0, 8.0), p(x0, 0.0)),
+        ]
+    }
+
+    #[test]
+    fn room_boundaries_by_level_batches_and_preserves_room_order() {
+        let code = CodeProfile::irc_2021_prescriptive();
+        let mut model = BuildingModel::new(code.clone());
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.walls.clear();
+        model
+            .walls
+            .extend(rect_walls(&code, "left", "level-1", 0.0, 12.0));
+        model
+            .walls
+            .extend(rect_walls(&code, "right", "level-1", 20.0, 32.0));
+        model.rooms = vec![
+            Room::new(
+                "room-left",
+                "Left",
+                RoomUsage::Living,
+                "level-1",
+                p(6.0, 4.0),
+            ),
+            Room::new(
+                "room-upper",
+                "Upper",
+                RoomUsage::Living,
+                "level-2",
+                p(6.0, 4.0),
+            ),
+            Room::new(
+                "room-right",
+                "Right",
+                RoomUsage::Living,
+                "level-1",
+                p(26.0, 4.0),
+            ),
+        ];
+
+        let boundaries = room_boundaries_by_level(&model);
+
+        assert_eq!(boundaries.len(), 3);
+        assert!(
+            boundaries[0]
+                .as_ref()
+                .is_some_and(|boundary| (boundary.area_square_feet() - 96.0).abs() < 1e-6)
+        );
+        assert!(
+            boundaries[1].is_none(),
+            "the level-2 room must not borrow level-1 walls"
+        );
+        assert!(
+            boundaries[2]
+                .as_ref()
+                .is_some_and(|boundary| (boundary.area_square_feet() - 96.0).abs() < 1e-6)
+        );
     }
 }
