@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConstructionSystem, Furnishing, Material, MepObject, ModelError,
+    ConstructionSystem, Furnishing, Material, MepObject, ModelError, StandardsPack,
     model::{insert_unique_id, validate_element_id},
 };
 
 pub const LIBRARY_FORMAT: &str = "framer.library";
-pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
+pub const LIBRARY_SCHEMA_VERSION: u32 = 3;
 const MIN_SUPPORTED_LIBRARY_SCHEMA_VERSION: u32 = LIBRARY_SCHEMA_VERSION;
 const STARTER_LIBRARY_SOURCE: &str = include_str!("../../../libraries/framer-starter.framerlib");
 
@@ -31,6 +31,8 @@ pub struct Library {
     pub furnishings: Vec<Furnishing>,
     #[serde(default)]
     pub mep_objects: Vec<MepObject>,
+    #[serde(default)]
+    pub standards: Vec<StandardsPack>,
 }
 
 impl Library {
@@ -57,6 +59,12 @@ impl Library {
             object.validate(&mut ids)?;
         }
 
+        for pack in &self.standards {
+            validate_element_id(&pack.id)?;
+            insert_unique_id(&mut ids, &pack.id)?;
+            pack.validate()?;
+        }
+
         Ok(())
     }
 
@@ -67,6 +75,7 @@ impl Library {
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.mep_objects
             .sort_by(|left, right| left.id.cmp(&right.id));
+        self.standards.sort_by(|left, right| left.id.cmp(&right.id));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -95,6 +104,8 @@ pub struct LibraryDocument {
     pub furnishings: Vec<Furnishing>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mep_objects: Vec<MepObject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standards: Vec<StandardsPack>,
 }
 
 impl LibraryDocument {
@@ -111,6 +122,7 @@ impl LibraryDocument {
             systems: library.systems,
             furnishings: library.furnishings,
             mep_objects: library.mep_objects,
+            standards: library.standards,
         }
     }
 
@@ -124,6 +136,7 @@ impl LibraryDocument {
             systems: self.systems,
             furnishings: self.furnishings,
             mep_objects: self.mep_objects,
+            standards: self.standards,
         }
     }
 
@@ -163,6 +176,7 @@ impl LibraryDocument {
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.mep_objects
             .sort_by(|left, right| left.id.cmp(&right.id));
+        self.standards.sort_by(|left, right| left.id.cmp(&right.id));
     }
 }
 
@@ -226,7 +240,7 @@ mod tests {
     use crate::{
         BoardProfile, ConstructionLayer, ConstructionSystem, ElementId, FramingPattern,
         FramingSpec, Furnishing, LayerFunction, Length, Material, MemberFamily, MepObject,
-        MepObjectKind, SystemKind,
+        MepObjectKind, StandardsPack, SystemKind,
     };
 
     use super::*;
@@ -240,12 +254,13 @@ mod tests {
         let json = save_library(&checked_in_starter_library()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.library\",\n"));
-        assert!(json.contains("  \"schema_version\": 2,\n"));
+        assert!(json.contains("  \"schema_version\": 3,\n"));
         assert!(json.contains("  \"uid\": \"8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8\",\n"));
         assert!(json.contains("  \"materials\": ["));
         assert!(json.contains("  \"systems\": ["));
         assert!(json.contains("  \"furnishings\": ["));
         assert!(json.contains("  \"mep_objects\": ["));
+        assert!(json.contains("  \"standards\": ["));
         assert!(!json.contains("\"authored\""));
     }
 
@@ -254,6 +269,7 @@ mod tests {
         let mut first = checked_in_starter_library();
         first.materials.reverse();
         first.systems.reverse();
+        first.standards.reverse();
 
         let second = checked_in_starter_library();
 
@@ -310,6 +326,7 @@ mod tests {
                 Length::from_whole_inches(4),
                 Length::from_whole_inches(24),
             )],
+            standards: vec![StandardsPack::irc_2021_starter()],
         };
 
         let reloaded = load_library(&save_library(&library).unwrap()).unwrap();
@@ -345,6 +362,14 @@ mod tests {
                 "mat-roofing-felt",
                 "mat-spf",
             ]
+        );
+        assert_eq!(
+            library
+                .standards
+                .iter()
+                .map(|pack| pack.id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["std-irc-2021"]
         );
         assert_eq!(
             library
@@ -436,7 +461,7 @@ mod tests {
     fn load_library_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.library",
-  "schema_version": 2,
+  "schema_version": 3,
   "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
   "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
   "version": "0.1.0",
@@ -466,13 +491,13 @@ mod tests {
     fn load_library_rejects_old_schema_with_unsupported_version_error() {
         let source = r#"{
   "format": "framer.library",
-  "schema_version": 0
+  "schema_version": 2
 }"#;
 
         assert!(matches!(
             load_library(source),
             Err(LibraryError::UnsupportedSchemaVersion {
-                found: 0,
+                found: 2,
                 supported: LIBRARY_SCHEMA_VERSION
             })
         ));

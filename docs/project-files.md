@@ -115,12 +115,12 @@ Framer library files are UTF-8 JSON documents with the `.framerlib` extension.
 They are versioned separately from project files and describe reusable content
 that can be copied into a self-contained `.framer` project.
 
-The current format is schema 2:
+The current format is schema 3:
 
 ```json
 {
   "format": "framer.library",
-  "schema_version": 2,
+  "schema_version": 3,
   "uid": "8f6ebee0-fbdc-4f29-9d90-0e3f3f0640a8",
   "version_id": "019e8b10-9b30-7c2b-8b4e-1db251cb8221",
   "version": "0.1.0",
@@ -128,26 +128,31 @@ The current format is schema 2:
   "materials": [],
   "systems": [],
   "furnishings": [],
-  "mep_objects": []
+  "mep_objects": [],
+  "standards": []
 }
 ```
 
 - `format` must be `framer.library`.
-- `schema_version` must be `2` for the current library loader.
+- `schema_version` must be `3` for the current library loader.
 - `uid` is the stable library identity; `version_id` identifies this published
   content version; `coordinate` is only a resolvable hint.
-- `materials`, `systems`, `furnishings`, and `mep_objects` use the same typed
-  definitions as project files.
+- `materials`, `systems`, `furnishings`, `mep_objects`, and `standards` use the
+  same typed definitions as project files. Library `standards` entries become
+  project `standards_packs` when vendored.
 - A library validates internally before save/load succeeds: IDs must be valid and
   unique, and every construction-system material reference must resolve to a
-  material in the same file. Furnishing and MEP family sizes must be positive.
+  material in the same file. Furnishing and MEP family sizes must be positive,
+  and every standards pack must pass `StandardsPack::validate()`.
 
 The checked-in starter catalog is
 [`../libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
-New projects and demos load that document and embed its material/system
-definitions into the authored project model. Furnishing and MEP object families
-are copied when placed from the starter catalog. Opening an existing `.framer`
-project does not read any `.framerlib`; projects remain self-contained.
+New projects and demos load that document for material/system definitions and
+seed the same IRC 2021 starter standards pack into the authored project model;
+the starter catalog also distributes that pack for vendor workflows. Furnishing
+and MEP object families are copied when placed from the starter catalog. Opening
+an existing `.framer` project does not read any `.framerlib`; projects remain
+self-contained.
 
 ## Project Packages
 
@@ -433,17 +438,17 @@ for that library version:
 - `coordinate`: human/resolver hint, not identity.
 - `version`: human semver label.
 
-Each vendored material, system, furnishing, or MEP object may also carry
+Each vendored material, system, furnishing, MEP object, or standards pack may also carry
 `Provenance`:
 
 - `library_uid` and `version_id`: point to the matching library stamp.
 - `source_id`: the element id inside the library before project-local remapping.
 - `content_hash`: `blake3:<hex>` hash of the source item canonical form.
 
-This metadata is descriptive. Do not make wall/material/system/family references
-point outside the project; every layer `material`, framing `cavity_material`,
-wall `system`, and object-instance `family` must still resolve to a local
-definition in this file.
+This metadata is descriptive. Do not make wall/material/system/family/standards-stack
+references point outside the project; every layer `material`, framing `cavity_material`,
+wall `system`, object-instance `family`, and standards stack entry must still resolve to a
+local definition in this file.
 
 Library lifecycle state is derived from the embedded definitions plus any
 currently available source library. A vendored item whose project-local content
@@ -451,9 +456,11 @@ no longer matches its stamped source-item hash is reported as locally modified;
 an item whose available source library now has a different source-item hash is
 reported as out of date. Re-sync overwrites the embedded vendored definition from
 the source library while keeping project-local ids stable; systems also refresh
-their material closure. Detach clears the selected item's provenance so it
-becomes ordinary project-owned content. None of these checks run during
-`load_project`, and a missing `.framerlib` never blocks opening this file.
+their material closure. Standards packs re-sync as single definitions because
+their rules do not reference material/system ids. Detach clears the selected
+item's provenance so it becomes ordinary project-owned content. None of these
+checks run during `load_project`, and a missing `.framerlib` never blocks
+opening this file.
 
 ## Dimensions
 

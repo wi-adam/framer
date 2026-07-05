@@ -137,17 +137,17 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 
 ### `.framerlib` serialization (`src/library.rs`)
 
-- Constants: `LIBRARY_FORMAT = "framer.library"`, **`LIBRARY_SCHEMA_VERSION = 2`**.
+- Constants: `LIBRARY_FORMAT = "framer.library"`, **`LIBRARY_SCHEMA_VERSION = 3`**.
 - A library document is a headless, versioned catalog of typed definitions:
   `uid`, `version_id`, `version`, `coordinate`, `materials`, `systems`, `furnishings`, and
-  `mep_objects`.
+  `mep_objects`, plus `standards` packs.
 - `load_library` peeks a header first, rejects non-library formats or unsupported
-  schemas explicitly, then validates that every material/system/family id is valid and every
-  construction layer or cavity material reference resolves inside the library. Furnishing and
-  MEP family sizes must be positive.
+  schemas explicitly, then validates that every material/system/family/standards id is valid,
+  every construction layer or cavity material reference resolves inside the library, and every
+  standards pack validates. Furnishing and MEP family sizes must be positive.
 - Canonical output mirrors project files: re-stamp the schema version, sort
-  materials/systems/furnishings/MEP objects by id, pretty-print, and append a trailing newline.
-  Layer order remains semantic and is never sorted.
+  materials/systems/furnishings/MEP objects/standards packs by id, pretty-print, and append a
+  trailing newline. Layer order remains semantic and is never sorted.
 - The built-in starter catalog lives at
   [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib);
   `BuildingModel::new` and the demo constructors vendor those definitions into each
@@ -171,16 +171,20 @@ Key entry points:
 - `load_verified_library(&LibraryBytes)` — parse a `.framerlib`, compute the canonical
   `blake3` hash, and fail closed if an expected hash is present and does not match.
 - `import_material` / `import_system` / `import_furnishing` / `import_mep_object` /
+  `import_standards_pack` /
   `import_item` — stage an atomic vendor-on-use import into a `BuildingModel`, mint
   project-local ids, copy referenced material closure for systems, stamp `LibraryStamp` +
-  per-item `Provenance`, validate the staged model, then commit it.
+  per-item `Provenance`, validate the staged model, then commit it. Standards packs are
+  single-item copies with only `pack.id` remapped.
 - `library_lifecycle_issues` — detect locally modified, out-of-date, or missing-source
-  vendored materials/systems/furnishings/MEP objects by recomputing provenance-excluded hashes
-  in source id space.
+  vendored materials/systems/furnishings/MEP objects/standards packs by recomputing
+  provenance-excluded hashes in source id space.
 - `resync_material` / `resync_system` / `resync_furnishing` / `resync_mep_object` /
+  `resync_standards_pack` /
   `resync_item` — replace a vendored definition from an available library while preserving
   project-local ids; system re-sync also refreshes the referenced material closure.
 - `detach_material` / `detach_system` / `detach_furnishing` / `detach_mep_object` /
+  `detach_standards_pack` /
   `detach_item` — clear provenance on selected vendored definitions and prune unused library
   stamps.
 - `ContentAddressedAssetStore` / `asset_content_hash` / `referenced_asset_hashes` — store and
