@@ -39,9 +39,10 @@ and (c) adds **node-based wall editing** (drag a corner → connected walls foll
    tolerance (drop the 24" cap).
 4. **Axis-aligned invariant kept.** All walls remain H/V for v1 (consistent with
    the walls-and-rooms design); free-angle walls stay out of scope.
-5. **Join reconciliation is geometry-derived, not patched.** A single
+5. **Join reconciliation is same-level geometry-derived, not patched.** A single
    `reconcile_joins(model)` run inside every structural edit derives the full join
-   set from wall geometry and matches against existing joins to preserve ids.
+   set from same-level wall geometry and matches against existing joins to preserve
+   ids. Coincident or crossing walls on different levels stay independent.
 
 ## Out of scope for v1 (kept architecturally open)
 
@@ -176,11 +177,12 @@ also suppresses the camera's primary-pan (`allow_primary_pan = false`).
 ## Section 4 — Correctness ripple: joins, rooms, dimensions (`framer-core` + app)
 
 - **`reconcile_joins(model)`** (new, `framer-core`) — pure pass deriving the full
-  join set from wall geometry (coincident endpoints → `Corner`; endpoint-on-
+  join set from same-level wall geometry (coincident endpoints → `Corner`; endpoint-on-
   interior → `Tee`; interior crossing → `Cross`), matched against existing joins
   by (wall-pair, kind, point) to **preserve ids/names**, dropping stale and adding
-  new. Run inside every structural `edit()` (draw, delete, move). Generalises
-  `joins_for_new_wall`; correct regardless of how geometry changed.
+  new. Run inside every structural `edit()` (draw, delete, move). Generalises the
+  same-level auto-join rule in `joins_for_new_wall`; correct regardless of how
+  geometry changed.
 - **Rooms** already re-derive from `topology::bounded_faces` at `rebuild()`; open
   loops are diagnostics, not errors. A transiently-torn room mid-drag recovers via
   its persistent `seed`. No new work beyond letting rebuild run.

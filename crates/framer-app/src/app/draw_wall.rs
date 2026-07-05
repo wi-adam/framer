@@ -743,6 +743,22 @@ mod tests {
     }
 
     #[test]
+    fn joins_for_new_wall_ignores_cross_level_midspan_tee() {
+        let mut model = empty_model();
+        model
+            .walls
+            .push(wall_from("through", p(0.0, 0.0), p(240.0, 0.0)));
+
+        let new_wall = wall_from("partition", p(120.0, 0.0), p(120.0, 96.0)).with_placement(
+            "level-2",
+            p(120.0, 0.0),
+            p(120.0, 96.0),
+        );
+
+        assert!(joins_for_new_wall(&model, &new_wall).is_empty());
+    }
+
+    #[test]
     fn resolve_second_point_snaps_onto_wall_interior_as_tee() {
         let mut model = empty_model();
         model
