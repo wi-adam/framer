@@ -519,6 +519,7 @@ impl FramerApp {
                             .selectable_label(level_selected, format!("Level: {level_name}"))
                             .clicked()
                         {
+                            self.set_active_level(ElementId::new(level_id.clone()));
                             self.selected = Selection::Level(level_id.clone());
                         }
 
@@ -1191,7 +1192,7 @@ impl FramerApp {
                         .find(|furnishing| furnishing.id == family_id)
                         .map(|furnishing| furnishing.name.clone())
                         .unwrap_or_else(|| "Furnishing".to_owned());
-                    let level = first_level_id(&app.model);
+                    let level = app.active_level_id();
                     app.model.furnishing_instances.push(FurnishingInstance::new(
                         instance_id.clone(),
                         format!("{family_name} {index}"),
@@ -1255,7 +1256,7 @@ impl FramerApp {
                         .find(|object| object.id == family_id)
                         .map(|object| object.name.clone())
                         .unwrap_or_else(|| "MEP object".to_owned());
-                    let level = first_level_id(&app.model);
+                    let level = app.active_level_id();
                     app.model.mep_instances.push(MepInstance::new(
                         instance_id.clone(),
                         format!("{family_name} {index}"),
@@ -2769,13 +2770,7 @@ impl FramerApp {
         if levels.is_empty() {
             return;
         }
-        let current = self
-            .model
-            .walls
-            .get(self.selected_wall)
-            .map(|wall| wall.level.0.clone())
-            .filter(|id| levels.iter().any(|(level_id, _)| level_id == id))
-            .unwrap_or_else(|| levels[0].0.clone());
+        let current = self.active_level_id().0;
         let current_name = levels
             .iter()
             .find(|(id, _)| id == &current)
@@ -2797,6 +2792,7 @@ impl FramerApp {
                 });
         });
         if chosen != current {
+            self.set_active_level(ElementId::new(chosen.clone()));
             self.selected = Selection::Level(chosen);
         }
     }
@@ -3496,14 +3492,6 @@ fn provenance_label(source: &Provenance) -> String {
 
 fn object_size_label(size: &framer_core::ObjectSize) -> String {
     format!("{} x {} x {}", size.width, size.depth, size.height)
-}
-
-fn first_level_id(model: &framer_core::BuildingModel) -> ElementId {
-    model
-        .levels
-        .first()
-        .map(|level| level.id.clone())
-        .unwrap_or_else(|| ElementId::new("level-1"))
 }
 
 fn matching_library_source(
@@ -5509,6 +5497,10 @@ mod tests {
     fn placing_starter_objects_vendors_families_and_instances() {
         let mut app = FramerApp::default();
         let placement = Point2::new(Length::from_inches(24.0), Length::from_inches(36.0));
+        let active_level = Level::new("level-2", "Level 2", Length::from_feet(10.0));
+        let active_level_id = active_level.id.clone();
+        app.model.levels.push(active_level);
+        app.set_active_level(active_level_id.clone());
         app.cursor_model = Some(placement);
 
         app.place_starter_furnishing("furnishing-workbench".to_owned());
@@ -5523,7 +5515,7 @@ mod tests {
         let furnishing = &app.model.furnishing_instances[0];
         assert_eq!(furnishing.family, app.model.furnishings[0].id);
         assert_eq!(furnishing.position, placement);
-        assert_eq!(furnishing.level, app.model.levels[0].id);
+        assert_eq!(furnishing.level, active_level_id);
         assert_eq!(
             app.selected,
             Selection::FurnishingInstance(furnishing.id.0.clone())
@@ -5548,7 +5540,7 @@ mod tests {
         let object = &app.model.mep_instances[0];
         assert_eq!(object.family, app.model.mep_objects[0].id);
         assert_eq!(object.position, Point2::new(Length::ZERO, Length::ZERO));
-        assert_eq!(object.level, app.model.levels[0].id);
+        assert_eq!(object.level, active_level_id);
         assert_eq!(app.selected, Selection::MepInstance(object.id.0.clone()));
         assert!(
             app.file_status
