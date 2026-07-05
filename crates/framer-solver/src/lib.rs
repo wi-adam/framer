@@ -375,6 +375,9 @@ fn connection_counts(model: &BuildingModel, plan: &ProjectFramePlan) -> Connecti
             .saturating_mul(2),
         );
 
+        // Top plates are currently emitted as full-length pieces. This stays at
+        // zero until stock-length plate splicing emits multiple pieces at the
+        // same elevation.
         let mut top_plate_lines = BTreeMap::<Length, u32>::new();
         for member in wall_plan
             .members
@@ -5178,6 +5181,20 @@ mod tests {
         assert!(csv.contains(
             "6,16d common nail,double top plate,irc2021.r602.3-1.fastening,IRC 2021 Table R602.3(1)"
         ));
+    }
+
+    #[test]
+    fn double_top_plate_spacing_rounds_up_partial_bays() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(Wall::new("wall", "Wall", Length::from_inches(102.0), &code));
+
+        let plan = generate_project_plan(&model).unwrap();
+        let double_top = fastener_row(&plan, "16d common nail", ConnectionKind::DoubleTopPlate);
+
+        assert_eq!(double_top.quantity, 7);
     }
 
     #[test]
