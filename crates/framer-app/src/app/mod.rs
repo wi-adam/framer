@@ -3779,6 +3779,26 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_lowers_standards_report_issues_into_plan_diagnostics() {
+        let mut app = FramerApp::default();
+        app.model.walls[0].height = Length::from_feet(20.0);
+
+        app.rebuild();
+
+        let plan = app
+            .project_plan
+            .as_ref()
+            .expect("high-wall model should still generate a framing plan");
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Violation
+                && diagnostic.rule.as_ref().is_some_and(|rule| {
+                    rule.rule == "irc2021.r602.3-5.stud-height"
+                        && rule.citation == "IRC 2021 Table R602.3(5)"
+                })
+        }));
+    }
+
+    #[test]
     fn compliance_source_focus_selects_existing_model_elements() {
         let mut app = FramerApp::default();
         let (wall_index, wall_id, opening_id, wall_level) = app
