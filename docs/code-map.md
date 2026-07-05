@@ -42,6 +42,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, code profiles, and `ModelError` validation. (~4.2k lines.) |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
+| `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, pack validation, the IRC 2021 starter pack, and pure stack resolution. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; level-scoped room-boundary helpers for stacked drafting; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2`. The basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer (`ConstraintSystem`) for driving dimensions / overconstraint checks. |
