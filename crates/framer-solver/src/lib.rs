@@ -2851,18 +2851,15 @@ fn add_opening_members(
         ));
     }
 
-    for (side, king_x) in [
-        ("left", side_positions.left_king),
-        ("right", side_positions.right_king),
-    ] {
+    for side in [OpeningSide::Left, OpeningSide::Right] {
         members.push(frame_member(
-            format!("{}-king-{}", opening.id.0, side),
+            format!("{}-king-{}", opening.id.0, side.label()),
             &opening.id,
             MemberKind::KingStud,
             wall_stud,
             FrameMemberPlacement::new(
                 MemberOrientation::Vertical,
-                king_x,
+                side_positions.king_x(side),
                 stud_base,
                 stud_top - stud_base,
                 stud_thickness,
@@ -2871,7 +2868,8 @@ fn add_opening_members(
             RuleProvenance::new(
                 "opening.king-studs.each-side",
                 format!(
-                    "A king stud is generated at the {side} rough opening edge for {}.",
+                    "A king stud is generated at the {} rough opening edge for {}.",
+                    side.label(),
                     opening.name
                 ),
             ),
@@ -2894,8 +2892,9 @@ fn add_opening_members(
                 RuleProvenance::new(
                     "opening.jack-studs.header-bearing",
                     format!(
-                        "{} jack stud(s) are generated at the {side} rough opening edge to support the selected header.",
-                        header_spec.jack_studs
+                        "{} jack stud(s) are generated at the {} rough opening edge to support the selected header.",
+                        header_spec.jack_studs,
+                        side.label()
                     ),
                 ),
             ));
@@ -2956,6 +2955,21 @@ fn add_opening_members(
     add_cripples(members, framing, opening, "upper", header_top, stud_top);
 }
 
+#[derive(Clone, Copy)]
+enum OpeningSide {
+    Left,
+    Right,
+}
+
+impl OpeningSide {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
 struct OpeningSidePositions {
     left_king: Length,
     left_jack_left_face: Length,
@@ -2984,22 +2998,28 @@ impl OpeningSidePositions {
         }
     }
 
-    fn jack_x(&self, side: &str, jack_index: u8) -> Length {
+    fn king_x(&self, side: OpeningSide) -> Length {
+        match side {
+            OpeningSide::Left => self.left_king,
+            OpeningSide::Right => self.right_king,
+        }
+    }
+
+    fn jack_x(&self, side: OpeningSide, jack_index: u8) -> Length {
         let half_stud = self.stud_thickness / 2;
         let offset = self.stud_thickness * i64::from(jack_index);
         match side {
-            "left" => self.opening_left - half_stud - offset,
-            "right" => self.opening_right + half_stud + offset,
-            _ => unreachable!("opening side is fixed by caller"),
+            OpeningSide::Left => self.opening_left - half_stud - offset,
+            OpeningSide::Right => self.opening_right + half_stud + offset,
         }
     }
 }
 
-fn jack_member_id(opening: &Opening, side: &str, jack_index: u8) -> String {
+fn jack_member_id(opening: &Opening, side: OpeningSide, jack_index: u8) -> String {
     if jack_index == 0 {
-        format!("{}-jack-{}", opening.id.0, side)
+        format!("{}-jack-{}", opening.id.0, side.label())
     } else {
-        format!("{}-jack-{}-{}", opening.id.0, side, jack_index + 1)
+        format!("{}-jack-{}-{}", opening.id.0, side.label(), jack_index + 1)
     }
 }
 
@@ -4264,6 +4284,56 @@ mod tests {
     }
 
     #[test]
+    fn header_sizing_known_snow_rejects_underrated_rows() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![
+            header_row(
+                BoardProfile::TwoByEight,
+                1,
+                30,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+            header_row(
+                BoardProfile::TwoByTwelve,
+                1,
+                70,
+                Length::from_feet(36.0),
+                Length::from_feet(6.0),
+                1,
+            ),
+        ]);
+        let site = SiteContext {
+            ground_snow_load_psf: Some(50),
+            ..SiteContext::default()
+        };
+
+        let plan = generate_wall_plan_with_site(
+            &wall,
+            &wall_system(),
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+            &site,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_member(&plan, "door-header").profile,
+            BoardProfile::TwoByTwelve
+        );
+    }
+
+    #[test]
     fn header_sizing_out_of_domain_falls_back_and_diagnoses() {
         let code = FramingDefaults::irc_2021_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(16.0), &code);
@@ -4311,6 +4381,79 @@ mod tests {
     }
 
     #[test]
+    fn bearing_interior_wall_uses_header_tables() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        let system = framing_system("system-interior", BoardProfile::TwoByFour);
+        wall.system = system.id.clone();
+        wall.tags = vec!["bearing".to_owned()];
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![header_row(
+            BoardProfile::TwoByEight,
+            1,
+            30,
+            Length::from_feet(36.0),
+            Length::from_feet(6.0),
+            1,
+        )]);
+
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, BoardProfile::TwoByEight);
+        assert_eq!(header.provenance.rule_id, "test.headers");
+    }
+
+    #[test]
+    fn nonbearing_interior_wall_uses_fallback_header_profile() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
+        let system = framing_system("system-interior", BoardProfile::TwoByFour);
+        wall.system = system.id.clone();
+        wall.openings.push(Opening::door(
+            "door",
+            "Door",
+            Length::from_feet(4.0),
+            Length::from_inches(48.0),
+            Length::from_inches(80.0),
+        ));
+        let standards = standards_with_header_rows(vec![header_row(
+            BoardProfile::TwoByEight,
+            1,
+            30,
+            Length::from_feet(36.0),
+            Length::from_feet(6.0),
+            1,
+        )]);
+
+        let plan = generate_wall_plan(
+            &wall,
+            &system,
+            &materials(),
+            &standards,
+            STARTER_STANDARDS_NAME,
+        )
+        .unwrap();
+        let header = find_member(&plan, "door-header");
+
+        assert_eq!(header.profile, code.header_profile);
+        assert_eq!(header.provenance.rule_id, "opening.header.default-profile");
+    }
+
+    #[test]
     fn starter_header_table_drives_plies_jacks_and_provenance() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
@@ -4322,6 +4465,13 @@ mod tests {
             STARTER_STANDARDS_NAME,
         )
         .unwrap();
+        let opening = model.walls[0]
+            .openings
+            .iter()
+            .find(|opening| opening.id.0 == "opening-garage-1")
+            .expect("garage opening");
+        let stud_thickness = model.framing_defaults().stud_profile.thickness();
+        let half_stud = stud_thickness / 2;
         let garage_headers = plan
             .members
             .iter()
@@ -4336,6 +4486,13 @@ mod tests {
                 member.source.0 == "opening-garage-1" && member.kind == MemberKind::JackStud
             })
             .count();
+        let header = find_member(&plan, "opening-garage-1-header");
+        let left_jack = find_member(&plan, "opening-garage-1-jack-left");
+        let left_jack_2 = find_member(&plan, "opening-garage-1-jack-left-2");
+        let right_jack = find_member(&plan, "opening-garage-1-jack-right");
+        let right_jack_2 = find_member(&plan, "opening-garage-1-jack-right-2");
+        let left_king = find_member(&plan, "opening-garage-1-king-left");
+        let right_king = find_member(&plan, "opening-garage-1-king-right");
 
         assert_eq!(garage_headers.len(), 2);
         assert!(
@@ -4360,6 +4517,17 @@ mod tests {
             );
         }
         assert_eq!(garage_jacks, 4);
+        assert_eq!(left_jack.x, opening.left() - half_stud);
+        assert_eq!(left_jack_2.x, opening.left() - half_stud - stud_thickness);
+        assert_eq!(right_jack.x, opening.right() + half_stud);
+        assert_eq!(right_jack_2.x, opening.right() + half_stud + stud_thickness);
+        assert_eq!(left_king.x, opening.left() - stud_thickness * 2 - half_stud);
+        assert_eq!(
+            right_king.x,
+            opening.right() + stud_thickness * 2 + half_stud
+        );
+        assert_eq!(header.x, opening.left() - stud_thickness * 2);
+        assert_eq!(header.cut_length, opening.width + stud_thickness * 4);
     }
 
     #[test]
