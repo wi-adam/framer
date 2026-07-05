@@ -608,7 +608,124 @@ impl StandardsPack {
                         },
                     ],
                 }],
-                bracing: Vec::new(),
+                bracing: vec![BracingTable {
+                    rule: "irc2021.r602.10-3.bracing".to_owned(),
+                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    rows: vec![
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(10.0),
+                            required_length: Length::from_feet(2.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(20.0),
+                            required_length: Length::from_feet(4.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(30.0),
+                            required_length: Length::from_feet(6.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(40.0),
+                            required_length: Length::from_feet(8.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(10.0),
+                            required_length: Length::from_feet(3.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(20.0),
+                            required_length: Length::from_feet(6.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(30.0),
+                            required_length: Length::from_feet(9.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Wsp,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(40.0),
+                            required_length: Length::from_feet(12.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(10.0),
+                            required_length: Length::from_feet(3.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(20.0),
+                            required_length: Length::from_feet(6.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(30.0),
+                            required_length: Length::from_feet(9.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::C),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(40.0),
+                            required_length: Length::from_feet(12.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(10.0),
+                            required_length: Length::from_feet(4.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(20.0),
+                            required_length: Length::from_feet(8.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(30.0),
+                            required_length: Length::from_feet(12.0),
+                        },
+                        BracingRow {
+                            method: BracingMethod::Gb,
+                            max_seismic: Some(SeismicDesignCategory::D2),
+                            max_wind_speed_mph: None,
+                            line_length: Length::from_feet(40.0),
+                            required_length: Length::from_feet(16.0),
+                        },
+                    ],
+                }],
             },
             checks: vec![
                 ComplianceCheck {
@@ -653,6 +770,32 @@ impl StandardsPack {
                         fact: Fact::RoomCeilingHeight,
                         op: CompareOp::Ge,
                         value: FactOperand::LengthLiteral(Length::from_feet(7.0)),
+                    },
+                },
+                ComplianceCheck {
+                    rule: "irc2021.r602.10.braced-length".to_owned(),
+                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    title: "Braced wall line length".to_owned(),
+                    severity: CheckSeverity::Required,
+                    applies: Applicability::Always,
+                    scope: CheckScope::BracedWallLines,
+                    requirement: Predicate::Compare {
+                        fact: Fact::BracedLineProvidedLength,
+                        op: CompareOp::Ge,
+                        value: FactOperand::Fact(Fact::BracedLineRequiredLength),
+                    },
+                },
+                ComplianceCheck {
+                    rule: "irc2021.r602.10.line-has-panels".to_owned(),
+                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    title: "Braced wall line has panels".to_owned(),
+                    severity: CheckSeverity::Advisory,
+                    applies: Applicability::Always,
+                    scope: CheckScope::BracedWallLines,
+                    requirement: Predicate::Compare {
+                        fact: Fact::BracedLineProvidedLength,
+                        op: CompareOp::Gt,
+                        value: FactOperand::LengthLiteral(Length::ZERO),
                     },
                 },
             ],
@@ -1051,6 +1194,7 @@ mod tests {
         }];
         pack.tables.headers.clear();
         pack.tables.fastening.clear();
+        pack.tables.bracing.clear();
         pack.checks.clear();
         pack
     }
@@ -1256,6 +1400,28 @@ mod tests {
                             {"connection": "TopPlateLap", "fastener": "16d common nail", "schedule": {"Count": 8}},
                             {"connection": "DoubleTopPlate", "fastener": "16d common nail", "schedule": {"Spacing": {"on_center": {"ticks": 256}}}}
                         ]
+                    }],
+                    "bracing": [{
+                        "rule": "irc2021.r602.10-3.bracing",
+                        "citation": "IRC 2021 R602.10.3",
+                        "rows": [
+                            {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 1920}, "required_length": {"ticks": 384}},
+                            {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 3840}, "required_length": {"ticks": 768}},
+                            {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 5760}, "required_length": {"ticks": 1152}},
+                            {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 7680}, "required_length": {"ticks": 1536}},
+                            {"method": "Wsp", "max_seismic": "D2", "line_length": {"ticks": 1920}, "required_length": {"ticks": 576}},
+                            {"method": "Wsp", "max_seismic": "D2", "line_length": {"ticks": 3840}, "required_length": {"ticks": 1152}},
+                            {"method": "Wsp", "max_seismic": "D2", "line_length": {"ticks": 5760}, "required_length": {"ticks": 1728}},
+                            {"method": "Wsp", "max_seismic": "D2", "line_length": {"ticks": 7680}, "required_length": {"ticks": 2304}},
+                            {"method": "Gb", "max_seismic": "C", "line_length": {"ticks": 1920}, "required_length": {"ticks": 576}},
+                            {"method": "Gb", "max_seismic": "C", "line_length": {"ticks": 3840}, "required_length": {"ticks": 1152}},
+                            {"method": "Gb", "max_seismic": "C", "line_length": {"ticks": 5760}, "required_length": {"ticks": 1728}},
+                            {"method": "Gb", "max_seismic": "C", "line_length": {"ticks": 7680}, "required_length": {"ticks": 2304}},
+                            {"method": "Gb", "max_seismic": "D2", "line_length": {"ticks": 1920}, "required_length": {"ticks": 768}},
+                            {"method": "Gb", "max_seismic": "D2", "line_length": {"ticks": 3840}, "required_length": {"ticks": 1536}},
+                            {"method": "Gb", "max_seismic": "D2", "line_length": {"ticks": 5760}, "required_length": {"ticks": 2304}},
+                            {"method": "Gb", "max_seismic": "D2", "line_length": {"ticks": 7680}, "required_length": {"ticks": 3072}}
+                        ]
                     }]
                 },
                 "checks": [
@@ -1296,6 +1462,32 @@ mod tests {
                             "fact": "RoomCeilingHeight",
                             "op": "Ge",
                             "value": {"LengthLiteral": {"ticks": 1344}}
+                        }}
+                    },
+                    {
+                        "rule": "irc2021.r602.10.braced-length",
+                        "citation": "IRC 2021 R602.10.3",
+                        "title": "Braced wall line length",
+                        "severity": "Required",
+                        "applies": "Always",
+                        "scope": "BracedWallLines",
+                        "requirement": {"Compare": {
+                            "fact": "BracedLineProvidedLength",
+                            "op": "Ge",
+                            "value": {"Fact": "BracedLineRequiredLength"}
+                        }}
+                    },
+                    {
+                        "rule": "irc2021.r602.10.line-has-panels",
+                        "citation": "IRC 2021 R602.10.3",
+                        "title": "Braced wall line has panels",
+                        "severity": "Advisory",
+                        "applies": "Always",
+                        "scope": "BracedWallLines",
+                        "requirement": {"Compare": {
+                            "fact": "BracedLineProvidedLength",
+                            "op": "Gt",
+                            "value": {"LengthLiteral": {"ticks": 0}}
                         }}
                     }
                 ]

@@ -1,14 +1,20 @@
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 use framer_core::{
-    Applicability, BoardProfile, BuildingModel, CheckScope, CheckSeverity, CompareOp, ElementId,
-    Fact, FactOperand, HeaderRow, Length, Opening, Predicate, PropertyValue, ResolutionAction,
-    ResolvedRule, ResolvedStandards, SiteContext, WallExposure,
+    Applicability, BoardProfile, BracedPanel, BracedWallLine, BracingMethod, BracingRow,
+    BuildingModel, CheckScope, CheckSeverity, CompareOp, ElementId, Fact, FactOperand, HeaderRow,
+    Length, Opening, Predicate, PropertyValue, ResolutionAction, ResolvedRule, ResolvedStandards,
+    SiteContext, Wall, WallExposure,
 };
 use framer_solver::{
     DiagnosticSeverity, FrameMember, MemberKind, PlanDiagnostic, ProjectFramePlan, RuleRef,
 };
 use serde::{Deserialize, Serialize};
+
+const BRACING_UNASSOCIATED_PANEL: &str = "standards.bracing.unassociated-panel";
+const BRACING_OUT_OF_DOMAIN: &str = "standards.bracing.out-of-domain";
+const BRACING_ASSOCIATION_TOLERANCE: Length = Length::from_whole_inches(48);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Tri {
@@ -149,6 +155,7 @@ pub fn evaluate(
         .map(|(pack, check)| (check.rule.as_str(), (pack, check)))
         .collect::<BTreeMap<_, _>>();
     let mut entries = Vec::new();
+    entries.extend(bracing_diagnostic_entries(model, resolved));
 
     for rule in resolved.rules.iter().filter(|rule| rule.severity.is_some()) {
         if let Some(reason) = &rule.waived {
@@ -222,6 +229,9 @@ pub fn diagnostics(report: &ComplianceReport) -> Vec<PlanDiagnostic> {
             let severity = match entry.outcome {
                 Outcome::Violation => DiagnosticSeverity::Violation,
                 Outcome::Advisory => DiagnosticSeverity::Warning,
+                Outcome::NeedsReview if entry.rule == BRACING_OUT_OF_DOMAIN => {
+                    DiagnosticSeverity::Unsupported
+                }
                 Outcome::NeedsReview => DiagnosticSeverity::NeedsReview,
                 Outcome::Pass | Outcome::NotApplicable | Outcome::Waived { .. } => return None,
             };
@@ -320,14 +330,80 @@ pub fn fact_value(
                 .find(|candidate| candidate.id == room.level)?;
             (level.height > Length::ZERO).then_some(FactValue::Length(level.height))
         }
-        (
-            Fact::BracedLineLength
-            | Fact::BracedLineRequiredLength
-            | Fact::BracedLineProvidedLength,
-            EntityRef::BracedWallLine(_),
-        ) => None,
+        (Fact::BracedLineLength, EntityRef::BracedWallLine(line)) => Some(FactValue::Length(
+            braced_line_length(find_braced_line(model, line)?)?,
+        )),
+        (Fact::BracedLineProvidedLength, EntityRef::BracedWallLine(line)) => {
+            let line = find_braced_line(model, line)?;
+            Some(FactValue::Length(braced_line_provided_length(model, line)))
+        }
+        (Fact::BracedLineRequiredLength, EntityRef::BracedWallLine(line)) => {
+            let line = find_braced_line(model, line)?;
+            match braced_line_required_length(line, model, resolved) {
+                BracingRequirement::Known(length) => Some(FactValue::Length(length)),
+                BracingRequirement::Unknown | BracingRequirement::OutOfDomain => None,
+            }
+        }
         _ => None,
     }
+}
+
+fn bracing_diagnostic_entries(
+    model: &BuildingModel,
+    resolved: &ResolvedStandards,
+) -> Vec<ComplianceEntry> {
+    let mut entries = Vec::new();
+    let (pack, citation) = bracing_context(model, resolved);
+
+    for (wall, panel) in bracing_panel_refs(model) {
+        if associated_line_for_panel(model, wall, panel).is_none() {
+            entries.push(ComplianceEntry {
+                rule: BRACING_UNASSOCIATED_PANEL.to_owned(),
+                citation: citation.clone(),
+                pack: pack.clone(),
+                outcome: Outcome::Advisory,
+                element: Some(panel.id.clone()),
+                message: format!(
+                    "Braced panel {} is not associated with a parallel braced wall line within 4 ft.",
+                    panel.id.0
+                ),
+                chain: Vec::new(),
+            });
+        }
+    }
+
+    for line in &model.braced_wall_lines {
+        if braced_line_required_length(line, model, resolved) == BracingRequirement::OutOfDomain {
+            entries.push(ComplianceEntry {
+                rule: BRACING_OUT_OF_DOMAIN.to_owned(),
+                citation: citation.clone(),
+                pack: pack.clone(),
+                outcome: Outcome::NeedsReview,
+                element: Some(line.id.clone()),
+                message: format!(
+                    "Braced wall line {} is outside the resolved bracing table domain.",
+                    line.id.0
+                ),
+                chain: Vec::new(),
+            });
+        }
+    }
+
+    entries
+}
+
+fn bracing_context(model: &BuildingModel, resolved: &ResolvedStandards) -> (ElementId, String) {
+    resolved
+        .bracing
+        .first()
+        .map(|(pack, table)| (pack.clone(), table.citation.clone()))
+        .or_else(|| {
+            model
+                .standards
+                .first()
+                .map(|pack| (pack.clone(), String::new()))
+        })
+        .unwrap_or_else(|| (ElementId::new("standards"), String::new()))
 }
 
 fn entry(
@@ -605,6 +681,221 @@ fn select_header_row(
         .cloned()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BracingRequirement {
+    Known(Length),
+    Unknown,
+    OutOfDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DistanceKey {
+    cross_sq: i128,
+    line_len_sq: i128,
+}
+
+impl Ord for DistanceKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.cross_sq * other.line_len_sq).cmp(&(other.cross_sq * self.line_len_sq))
+    }
+}
+
+impl PartialOrd for DistanceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn bracing_panel_refs(model: &BuildingModel) -> Vec<(&Wall, &BracedPanel)> {
+    model
+        .walls
+        .iter()
+        .flat_map(|wall| wall.bracing.iter().map(move |panel| (wall, panel)))
+        .collect()
+}
+
+fn find_braced_line<'a>(model: &'a BuildingModel, line: &ElementId) -> Option<&'a BracedWallLine> {
+    model
+        .braced_wall_lines
+        .iter()
+        .find(|candidate| candidate.id == *line)
+}
+
+fn braced_line_length(line: &BracedWallLine) -> Option<Length> {
+    if line.start.y == line.end.y && line.start.x != line.end.x {
+        Some((line.end.x - line.start.x).abs())
+    } else if line.start.x == line.end.x && line.start.y != line.end.y {
+        Some((line.end.y - line.start.y).abs())
+    } else {
+        None
+    }
+}
+
+fn braced_line_provided_length(model: &BuildingModel, line: &BracedWallLine) -> Length {
+    associated_panels_for_line(model, line)
+        .into_iter()
+        .fold(Length::ZERO, |sum, (_, panel)| sum + panel.length)
+}
+
+fn braced_line_required_length(
+    line: &BracedWallLine,
+    model: &BuildingModel,
+    resolved: &ResolvedStandards,
+) -> BracingRequirement {
+    let Some(line_length) = braced_line_length(line) else {
+        return BracingRequirement::Unknown;
+    };
+    let methods = associated_panels_for_line(model, line)
+        .into_iter()
+        .map(|(_, panel)| panel.method)
+        .collect::<BTreeSet<_>>();
+    if methods.is_empty() {
+        return BracingRequirement::Unknown;
+    }
+
+    let mut required = Length::ZERO;
+    let mut unknown = false;
+    let mut out_of_domain = false;
+    for method in methods {
+        match bracing_required_for_method(method, line_length, &model.site, resolved) {
+            BracingRequirement::Known(length) => required = required.max(length),
+            BracingRequirement::Unknown => unknown = true,
+            BracingRequirement::OutOfDomain => out_of_domain = true,
+        }
+    }
+
+    if out_of_domain {
+        BracingRequirement::OutOfDomain
+    } else if unknown {
+        BracingRequirement::Unknown
+    } else {
+        BracingRequirement::Known(required)
+    }
+}
+
+fn bracing_required_for_method(
+    method: BracingMethod,
+    line_length: Length,
+    site: &SiteContext,
+    resolved: &ResolvedStandards,
+) -> BracingRequirement {
+    let rows = resolved
+        .bracing
+        .iter()
+        .flat_map(|(_, table)| table.rows.iter())
+        .filter(|row| row.method == method)
+        .filter(|row| row.line_length >= line_length)
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return BracingRequirement::OutOfDomain;
+    }
+    if site.seismic.is_none() && rows.iter().any(|row| row.max_seismic.is_some()) {
+        return BracingRequirement::Unknown;
+    }
+    if site.wind_speed_mph.is_none() && rows.iter().any(|row| row.max_wind_speed_mph.is_some()) {
+        return BracingRequirement::Unknown;
+    }
+
+    rows.into_iter()
+        .filter(|row| bracing_row_matches_site(row, site))
+        .min_by_key(|row| {
+            (
+                row.line_length,
+                row.required_length,
+                row.max_seismic,
+                row.max_wind_speed_mph,
+            )
+        })
+        .map(|row| BracingRequirement::Known(row.required_length))
+        .unwrap_or(BracingRequirement::OutOfDomain)
+}
+
+fn bracing_row_matches_site(row: &BracingRow, site: &SiteContext) -> bool {
+    let seismic_matches = row
+        .max_seismic
+        .is_none_or(|max| site.seismic.is_some_and(|site| max >= site));
+    let wind_matches = row
+        .max_wind_speed_mph
+        .is_none_or(|max| site.wind_speed_mph.is_some_and(|site| max >= site));
+    seismic_matches && wind_matches
+}
+
+fn associated_panels_for_line<'a>(
+    model: &'a BuildingModel,
+    line: &BracedWallLine,
+) -> Vec<(&'a Wall, &'a BracedPanel)> {
+    bracing_panel_refs(model)
+        .into_iter()
+        .filter(|(wall, panel)| {
+            associated_line_for_panel(model, wall, panel)
+                .is_some_and(|candidate| candidate.id == line.id)
+        })
+        .collect()
+}
+
+fn associated_line_for_panel<'a>(
+    model: &'a BuildingModel,
+    wall: &Wall,
+    panel: &BracedPanel,
+) -> Option<&'a BracedWallLine> {
+    let wall_direction = direction(wall.start, wall.end);
+    if wall_direction == (0, 0) {
+        return None;
+    }
+    let midpoint = wall.point_at_local_x(panel.offset + panel.length / 2);
+
+    model
+        .braced_wall_lines
+        .iter()
+        .filter(|line| line.level == wall.level)
+        .filter(|line| {
+            let line_direction = direction(line.start, line.end);
+            line_direction != (0, 0) && cross(wall_direction, line_direction) == 0
+        })
+        .filter_map(|line| {
+            let distance = distance_to_line(midpoint, line)?;
+            (distance.within(BRACING_ASSOCIATION_TOLERANCE)).then_some((distance, &line.id, line))
+        })
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+        .map(|(_, _, line)| line)
+}
+
+impl DistanceKey {
+    fn within(self, tolerance: Length) -> bool {
+        let tolerance = i128::from(tolerance.ticks());
+        self.cross_sq <= tolerance * tolerance * self.line_len_sq
+    }
+}
+
+fn distance_to_line(point: framer_core::Point2, line: &BracedWallLine) -> Option<DistanceKey> {
+    let line_direction = direction(line.start, line.end);
+    let line_len_sq = dot(line_direction, line_direction);
+    if line_len_sq == 0 {
+        return None;
+    }
+    let offset = direction(line.start, point);
+    let cross = cross(line_direction, offset);
+    Some(DistanceKey {
+        cross_sq: cross * cross,
+        line_len_sq,
+    })
+}
+
+fn direction(start: framer_core::Point2, end: framer_core::Point2) -> (i128, i128) {
+    (
+        i128::from((end.x - start.x).ticks()),
+        i128::from((end.y - start.y).ticks()),
+    )
+}
+
+fn cross(left: (i128, i128), right: (i128, i128)) -> i128 {
+    left.0 * right.1 - left.1 * right.0
+}
+
+fn dot(left: (i128, i128), right: (i128, i128)) -> i128 {
+    left.0 * right.0 + left.1 * right.1
+}
+
 fn csv_field(value: &str) -> String {
     if value.contains([',', '"', '\n']) {
         format!("\"{}\"", value.replace('"', "\"\""))
@@ -616,8 +907,8 @@ fn csv_field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        ComplianceCheck, FramingDefaults, Point2, Room, RoomUsage, SeismicDesignCategory,
-        StandardsPack, Wall,
+        BracedPanel, BracedWallLine, BracingMethod, ComplianceCheck, FramingDefaults, Point2, Room,
+        RoomUsage, SeismicDesignCategory, StandardsPack, Wall,
     };
     use framer_solver::generate_project_plan;
 
@@ -679,6 +970,203 @@ mod tests {
             fact_value(Fact::WallStudMaxHeight, &wall, &model, &resolved, &plan),
             None
         );
+    }
+
+    #[test]
+    fn bracing_association_uses_parallel_tolerance_and_tie_break() {
+        let mut model = braced_line_model(Length::from_feet(20.0));
+        model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        model.braced_wall_lines = vec![
+            braced_line("bwl-b", Length::from_feet(20.0), Length::from_feet(2.0)),
+            braced_line(
+                "bwl-far",
+                Length::from_feet(20.0),
+                Length::from_whole_inches(49),
+            ),
+            BracedWallLine {
+                id: ElementId::new("bwl-cross"),
+                name: "Cross line".to_owned(),
+                level: ElementId::new("level-1"),
+                start: Point2::new(Length::from_feet(4.0), Length::ZERO),
+                end: Point2::new(Length::from_feet(4.0), Length::from_feet(20.0)),
+            },
+            braced_line("bwl-a", Length::from_feet(20.0), Length::from_feet(-2.0)),
+        ];
+
+        let associated =
+            associated_line_for_panel(&model, &model.walls[0], &model.walls[0].bracing[0])
+                .expect("associated braced wall line");
+        assert_eq!(associated.id, ElementId::new("bwl-a"));
+
+        model.braced_wall_lines = vec![braced_line(
+            "bwl-too-far",
+            Length::from_feet(20.0),
+            Length::from_whole_inches(49),
+        )];
+        assert!(
+            associated_line_for_panel(&model, &model.walls[0], &model.walls[0].bracing[0])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn braced_line_facts_use_associated_panels_and_sdc_bands() {
+        let mut model = braced_line_model(Length::from_feet(20.0));
+        model.site.seismic = Some(SeismicDesignCategory::C);
+        model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let line = EntityRef::BracedWallLine(ElementId::new("bwl"));
+
+        assert_eq!(
+            fact_value(Fact::BracedLineLength, &line, &model, &resolved, &plan),
+            Some(FactValue::Length(Length::from_feet(20.0)))
+        );
+        assert_eq!(
+            fact_value(
+                Fact::BracedLineProvidedLength,
+                &line,
+                &model,
+                &resolved,
+                &plan
+            ),
+            Some(FactValue::Length(Length::from_feet(4.0)))
+        );
+        assert_eq!(
+            fact_value(
+                Fact::BracedLineRequiredLength,
+                &line,
+                &model,
+                &resolved,
+                &plan
+            ),
+            Some(FactValue::Length(Length::from_feet(4.0)))
+        );
+
+        model.site.seismic = Some(SeismicDesignCategory::D2);
+        let resolved = model.resolved_standards();
+        assert_eq!(
+            fact_value(
+                Fact::BracedLineRequiredLength,
+                &line,
+                &model,
+                &resolved,
+                &plan
+            ),
+            Some(FactValue::Length(Length::from_feet(6.0)))
+        );
+    }
+
+    #[test]
+    fn braced_line_required_length_uses_multi_method_max() {
+        let mut model = braced_line_model(Length::from_feet(20.0));
+        model.site.seismic = Some(SeismicDesignCategory::D2);
+        model.walls[0].bracing = vec![
+            braced_panel(
+                "panel-wsp",
+                Length::from_feet(2.0),
+                Length::from_feet(4.0),
+                BracingMethod::Wsp,
+            ),
+            braced_panel(
+                "panel-gb",
+                Length::from_feet(8.0),
+                Length::from_feet(4.0),
+                BracingMethod::Gb,
+            ),
+        ];
+        let plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let line = EntityRef::BracedWallLine(ElementId::new("bwl"));
+
+        assert_eq!(
+            fact_value(
+                Fact::BracedLineRequiredLength,
+                &line,
+                &model,
+                &resolved,
+                &plan
+            ),
+            Some(FactValue::Length(Length::from_feet(8.0)))
+        );
+    }
+
+    #[test]
+    fn unknown_sdc_turns_bracing_checks_into_needs_review() {
+        let mut model = braced_line_model(Length::from_feet(20.0));
+        model.site.seismic = None;
+        model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        let report = evaluate(&model, &resolved, &plan);
+
+        assert!(has_outcome(
+            &report,
+            "irc2021.r602.10.braced-length",
+            &Outcome::NeedsReview
+        ));
+        assert!(diagnostics(&report).iter().any(|diagnostic| {
+            diagnostic.code == "irc2021.r602.10.braced-length"
+                && diagnostic.severity == DiagnosticSeverity::NeedsReview
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("bwl")
+        }));
+    }
+
+    #[test]
+    fn bracing_out_of_domain_lowers_to_unsupported_diagnostic() {
+        let mut model = braced_line_model(Length::from_feet(50.0));
+        model.site.seismic = Some(SeismicDesignCategory::C);
+        model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        let report = evaluate(&model, &resolved, &plan);
+
+        assert!(diagnostics(&report).iter().any(|diagnostic| {
+            diagnostic.code == BRACING_OUT_OF_DOMAIN
+                && diagnostic.severity == DiagnosticSeverity::Unsupported
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("bwl")
+        }));
+    }
+
+    #[test]
+    fn unassociated_bracing_panels_emit_advisory_diagnostics() {
+        let mut model = one_wall_model(Length::from_feet(20.0));
+        model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        let report = evaluate(&model, &resolved, &plan);
+
+        assert_eq!(evaluate(&model, &resolved, &plan), report);
+        assert!(diagnostics(&report).iter().any(|diagnostic| {
+            diagnostic.code == BRACING_UNASSOCIATED_PANEL
+                && diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("panel")
+        }));
     }
 
     #[test]
@@ -806,6 +1294,36 @@ mod tests {
         let mut model = BuildingModel::new();
         model.walls = vec![Wall::new("wall", "Wall", length, &defaults)];
         model
+    }
+
+    fn braced_line_model(length: Length) -> BuildingModel {
+        let mut model = one_wall_model(length);
+        model.braced_wall_lines = vec![braced_line("bwl", length, Length::ZERO)];
+        model
+    }
+
+    fn braced_line(id: &str, length: Length, y: Length) -> BracedWallLine {
+        BracedWallLine {
+            id: ElementId::new(id),
+            name: id.to_owned(),
+            level: ElementId::new("level-1"),
+            start: Point2::new(Length::ZERO, y),
+            end: Point2::new(length, y),
+        }
+    }
+
+    fn braced_panel(
+        id: &str,
+        offset: Length,
+        length: Length,
+        method: BracingMethod,
+    ) -> BracedPanel {
+        BracedPanel {
+            id: ElementId::new(id),
+            offset,
+            length,
+            method,
+        }
     }
 
     fn wall_check(
