@@ -3788,6 +3788,21 @@ mod tests {
     }
 
     #[test]
+    fn demo_wall_emits_starter_standards_diagnostic_name() {
+        let plan = generate_project_plan(&BuildingModel::demo_wall()).unwrap();
+        let wall_plan = plan
+            .wall_plan(&ElementId::new("wall-1"))
+            .expect("demo wall plan");
+
+        assert!(wall_plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "code-profile.starter-only"
+                && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("wall-1")
+                && matches!(diagnostic.severity, DiagnosticSeverity::Warning)
+                && diagnostic.message.contains(STARTER_STANDARDS_NAME)
+        }));
+    }
+
+    #[test]
     fn project_svg_labels_rooms() {
         let model = rectangle_with_room();
         let plan = generate_project_plan(&model).unwrap();
