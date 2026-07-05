@@ -362,6 +362,7 @@ pub(super) fn section_position(wall: &Wall, selection: &Selection) -> Option<Len
                 Some((start + end) / 2)
             }),
         Selection::Member { .. }
+        | Selection::Site
         | Selection::Join(_)
         | Selection::Level(_)
         | Selection::Room(_)
@@ -372,6 +373,7 @@ pub(super) fn section_position(wall: &Wall, selection: &Selection) -> Option<Len
         | Selection::Material(_)
         | Selection::Furnishing(_)
         | Selection::MepObject(_)
+        | Selection::StandardsPack(_)
         | Selection::FurnishingInstance(_)
         | Selection::MepInstance(_)
         | Selection::Wall => Some(wall.length / 2),

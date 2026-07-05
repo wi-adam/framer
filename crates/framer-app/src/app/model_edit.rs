@@ -453,6 +453,18 @@ pub(super) fn next_material_id(model: &BuildingModel) -> (String, usize) {
     }
 }
 
+/// Generate the next free project-local standards pack id.
+pub(super) fn next_standards_pack_id(model: &BuildingModel) -> (String, usize) {
+    let mut index = model.standards_packs.len() + 1;
+    loop {
+        let id = format!("std-local-{index}");
+        if model.standards_packs.iter().all(|pack| pack.id.0 != id) {
+            return (id, index);
+        }
+        index += 1;
+    }
+}
+
 /// Generate the next free `room-N` id, unique across every room in the model.
 pub(super) fn next_room_id(model: &BuildingModel) -> (String, usize) {
     let mut index = model.rooms.len() + 1;

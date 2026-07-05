@@ -442,6 +442,9 @@ established patterns in `framer-library` exactly).
 [command-surfaces.md](../specs/command-surfaces.md); all mutations via the existing
 undoable `edit()` path).
 
+**Status:** Implemented in the app authoring slice; compliance panel/report export remains
+PR 9.
+
 - Site-context editor in the inspector: jurisdiction text field; SDC dropdown (incl.
   "Unknown"); integer fields for wind/snow; frost depth as a length field. Every change
   one undo step.

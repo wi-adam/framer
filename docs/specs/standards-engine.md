@@ -4,10 +4,11 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Proposed · **Linked goal:** G-015 (Standards Engine; subsumes G-008 Code
+> **Status:** Partially implemented — app authoring landed; compliance panel/export remains ·
+> **Linked goal:** G-015 (Standards Engine; subsumes G-008 Code
 > Profile Data, advances G-006 Rule Explanations) ·
 > **Plan:** [2026-07-04 — Standards Engine](../plans/2026-07-04-standards-engine.md) ·
-> **Last reviewed:** 2026-07-04
+> **Last reviewed:** 2026-07-05
 
 ## Intent / Purpose
 
@@ -337,9 +338,11 @@ IRC 2021 starter pack.
 
 ### App (`framer-app`)
 
-Site-context editor, stack manager (add/reorder/remove packs, author project-local pack,
-waive with reason), and a compliance panel over the report with per-rule outcomes and
-element focus. Detailed UX is out of this spec (see
+Implemented authoring surface: site-context editor, stack manager (add/reorder/remove packs,
+import starter-library packs, author project-local packs), and waive-with-reason controls that
+write `RuleOverlay::Waive` into a project-local pack. Remaining app verification surface:
+a compliance panel over the report with per-rule outcomes, element focus, and CSV export.
+Detailed UX is out of this spec (see
 [command-surfaces.md](command-surfaces.md) conventions).
 
 ## Constraints & invariants
