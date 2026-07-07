@@ -5,8 +5,9 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented · **Linked goal:** G-011 (CAD Workspace UX) ·
-> **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md) ·
-> **Last reviewed:** 2026-07-04
+> **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
+> [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md) ·
+> **Last reviewed:** 2026-07-07
 
 ## Intent / Purpose
 
@@ -96,7 +97,18 @@ workbench, but purpose-built for wood-framed structures.
 - The workflow command strip is tabbed by workflow (`Design`, `Frame`, `Openings`,
   `Roofs`, `Annotate`, `Inspect`, `Plan`) and each tab contains compact command
   panels with small icons, short labels, dividers, and flyout arrows where variants
-  belong.
+  belong. A workflow tab that currently has no commands ships **hidden** (today:
+  `Inspect`) rather than rendering an empty strip. The strip keeps a constant
+  height across tabs so switching never reflows the panels below.
+- The workflow tab strip is also the **workspace control**: selecting `Plan`
+  enters the Plan workspace, selecting any authoring tab returns to the Design
+  workspace, and the `Plan` tab is visually separated as an output tab. There is
+  no standalone workspace switcher row.
+- Disabled commands state their enabling context in a tooltip ("Available in the
+  Plan workspace"), on every surface (menus, strip, palette).
+- Command search entries display a human-readable category and the command's
+  shortcut — never internal surface names ("App header"). Escape closes the
+  palette (topmost transient surface dismisses first).
 - Contextual tool tabs or tool option strips replace broad permanent buttons when
   a tool is active. For example, activating Wall can show wall type, baseline,
   height, level, and placement options in a dense strip.
@@ -143,8 +155,9 @@ workbench, but purpose-built for wood-framed structures.
 | --- | --- | --- | --- |
 | Project/document actions (`New`, `Open`, `Save`, profile, help, theme) | App/quick-access bar or project menu | Command search / shortcuts | Workflow command strip |
 | Sample/demo loaders | Project menu or examples picker | Command search | Workflow command strip |
-| Workspace mode (`Design`, `Plan`) | App/workspace switcher | Command search | Repeated in every command tab |
-| View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`, `Render`) | Workspace/view tabs or view bar | Command search / shortcuts | Mixed into modeling panels |
+| Workspace mode (`Design`, `Plan`) | Workflow tab strip (`Plan` tab = Plan workspace) | Command search | A second standalone switcher row |
+| View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`, `Render`) | Workspace/view tabs or view bar | Command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns |
+| Diagnostics (errors, warnings, unsupported, info) | Status-bar counters → diagnostics popover | Plan workspace inspector / command search | Visible-but-dead counters; buried in a single workspace |
 | Drafting/view state (`Grid`, `Snap`, `Ortho`, layers) | Status/view-control bar | Command search | Inspector property rows |
 | Modal authoring tools (`Wall`, `Room`, `Ceiling`, `Floor`, `Dimension`) | Workflow command strip tab/panel | Shortcuts / command search | Inspector |
 | Tool settings (`Driving` vs `Reference`, placement mode, wall baseline) | Contextual tool tab or options strip | Inspector when selection-backed | Permanent global buttons |
@@ -183,6 +196,12 @@ workbench, but purpose-built for wood-framed structures.
   strips, catalogs, or placement previews.
 - **Context before permanence:** selection and host-specific actions appear near
   selected or hovered geometry instead of occupying permanent chrome.
+- **Workflow tabs are the workspace control:** the standalone "Design Workspace /
+  Plan Workspace" switcher row is removed (decided 2026-07-07 after the UI/UX
+  review found the three stacked nav rows with coupled state unlearnable). The
+  `Plan` workflow tab *is* the Plan workspace; view tabs remain the view-mode
+  control; the floating on-canvas 2D/3D dropdown is removed (nav cube + view tabs
+  cover it).
 - **Search as universal backstop:** once implemented, command search is the route
   for commands that are useful but not worth permanent chrome.
 - **No core command dependency:** command metadata and rendering live in
