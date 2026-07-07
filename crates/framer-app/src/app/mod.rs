@@ -1124,6 +1124,53 @@ impl FramerApp {
         }
     }
 
+    fn action_disabled_reason(&self, id: actions::ActionId) -> Option<&'static str> {
+        if self.action_enabled(id) {
+            return None;
+        }
+
+        match id {
+            actions::ActionId::Undo => Some("Nothing to undo"),
+            actions::ActionId::Redo => Some("Nothing to redo"),
+            actions::ActionId::ExportArtifacts => Some("Available in the Plan workspace"),
+            actions::ActionId::ExportComplianceReport
+                if !self.workspace_mode.shows_generated_plan() =>
+            {
+                Some("Available in the Plan workspace")
+            }
+            actions::ActionId::ExportComplianceReport => Some("No compliance report available"),
+            actions::ActionId::DeleteSelection => Some("Select an object to delete"),
+            actions::ActionId::AddDoor
+            | actions::ActionId::AddWindow
+            | actions::ActionId::AddGarageDoor
+            | actions::ActionId::AddGableRoof
+            | actions::ActionId::AddShedRoof
+            | actions::ActionId::AddHipRoof => Some("Available in the Design workspace"),
+            actions::ActionId::CommandSearch
+            | actions::ActionId::NewProject
+            | actions::ActionId::OpenProject
+            | actions::ActionId::SaveProject
+            | actions::ActionId::LoadShellDemo
+            | actions::ActionId::LoadWallDemo
+            | actions::ActionId::WorkspaceDesign
+            | actions::ActionId::WorkspacePlan
+            | actions::ActionId::ViewPlan
+            | actions::ActionId::ViewElevation
+            | actions::ActionId::ViewRoof
+            | actions::ActionId::View3d
+            | actions::ActionId::ViewRender
+            | actions::ActionId::ToolWall
+            | actions::ActionId::ToolRoom
+            | actions::ActionId::ToolCeiling
+            | actions::ActionId::ToolVault
+            | actions::ActionId::ToolFloor
+            | actions::ActionId::ToolDimensionLinear
+            | actions::ActionId::DimensionKind
+            | actions::ActionId::DimensionAxis
+            | actions::ActionId::ToggleSection => None,
+        }
+    }
+
     fn execute_action(&mut self, id: actions::ActionId) {
         if !self.action_enabled(id) {
             return;

@@ -287,7 +287,9 @@ impl FramerApp {
         ) {
             self.canvas_view_controls(ui, canvas);
         }
-        if let Some(anchor) = toolbar_anchor {
+        if let Some(anchor) = toolbar_anchor
+            && !self.command_search.open
+        {
             self.canvas_context_toolbar(ui, anchor);
         }
     }

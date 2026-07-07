@@ -670,6 +670,84 @@ fn command_search_escape_closes_without_executing() {
     );
 }
 
+#[test]
+fn command_search_escape_closes_before_active_wall_tool() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.key_press(egui::Key::W);
+    harness.run();
+    assert!(harness.state().draw_wall_tool.active);
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    assert!(harness.state().command_search.open);
+
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(!harness.state().command_search.open);
+    assert!(
+        harness.state().draw_wall_tool.active,
+        "Escape should dismiss the topmost command palette before cancelling tools"
+    );
+
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert!(
+        !harness.state().draw_wall_tool.active,
+        "Escape should still cancel the wall tool once the palette is closed"
+    );
+}
+
+#[test]
+fn command_search_suppresses_canvas_context_toolbar() {
+    let mut harness = demo_harness();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Delete").next().is_some(),
+        "selected wall should expose its canvas context toolbar"
+    );
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+
+    assert!(harness.state().command_search.open);
+    assert!(
+        harness.query_all_by_label("Delete").next().is_none(),
+        "global command search should hide canvas-local context actions underneath it"
+    );
+}
+
+#[test]
+fn disabled_command_reasons_follow_enabled_context() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+    assert_eq!(
+        harness
+            .state()
+            .action_disabled_reason(ActionId::ExportArtifacts),
+        Some("Available in the Plan workspace")
+    );
+    assert_eq!(
+        harness
+            .state()
+            .action_disabled_reason(ActionId::ExportComplianceReport),
+        Some("Available in the Plan workspace")
+    );
+
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert!(harness.state().action_enabled(ActionId::ExportArtifacts));
+    assert_eq!(
+        harness
+            .state()
+            .action_disabled_reason(ActionId::ExportArtifacts),
+        None
+    );
+}
+
 /// Workspace mode and view switching live in the workspace/view bar, not inside
 /// the workflow command strip's modeling panels.
 #[test]
