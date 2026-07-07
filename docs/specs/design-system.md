@@ -4,7 +4,9 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX)
+> **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX) ·
+> **Plan:** [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md) ·
+> **Last reviewed:** 2026-07-07
 
 ## Goal
 
@@ -69,12 +71,23 @@ Grouped by role so call sites read intent, not hex:
 
 ### Theme storage & switching
 
-The active `Theme` lives in egui memory (`ctx.data_mut`), fetched anywhere via
-`design::theme(ui)`. Existing free functions migrate with a one-line swap
-(`theme::panel_bg()` → `t.panel`) instead of threading `&Theme` through every signature.
-Switching theme calls `design::configure_style(ctx, &theme)` once to rebuild egui's
-`Style.visuals`, and persists the choice via egui storage. Toggle lives in the app
-header.
+The active `Theme` is process state behind `design::active()` (implemented today as a
+thread-local `Cell` in `design/mod.rs`; `design::theme(ui)` wraps it). Existing free
+functions migrated with a one-line swap (`theme::panel_bg()` → `t.panel`) instead of
+threading `&Theme` through every signature. Requirements, independent of the storage
+mechanism:
+
+- **Single styling source per widget.** A widget's text, fill, and stroke colors come
+  from the same palette. Chrome that forces a fixed palette (the app header renders
+  with `studio_dark()` regardless of the active theme) must style *all* of its child
+  widgets from that forced palette — never a forced palette's text over fills
+  inherited from the global egui style. (This mixing made the header's
+  Project/Examples menu labels unreadable on light theme.)
+- **Switching restyles everything.** `design::set_theme` must rebuild the style egui
+  *actually renders from* — on egui 0.35 that includes the per-theme style slots /
+  `ThemePreference` handling, so panel fills, menus, and popups flip together with
+  token-reading widgets. The toggle lives in the app header.
+- **Persistence.** The chosen theme persists across launches via eframe storage.
 
 ## Component library (`design/widgets.rs`)
 
@@ -101,6 +114,42 @@ Each reads `theme(ui)` so it restyles for free:
 - Domain visuals: `wall_glyph`, `opening_glyph`, `roof_glyph`, `layer_stack_glyph`,
   `section_cut_glyph`, `framing_swatch`, and `validation_badge`.
 
+## UI conventions (locked)
+
+Cross-cutting rules every surface follows. A violation of one of these is a bug, not
+a style preference:
+
+- **One length format.** User-visible lengths use `framer-core`'s `Length` display
+  (feet-inch-fraction: `28' 0"`, `0' 8 3/16"`) everywhere — inspector fields, plan
+  summaries, status-bar readouts, canvas dimensions. Entry may accept decimal
+  feet/inches; display normalizes. No decimal-feet in one panel and bare inches in
+  another for the same kind of quantity.
+- **Labels lead.** Property rows are label-left / value-right, including rows whose
+  value widget is a dropdown (Level, Kind, First/Second wall).
+- **Names, not ids.** Raw model ids (`wall-back`, `opening-back-left-window`) never
+  appear as primary UI text in inspector headers, breadcrumbs, or the status bar.
+  Ids stay reachable via a muted secondary row or tooltip.
+- **One name per concept.** Each concept has a single user-facing name across tree,
+  inspector, breadcrumb, and diagnostics — the wall-junction object is **"Corner"**
+  in the UI; "join" remains internal vocabulary.
+- **Tooltips everywhere.** Every command control — ribbon/command-strip tools
+  included, not only icon-only buttons — has a tooltip; commands with shortcuts show
+  them. Disabled controls explain their enabling context ("Available in the Plan
+  workspace").
+- **Empty states.** A view with nothing to show says so and points at the remedy
+  ("No roofs yet — add one in the Roofs tab") instead of silently rendering another
+  view's content under its own title.
+- **Stable chrome.** Chrome heights do not change when switching workflow tabs, and
+  transient status (toasts/chips) overlays the canvas rather than reflowing panels.
+- **Opaque elevation.** Menus, popups, and the command palette render fully opaque
+  with a shadow; underlying content never bleeds through. Escape dismisses the
+  topmost transient surface first.
+- **Selection lifecycle.** Clicking empty canvas clears the selection, and the
+  inspector shows a friendly empty state. Destructive actions use the danger tone.
+- **Status truth.** The status bar shows live values only — no hardcoded readouts.
+  (Zoom must track the camera; readouts that cannot be real yet are removed, not
+  faked.)
+
 ## Screen-by-screen reskin
 
 - **App / quick-access bar:** dark strip — wordmark · project/document controls ·
@@ -119,8 +168,9 @@ Each reads `theme(ui)` so it restyles for free:
 - **Canvas:** model-first drawing area; warm drawing-paper surface, rulers, major/
   minor technical grid, authored construction highlights, marking menu / compact
   context toolbar on selection, axis gizmo, ViewCube, scale bar, navigation widget.
-- **Status / view-control bar:** ✓ Ready · `Level ▾` · X/Y/Z live readout ·
-  `Snap ▾` · Grid/Ortho toggles · layer/display controls · diagnostics · zoom.
+- **Status / view-control bar:** `Level ▾` · X/Y live readout · `Snap ▾` ·
+  Grid/Ortho toggles · layer/display controls · diagnostics counters that open the
+  diagnostics popover · live zoom.
 - **Active drafting state:** `Grid`, `Ortho`, `Snap`, cursor readout, and `Level`
   are backed by `FramerApp` presentation state. The active level drives newly authored
   level-owned objects and same-level region picking for room, ceiling, floor, and vault
