@@ -129,6 +129,10 @@ struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
+    /// No authored or generated object is selected. PR 7 wires this to canvas
+    /// clears; PR 5 introduces the inspector state so it can be visually covered.
+    #[allow(dead_code)]
+    None,
     Site,
     Level(String),
     Wall,
@@ -136,7 +140,10 @@ enum Selection {
     Dimension(String),
     Join(String),
     Room(String),
-    Member { wall_id: String, member_id: String },
+    Member {
+        wall_id: String,
+        member_id: String,
+    },
     RoofPlane(String),
     Ceiling(String),
     FloorDeck(String),
@@ -1798,6 +1805,7 @@ impl FramerApp {
         }
 
         match &self.selected {
+            Selection::None => {}
             Selection::Wall => {}
             Selection::Member { wall_id, .. } => {
                 if let Some(index) = self

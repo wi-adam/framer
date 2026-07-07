@@ -362,6 +362,7 @@ pub(super) fn section_position(wall: &Wall, selection: &Selection) -> Option<Len
                 Some((start + end) / 2)
             }),
         Selection::Member { .. }
+        | Selection::None
         | Selection::Site
         | Selection::Join(_)
         | Selection::Level(_)
