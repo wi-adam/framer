@@ -158,6 +158,9 @@ fn capture_ui_shot_deck() {
     }
     harness.state_mut().selected = Selection::None;
     shot(&mut harness, &dir, &mut index, "empty-selection");
+    harness.state_mut().layers.joins = true;
+    shot(&mut harness, &dir, &mut index, "corner-labels-layer-on");
+    harness.state_mut().layers.joins = false;
 
     // Views, with the back wall selected for the elevation.
     harness.state_mut().selected_wall = back_wall_index;

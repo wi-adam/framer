@@ -1206,17 +1206,21 @@ fn w_key_toggles_draw_wall_tool() {
     );
 }
 
-/// A fresh app shows walls as outlines with every layer visible — the cleanest
-/// default so a loaded shell reads as a line drawing first.
+/// A fresh app shows walls as outlines with noisy corner labels off by default
+/// so a loaded shell reads as a clean line drawing first.
 #[test]
-fn layers_default_to_outline_with_everything_visible() {
+fn layers_default_to_outline_with_corner_labels_quiet() {
     let mut harness = demo_harness();
     harness.run();
     let layers = harness.state().layers;
     assert_eq!(layers.wall_display, WallDisplay::Outline);
     assert!(
-        layers.grid && layers.rooms && layers.joins && layers.wall_labels,
-        "all visibility layers should default on"
+        layers.grid && layers.rooms && layers.wall_labels,
+        "primary drafting layers should default on"
+    );
+    assert!(
+        !layers.joins,
+        "corner labels should be opt-in unless hovered or selected"
     );
 }
 
