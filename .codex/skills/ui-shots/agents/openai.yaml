@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Shots"
+  short_description: "Render and inspect Framer UI screenshots."
+  default_prompt: "Use $ui-shots to render and inspect the Framer UI screenshot deck."
