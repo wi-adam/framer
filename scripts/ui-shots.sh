@@ -7,7 +7,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-: "${UI_SHOTS_DIR:=target/ui-shots}"
+# Absolute path: cargo runs the test binary with cwd = crates/framer-app, so a
+# relative default would land the PNGs in crates/framer-app/target/ instead of
+# the workspace-root target/ that the docs point at.
+: "${UI_SHOTS_DIR:=$PWD/target/ui-shots}"
 export UI_SHOTS_DIR
 
 cargo test -p framer-app ui_shots -- --ignored --nocapture "$@"

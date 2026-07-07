@@ -221,7 +221,7 @@ impl FramerApp {
         }
     }
 
-    fn select_workflow_tab(&mut self, tab: WorkflowTab) {
+    pub(super) fn select_workflow_tab(&mut self, tab: WorkflowTab) {
         self.command_tab = tab;
         match tab {
             WorkflowTab::Plan => self.set_workspace_mode(WorkspaceMode::Plan),

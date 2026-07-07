@@ -28,7 +28,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
-use super::{FramerApp, ViewportMode, WorkspaceMode, actions, design};
+use super::{FramerApp, ViewportMode, actions, design};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -80,17 +80,11 @@ fn shot(harness: &mut Harness<'_, FramerApp>, dir: &Path, index: &mut u32, name:
     *index += 1;
 }
 
-/// Selects a workflow tab the way the toolbar click does (tab + coupled
-/// workspace). `select_workflow_tab` itself is private to `panels`, and
-/// clicking tab labels through AccessKit is ambiguous ("Design" also appears
-/// as a panel badge and in the status bar), so replicate the two-field update.
+/// Selects a workflow tab through the app's own toolbar handler (tab + coupled
+/// workspace). Clicking tab labels through AccessKit would be ambiguous —
+/// "Design" also appears as a panel badge and in the status bar.
 fn select_tab(harness: &mut Harness<'_, FramerApp>, tab: actions::WorkflowTab) {
-    let app = harness.state_mut();
-    app.command_tab = tab;
-    match tab {
-        actions::WorkflowTab::Plan => app.set_workspace_mode(WorkspaceMode::Plan),
-        _ => app.set_workspace_mode(WorkspaceMode::Design),
-    }
+    harness.state_mut().select_workflow_tab(tab);
 }
 
 #[test]
