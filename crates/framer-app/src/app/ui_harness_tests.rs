@@ -15,7 +15,7 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{DimensionAxis, DimensionKind, OpeningKind};
+use framer_core::{DimensionAxis, DimensionKind, Length, OpeningKind, Point2};
 
 use super::actions::{self, ActionId};
 use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels};
@@ -208,6 +208,96 @@ fn header_menus_and_tree_sections_are_reachable_on_default_theme() {
         harness.query_all_by_label("Wall joins").next().is_some(),
         "the default light model tree should expose the Wall joins section heading"
     );
+}
+
+#[test]
+fn status_bar_reports_canonical_cursor_units_and_zoom() {
+    let mut harness = demo_harness();
+    harness.run();
+    harness.state_mut().cursor_model = Some(Point2::new(
+        Length::from_ticks(14 * 12 * Length::TICKS_PER_INCH + 3 * Length::TICKS_PER_INCH + 10),
+        Length::from_feet(24.0),
+    ));
+    harness.run_steps(1);
+
+    assert!(
+        harness
+            .query_all_by_label("X 14' 3 5/8\"   Y 24' 0\"")
+            .next()
+            .is_some(),
+        "status bar should render cursor coordinates with the core Length display"
+    );
+    assert!(
+        harness.query_all_by_label("100%").next().is_some(),
+        "fit-to-bounds plan view should report 100% zoom"
+    );
+    assert!(
+        harness
+            .query_all_by_label("X 14.302 ft   Y 24.000 ft   Z 0.000 ft")
+            .next()
+            .is_none(),
+        "status bar should not render the old decimal-feet cursor readout"
+    );
+}
+
+#[test]
+fn status_bar_diagnostics_popover_selects_source_from_design() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
+
+    let diagnostic = {
+        let app = harness.state();
+        let plan = app
+            .project_plan
+            .as_ref()
+            .expect("demo shell should solve to a framing plan");
+        plan.diagnostics
+            .iter()
+            .chain(
+                plan.wall_plans
+                    .iter()
+                    .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
+            )
+            .find(|diagnostic| {
+                diagnostic.source.as_ref().is_some_and(|source| {
+                    app.model
+                        .walls
+                        .iter()
+                        .any(|wall| wall.openings.iter().any(|opening| opening.id == *source))
+                })
+            })
+            .cloned()
+            .expect("demo shell should expose a source-backed opening diagnostic")
+    };
+    let source = diagnostic.source.clone().expect("diagnostic has a source");
+
+    harness
+        .get_by_role_and_label(Role::Button, "Diagnostics")
+        .click();
+    harness.run();
+
+    assert!(
+        harness.query_all_by_label("3 warnings").next().is_some(),
+        "diagnostics popover should keep the visible warning count"
+    );
+    assert!(
+        harness
+            .query_all_by_label(diagnostic.message.as_str())
+            .next()
+            .is_some(),
+        "diagnostics popover should list diagnostic messages"
+    );
+
+    let action_label = panels::diagnostic_row_action_label(&source);
+    harness
+        .get_by_role_and_label(Role::Button, &action_label)
+        .click();
+    harness.run();
+
+    assert_eq!(harness.state().selected, Selection::Opening(source.0));
 }
 
 /// The workflow command strip is tabbed by process instead of exposing every

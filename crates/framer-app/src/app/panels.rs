@@ -6,7 +6,7 @@ use eframe::egui::{
     containers::menu::{MenuButton, MenuConfig},
 };
 use framer_core::{
-    CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    BuildingModel, CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
     DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
     FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
     Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall, WallJoin,
@@ -2752,7 +2752,14 @@ impl FramerApp {
 
         if self.workspace_mode.shows_generated_plan() {
             ui.separator();
-            diagnostics_panel(ui, self.error.as_deref(), self.project_plan.as_ref());
+            if let Some(source) = diagnostics_panel(
+                ui,
+                self.error.as_deref(),
+                self.project_plan.as_ref(),
+                &self.model,
+            ) {
+                self.focus_compliance_source(source);
+            }
             ui.separator();
             if let Some(source) = compliance_panel(ui, self.compliance_report.as_ref()) {
                 self.focus_compliance_source(source);
@@ -2783,13 +2790,19 @@ impl FramerApp {
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
         let t = design::active();
-        let (unsupported, warnings, info) = self.diagnostic_counts();
-        let error_count = usize::from(self.error.is_some());
+        let diagnostics = self.plan_diagnostics();
+        let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
+        let error = self.error.clone();
+        let diagnostic_counts = DiagnosticCounts {
+            errors: usize::from(error.is_some()),
+            unsupported,
+            warnings,
+            info,
+        };
+        let zoom_percent = self.status_zoom_percent();
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::MD, 2.0);
-            status_metric(ui, Icon::Ready, "Ready", t.success);
-            toolbar_divider(ui);
             self.status_level_dropdown(ui);
             toolbar_divider(ui);
             ui.label(
@@ -2814,25 +2827,23 @@ impl FramerApp {
             if let Some(cursor) = self.cursor_model {
                 toolbar_divider(ui);
                 ui.label(
-                    RichText::new(format!(
-                        "X {:.3} ft   Y {:.3} ft   Z 0.000 ft",
-                        cursor.x.inches() / 12.0,
-                        cursor.y.inches() / 12.0
-                    ))
-                    .monospace()
-                    .size(design::text_size::LABEL)
-                    .color(t.text_muted),
+                    RichText::new(format!("X {}   Y {}", cursor.x, cursor.y))
+                        .monospace()
+                        .size(design::text_size::LABEL)
+                        .color(t.text_muted),
                 );
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = design::space::MD;
-                ui.label(
-                    RichText::new("100%")
-                        .size(design::text_size::LABEL)
-                        .color(t.text_secondary),
-                );
-                toolbar_divider(ui);
+                if let Some(zoom_percent) = zoom_percent {
+                    ui.label(
+                        RichText::new(format!("{zoom_percent}%"))
+                            .size(design::text_size::LABEL)
+                            .color(t.text_secondary),
+                    );
+                    toolbar_divider(ui);
+                }
                 widgets::toggle_switch(ui, &mut self.ortho, "Ortho");
                 // Layers popover: the wall display mode (shared by Plan + 3D) plus
                 // per-layer visibility toggles. `CloseOnClickOutside` keeps it open
@@ -2912,26 +2923,15 @@ impl FramerApp {
                         });
                 });
                 toolbar_divider(ui);
-                let muted = t.text_muted;
-                status_metric(ui, Icon::Saved, &format!("{info} info"), muted);
-                status_metric(
+                if let Some(source) = status_diagnostics_menu(
                     ui,
-                    Icon::Warning,
-                    &format!("{unsupported} unsupported"),
-                    if unsupported == 0 { muted } else { t.warning },
-                );
-                status_metric(
-                    ui,
-                    Icon::Warning,
-                    &format!("{warnings} warnings"),
-                    if warnings == 0 { muted } else { t.warning },
-                );
-                status_metric(
-                    ui,
-                    Icon::Error,
-                    &format!("{error_count} errors"),
-                    if error_count == 0 { muted } else { t.danger },
-                );
+                    &self.model,
+                    error.as_deref(),
+                    &diagnostics,
+                    diagnostic_counts,
+                ) {
+                    self.focus_compliance_source(source);
+                }
             });
         });
     }
@@ -2996,9 +2996,23 @@ impl FramerApp {
         }
     }
 
-    fn diagnostic_counts(&self) -> (usize, usize, usize) {
+    fn status_zoom_percent(&self) -> Option<u32> {
+        match self.viewport_mode {
+            ViewportMode::Plan | ViewportMode::RoofPlan => Some(self.plan_view.zoom_percent()),
+            ViewportMode::Elevation => Some(
+                self.model
+                    .walls
+                    .get(self.selected_wall)
+                    .and_then(|wall| self.elevation_views.get(&wall.id.0))
+                    .map_or(100, |camera| camera.zoom_percent()),
+            ),
+            ViewportMode::Axonometric | ViewportMode::Render => None,
+        }
+    }
+
+    fn plan_diagnostics(&self) -> Vec<PlanDiagnostic> {
         let Some(plan) = &self.project_plan else {
-            return (0, 0, 0);
+            return Vec::new();
         };
         plan.diagnostics
             .iter()
@@ -3007,18 +3021,8 @@ impl FramerApp {
                     .iter()
                     .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
             )
-            .fold(
-                (0, 0, 0),
-                |(unsupported, warnings, info), diagnostic| match diagnostic.severity {
-                    DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => {
-                        (unsupported + 1, warnings, info)
-                    }
-                    DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => {
-                        (unsupported, warnings + 1, info)
-                    }
-                    DiagnosticSeverity::Info => (unsupported, warnings, info + 1),
-                },
-            )
+            .cloned()
+            .collect()
     }
 }
 
@@ -4031,8 +4035,127 @@ fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
         });
 }
 
-/// An icon + text status-bar metric (used for Ready, diagnostics, snap).
-fn status_metric(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
+#[derive(Clone, Copy)]
+struct DiagnosticCounts {
+    errors: usize,
+    unsupported: usize,
+    warnings: usize,
+    info: usize,
+}
+
+fn count_diagnostics(diagnostics: &[PlanDiagnostic]) -> (usize, usize, usize) {
+    diagnostics.iter().fold(
+        (0, 0, 0),
+        |(unsupported, warnings, info), diagnostic| match diagnostic.severity {
+            DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => {
+                (unsupported + 1, warnings, info)
+            }
+            DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => {
+                (unsupported, warnings + 1, info)
+            }
+            DiagnosticSeverity::Info => (unsupported, warnings, info + 1),
+        },
+    )
+}
+
+fn diagnostics_status_label(counts: DiagnosticCounts) -> String {
+    format!(
+        "{} errors   {} warnings   {} unsupported   {} info",
+        counts.errors, counts.warnings, counts.unsupported, counts.info
+    )
+}
+
+fn status_diagnostics_menu(
+    ui: &mut Ui,
+    model: &BuildingModel,
+    error: Option<&str>,
+    diagnostics: &[PlanDiagnostic],
+    counts: DiagnosticCounts,
+) -> Option<ElementId> {
+    let t = design::active();
+    let text_color = if counts.errors > 0 {
+        t.danger
+    } else if counts.unsupported > 0 || counts.warnings > 0 {
+        t.warning
+    } else {
+        t.text_secondary
+    };
+    let label = diagnostics_status_label(counts);
+    let button = egui::Button::new(
+        RichText::new(label)
+            .size(design::text_size::LABEL)
+            .color(text_color),
+    )
+    .frame(false);
+    let (response, focused) = MenuButton::from_button(button).ui(ui, |ui| {
+        ui.set_min_width(420.0);
+        panel_subheader(ui, "Diagnostics");
+        ui.horizontal_wrapped(|ui| {
+            diagnostic_count_label(
+                ui,
+                Icon::Error,
+                &format!("{} errors", counts.errors),
+                if counts.errors == 0 {
+                    t.text_muted
+                } else {
+                    t.danger
+                },
+            );
+            diagnostic_count_label(
+                ui,
+                Icon::Warning,
+                &format!("{} warnings", counts.warnings),
+                if counts.warnings == 0 {
+                    t.text_muted
+                } else {
+                    t.warning
+                },
+            );
+            diagnostic_count_label(
+                ui,
+                Icon::Warning,
+                &format!("{} unsupported", counts.unsupported),
+                if counts.unsupported == 0 {
+                    t.text_muted
+                } else {
+                    t.warning
+                },
+            );
+            diagnostic_count_label(
+                ui,
+                Icon::Help,
+                &format!("{} info", counts.info),
+                t.text_muted,
+            );
+        });
+        ui.separator();
+
+        let mut focused = None;
+        if let Some(error) = error {
+            diagnostic_error_row(ui, error);
+        }
+        if diagnostics.is_empty() && error.is_none() {
+            ui.label(RichText::new("No diagnostics").color(t.text_secondary));
+        } else {
+            ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for diagnostic in diagnostics {
+                    if let Some(source) = diagnostic_row(ui, model, diagnostic) {
+                        focused = Some(source);
+                    }
+                }
+            });
+        }
+        focused
+    });
+    let enabled = response.enabled();
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Diagnostics")
+    });
+    response.on_hover_text("Diagnostics");
+    focused.and_then(|inner| inner.inner)
+}
+
+fn diagnostic_count_label(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(design::icon_text(icon, 13.0).color(color));
@@ -5159,10 +5282,16 @@ fn placed_object_summary(
         });
 }
 
-fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFramePlan>) {
+fn diagnostics_panel(
+    ui: &mut Ui,
+    error: Option<&str>,
+    plan: Option<&ProjectFramePlan>,
+    model: &BuildingModel,
+) -> Option<ElementId> {
     panel_subheader(ui, "Diagnostics");
+    let mut focused = None;
     if let Some(error) = error {
-        ui.colored_label(theme::danger(), error);
+        diagnostic_error_row(ui, error);
     }
 
     if let Some(plan) = plan {
@@ -5174,35 +5303,15 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
                     .iter()
                     .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
             )
+            .cloned()
             .collect::<Vec<_>>();
 
         if diagnostics.is_empty() {
             ui.label("No diagnostics");
-            return;
+            return focused;
         }
 
-        let unsupported = diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                matches!(
-                    diagnostic.severity,
-                    DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation
-                )
-            })
-            .count();
-        let warnings = diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                matches!(
-                    diagnostic.severity,
-                    DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview
-                )
-            })
-            .count();
-        let info = diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Info)
-            .count();
+        let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
 
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{unsupported} unsupported"));
@@ -5211,7 +5320,9 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
         });
 
         for diagnostic in diagnostics.iter().take(5) {
-            diagnostic_row(ui, diagnostic);
+            if let Some(source) = diagnostic_row(ui, model, diagnostic) {
+                focused = Some(source);
+            }
         }
 
         if diagnostics.len() > 5 {
@@ -5219,33 +5330,194 @@ fn diagnostics_panel(ui: &mut Ui, error: Option<&str>, plan: Option<&ProjectFram
                 .default_open(false)
                 .show(ui, |ui| {
                     for diagnostic in diagnostics.iter().skip(5) {
-                        diagnostic_row(ui, diagnostic);
+                        if let Some(source) = diagnostic_row(ui, model, diagnostic) {
+                            focused = Some(source);
+                        }
                     }
                 });
         }
     } else if error.is_none() {
         ui.label("No diagnostics");
     }
+    focused
 }
 
-fn diagnostic_row(ui: &mut Ui, diagnostic: &PlanDiagnostic) {
-    let color = match diagnostic.severity {
+fn diagnostic_error_row(ui: &mut Ui, error: &str) {
+    let t = design::active();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(design::icon_text(Icon::Error, 13.0).color(t.danger));
+        ui.label(RichText::new("Error").strong().color(t.danger));
+        ui.label(RichText::new(error).color(t.text));
+    });
+    ui.add_space(4.0);
+}
+
+fn diagnostic_row(
+    ui: &mut Ui,
+    model: &BuildingModel,
+    diagnostic: &PlanDiagnostic,
+) -> Option<ElementId> {
+    let t = design::active();
+    let color = diagnostic_severity_color(diagnostic.severity);
+    let source_label = diagnostic
+        .source
+        .as_ref()
+        .map(|source| diagnostic_source_label(model, source));
+    let row = ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(design::icon_text(diagnostic_icon(diagnostic.severity), 13.0).color(color));
+            ui.label(
+                RichText::new(diagnostic_code_prefix(diagnostic.severity))
+                    .strong()
+                    .color(color),
+            );
+            ui.label(
+                RichText::new(&diagnostic.code)
+                    .size(design::text_size::LABEL)
+                    .color(t.text_secondary),
+            );
+            if let Some(source_label) = &source_label {
+                ui.label(
+                    RichText::new(source_label)
+                        .size(design::text_size::LABEL)
+                        .color(t.text_muted),
+                );
+            }
+        });
+        ui.label(
+            RichText::new(&diagnostic.message)
+                .size(design::text_size::BODY)
+                .color(t.text),
+        );
+    });
+    let mut focused = None;
+    if let Some(source) = &diagnostic.source {
+        let response = ui
+            .interact(
+                row.response.rect,
+                ui.id()
+                    .with(format!("diagnostic-row-{}-{}", diagnostic.code, source.0)),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Select source element");
+        let enabled = response.enabled();
+        let label = diagnostic_row_action_label(source);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.clone())
+        });
+        if response.clicked() {
+            focused = Some(source.clone());
+        }
+    }
+    ui.add_space(4.0);
+    focused
+}
+
+pub(super) fn diagnostic_row_action_label(source: &ElementId) -> String {
+    format!("Select diagnostic source {}", source.0)
+}
+
+fn diagnostic_icon(severity: DiagnosticSeverity) -> Icon {
+    match severity {
+        DiagnosticSeverity::Info => Icon::Help,
+        DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => Icon::Warning,
+        DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => Icon::Error,
+    }
+}
+
+fn diagnostic_severity_color(severity: DiagnosticSeverity) -> Color32 {
+    match severity {
         DiagnosticSeverity::Info => theme::active_blue(),
         DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => theme::warning(),
         DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => theme::danger(),
-    };
-    ui.colored_label(
-        color,
-        format!(
-            "{} {}",
-            diagnostic_code_prefix(diagnostic.severity),
-            diagnostic.code
-        ),
-    );
-    if let Some(source) = &diagnostic.source {
-        ui.small(source.0.as_str());
     }
-    ui.label(&diagnostic.message);
+}
+
+fn diagnostic_source_label(model: &BuildingModel, source: &ElementId) -> String {
+    let name = diagnostic_source_name(model, source);
+    match name {
+        Some(name) if name != source.0 => format!("{name} ({})", source.0),
+        Some(name) => name,
+        None => source.0.clone(),
+    }
+}
+
+fn diagnostic_source_name(model: &BuildingModel, source: &ElementId) -> Option<String> {
+    if let Some(wall) = model.walls.iter().find(|wall| wall.id == *source) {
+        return Some(wall.name.clone());
+    }
+    for wall in &model.walls {
+        if let Some(opening) = wall.openings.iter().find(|opening| opening.id == *source) {
+            return Some(opening.name.clone());
+        }
+        if let Some(dimension) = wall
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.id == *source)
+        {
+            return Some(dimension.name.clone());
+        }
+    }
+    if let Some(join) = model.wall_joins.iter().find(|join| join.id == *source) {
+        return Some(join.name.clone());
+    }
+    if let Some(level) = model.levels.iter().find(|level| level.id == *source) {
+        return Some(level.name.clone());
+    }
+    if let Some(room) = model.rooms.iter().find(|room| room.id == *source) {
+        return Some(room.name.clone());
+    }
+    if let Some(plane) = model.roof_planes.iter().find(|plane| plane.id == *source) {
+        return Some(plane.name.clone());
+    }
+    if let Some(ceiling) = model.ceilings.iter().find(|ceiling| ceiling.id == *source) {
+        return Some(ceiling.name.clone());
+    }
+    if let Some(deck) = model.floor_decks.iter().find(|deck| deck.id == *source) {
+        return Some(deck.name.clone());
+    }
+    if let Some(system) = model.systems.iter().find(|system| system.id == *source) {
+        return Some(system.name.clone());
+    }
+    if let Some(material) = model
+        .materials
+        .iter()
+        .find(|material| material.id == *source)
+    {
+        return Some(material.name.clone());
+    }
+    if let Some(furnishing) = model
+        .furnishings
+        .iter()
+        .find(|furnishing| furnishing.id == *source)
+    {
+        return Some(furnishing.name.clone());
+    }
+    if let Some(object) = model.mep_objects.iter().find(|object| object.id == *source) {
+        return Some(object.name.clone());
+    }
+    if let Some(pack) = model.standards_packs.iter().find(|pack| pack.id == *source) {
+        return Some(pack.name.clone());
+    }
+    if let Some(instance) = model
+        .furnishing_instances
+        .iter()
+        .find(|instance| instance.id == *source)
+    {
+        return Some(instance.name.clone());
+    }
+    if let Some(instance) = model
+        .mep_instances
+        .iter()
+        .find(|instance| instance.id == *source)
+    {
+        return Some(instance.name.clone());
+    }
+    model
+        .braced_wall_lines
+        .iter()
+        .find(|line| line.id == *source)
+        .map(|line| line.name.clone())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

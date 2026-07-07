@@ -152,14 +152,19 @@ fn capture_ui_shot_deck() {
     }
     harness.state_mut().viewport_mode = ViewportMode::Plan;
 
-    // Overlay surfaces: the command palette, then the Project menu (menus are
-    // egui popup state, so open it through a real click; the palette is closed
-    // by resetting its state because Escape handling is part of what the shots
-    // exist to review).
+    // Overlay surfaces: the command palette, diagnostics popover, then the
+    // Project menu (menus are egui popup state, so open them through real clicks;
+    // the palette is closed by resetting its state because Escape handling is
+    // part of what the shots exist to review).
     harness.state_mut().open_command_search();
     shot(&mut harness, &dir, &mut index, "command-palette");
     harness.state_mut().command_search = Default::default();
     harness.run_ok();
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Diagnostics")
+        .click();
+    shot(&mut harness, &dir, &mut index, "diagnostics-popover");
 
     harness.get_by_label("Project").click();
     shot(&mut harness, &dir, &mut index, "project-menu");
