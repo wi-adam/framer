@@ -292,7 +292,7 @@ impl FramerApp {
         if let Some(anchor) = toolbar_anchor
             && !self.command_search.open
         {
-            self.canvas_context_toolbar(ui, anchor);
+            self.canvas_context_toolbar(ui, anchor, canvas);
         }
         self.status_toast_overlay(ui, canvas.left_top() + Vec2::new(12.0, 12.0));
     }
@@ -311,41 +311,37 @@ impl FramerApp {
                     self.viewport_mode = ViewportMode::Axonometric;
                 }
             });
-
-        egui::Area::new(egui::Id::new("canvas-view-mode"))
-            .fixed_pos(Pos2::new(canvas.right() - 78.0, canvas.bottom() - 46.0))
-            .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
-                Frame::new()
-                    .fill(t.overlay)
-                    .stroke(t.border_stroke())
-                    .corner_radius(design::radius::MD)
-                    .inner_margin(Margin::symmetric(6, 4))
-                    .show(ui, |ui| {
-                        let is_3d = self.viewport_mode == ViewportMode::Axonometric;
-                        egui::ComboBox::from_id_salt("view-2d-3d")
-                            .selected_text(if is_3d { "3D" } else { "2D" })
-                            .width(44.0)
-                            .show_ui(ui, |ui| {
-                                if ui.selectable_label(!is_3d, "2D").clicked() {
-                                    self.viewport_mode = ViewportMode::Plan;
-                                }
-                                if ui.selectable_label(is_3d, "3D").clicked() {
-                                    self.viewport_mode = ViewportMode::Axonometric;
-                                }
-                            });
-                    });
-            });
     }
 
-    fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2) {
-        if !self.has_selection_context_actions() {
+    fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2, canvas: Rect) {
+        let duplicate_opening = self.can_duplicate_selected_opening();
+        let delete_selection = self.can_delete_selected_from_context();
+        if !duplicate_opening && !delete_selection {
             return;
         }
 
         let t = design::active();
+        let action_count = usize::from(duplicate_opening) + usize::from(delete_selection);
+        let spacing = 2.0;
+        let width = action_count as f32 * design::control::ICON_BTN
+            + action_count.saturating_sub(1) as f32 * spacing
+            + 8.0;
+        let height = design::control::ICON_BTN + 6.0;
+        let inset = 8.0;
+        let min_x = canvas.left() + inset;
+        let max_x = canvas.right() - width - inset;
+        let min_y = canvas.top() + inset;
+        let max_y = canvas.bottom() - height - inset;
+        let x = (anchor.x - width / 2.0).clamp(min_x, max_x.max(min_x));
+        let above_y = anchor.y - height - 14.0;
+        let preferred_y = if above_y >= min_y {
+            above_y
+        } else {
+            anchor.y + 14.0
+        };
+        let y = preferred_y.clamp(min_y, max_y.max(min_y));
         egui::Area::new(egui::Id::new("canvas-context-toolbar"))
-            .fixed_pos(Pos2::new(anchor.x - 40.0, anchor.y - 44.0))
+            .fixed_pos(Pos2::new(x, y))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 Frame::new()
@@ -356,7 +352,7 @@ impl FramerApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            if self.can_duplicate_selected_opening() {
+                            if duplicate_opening {
                                 let response = design::widgets::icon_button(
                                     ui,
                                     design::Icon::Duplicate,
@@ -373,7 +369,7 @@ impl FramerApp {
                                     self.duplicate_selected_opening();
                                 }
                             }
-                            if self.can_delete_selected_from_context() {
+                            if delete_selection {
                                 let action = actions::metadata(ActionId::DeleteSelection);
                                 let response =
                                     design::widgets::icon_button(ui, action.icon, action.tooltip);
@@ -391,10 +387,6 @@ impl FramerApp {
                         });
                     });
             });
-    }
-
-    fn has_selection_context_actions(&self) -> bool {
-        self.can_duplicate_selected_opening() || self.can_delete_selected_from_context()
     }
 
     fn can_duplicate_selected_opening(&self) -> bool {
@@ -725,26 +717,27 @@ fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
         FontId::proportional(9.0),
         theme.text_secondary,
     );
+    let compass = rect.shrink(5.0);
     for (label, align, pos) in [
         (
             "N",
             Align2::CENTER_TOP,
-            rect.center_top() + Vec2::new(0.0, 1.0),
+            compass.center_top() + Vec2::new(0.0, 1.0),
         ),
         (
             "S",
             Align2::CENTER_BOTTOM,
-            rect.center_bottom() + Vec2::new(0.0, -1.0),
+            compass.center_bottom() + Vec2::new(0.0, -1.0),
         ),
         (
             "W",
             Align2::LEFT_CENTER,
-            rect.left_center() + Vec2::new(1.0, 0.0),
+            compass.left_center() + Vec2::new(1.0, 0.0),
         ),
         (
             "E",
             Align2::RIGHT_CENTER,
-            rect.right_center() + Vec2::new(-1.0, 0.0),
+            compass.right_center() + Vec2::new(-1.0, 0.0),
         ),
     ] {
         painter.text(

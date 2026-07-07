@@ -199,17 +199,11 @@ pub(super) fn draw_drafting_rulers(painter: &egui::Painter, rect: Rect, drawing:
 }
 
 pub(super) fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
-    let origin = rect.left_bottom() + Vec2::new(32.0, -30.0);
-    let x_end = origin + Vec2::new(36.0, 0.0);
-    let y_end = origin + Vec2::new(0.0, -36.0);
-    painter.line_segment(
-        [origin, x_end],
-        Stroke::new(1.5, Color32::from_rgb(204, 60, 48)),
-    );
-    painter.line_segment(
-        [origin, y_end],
-        Stroke::new(1.5, Color32::from_rgb(52, 158, 83)),
-    );
+    let origin = rect.left_bottom() + Vec2::new(36.0, -62.0);
+    let x_end = origin + Vec2::new(30.0, 0.0);
+    let y_end = origin + Vec2::new(0.0, -30.0);
+    painter.line_segment([origin, x_end], Stroke::new(1.5, theme::danger()));
+    painter.line_segment([origin, y_end], Stroke::new(1.5, theme::success()));
     painter.circle_filled(origin, 4.0, theme::active_blue());
     painter.text(
         x_end + Vec2::new(7.0, 0.0),

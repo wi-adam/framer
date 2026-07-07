@@ -347,8 +347,8 @@ impl WallDisplay {
 
 /// The visual-layering state for the Plan and 3D views: the wall display mode
 /// plus per-layer visibility toggles. Presentation state only — never
-/// serialized; re-initialized to defaults each launch (everything visible,
-/// walls as outlines).
+/// serialized; re-initialized to defaults each launch (walls as outlines, core
+/// drafting layers visible, corner labels opt-in).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewLayers {
     pub(crate) wall_display: WallDisplay,
@@ -364,7 +364,7 @@ impl Default for ViewLayers {
             wall_display: WallDisplay::Outline,
             grid: true,
             rooms: true,
-            joins: true,
+            joins: false,
             wall_labels: true,
         }
     }
@@ -419,6 +419,10 @@ enum ViewClick {
     Room {
         room_id: String,
     },
+    /// Select an authored wall corner/junction in the plan.
+    Join {
+        join_id: String,
+    },
     FurnishingInstance {
         instance_id: String,
     },
@@ -441,6 +445,8 @@ enum ViewClick {
     FloorDeck {
         id: String,
     },
+    /// The user clicked drawing paper without hitting an authored object.
+    EmptyCanvas,
 }
 
 #[derive(Debug, Clone)]
@@ -1804,38 +1810,8 @@ impl FramerApp {
             return;
         }
 
-        match &self.selected {
-            Selection::None => {}
-            Selection::Wall => {}
-            Selection::Member { wall_id, .. } => {
-                if let Some(index) = self
-                    .model
-                    .walls
-                    .iter()
-                    .position(|wall| wall.id.0 == *wall_id)
-                {
-                    self.selected_wall = index;
-                }
-                self.selected = Selection::Wall;
-            }
-            Selection::Level(_)
-            | Selection::Opening(_)
-            | Selection::Join(_)
-            | Selection::Room(_)
-            | Selection::RoofPlane(_)
-            | Selection::Ceiling(_)
-            | Selection::FloorDeck(_)
-            | Selection::System(_)
-            | Selection::Material(_)
-            | Selection::Furnishing(_)
-            | Selection::MepObject(_)
-            | Selection::StandardsPack(_)
-            | Selection::FurnishingInstance(_)
-            | Selection::MepInstance(_) => {
-                self.selected = Selection::Wall;
-            }
-            Selection::Site => {}
-            Selection::Dimension(_) => unreachable!("dimension selections exit above"),
+        if !matches!(self.selected, Selection::None) {
+            self.selected = Selection::None;
         }
     }
 
@@ -3312,6 +3288,9 @@ impl FramerApp {
             ViewClick::Room { room_id } => {
                 self.selected = Selection::Room(room_id);
             }
+            ViewClick::Join { join_id } => {
+                self.selected = Selection::Join(join_id);
+            }
             ViewClick::FurnishingInstance { instance_id } => {
                 self.selected = Selection::FurnishingInstance(instance_id);
             }
@@ -3339,6 +3318,9 @@ impl FramerApp {
             }
             ViewClick::FloorDeck { id } => {
                 self.selected = Selection::FloorDeck(id);
+            }
+            ViewClick::EmptyCanvas => {
+                self.selected = Selection::None;
             }
         }
     }
@@ -4422,6 +4404,37 @@ mod tests {
         assert!(!app.dimension_tool.active);
         assert_eq!(app.selected, Selection::Opening(opening));
         assert_eq!(app.dimension_status, None);
+    }
+
+    #[test]
+    fn escape_clears_selection_when_no_tool_is_active() {
+        let mut app = FramerApp::default();
+        app.selected = Selection::Opening(app.model.walls[0].openings[0].id.0.clone());
+
+        app.exit_current_context();
+
+        assert_eq!(app.selected, Selection::None);
+    }
+
+    #[test]
+    fn empty_canvas_click_clears_selection() {
+        let mut app = FramerApp::default();
+
+        app.handle_view_click(ViewClick::EmptyCanvas);
+
+        assert_eq!(app.selected, Selection::None);
+    }
+
+    #[test]
+    fn plan_corner_click_selects_corner() {
+        let mut app = FramerApp::default();
+        let join_id = app.model.wall_joins[0].id.0.clone();
+
+        app.handle_view_click(ViewClick::Join {
+            join_id: join_id.clone(),
+        });
+
+        assert_eq!(app.selected, Selection::Join(join_id));
     }
 
     #[test]

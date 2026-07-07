@@ -136,6 +136,36 @@ fn hit_selected_wall_handle(
     }
 }
 
+fn screen_bounds(points: &[Pos2]) -> Option<Rect> {
+    let first = *points.first()?;
+    let mut bounds = Rect::from_min_max(first, first);
+    for point in &points[1..] {
+        bounds.min.x = bounds.min.x.min(point.x);
+        bounds.min.y = bounds.min.y.min(point.y);
+        bounds.max.x = bounds.max.x.max(point.x);
+        bounds.max.y = bounds.max.y.max(point.y);
+    }
+    Some(bounds)
+}
+
+fn toolbar_anchor_above(rect: Rect) -> Pos2 {
+    Pos2::new(rect.center().x, rect.top())
+}
+
+fn join_label_visible(layers: ViewLayers, hovered: bool, selected: bool) -> bool {
+    layers.joins || hovered || selected
+}
+
+fn resolve_empty_canvas_click(
+    object_hit: bool,
+    over_element: bool,
+    clicked: bool,
+    pointer_in_drawing: bool,
+    tool_active: bool,
+) -> bool {
+    !object_hit && clicked && pointer_in_drawing && !over_element && !tool_active
+}
+
 /// Resolve a wall-endpoint drag to a snapped model point: ortho-locked to the
 /// wall's fixed far end, snapping to other walls' endpoints/midpoints/alignment
 /// (the moving node and its coincident neighbours are excluded).
@@ -467,6 +497,7 @@ pub(super) fn draw_project_plan(
     let mut clicked_furnishing = None;
     let mut clicked_mep = None;
     let mut clicked_room = None;
+    let mut clicked_join = None;
     let mut clicked_roof = None;
     let mut over_element = false;
 
@@ -529,7 +560,11 @@ pub(super) fn draw_project_plan(
         ));
         let label = plan_point(room.seed, bounds, drawing, camera);
         if selected {
-            *toolbar_out = Some(label);
+            if let Some(bounds) = screen_bounds(&screen) {
+                *toolbar_out = Some(toolbar_anchor_above(bounds.expand(8.0)));
+            } else {
+                *toolbar_out = Some(label);
+            }
         }
         painter.text(
             label,
@@ -581,7 +616,7 @@ pub(super) fn draw_project_plan(
             Color32::from_rgb(190, 172, 132),
         );
         if selected {
-            *toolbar_out = Some(rect.center());
+            *toolbar_out = Some(toolbar_anchor_above(rect.expand(8.0)));
         }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_furnishing = Some(ViewClick::FurnishingInstance {
@@ -619,7 +654,7 @@ pub(super) fn draw_project_plan(
             Color32::from_rgb(124, 162, 186),
         );
         if selected {
-            *toolbar_out = Some(rect.center());
+            *toolbar_out = Some(toolbar_anchor_above(rect.expand(8.0)));
         }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
             clicked_mep = Some(ViewClick::MepInstance {
@@ -628,17 +663,28 @@ pub(super) fn draw_project_plan(
         }
     }
 
-    if layers.joins {
-        for join in &model.wall_joins {
-            let point = plan_point(join.point, bounds, drawing, camera);
-            painter.circle_filled(point, 4.5, theme::active_blue());
+    for join in &model.wall_joins {
+        let point = plan_point(join.point, bounds, drawing, camera);
+        let hovered = pointer.is_some_and(|position| position.distance(point) <= 9.0);
+        over_element |= hovered;
+        let selected = matches!(selection, Selection::Join(id) if id == &join.id.0);
+        if join_label_visible(layers, hovered, selected) {
+            let ink = theme::framing_line_dark();
+            let marker_radius = if selected || hovered { 5.0 } else { 4.0 };
+            painter.circle_filled(point, marker_radius, theme::sheet());
+            painter.circle_stroke(point, marker_radius, Stroke::new(1.25, ink));
             painter.text(
                 point + Vec2::new(6.0, -7.0),
                 Align2::LEFT_CENTER,
                 join_kind_label(join.kind),
                 FontId::proportional(10.0),
-                theme::active_blue(),
+                ink,
             );
+        }
+        if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
+            clicked_join = Some(ViewClick::Join {
+                join_id: join.id.0.clone(),
+            });
         }
     }
 
@@ -675,7 +721,9 @@ pub(super) fn draw_project_plan(
         };
         painter.line_segment([start, end], stroke);
         if selected {
-            *toolbar_out = Some(Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0));
+            *toolbar_out = Some(toolbar_anchor_above(
+                Rect::from_two_pos(start, end).expand(14.0),
+            ));
             draw_selected_wall_handles(&painter, start, end, hovered_wall_handle);
         }
         if hovered && response.clicked() && !draw_tool.active && !region_tool_active {
@@ -704,9 +752,8 @@ pub(super) fn draw_project_plan(
             let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
                 && selected_wall == index;
             if opening_selected {
-                *toolbar_out = Some(Pos2::new(
-                    (left.x + right.x) / 2.0,
-                    (left.y + right.y) / 2.0,
+                *toolbar_out = Some(toolbar_anchor_above(
+                    Rect::from_two_pos(left, right).expand(12.0),
                 ));
             }
             // Widen the gap to the wall's full thickness: a white band quad cuts
@@ -859,7 +906,11 @@ pub(super) fn draw_project_plan(
             );
             if let Some(centroid) = polygon_centroid(&screen) {
                 if selected {
-                    *toolbar_out = Some(centroid);
+                    if let Some(bounds) = screen_bounds(&screen) {
+                        *toolbar_out = Some(toolbar_anchor_above(bounds.expand(8.0)));
+                    } else {
+                        *toolbar_out = Some(centroid);
+                    }
                 }
                 painter.text(
                     centroid,
@@ -928,12 +979,28 @@ pub(super) fn draw_project_plan(
 
     // In the roof-plan view a roof outline is the top-priority hit; elsewhere the
     // ordinary wall/opening/room priority applies (clicked_roof is always None).
-    clicked_roof
+    let object_click = clicked_roof
         .or(clicked_opening)
+        .or(clicked_join)
         .or(clicked_furnishing)
         .or(clicked_mep)
         .or(clicked_wall)
-        .or(clicked_room)
+        .or(clicked_room);
+    let object_hit = object_click.is_some();
+    let empty_canvas_click = resolve_empty_canvas_click(
+        object_hit,
+        over_element,
+        response.clicked(),
+        pointer.is_some_and(|position| drawing.contains(position)),
+        draw_tool.active || region_tool_active,
+    );
+    if object_hit {
+        object_click
+    } else if empty_canvas_click {
+        Some(ViewClick::EmptyCanvas)
+    } else {
+        None
+    }
 }
 
 /// The average of `vertices` (a screen-space polygon's label anchor). `None` for
@@ -1285,6 +1352,57 @@ mod tests {
             wall(code, &format!("{prefix}-t"), level, p(x1, 8.0), p(x0, 8.0)),
             wall(code, &format!("{prefix}-l"), level, p(x0, 8.0), p(x0, 0.0)),
         ]
+    }
+
+    #[test]
+    fn corner_labels_are_visible_only_when_relevant() {
+        let mut layers = ViewLayers {
+            joins: false,
+            ..ViewLayers::default()
+        };
+
+        assert!(!join_label_visible(layers, false, false));
+        assert!(join_label_visible(layers, true, false));
+        assert!(join_label_visible(layers, false, true));
+
+        layers.joins = true;
+        assert!(join_label_visible(layers, false, false));
+    }
+
+    #[test]
+    fn empty_canvas_click_resolution_requires_clear_canvas_click() {
+        let cases = [
+            (false, false, true, true, false, true, "clear canvas click"),
+            (true, false, true, true, false, false, "object hit wins"),
+            (
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                "hovered element blocks",
+            ),
+            (false, false, false, true, false, false, "unclicked canvas"),
+            (false, false, true, false, false, false, "outside drawing"),
+            (false, false, true, true, true, false, "active tool blocks"),
+        ];
+
+        for (object_hit, over_element, clicked, pointer_in_drawing, tool_active, expected, label) in
+            cases
+        {
+            assert_eq!(
+                resolve_empty_canvas_click(
+                    object_hit,
+                    over_element,
+                    clicked,
+                    pointer_in_drawing,
+                    tool_active,
+                ),
+                expected,
+                "{label}",
+            );
+        }
     }
 
     #[test]
