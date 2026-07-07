@@ -15,9 +15,12 @@ framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true
 framer-standards.workspace = true
 
-# Default (no) features: the headless UI tests drive the app through the
-# AccessKit tree only — no wgpu rendering or image snapshots — which keeps the
-# dev-build lean and the harness deterministic across platforms.
+# The headless UI smoke tests drive the app through the AccessKit tree only and
+# stay GPU-less/deterministic (they never opt into a renderer). The `wgpu` and
+# `snapshot` features exist for the ui-shots screenshot suite
+# (`app/ui_shots_tests.rs`, run via scripts/ui-shots.sh), which renders real
+# frames off-screen and needs a wgpu adapter.
 [dev-dependencies]
-egui_kittest = "0.35"
+egui_kittest = { version = "0.35", features = ["snapshot", "wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 pollster.workspace = true
