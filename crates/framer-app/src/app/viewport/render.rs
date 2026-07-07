@@ -12,6 +12,7 @@ use super::theme;
 use super::view_common::{
     draw_view_background, draw_view_border, draw_view_empty, render_resolution, viewport_size,
 };
+use crate::app::design::text_size;
 use crate::app::render as path_render;
 use crate::app::{FramerApp, render_job};
 
@@ -39,7 +40,7 @@ fn draw_render_progress_chip(painter: &egui::Painter, drawing: Rect, label: &str
         chip.left_center() + Vec2::new(8.0, 0.0),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(11.0),
+        FontId::proportional(text_size::LABEL),
         theme::text_primary(),
     );
 }

@@ -714,7 +714,7 @@ fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
         face.center(),
         Align2::CENTER_CENTER,
         "TOP",
-        FontId::proportional(9.0),
+        FontId::proportional(design::text_size::MICRO),
         theme.text_secondary,
     );
     let compass = rect.shrink(5.0);
@@ -744,7 +744,7 @@ fn draw_nav_cube(painter: &egui::Painter, rect: Rect, theme: design::Theme) {
             pos,
             align,
             label,
-            FontId::proportional(7.5),
+            FontId::proportional(design::text_size::MICRO),
             theme.text_muted,
         );
     }

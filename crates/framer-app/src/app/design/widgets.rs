@@ -123,7 +123,7 @@ pub(crate) fn tool_group(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 pub(crate) fn workflow_tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let t = active();
     let (fill, stroke, fg) = if selected {
-        (t.accent_soft, t.accent_stroke(), t.text)
+        (t.control, t.border_stroke(), t.text)
     } else {
         (
             Color32::TRANSPARENT,
@@ -131,7 +131,7 @@ pub(crate) fn workflow_tab(ui: &mut Ui, label: &str, selected: bool) -> Response
             t.text_secondary,
         )
     };
-    ui.add(
+    let response = ui.add(
         Button::new(
             RichText::new(label)
                 .strong()
@@ -141,7 +141,18 @@ pub(crate) fn workflow_tab(ui: &mut Ui, label: &str, selected: bool) -> Response
         .fill(fill)
         .stroke(stroke)
         .corner_radius(radius::SM),
-    )
+    );
+    if selected {
+        let rect = response.rect.shrink2(Vec2::new(5.0, 0.0));
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.left(), rect.bottom() + 1.0),
+                Pos2::new(rect.right(), rect.bottom() + 1.0),
+            ],
+            Stroke::new(2.0, t.accent),
+        );
+    }
+    response
 }
 
 /// A low-chrome command-strip panel: caption above compact icon commands.
@@ -151,21 +162,39 @@ pub(crate) fn command_panel(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui))
         .fill(t.toolbar)
         .stroke(t.soft_stroke())
         .corner_radius(radius::SM)
-        .inner_margin(Margin::symmetric(6, 3))
+        .inner_margin(Margin::symmetric(5, 2))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(label)
-                        .size(text_size::MICRO)
-                        .strong()
-                        .color(t.text_muted),
-                );
+                if !label.is_empty() {
+                    ui.label(
+                        RichText::new(label)
+                            .size(text_size::MICRO)
+                            .strong()
+                            .color(t.text_muted),
+                    );
+                }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = space::XS;
                     add(ui);
                 });
             });
         });
+}
+
+pub(crate) fn catalog_add_button(ui: &mut Ui, label: &str) -> Response {
+    let t = active();
+    let response = ui.add(
+        Button::new(
+            RichText::new(format!("+ {label}"))
+                .size(text_size::LABEL)
+                .strong()
+                .color(t.text_secondary),
+        )
+        .fill(t.control)
+        .stroke(t.soft_stroke())
+        .corner_radius(radius::SM),
+    );
+    with_tooltip(response, &format!("Add {label}"))
 }
 
 /// A vertical divider sized to a toolbar group's button row.
@@ -242,7 +271,7 @@ pub(crate) fn section<R>(
 /// A workspace tab: text with an accent underline when selected.
 pub(crate) fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let t = active();
-    let color = if selected { t.accent } else { t.text_secondary };
+    let color = if selected { t.text } else { t.text_secondary };
     let response = ui.add(
         Button::new(RichText::new(label).strong().color(color))
             .frame(false)
