@@ -614,9 +614,14 @@ impl FramerApp {
                         .collect();
 
                     let site_selected = matches!(self.selected, Selection::Site);
-                    if ui
-                        .selectable_label(site_selected, "Site & standards")
-                        .clicked()
+                    if tree_row(
+                        ui,
+                        site_selected,
+                        Icon::Standards,
+                        "Site & standards",
+                        "Site and standards",
+                    )
+                    .clicked()
                     {
                         self.selected = Selection::Site;
                     }
@@ -632,7 +637,14 @@ impl FramerApp {
                             };
                             if ui
                                 .horizontal(|ui| {
-                                    let clicked = ui.selectable_label(selected, label).clicked();
+                                    let clicked = tree_row_contents(
+                                        ui,
+                                        selected,
+                                        Icon::Standards,
+                                        &label,
+                                        "Standards pack",
+                                    )
+                                    .clicked();
                                     if *from_library {
                                         library_badge(ui);
                                     }
@@ -648,9 +660,7 @@ impl FramerApp {
                     for (level_id, level_name) in levels {
                         let level_selected =
                             matches!(&self.selected, Selection::Level(id) if id == &level_id);
-                        if ui
-                            .selectable_label(level_selected, format!("Level: {level_name}"))
-                            .clicked()
+                        if tree_row(ui, level_selected, Icon::Level, &level_name, "Level").clicked()
                         {
                             self.set_active_level(ElementId::new(level_id.clone()));
                             self.selected = Selection::Level(level_id.clone());
@@ -666,12 +676,14 @@ impl FramerApp {
 
                                 let wall_selected = self.selected_wall == *index
                                     && matches!(self.selected, Selection::Wall);
-                                if ui
-                                    .selectable_label(
-                                        wall_selected,
-                                        format!("Wall segment: {wall_name}"),
-                                    )
-                                    .clicked()
+                                if tree_row(
+                                    ui,
+                                    wall_selected,
+                                    Icon::Wall,
+                                    wall_name,
+                                    "Wall segment",
+                                )
+                                .clicked()
                                 {
                                     self.selected_wall = *index;
                                     self.selected = Selection::Wall;
@@ -684,16 +696,14 @@ impl FramerApp {
                                             &self.selected,
                                             Selection::Opening(id) if id == opening_id
                                         );
-                                        if ui
-                                            .selectable_label(
-                                                selected,
-                                                format!(
-                                                    "{}: {}",
-                                                    kind_label(*opening_kind),
-                                                    opening_name
-                                                ),
-                                            )
-                                            .clicked()
+                                        if tree_row(
+                                            ui,
+                                            selected,
+                                            opening_tree_icon(*opening_kind),
+                                            opening_name,
+                                            kind_label(*opening_kind),
+                                        )
+                                        .clicked()
                                         {
                                             self.selected_wall = *index;
                                             self.selected = Selection::Opening(opening_id.clone());
@@ -706,16 +716,18 @@ impl FramerApp {
                                             &self.selected,
                                             Selection::Dimension(id) if id == dimension_id
                                         );
-                                        if ui
-                                            .selectable_label(
-                                                selected,
-                                                format!(
-                                                    "{} dimension: {}",
-                                                    dimension_kind_label(*dimension_kind),
-                                                    dimension_name
-                                                ),
-                                            )
-                                            .clicked()
+                                        let kind = format!(
+                                            "{} dimension",
+                                            dimension_kind_label(*dimension_kind)
+                                        );
+                                        if tree_row(
+                                            ui,
+                                            selected,
+                                            Icon::Dimension,
+                                            dimension_name,
+                                            &kind,
+                                        )
+                                        .clicked()
                                         {
                                             self.selected_wall = *index;
                                             self.selected =
@@ -734,10 +746,7 @@ impl FramerApp {
                                     &self.selected,
                                     Selection::Room(id) if id == room_id
                                 );
-                                if ui
-                                    .selectable_label(selected, format!("Room: {room_name}"))
-                                    .clicked()
-                                {
+                                if tree_row(ui, selected, Icon::Room, room_name, "Room").clicked() {
                                     self.selected = Selection::Room(room_id.clone());
                                 }
                             }
@@ -750,8 +759,7 @@ impl FramerApp {
                                     &self.selected,
                                     Selection::RoofPlane(id) if id == plane_id
                                 );
-                                if ui
-                                    .selectable_label(selected, format!("Roof plane: {plane_name}"))
+                                if tree_row(ui, selected, Icon::Roof, plane_name, "Roof plane")
                                     .clicked()
                                 {
                                     self.selected = Selection::RoofPlane(plane_id.clone());
@@ -768,12 +776,12 @@ impl FramerApp {
                                 );
                                 // Distinguish a sloped (scissor/vault) ceiling from a
                                 // flat one in the tree.
-                                let kind = if *sloped { "sloped" } else { "flat" };
-                                if ui
-                                    .selectable_label(
-                                        selected,
-                                        format!("Ceiling: {ceiling_name} ({kind})"),
-                                    )
+                                let kind = if *sloped {
+                                    "Sloped ceiling"
+                                } else {
+                                    "Flat ceiling"
+                                };
+                                if tree_row(ui, selected, Icon::Ceiling, ceiling_name, kind)
                                     .clicked()
                                 {
                                     self.selected = Selection::Ceiling(ceiling_id.clone());
@@ -788,8 +796,7 @@ impl FramerApp {
                                     &self.selected,
                                     Selection::FloorDeck(id) if id == deck_id
                                 );
-                                if ui
-                                    .selectable_label(selected, format!("Floor deck: {deck_name}"))
+                                if tree_row(ui, selected, Icon::Floor, deck_name, "Floor deck")
                                     .clicked()
                                 {
                                     self.selected = Selection::FloorDeck(deck_id.clone());
@@ -800,17 +807,12 @@ impl FramerApp {
 
                     if !joins.is_empty() {
                         ui.separator();
-                        strong_label(ui, "Wall joins");
+                        strong_label(ui, "Corners");
                         for (join_id, join_name, join_kind) in joins {
                             let selected =
                                 matches!(&self.selected, Selection::Join(id) if id == &join_id);
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!("{}: {}", join_kind_label(join_kind), join_name),
-                                )
-                                .clicked()
-                            {
+                            let kind = format!("Corner ({})", join_kind_label(join_kind));
+                            if tree_row(ui, selected, Icon::Corner, &join_name, &kind).clicked() {
                                 self.selected = Selection::Join(join_id);
                             }
                         }
@@ -1048,9 +1050,8 @@ impl FramerApp {
                     let selected = matches!(&self.selected, Selection::System(s) if s == id);
                     if ui
                         .horizontal(|ui| {
-                            let clicked = ui
-                                .selectable_label(selected, format!("{name} ({kind})"))
-                                .clicked();
+                            let clicked =
+                                tree_row_contents(ui, selected, Icon::System, name, kind).clicked();
                             if *from_library {
                                 library_badge(ui);
                             }
@@ -1088,8 +1089,16 @@ impl FramerApp {
                     let [r, g, b] = *color;
                     if ui
                         .horizontal(|ui| {
+                            ui.label(
+                                design::icon_text(Icon::Material, 13.0)
+                                    .color(design::active().text_muted),
+                            )
+                            .on_hover_text("Material");
                             color_swatch(ui, Color32::from_rgb(r, g, b));
-                            let clicked = ui.selectable_label(selected, name).clicked();
+                            let clicked = ui
+                                .selectable_label(selected, name)
+                                .on_hover_text("Material")
+                                .clicked();
                             if *from_library {
                                 library_badge(ui);
                             }
@@ -1110,7 +1119,14 @@ impl FramerApp {
                     let selected = matches!(&self.selected, Selection::Furnishing(f) if f == id);
                     if ui
                         .horizontal(|ui| {
-                            let clicked = ui.selectable_label(selected, name).clicked();
+                            let clicked = tree_row_contents(
+                                ui,
+                                selected,
+                                Icon::Furnishing,
+                                name,
+                                "Furnishing",
+                            )
+                            .clicked();
                             ui.label(RichText::new(size).size(design::text_size::LABEL));
                             if *from_library {
                                 library_badge(ui);
@@ -1129,9 +1145,9 @@ impl FramerApp {
                     let selected = matches!(&self.selected, Selection::MepObject(m) if m == id);
                     if ui
                         .horizontal(|ui| {
-                            let clicked = ui
-                                .selectable_label(selected, format!("{name} ({kind})"))
-                                .clicked();
+                            let clicked =
+                                tree_row_contents(ui, selected, Icon::MepObject, name, kind)
+                                    .clicked();
                             ui.label(RichText::new(size).size(design::text_size::LABEL));
                             if *from_library {
                                 library_badge(ui);
@@ -1154,7 +1170,7 @@ impl FramerApp {
                     strong_label(ui, "Starter");
                     for (id, name, kind) in &starter_systems {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{name} ({kind})"));
+                            tree_static_row_contents(ui, Icon::System, name, kind);
                             if ui.button("Insert").clicked() {
                                 insert_system = Some(id.clone());
                             }
@@ -1163,8 +1179,13 @@ impl FramerApp {
                     for (id, name, color) in &starter_materials {
                         let [r, g, b] = *color;
                         ui.horizontal(|ui| {
+                            ui.label(
+                                design::icon_text(Icon::Material, 13.0)
+                                    .color(design::active().text_muted),
+                            )
+                            .on_hover_text("Material");
                             color_swatch(ui, Color32::from_rgb(r, g, b));
-                            ui.label(name);
+                            ui.label(name).on_hover_text("Material");
                             if ui.button("Insert").clicked() {
                                 insert_material = Some(id.clone());
                             }
@@ -1172,7 +1193,8 @@ impl FramerApp {
                     }
                     for (id, name, size) in &starter_furnishings {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{name} ({size})"));
+                            tree_static_row_contents(ui, Icon::Furnishing, name, "Furnishing");
+                            ui.label(RichText::new(size).size(design::text_size::LABEL));
                             if ui.button("Place").clicked() {
                                 place_furnishing = Some(id.clone());
                             }
@@ -1180,7 +1202,8 @@ impl FramerApp {
                     }
                     for (id, name, kind, size) in &starter_mep_objects {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{name} ({kind}, {size})"));
+                            tree_static_row_contents(ui, Icon::MepObject, name, kind);
+                            ui.label(RichText::new(size).size(design::text_size::LABEL));
                             if ui.button("Place").clicked() {
                                 place_mep_object = Some(id.clone());
                             }
@@ -2030,14 +2053,14 @@ impl FramerApp {
                         }
 
                         ui.separator();
-                        strong_label(ui, "Join point");
+                        strong_label(ui, "Corner point");
                         changed |= coordinate_drag(ui, "X", &mut join.point.x);
                         changed |= coordinate_drag(ui, "Y", &mut join.point.y);
                     } else {
                         join_summary(ui, join, &wall_options);
                     }
                 } else {
-                    ui.label("Wall join no longer exists");
+                    ui.label("Corner no longer exists");
                 }
             }
             Selection::Member { wall_id, member_id } => {
@@ -2966,7 +2989,7 @@ impl FramerApp {
                             );
                             widgets::toggle_switch(ui, &mut self.layers.grid, "Grid");
                             widgets::toggle_switch(ui, &mut self.layers.rooms, "Rooms");
-                            widgets::toggle_switch(ui, &mut self.layers.joins, "Joins");
+                            widgets::toggle_switch(ui, &mut self.layers.joins, "Corners");
                             widgets::toggle_switch(ui, &mut self.layers.wall_labels, "Wall labels");
                         });
                 // The trigger is icon-only, so give it an explicit accessible name
@@ -3062,24 +3085,170 @@ impl FramerApp {
         match &self.selected {
             Selection::None => "Nothing selected".to_owned(),
             Selection::Site => "Site & standards".to_owned(),
-            Selection::Level(id) => format!("Level: {id}"),
-            Selection::Wall => "Wall segment".to_owned(),
-            Selection::Opening(id) => format!("Opening: {id}"),
-            Selection::Dimension(id) => format!("Dimension: {id}"),
-            Selection::Join(id) => format!("Join: {id}"),
-            Selection::Room(id) => format!("Room: {id}"),
+            Selection::Level(id) => format!("Level: {}", self.level_name(id)),
+            Selection::Wall => self
+                .model
+                .walls
+                .get(self.selected_wall)
+                .map(|wall| format!("Wall segment: {}", wall.name))
+                .unwrap_or_else(|| "Wall segment".to_owned()),
+            Selection::Opening(id) => format!("Opening: {}", self.opening_name(id)),
+            Selection::Dimension(id) => format!("Dimension: {}", self.dimension_name(id)),
+            Selection::Join(id) => format!("Corner: {}", self.corner_name(id)),
+            Selection::Room(id) => format!("Room: {}", self.room_name(id)),
             Selection::Member { member_id, .. } => format!("Member: {member_id}"),
-            Selection::RoofPlane(id) => format!("Roof plane: {id}"),
-            Selection::Ceiling(id) => format!("Ceiling: {id}"),
-            Selection::FloorDeck(id) => format!("Floor deck: {id}"),
-            Selection::System(id) => format!("System: {id}"),
-            Selection::Material(id) => format!("Material: {id}"),
-            Selection::Furnishing(id) => format!("Furnishing: {id}"),
-            Selection::MepObject(id) => format!("MEP object: {id}"),
-            Selection::StandardsPack(id) => format!("Standards pack: {id}"),
-            Selection::FurnishingInstance(id) => format!("Furnishing instance: {id}"),
-            Selection::MepInstance(id) => format!("MEP instance: {id}"),
+            Selection::RoofPlane(id) => format!("Roof plane: {}", self.roof_plane_name(id)),
+            Selection::Ceiling(id) => format!("Ceiling: {}", self.ceiling_name(id)),
+            Selection::FloorDeck(id) => format!("Floor deck: {}", self.floor_deck_name(id)),
+            Selection::System(id) => format!("System: {}", self.system_name(id)),
+            Selection::Material(id) => format!("Material: {}", self.material_name(id)),
+            Selection::Furnishing(id) => format!("Furnishing: {}", self.furnishing_name(id)),
+            Selection::MepObject(id) => format!("MEP object: {}", self.mep_object_name(id)),
+            Selection::StandardsPack(id) => {
+                format!("Standards pack: {}", self.standards_pack_name(id))
+            }
+            Selection::FurnishingInstance(id) => {
+                format!("Furnishing instance: {}", self.furnishing_instance_name(id))
+            }
+            Selection::MepInstance(id) => format!("MEP instance: {}", self.mep_instance_name(id)),
         }
+    }
+
+    fn level_name(&self, id: &str) -> String {
+        self.model
+            .levels
+            .iter()
+            .find(|level| level.id.0 == id)
+            .map(|level| level.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn opening_name(&self, id: &str) -> String {
+        self.model
+            .walls
+            .iter()
+            .flat_map(|wall| wall.openings.iter())
+            .find(|opening| opening.id.0 == id)
+            .map(|opening| opening.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn dimension_name(&self, id: &str) -> String {
+        self.model
+            .walls
+            .iter()
+            .flat_map(|wall| wall.dimensions.iter())
+            .find(|dimension| dimension.id.0 == id)
+            .map(|dimension| dimension.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn corner_name(&self, id: &str) -> String {
+        self.model
+            .wall_joins
+            .iter()
+            .find(|join| join.id.0 == id)
+            .map(|join| join.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn room_name(&self, id: &str) -> String {
+        self.model
+            .rooms
+            .iter()
+            .find(|room| room.id.0 == id)
+            .map(|room| room.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn roof_plane_name(&self, id: &str) -> String {
+        self.model
+            .roof_planes
+            .iter()
+            .find(|plane| plane.id.0 == id)
+            .map(|plane| plane.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn ceiling_name(&self, id: &str) -> String {
+        self.model
+            .ceilings
+            .iter()
+            .find(|ceiling| ceiling.id.0 == id)
+            .map(|ceiling| ceiling.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn floor_deck_name(&self, id: &str) -> String {
+        self.model
+            .floor_decks
+            .iter()
+            .find(|deck| deck.id.0 == id)
+            .map(|deck| deck.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn system_name(&self, id: &str) -> String {
+        self.model
+            .systems
+            .iter()
+            .find(|system| system.id.0 == id)
+            .map(|system| system.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn material_name(&self, id: &str) -> String {
+        self.model
+            .materials
+            .iter()
+            .find(|material| material.id.0 == id)
+            .map(|material| material.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn furnishing_name(&self, id: &str) -> String {
+        self.model
+            .furnishings
+            .iter()
+            .find(|furnishing| furnishing.id.0 == id)
+            .map(|furnishing| furnishing.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn mep_object_name(&self, id: &str) -> String {
+        self.model
+            .mep_objects
+            .iter()
+            .find(|object| object.id.0 == id)
+            .map(|object| object.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn standards_pack_name(&self, id: &str) -> String {
+        self.model
+            .standards_packs
+            .iter()
+            .find(|pack| pack.id.0 == id)
+            .map(|pack| pack.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn furnishing_instance_name(&self, id: &str) -> String {
+        self.model
+            .furnishing_instances
+            .iter()
+            .find(|instance| instance.id.0 == id)
+            .map(|instance| instance.name.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    fn mep_instance_name(&self, id: &str) -> String {
+        self.model
+            .mep_instances
+            .iter()
+            .find(|instance| instance.id.0 == id)
+            .map(|instance| instance.name.clone())
+            .unwrap_or_else(|| id.to_owned())
     }
 
     fn status_zoom_percent(&self) -> Option<u32> {
@@ -3254,7 +3423,7 @@ fn inspector_edit_label(selection: &Selection) -> &'static str {
         Selection::Wall => "Edit wall",
         Selection::Opening(_) => "Edit opening",
         Selection::Dimension(_) => "Edit dimension",
-        Selection::Join(_) => "Edit join",
+        Selection::Join(_) => "Edit corner",
         Selection::Room(_) => "Edit room",
         Selection::Member { .. } => "Edit",
         Selection::RoofPlane(_) => "Edit roof plane",
@@ -4133,7 +4302,7 @@ fn selection_badge(selection: &Selection) -> &'static str {
         Selection::Wall => "Wall",
         Selection::Opening(_) => "Opening",
         Selection::Dimension(_) => "Dimension",
-        Selection::Join(_) => "Join",
+        Selection::Join(_) => "Corner",
         Selection::Room(_) => "Room",
         Selection::Member { .. } => "Member",
         Selection::RoofPlane(_) => "Roof",
@@ -4185,6 +4354,36 @@ fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
         });
 }
 
+fn tree_row(ui: &mut Ui, selected: bool, icon: Icon, name: &str, kind: &str) -> Response {
+    ui.horizontal(|ui| tree_row_contents(ui, selected, icon, name, kind))
+        .inner
+}
+
+fn tree_row_contents(ui: &mut Ui, selected: bool, icon: Icon, name: &str, kind: &str) -> Response {
+    let tooltip = format!("{kind}: {name}");
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.label(design::icon_text(icon, 13.0).color(design::active().text_muted))
+        .on_hover_text(tooltip.clone());
+    ui.selectable_label(selected, name).on_hover_text(tooltip)
+}
+
+fn tree_static_row_contents(ui: &mut Ui, icon: Icon, name: &str, kind: &str) {
+    let tooltip = format!("{kind}: {name}");
+    ui.spacing_mut().item_spacing.x = 6.0;
+    ui.label(design::icon_text(icon, 13.0).color(design::active().text_muted))
+        .on_hover_text(tooltip.clone());
+    ui.label(name).on_hover_text(tooltip);
+}
+
+fn opening_tree_icon(kind: OpeningKind) -> Icon {
+    match kind {
+        OpeningKind::Door => Icon::Door,
+        OpeningKind::Window | OpeningKind::Skylight => Icon::Window,
+        OpeningKind::GarageDoor => Icon::GarageDoor,
+        OpeningKind::Stair => Icon::Floor,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DiagnosticCounts {
     errors: usize,
@@ -4192,6 +4391,9 @@ struct DiagnosticCounts {
     warnings: usize,
     info: usize,
 }
+
+const UNSUPPORTED_DIAGNOSTIC_TOOLTIP: &str =
+    "Conditions outside the supported prescriptive scope — see diagnostics";
 
 fn count_diagnostics(diagnostics: &[PlanDiagnostic]) -> (usize, usize, usize) {
     diagnostics.iter().fold(
@@ -4250,6 +4452,7 @@ fn status_diagnostics_menu(
                 } else {
                     t.danger
                 },
+                None,
             );
             diagnostic_count_label(
                 ui,
@@ -4260,6 +4463,7 @@ fn status_diagnostics_menu(
                 } else {
                     t.warning
                 },
+                None,
             );
             diagnostic_count_label(
                 ui,
@@ -4270,12 +4474,14 @@ fn status_diagnostics_menu(
                 } else {
                     t.warning
                 },
+                Some(UNSUPPORTED_DIAGNOSTIC_TOOLTIP),
             );
             diagnostic_count_label(
                 ui,
                 Icon::Help,
                 &format!("{} info", counts.info),
                 t.text_muted,
+                None,
             );
         });
         ui.separator();
@@ -4301,12 +4507,23 @@ fn status_diagnostics_menu(
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Diagnostics")
     });
-    response.on_hover_text("Diagnostics");
+    let tooltip = if counts.unsupported > 0 {
+        format!("Diagnostics\n{UNSUPPORTED_DIAGNOSTIC_TOOLTIP}")
+    } else {
+        "Diagnostics".to_owned()
+    };
+    response.on_hover_text(tooltip);
     focused.and_then(|inner| inner.inner)
 }
 
-fn diagnostic_count_label(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
-    ui.horizontal(|ui| {
+fn diagnostic_count_label(
+    ui: &mut Ui,
+    icon: Icon,
+    text: &str,
+    color: Color32,
+    tooltip: Option<&str>,
+) {
+    let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(design::icon_text(icon, 13.0).color(color));
         ui.label(
@@ -4315,6 +4532,9 @@ fn diagnostic_count_label(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
                 .color(design::active().text_secondary),
         );
     });
+    if let Some(tooltip) = tooltip {
+        row.response.on_hover_text(tooltip);
+    }
 }
 
 fn snap_label(step: Option<Length>) -> String {
@@ -5510,7 +5730,8 @@ fn diagnostics_panel(
         let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("{unsupported} unsupported"));
+            ui.label(format!("{unsupported} unsupported"))
+                .on_hover_text(UNSUPPORTED_DIAGNOSTIC_TOOLTIP);
             ui.label(format!("{warnings} warnings"));
             ui.label(format!("{info} info"));
         });

@@ -70,6 +70,18 @@ pub(crate) enum Icon {
     More,
     Pin,
     Eye,
+    Level,
+    Standards,
+    Room,
+    Roof,
+    Ceiling,
+    Floor,
+    Corner,
+    Dimension,
+    System,
+    Material,
+    Furnishing,
+    MepObject,
     // Status bar.
     Snap,
     LayoutGrid,
@@ -127,6 +139,18 @@ impl Icon {
             Icon::More => '\u{e0b6}',          // ellipsis
             Icon::Pin => '\u{e259}',           // pin
             Icon::Eye => '\u{e0ba}',           // eye
+            Icon::Level => '\u{e0ff}',         // layout-grid
+            Icon::Standards => '\u{e086}',     // clipboard-list
+            Icon::Room => '\u{e098}',          // columns-2
+            Icon::Roof => '\u{e0f3}',          // hexagon
+            Icon::Ceiling => '\u{e431}',       // panel-right
+            Icon::Floor => '\u{e0ff}',         // layout-grid
+            Icon::Corner => '\u{e192}',        // triangle
+            Icon::Dimension => '\u{e14b}',     // ruler
+            Icon::System => '\u{e245}',        // settings-2
+            Icon::Material => '\u{e460}',      // list-filter
+            Icon::Furnishing => '\u{e061}',    // box
+            Icon::MepObject => '\u{e245}',     // settings-2
             Icon::Snap => '\u{e2b5}',          // magnet
             Icon::LayoutGrid => '\u{e0ff}',    // layout-grid
             Icon::LayoutColumns => '\u{e098}', // columns-2

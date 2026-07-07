@@ -130,23 +130,38 @@ fn capture_ui_shot_deck() {
     harness.run_ok();
 
     // Selection states (back in the Frame tab): wall, opening, corner — the
-    // three inspector layouts. Tree row labels are unique in the AccessKit
-    // tree, so clicks are unambiguous.
+    // three inspector layouts. Select by state so the deck stays deterministic
+    // even when tree names intentionally match canvas labels.
     select_tab(&mut harness, actions::WorkflowTab::Frame);
     harness.run_ok();
-    for (label, name) in [
-        ("Wall segment: Back wall", "wall-selected"),
-        ("Window: Back left window", "opening-selected"),
-        ("Corner: Back left corner", "corner-selected"),
+    let back_wall_index = harness
+        .state()
+        .model
+        .walls
+        .iter()
+        .position(|wall| wall.id.0 == "wall-back")
+        .expect("demo shell has a back wall");
+    for (selection, name) in [
+        (Selection::Wall, "wall-selected"),
+        (
+            Selection::Opening("opening-back-left-window".to_owned()),
+            "opening-selected",
+        ),
+        (
+            Selection::Join("join-back-left".to_owned()),
+            "corner-selected",
+        ),
     ] {
-        harness.get_by_label(label).click();
+        harness.state_mut().selected_wall = back_wall_index;
+        harness.state_mut().selected = selection;
         shot(&mut harness, &dir, &mut index, name);
     }
     harness.state_mut().selected = Selection::None;
     shot(&mut harness, &dir, &mut index, "empty-selection");
 
     // Views, with the back wall selected for the elevation.
-    harness.get_by_label("Wall segment: Back wall").click();
+    harness.state_mut().selected_wall = back_wall_index;
+    harness.state_mut().selected = Selection::Wall;
     harness.run_ok();
     for (mode, name) in [
         (ViewportMode::Elevation, "wall-elevation-view"),
@@ -186,7 +201,15 @@ fn capture_ui_shot_deck() {
     let mut dark = shots_harness(design::studio_dark());
     dark.run_ok();
     shot(&mut dark, &dir, &mut index, "dark-frame-shell");
-    dark.get_by_label("Wall segment: Back wall").click();
+    let dark_back_wall_index = dark
+        .state()
+        .model
+        .walls
+        .iter()
+        .position(|wall| wall.id.0 == "wall-back")
+        .expect("demo shell has a back wall");
+    dark.state_mut().selected_wall = dark_back_wall_index;
+    dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
 
     println!(
