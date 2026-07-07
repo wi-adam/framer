@@ -117,3 +117,78 @@ pub(crate) mod control {
     /// Inline / status icon glyph size.
     pub(crate) const INLINE_ICON: f32 = 14.0;
 }
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::Color32;
+
+    use super::super::palette::{studio_dark, studio_light};
+    use super::*;
+
+    const MIN_UI_TEXT_CONTRAST: f32 = 3.0;
+
+    #[test]
+    fn text_and_surface_token_pairings_keep_minimum_contrast() {
+        for (theme_name, theme) in [("light", studio_light()), ("dark", studio_dark())] {
+            for (pair_name, foreground, background) in token_pairings(theme) {
+                let ratio = contrast_ratio(foreground, background);
+                assert!(
+                    ratio >= MIN_UI_TEXT_CONTRAST,
+                    "{theme_name} {pair_name} contrast {ratio:.2} should be at least {MIN_UI_TEXT_CONTRAST:.1}"
+                );
+            }
+        }
+    }
+
+    fn token_pairings(theme: Theme) -> Vec<(&'static str, Color32, Color32)> {
+        vec![
+            ("text on panel", theme.text, theme.panel),
+            ("secondary text on panel", theme.text_secondary, theme.panel),
+            ("muted text on panel", theme.text_muted, theme.panel),
+            ("text on toolbar", theme.text, theme.toolbar),
+            (
+                "secondary text on toolbar",
+                theme.text_secondary,
+                theme.toolbar,
+            ),
+            ("text on control", theme.text, theme.control),
+            (
+                "secondary text on control",
+                theme.text_secondary,
+                theme.control,
+            ),
+            ("text on field", theme.text, theme.field),
+            ("secondary text on field", theme.text_secondary, theme.field),
+            ("text on overlay", theme.text, theme.overlay),
+            (
+                "secondary text on overlay",
+                theme.text_secondary,
+                theme.overlay,
+            ),
+            ("accent text on accent", theme.text_on_accent, theme.accent),
+            ("danger text on panel", theme.danger, theme.panel),
+            ("warning text on panel", theme.warning, theme.panel),
+        ]
+    }
+
+    fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+        let lighter = relative_luminance(a).max(relative_luminance(b));
+        let darker = relative_luminance(a).min(relative_luminance(b));
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    fn relative_luminance(color: Color32) -> f32 {
+        0.2126 * linear_channel(color.r())
+            + 0.7152 * linear_channel(color.g())
+            + 0.0722 * linear_channel(color.b())
+    }
+
+    fn linear_channel(value: u8) -> f32 {
+        let channel = f32::from(value) / 255.0;
+        if channel <= 0.03928 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+}

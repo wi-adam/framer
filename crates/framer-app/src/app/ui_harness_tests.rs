@@ -187,6 +187,29 @@ fn header_owns_non_modeling_command_surfaces() {
     }
 }
 
+#[test]
+fn header_menus_and_tree_section_headings_render_on_default_theme() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+
+    for label in ["Project", "Examples"] {
+        assert!(
+            harness
+                .query_all_by_role_and_label(Role::Button, label)
+                .next()
+                .is_some(),
+            "the header should expose '{label}' as a visible menu button"
+        );
+    }
+
+    assert!(
+        harness.query_all_by_label("Wall joins").next().is_some(),
+        "the default light model tree should render the Wall joins section heading"
+    );
+}
+
 /// The workflow command strip is tabbed by process instead of exposing every
 /// authoring button in one permanent row.
 #[test]

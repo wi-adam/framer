@@ -13,7 +13,10 @@ pub(crate) mod widgets;
 
 use std::cell::Cell;
 
-use eframe::egui::{self, Context, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Vec2};
+use eframe::{
+    Storage,
+    egui::{self, Context, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Vec2},
+};
 
 pub(crate) use icons::{Icon, icon_font, icon_text};
 pub(crate) use palette::{studio_dark, studio_light};
@@ -22,6 +25,10 @@ pub(crate) use tokens::{Theme, control, radius, space, text_size};
 thread_local! {
     static ACTIVE: Cell<Theme> = const { Cell::new(palette::studio_light()) };
 }
+
+const THEME_STORAGE_KEY: &str = "framer.theme";
+const LIGHT_THEME_STORAGE_VALUE: &str = "light";
+const DARK_THEME_STORAGE_VALUE: &str = "dark";
 
 /// The currently active theme.
 pub(crate) fn active() -> Theme {
@@ -45,6 +52,20 @@ pub(crate) fn install(ctx: &Context, theme: Theme) {
     set_theme(ctx, theme);
 }
 
+/// Restore the persisted theme, defaulting to light when storage is absent or stale.
+pub(crate) fn theme_from_storage(storage: Option<&dyn Storage>) -> Theme {
+    storage
+        .and_then(|storage| storage.get_string(THEME_STORAGE_KEY))
+        .as_deref()
+        .and_then(theme_from_storage_value)
+        .unwrap_or_else(studio_light)
+}
+
+/// Persist the active theme for the next eframe launch.
+pub(crate) fn save_theme(storage: &mut dyn Storage) {
+    storage.set_string(THEME_STORAGE_KEY, theme_storage_value(active()).to_owned());
+}
+
 /// Switch the active theme and rebuild the egui style from it.
 pub(crate) fn set_theme(ctx: &Context, theme: Theme) {
     set_active(theme);
@@ -66,6 +87,13 @@ pub(crate) fn toggle_theme(ctx: &Context) -> Theme {
 /// base so unspecified surfaces (popups, scrollbars, shadows) are variant-correct,
 /// then overrides with our tokens.
 fn configure_style(ctx: &Context, theme: Theme) {
+    let egui_theme = if theme.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(egui_theme);
+
     let mut style = (*ctx.global_style()).clone();
 
     style.visuals = if theme.dark {
@@ -103,7 +131,7 @@ fn configure_style(ctx: &Context, theme: Theme) {
 
     let v = &mut style.visuals;
     v.panel_fill = theme.app_bg;
-    v.window_fill = theme.panel;
+    v.window_fill = theme.overlay;
     v.window_stroke = theme.divider_stroke();
     v.extreme_bg_color = theme.canvas;
     v.faint_bg_color = theme.chrome_alt;
@@ -155,5 +183,85 @@ fn configure_style(ctx: &Context, theme: Theme) {
 
     v.widgets.open = v.widgets.hovered;
 
+    ctx.set_style_of(egui_theme, style.clone());
     ctx.set_global_style(style);
+    ctx.request_repaint();
+}
+
+fn theme_from_storage_value(value: &str) -> Option<Theme> {
+    match value {
+        DARK_THEME_STORAGE_VALUE => Some(studio_dark()),
+        LIGHT_THEME_STORAGE_VALUE => Some(studio_light()),
+        _ => None,
+    }
+}
+
+fn theme_storage_value(theme: Theme) -> &'static str {
+    if theme.dark {
+        DARK_THEME_STORAGE_VALUE
+    } else {
+        LIGHT_THEME_STORAGE_VALUE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MemoryStorage {
+        values: HashMap<String, String>,
+    }
+
+    impl Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.values.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.values.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.values.remove(key);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn restores_theme_from_storage() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(THEME_STORAGE_KEY, DARK_THEME_STORAGE_VALUE.to_owned());
+
+        assert_eq!(theme_from_storage(Some(&storage)), studio_dark());
+
+        storage.set_string(THEME_STORAGE_KEY, LIGHT_THEME_STORAGE_VALUE.to_owned());
+        assert_eq!(theme_from_storage(Some(&storage)), studio_light());
+    }
+
+    #[test]
+    fn invalid_or_missing_theme_storage_defaults_to_light() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(THEME_STORAGE_KEY, "system".to_owned());
+
+        assert_eq!(theme_from_storage(Some(&storage)), studio_light());
+        assert_eq!(theme_from_storage(None), studio_light());
+    }
+
+    #[test]
+    fn saves_active_theme_to_storage() {
+        let ctx = Context::default();
+        install(&ctx, studio_dark());
+        let mut storage = MemoryStorage::default();
+
+        save_theme(&mut storage);
+
+        assert_eq!(
+            storage.get_string(THEME_STORAGE_KEY).as_deref(),
+            Some(DARK_THEME_STORAGE_VALUE)
+        );
+    }
 }

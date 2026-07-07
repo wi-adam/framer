@@ -35,7 +35,7 @@ pub(crate) const fn studio_light() -> Theme {
         accent: rgb(43, 124, 222),
         accent_soft: rgb(219, 233, 252),
         success: rgb(38, 158, 94),
-        warning: rgb(211, 152, 41),
+        warning: rgb(180, 125, 24),
         danger: rgb(212, 74, 68),
 
         divider: rgb(224, 228, 232),

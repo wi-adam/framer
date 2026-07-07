@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
-eframe.workspace = true
+eframe = { workspace = true, features = ["persistence"] }
 env_logger.workspace = true
 framer-core.workspace = true
 framer-library.workspace = true
