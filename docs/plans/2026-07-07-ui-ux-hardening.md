@@ -25,10 +25,16 @@ user-facing severity. Each PR leaves the workspace green.
   `cargo fmt --all -- --check` ·
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` ·
   `cargo test --workspace --all-features --locked`.
-- **Visual verification:** GUI screenshots only work against the *installed* app.
-  Use the `.claude/skills/install-app` skill (`scripts/install-app.sh`), then drive
-  `~/Applications/Framer.app` (bundle id `dev.framer.app`). `cargo run` windows are
-  invisible to screenshot tooling.
+- **Visual verification:** prefer `scripts/ui-shots.sh` (the `ui-shots` skill) —
+  it renders an 18-frame deck of the real UI off-screen to `target/ui-shots/*.png`
+  in ~15 s, covering every workflow tab, view, selection state, the palette, the
+  Project menu, and dark shots. Where a task below says "screenshot", regenerate
+  the deck and read the relevant PNG; add states to
+  `crates/framer-app/src/app/ui_shots_tests.rs` if the deck doesn't cover what you
+  changed. Only *interactive* checks (drags, hover, live toggling, camera feel)
+  need the `.claude/skills/install-app` skill (`scripts/install-app.sh`, then drive
+  `~/Applications/Framer.app`, bundle id `dev.framer.app`; `cargo run` windows are
+  invisible to screenshot tooling).
 - Headless UI tests live in `crates/framer-app/src/app/ui_harness_tests.rs`
   (egui_kittest). Gotchas: build the UI through `FramerApp::ui_root`, and warm up
   fonts before asserting on text (see existing tests for the pattern).
@@ -94,9 +100,11 @@ back; (e) the theme choice does not persist across launches.
   flips. Setting `ctx.set_theme(...)` / pinning `ThemePreference` to our choice is an
   acceptable mechanism.
   - Files: `crates/framer-app/src/app/design/mod.rs`
-  - Verify: install-app; click the sun/moon toggle in the header; the whole app
-    (panels, canvas chrome, menus) must switch dark and back. This same fix likely
-    resolves the translucent-popup symptom — check the Project menu after it.
+  - Verify: the ui-shots dark deck (`17-dark-frame-shell.png`,
+    `18-dark-wall-selected.png`) currently reproduces the bug exactly — dark
+    header, white panels, phantom "Wall joins" header — so iterate against it;
+    after the fix those shots must render fully dark. Then install-app once to
+    confirm the *live* toggle flips both ways.
   - Commit: `fix(app): make theme switching restyle the whole app`
 - **Task 1.2** — Opaque, elevated popups. After 1.1, open Project menu, Examples
   menu, the Level dropdowns, snap combo, layers popover, and command palette on both
@@ -105,8 +113,11 @@ back; (e) the theme choice does not persist across launches.
   popup/menu fill wiring in `configure_style` (`window_fill`, menu styling) rather
   than per-call-site hacks.
   - Files: `crates/framer-app/src/app/design/mod.rs`
-  - Verify: install-app; screenshot each popup over the canvas; no underlying text
-    legible through the popup body.
+  - Verify: ui-shots (`15-command-palette.png`, `16-project-menu.png`, dark shots)
+    show opaque popups — note kittest already renders the Project menu opaque
+    while the live app shows bleed-through, so the live symptom likely involves
+    eframe window compositing/transparency; confirm the final result with
+    install-app, which ui-shots cannot substitute for here.
   - Commit: `fix(app): opaque elevated menus and popups`
 - **Task 1.3** — One palette per widget in the forced-dark header. `app_header`
   (`panels.rs:33`) builds `head = design::studio_dark()` and passes it into helpers;
@@ -117,18 +128,19 @@ back; (e) the theme choice does not persist across launches.
   `design/widgets.rs`).
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/design/widgets.rs`
-  - Verify: on light theme, "Project" and "Examples" are crisply legible in the dark
-    header; also on dark theme. Add a `ui_harness_tests.rs` case asserting the header
-    contains visible "Project"/"Examples" button labels.
+  - Verify: ui-shots `01-frame-shell.png` (and the dark shots) show "Project" and
+    "Examples" crisply legible in the dark header. Add a `ui_harness_tests.rs`
+    case asserting the header contains visible "Project"/"Examples" button labels.
   - Commit: `fix(app): readable header menu buttons on both themes`
 - **Task 1.4** — Diagnose and fix the never-rendering section labels: "Wall joins",
   "Systems" (`panel_subheader`, `panels.rs:3458`, used in `model_tree`) and the
   "Join point" heading in the corner inspector. Symptom is theme-toggle-history
   dependent, so suspect stale/wrongly-sourced color or a caching effect rather than
-  conditional logic — but verify by reproducing first (fresh launch, light theme,
-  select a corner: all three labels missing).
+  conditional logic — but verify by reproducing first (the ui-shots light deck:
+  `01-frame-shell.png` should show "Wall joins" above the corners and
+  `10-corner-selected.png` a "Join point" heading; today they're missing).
   - Files: `crates/framer-app/src/app/panels.rs` (+ wherever the root cause lives)
-  - Verify: fresh launch on light theme shows all three labels; add a
+  - Verify: ui-shots light deck shows all three labels; add a
     `ui_harness_tests.rs` case asserting "Wall joins" renders in the default state.
   - Commit: `fix(app): render tree and inspector section headers on light theme`
 - **Task 1.5** — Persist the theme choice via eframe storage (there is currently no
@@ -161,9 +173,10 @@ Plan-mode inspector.
   in 3D. Update it as the camera changes.
   - Files: `crates/framer-app/src/app/panels.rs`,
     `crates/framer-app/src/app/viewport/camera_2d.rs` (read-only accessor)
-  - Verify: install-app; zoom the plan (pinch/Cmd+scroll) and watch the percentage
-    change. Note: synthetic Cmd+scroll from screenshot tooling pans instead of
-    zooming — verify zoom by hand or via the accessor's unit test.
+  - Verify: unit-test the accessor (camera scale → displayed percentage); then
+    install-app and zoom the plan by hand (pinch/Cmd+scroll) to watch the readout
+    change — this one is inherently interactive. Note: synthetic Cmd+scroll from
+    screenshot tooling pans instead of zooming.
   - Commit: `fix(app): status-bar zoom reflects the real camera`
 - **Task 2.2** — Remove the hardcoded "Ready" status metric (`panels.rs:2789`) — the
   header save pill already owns app/file status — and drop the fake `Z 0.000 ft`
@@ -482,8 +495,9 @@ cargo test --workspace --all-features --locked
 ```
 
 Plus: GPU parity after PR 8 (`cargo test -p framer-app --test gpu_parity`), the
-markdown link check for PR 0, and a final install-app visual pass on both themes
-walking every workflow tab, every view tab, the menus, palette, popovers, and
-selection types. When done, update both specs' **Status**/**Last reviewed** and
+markdown link check for PR 0, a `scripts/ui-shots.sh` deck review after every PR
+(both themes are in the deck), and one final install-app *interactive* pass at the
+end — drags, hover, snapping, live theme toggle, camera feel — which the deck
+cannot cover. When done, update both specs' **Status**/**Last reviewed** and
 `docs/code-map.md` where module responsibilities moved (workspace switcher removal,
 diagnostics popover).
