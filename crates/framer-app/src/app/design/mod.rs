@@ -264,4 +264,24 @@ mod tests {
             Some(DARK_THEME_STORAGE_VALUE)
         );
     }
+
+    #[test]
+    fn install_pins_egui_theme_and_per_theme_style_slot() {
+        let ctx = Context::default();
+        install(&ctx, studio_light());
+
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Light).visuals.window_fill,
+            studio_light().overlay,
+        );
+
+        set_theme(&ctx, studio_dark());
+
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark).visuals.window_fill,
+            studio_dark().overlay,
+        );
+    }
 }
