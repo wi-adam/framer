@@ -131,25 +131,37 @@ impl FramerApp {
         let (response, _) = MenuButton::from_button(widgets::header_menu_button("Project", head))
             .ui(ui, |ui| {
                 ui.set_min_width(176.0);
-                if header_menu_action(ui, ActionId::NewProject, true).clicked() {
+                if header_menu_action(ui, ActionId::NewProject, true, None).clicked() {
                     self.new_project();
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::OpenProject, true).clicked() {
+                if header_menu_action(ui, ActionId::OpenProject, true, None).clicked() {
                     self.load_project_file();
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::SaveProject, true).clicked() {
+                if header_menu_action(ui, ActionId::SaveProject, true, None).clicked() {
                     self.save_project_file();
                     ui.close();
                 }
                 ui.separator();
-                if header_menu_action(ui, ActionId::ExportArtifacts, can_export).clicked() {
+                if header_menu_action(
+                    ui,
+                    ActionId::ExportArtifacts,
+                    can_export,
+                    self.action_disabled_reason(ActionId::ExportArtifacts),
+                )
+                .clicked()
+                {
                     self.export_current_artifacts();
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::ExportComplianceReport, can_export_compliance)
-                    .clicked()
+                if header_menu_action(
+                    ui,
+                    ActionId::ExportComplianceReport,
+                    can_export_compliance,
+                    self.action_disabled_reason(ActionId::ExportComplianceReport),
+                )
+                .clicked()
                 {
                     self.export_compliance_report();
                     ui.close();
@@ -164,11 +176,11 @@ impl FramerApp {
         let (response, _) = MenuButton::from_button(widgets::header_menu_button("Examples", head))
             .ui(ui, |ui| {
                 ui.set_min_width(176.0);
-                if header_menu_action(ui, ActionId::LoadShellDemo, true).clicked() {
+                if header_menu_action(ui, ActionId::LoadShellDemo, true, None).clicked() {
                     self.reset_demo();
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::LoadWallDemo, true).clicked() {
+                if header_menu_action(ui, ActionId::LoadWallDemo, true, None).clicked() {
                     self.reset_wall_demo();
                     ui.close();
                 }
@@ -403,7 +415,14 @@ impl FramerApp {
                 ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for action in matches {
                         let enabled = self.action_enabled(action.id);
-                        if command_search_action(ui, action, enabled).clicked() {
+                        if command_search_action(
+                            ui,
+                            action,
+                            enabled,
+                            self.action_disabled_reason(action.id),
+                        )
+                        .clicked()
+                        {
                             execute = Some(action.id);
                         }
                     }
@@ -3066,17 +3085,23 @@ fn header_command_button(
     );
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
-    response.on_hover_text(tooltip_override.unwrap_or(action.tooltip))
+    let tooltip = tooltip_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| action_tooltip(*action, None));
+    action_response_with_tooltip(response, enabled, tooltip)
 }
 
-fn header_menu_action(ui: &mut Ui, id: ActionId, enabled: bool) -> Response {
+fn header_menu_action(
+    ui: &mut Ui,
+    id: ActionId,
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) -> Response {
     let action = actions::metadata(id);
-    let response = ui
-        .add_enabled(enabled, egui::Button::new(action.label))
-        .on_hover_text(action.tooltip);
+    let response = ui.add_enabled(enabled, egui::Button::new(action.label));
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
-    response
+    action_response_with_tooltip(response, enabled, action_tooltip(*action, disabled_reason))
 }
 
 fn strong_label(ui: &mut Ui, text: &str) {
@@ -3213,53 +3238,17 @@ fn should_capture_edit_base(
     !is_pending && (pointer_down || any_click || text_focused)
 }
 
-fn action_owner_label(owner: actions::ActionOwner) -> &'static str {
-    match owner {
-        actions::ActionOwner::Project => "Project",
-        actions::ActionOwner::Edit => "Edit",
-        actions::ActionOwner::Samples => "Examples",
-        actions::ActionOwner::Workspace => "Workspace",
-        actions::ActionOwner::View => "View",
-        actions::ActionOwner::Structure => "Structure",
-        actions::ActionOwner::Openings => "Openings",
-        actions::ActionOwner::Roofs => "Roofs",
-        actions::ActionOwner::Dimensions => "Dimensions",
-        actions::ActionOwner::Plan => "Plan",
-    }
-}
-
-fn action_route_label(action: actions::ActionMetadata) -> &'static str {
-    match action.command_strip.map(|route| route.presentation) {
-        Some(actions::CommandPresentation::TopLevel) => "Workflow strip",
-        Some(actions::CommandPresentation::FlyoutVariant { flyout }) => flyout,
-        None => match action.primary_surface {
-            actions::CommandSurface::AppQuickAccess => "App header",
-            actions::CommandSurface::ProjectMenu => "Project menu",
-            actions::CommandSurface::ExamplesPicker => "Examples",
-            actions::CommandSurface::WorkspaceViewBar => "Workspace bar",
-            actions::CommandSurface::WorkflowCommandStrip => "Workflow strip",
-            actions::CommandSurface::CommandStripFlyout => "Flyout",
-            actions::CommandSurface::ContextToolbar => "Context toolbar",
-            actions::CommandSurface::ToolOptionsStrip => "Tool options",
-            actions::CommandSurface::Inspector => "Inspector",
-            actions::CommandSurface::PlanWorkspace => "Plan workspace",
-            actions::CommandSurface::CommandSearch => "Command search",
-            actions::CommandSurface::Shortcut => "Shortcut",
-        },
-    }
-}
-
 fn command_search_matches(action: actions::ActionMetadata, lowercase_query: &str) -> bool {
     if lowercase_query.is_empty() {
         return true;
     }
 
-    let route = action_route_label(action);
+    let shortcut = action.shortcut().unwrap_or_default();
     [
         action.label,
         action.tooltip,
-        action_owner_label(action.owner),
-        route,
+        action.search_category(),
+        shortcut,
     ]
     .into_iter()
     .any(|value| contains_ascii_case_insensitive(value, lowercase_query))
@@ -3277,28 +3266,55 @@ fn contains_ascii_case_insensitive(haystack: &str, lowercase_needle: &str) -> bo
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn command_search_action(ui: &mut Ui, action: actions::ActionMetadata, enabled: bool) -> Response {
-    let label = format!(
-        "{}    {} / {}",
-        action.label,
-        action_owner_label(action.owner),
-        action_route_label(action)
+fn command_search_action(
+    ui: &mut Ui,
+    action: actions::ActionMetadata,
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) -> Response {
+    let label = command_search_label(action);
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(label).min_size(Vec2::new(ui.available_width(), 30.0)),
     );
-    let response = ui
-        .add_enabled(
-            enabled,
-            egui::Button::new(label).min_size(Vec2::new(ui.available_width(), 30.0)),
-        )
-        .on_hover_text(action.tooltip);
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
-    response
+    action_response_with_tooltip(response, enabled, action_tooltip(action, disabled_reason))
 }
 
 fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) -> Response {
     let action = actions::metadata(id);
-    widgets::tool_button(ui, action.icon, action.label, active, enabled)
-        .on_hover_text(action.tooltip)
+    let response = widgets::tool_button(ui, action.icon, action.label, active, enabled);
+    action_response_with_tooltip(response, enabled, action_tooltip(*action, None))
+}
+
+fn command_search_label(action: actions::ActionMetadata) -> String {
+    let mut label = format!("{} — {}", action.label, action.search_category());
+    if let Some(shortcut) = action.shortcut() {
+        label.push(' ');
+        label.push_str(shortcut);
+    }
+    label
+}
+
+fn action_tooltip(action: actions::ActionMetadata, disabled_reason: Option<&str>) -> String {
+    let mut tooltip = disabled_reason.unwrap_or(action.tooltip).to_owned();
+    if disabled_reason.is_none()
+        && let Some(shortcut) = action.shortcut()
+    {
+        tooltip.push_str(" (");
+        tooltip.push_str(shortcut);
+        tooltip.push(')');
+    }
+    tooltip
+}
+
+fn action_response_with_tooltip(response: Response, enabled: bool, tooltip: String) -> Response {
+    if enabled {
+        response.on_hover_text(tooltip)
+    } else {
+        response.on_disabled_hover_text(tooltip)
+    }
 }
 
 fn command_flyout_button(
@@ -3327,12 +3343,10 @@ fn command_flyout_button(
 
 fn flyout_action(ui: &mut Ui, id: ActionId) -> Response {
     let action = actions::metadata(id);
-    let response = ui
-        .add(egui::Button::new(action.label))
-        .on_hover_text(action.tooltip);
+    let response = ui.add(egui::Button::new(action.label));
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, action.label));
-    response
+    action_response_with_tooltip(response, true, action_tooltip(*action, None))
 }
 
 const WORKFLOW_TABS: &[WorkflowTab] = &[
@@ -6470,6 +6484,57 @@ mod tests {
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults,
     };
+
+    #[test]
+    fn command_search_labels_use_categories_and_shortcuts() {
+        assert_eq!(
+            command_search_label(*actions::metadata(ActionId::NewProject)),
+            "New — Project"
+        );
+        assert_eq!(
+            command_search_label(*actions::metadata(ActionId::Undo)),
+            "Undo — Edit ⌘Z"
+        );
+        assert_eq!(
+            command_search_label(*actions::metadata(ActionId::ToolWall)),
+            "Wall — Structure W"
+        );
+
+        for action in actions::ACTIONS {
+            let label = command_search_label(*action);
+            assert!(
+                !label.contains("App header") && !label.contains("Workflow strip"),
+                "command search label should not expose internal routes: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_search_matching_ignores_internal_surface_names() {
+        assert!(!command_search_matches(
+            *actions::metadata(ActionId::NewProject),
+            "app header"
+        ));
+        assert!(command_search_matches(
+            *actions::metadata(ActionId::NewProject),
+            "project"
+        ));
+    }
+
+    #[test]
+    fn action_tooltips_append_shortcuts_or_disabled_reason() {
+        assert_eq!(
+            action_tooltip(*actions::metadata(ActionId::ToolWall), None),
+            "Draw walls in the plan view (W)"
+        );
+        assert_eq!(
+            action_tooltip(
+                *actions::metadata(ActionId::ExportArtifacts),
+                Some("Available in the Plan workspace"),
+            ),
+            "Available in the Plan workspace"
+        );
+    }
 
     #[test]
     fn captures_edit_base_on_click_release_frame() {

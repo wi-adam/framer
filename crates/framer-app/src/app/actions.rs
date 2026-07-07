@@ -58,6 +58,23 @@ pub(crate) enum ActionOwner {
     Plan,
 }
 
+impl ActionOwner {
+    pub(crate) const fn search_category(self) -> &'static str {
+        match self {
+            Self::Project => "Project",
+            Self::Edit => "Edit",
+            Self::Samples => "Examples",
+            Self::Workspace => "Workspace",
+            Self::View => "View",
+            Self::Structure => "Structure",
+            Self::Openings => "Openings",
+            Self::Roofs => "Roofs",
+            Self::Dimensions => "Dimensions",
+            Self::Plan => "Plan",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandSurface {
     AppQuickAccess,
@@ -120,6 +137,50 @@ pub(crate) struct ActionMetadata {
     pub(crate) mutates_authored_intent: bool,
 }
 
+impl ActionMetadata {
+    pub(crate) const fn search_category(self) -> &'static str {
+        self.owner.search_category()
+    }
+
+    pub(crate) const fn shortcut(self) -> Option<&'static str> {
+        match self.id {
+            ActionId::CommandSearch => Some("⌘K"),
+            ActionId::Undo => Some("⌘Z"),
+            ActionId::Redo => Some("⌘⇧Z"),
+            ActionId::ToolWall => Some("W"),
+            ActionId::ToolRoom => Some("R"),
+            ActionId::ToolCeiling => Some("C"),
+            ActionId::ToolVault => Some("V"),
+            ActionId::ToolFloor => Some("F"),
+            ActionId::DeleteSelection => Some("Del"),
+            ActionId::ToolDimensionLinear => Some("D"),
+            ActionId::NewProject
+            | ActionId::OpenProject
+            | ActionId::SaveProject
+            | ActionId::ExportArtifacts
+            | ActionId::ExportComplianceReport
+            | ActionId::LoadShellDemo
+            | ActionId::LoadWallDemo
+            | ActionId::WorkspaceDesign
+            | ActionId::WorkspacePlan
+            | ActionId::ViewPlan
+            | ActionId::ViewElevation
+            | ActionId::ViewRoof
+            | ActionId::View3d
+            | ActionId::ViewRender
+            | ActionId::AddDoor
+            | ActionId::AddWindow
+            | ActionId::AddGarageDoor
+            | ActionId::AddGableRoof
+            | ActionId::AddShedRoof
+            | ActionId::AddHipRoof
+            | ActionId::DimensionKind
+            | ActionId::DimensionAxis
+            | ActionId::ToggleSection => None,
+        }
+    }
+}
+
 const SEARCH: &[CommandSurface] = &[CommandSurface::CommandSearch];
 const SEARCH_SHORTCUT: &[CommandSurface] =
     &[CommandSurface::CommandSearch, CommandSurface::Shortcut];
@@ -149,7 +210,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::CommandSearch,
         label: "Commands",
         icon: Icon::Search,
-        tooltip: "Open command search (Cmd/Ctrl+K)",
+        tooltip: "Open command search",
         owner: ActionOwner::Workspace,
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -336,7 +397,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolWall,
         label: "Wall",
         icon: Icon::Wall,
-        tooltip: "Draw walls in the plan view (W)",
+        tooltip: "Draw walls in the plan view",
         owner: ActionOwner::Structure,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -351,7 +412,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolRoom,
         label: "Room",
         icon: Icon::Shell,
-        tooltip: "Place a room inside an enclosed area (R)",
+        tooltip: "Place a room inside an enclosed area",
         owner: ActionOwner::Structure,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -366,7 +427,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolCeiling,
         label: "Ceiling",
         icon: Icon::PanelRight,
-        tooltip: "Place a flat ceiling inside an enclosed area (C)",
+        tooltip: "Place a flat ceiling inside an enclosed area",
         owner: ActionOwner::Structure,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -381,7 +442,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolVault,
         label: "Vault",
         icon: Icon::Angular,
-        tooltip: "Vault an enclosed area: two opposing sloped ceilings meeting at a ridge (V)",
+        tooltip: "Vault an enclosed area: two opposing sloped ceilings meeting at a ridge",
         owner: ActionOwner::Structure,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -396,7 +457,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolFloor,
         label: "Floor",
         icon: Icon::LayoutGrid,
-        tooltip: "Place a floor deck inside an enclosed area (F)",
+        tooltip: "Place a floor deck inside an enclosed area",
         owner: ActionOwner::Structure,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -411,7 +472,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::DeleteSelection,
         label: "Delete",
         icon: Icon::Delete,
-        tooltip: "Delete the selected object (Del)",
+        tooltip: "Delete the selected object",
         owner: ActionOwner::Edit,
         primary_surface: CommandSurface::ContextToolbar,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -518,7 +579,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ToolDimensionLinear,
         label: "Linear",
         icon: Icon::Linear,
-        tooltip: "Place a wall dimension (D)",
+        tooltip: "Place a wall dimension",
         owner: ActionOwner::Dimensions,
         primary_surface: CommandSurface::WorkflowCommandStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
@@ -719,6 +780,36 @@ mod tests {
     }
 
     #[test]
+    fn actions_have_search_categories_and_real_shortcut_labels() {
+        for action in ACTIONS {
+            assert!(
+                !action.search_category().trim().is_empty(),
+                "{:?} must have a command-search category",
+                action.id
+            );
+        }
+
+        for (id, shortcut) in [
+            (ActionId::CommandSearch, "⌘K"),
+            (ActionId::Undo, "⌘Z"),
+            (ActionId::Redo, "⌘⇧Z"),
+            (ActionId::ToolWall, "W"),
+            (ActionId::ToolRoom, "R"),
+            (ActionId::ToolCeiling, "C"),
+            (ActionId::ToolVault, "V"),
+            (ActionId::ToolFloor, "F"),
+            (ActionId::DeleteSelection, "Del"),
+            (ActionId::ToolDimensionLinear, "D"),
+        ] {
+            assert_eq!(
+                metadata(id).shortcut(),
+                Some(shortcut),
+                "{id:?} shortcut should match the handled keyboard path"
+            );
+        }
+    }
+
+    #[test]
     fn command_strip_actions_have_complete_routes() {
         for action in ACTIONS {
             match action.primary_surface {
@@ -746,6 +837,20 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn command_strip_actions_have_non_empty_tooltips() {
+        for action in ACTIONS
+            .iter()
+            .filter(|action| action.command_strip.is_some())
+        {
+            assert!(
+                !action.tooltip.trim().is_empty(),
+                "{:?} must show a command-strip tooltip",
+                action.id
+            );
         }
     }
 
