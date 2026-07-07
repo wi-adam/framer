@@ -4,12 +4,14 @@ use eframe::egui::{
 };
 use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
+#[cfg(test)]
+use super::WorkspaceMode;
 use super::actions::{self, ActionId};
 use super::draw_wall::SnapResult;
 use super::labels::{dimension_axis_label, dimension_kind_label};
 #[cfg(test)]
 use super::model_edit::OpeningEditHandle;
-use super::{FramerApp, Selection, ViewClick, ViewportMode, WorkspaceMode, design, theme};
+use super::{FramerApp, Selection, ViewClick, ViewportMode, design, theme};
 
 mod camera_2d;
 pub(super) use camera_2d::View2dState;
@@ -292,6 +294,7 @@ impl FramerApp {
         {
             self.canvas_context_toolbar(ui, anchor);
         }
+        self.status_toast_overlay(ui, canvas.left_top() + Vec2::new(12.0, 12.0));
     }
 
     fn canvas_view_controls(&mut self, ui: &mut Ui, canvas: Rect) {
@@ -431,8 +434,7 @@ impl FramerApp {
             .inner_margin(Margin::symmetric(6, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = design::space::LG;
-                    self.workspace_switcher(ui);
+                    ui.spacing_mut().item_spacing.x = design::space::SM;
                     self.viewport_tabs(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -443,18 +445,6 @@ impl FramerApp {
                     });
                 });
             });
-    }
-
-    fn workspace_switcher(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = design::space::XS;
-            if workspace_mode_tab(ui, WorkspaceMode::Design, self.workspace_mode).clicked() {
-                self.set_workspace_mode(WorkspaceMode::Design);
-            }
-            if workspace_mode_tab(ui, WorkspaceMode::Plan, self.workspace_mode).clicked() {
-                self.set_workspace_mode(WorkspaceMode::Plan);
-            }
-        });
     }
 
     fn viewport_tabs(&mut self, ui: &mut Ui) {
@@ -654,23 +644,6 @@ impl FramerApp {
             .map(|system| system.name.clone())
             .unwrap_or_else(|| "Wall system".to_owned())
     }
-}
-
-fn workspace_mode_tab(
-    ui: &mut Ui,
-    mode: WorkspaceMode,
-    active_mode: WorkspaceMode,
-) -> egui::Response {
-    let action_id = match mode {
-        WorkspaceMode::Design => ActionId::WorkspaceDesign,
-        WorkspaceMode::Plan => ActionId::WorkspacePlan,
-    };
-    let label = match mode {
-        WorkspaceMode::Design => "Design Workspace",
-        WorkspaceMode::Plan => "Plan Workspace",
-    };
-    let action = actions::metadata(action_id);
-    design::widgets::tab(ui, label, mode == active_mode).on_hover_text(action.tooltip)
 }
 
 fn view_tab(ui: &mut Ui, action_id: ActionId, label: &str, selected: bool) -> egui::Response {

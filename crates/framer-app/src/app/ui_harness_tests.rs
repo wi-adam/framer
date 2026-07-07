@@ -307,14 +307,16 @@ fn workflow_command_strip_routes_tabbed_panels() {
     let mut harness = demo_harness();
     harness.run();
 
-    for tab in [
-        "Design", "Frame", "Openings", "Roofs", "Annotate", "Inspect", "Plan",
-    ] {
+    for tab in ["Design", "Frame", "Openings", "Roofs", "Annotate", "Plan"] {
         assert!(
             harness.query_all_by_label(tab).next().is_some(),
             "workflow tab '{tab}' should be visible"
         );
     }
+    assert!(
+        harness.query_all_by_label("Inspect").next().is_none(),
+        "empty Inspect workflow tab should stay hidden until it owns commands"
+    );
 
     for old_group in ["WORKSPACE", "BUILD", "DIMENSION", "TOOLS"] {
         assert!(
@@ -393,7 +395,6 @@ fn workflow_command_strip_renders_metadata_top_level_actions() {
         actions::WorkflowTab::Openings,
         actions::WorkflowTab::Roofs,
         actions::WorkflowTab::Annotate,
-        actions::WorkflowTab::Inspect,
         actions::WorkflowTab::Plan,
     ] {
         harness
@@ -748,25 +749,26 @@ fn disabled_command_reasons_follow_enabled_context() {
     );
 }
 
-/// Workspace mode and view switching live in the workspace/view bar, not inside
-/// the workflow command strip's modeling panels.
+/// The visible workspace switch lives in the workflow strip's generated output
+/// tab, while view switching stays in the workspace/view bar.
 #[test]
 fn workspace_view_bar_owns_workspace_and_view_controls() {
     let mut harness = demo_harness();
     harness.run();
 
-    for label in [
-        "Design Workspace",
-        "Plan Workspace",
-        "Shell",
-        "Wall",
-        "Roof",
-        "3D",
-        "Render",
-    ] {
+    for label in ["Shell", "Wall", "Roof", "3D", "Render"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
             "workspace/view bar should expose '{label}'"
+        );
+    }
+    for removed_switcher in ["Design Workspace", "Plan Workspace"] {
+        assert!(
+            harness
+                .query_all_by_label(removed_switcher)
+                .next()
+                .is_none(),
+            "workspace/view bar should not expose the removed '{removed_switcher}' switcher"
         );
     }
     assert!(
@@ -774,7 +776,7 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
         "workflow command strip should no longer expose a View panel"
     );
 
-    harness.get_by_label("Plan Workspace").click();
+    harness.get_by_label("Plan").click();
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
     assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
@@ -790,7 +792,11 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
     harness.run();
     assert_eq!(harness.state().viewport_mode, ViewportMode::Elevation);
 
-    harness.get_by_label("Design Workspace").click();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "design workspace".to_owned();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
     harness.run();
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
     assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
@@ -810,6 +816,60 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
     harness.get_by_label("3D").click();
     harness.run_steps(1);
     assert_eq!(harness.state().viewport_mode, ViewportMode::Axonometric);
+}
+
+#[test]
+fn transient_status_toasts_do_not_reflow_main_panels() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let model_browser_y = harness.get_by_label("Model Browser").rect().top();
+    harness.state_mut().file_status = Some("Created new project".to_owned());
+    harness.state_mut().artifact_status = Some("Exported plan artifacts".to_owned());
+    harness.state_mut().dimension_status = Some("Pick two anchors, then place".to_owned());
+    harness.run();
+
+    assert!(
+        harness
+            .query_all_by_label("Created new project")
+            .next()
+            .is_some(),
+        "full file status should remain visible as a canvas toast"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Exported plan artifacts")
+            .next()
+            .is_some(),
+        "artifact status should remain visible as a canvas toast"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Pick two anchors, then place")
+            .next()
+            .is_some(),
+        "tool guidance should remain visible as a canvas toast"
+    );
+
+    let shifted_y = harness.get_by_label("Model Browser").rect().top();
+    assert!(
+        (shifted_y - model_browser_y).abs() <= 0.5,
+        "transient statuses must not change the main panel top edge"
+    );
+
+    harness.state_mut().status_toast_until = -1.0;
+    harness.run_steps(1);
+    assert!(
+        harness
+            .query_all_by_label("Created new project")
+            .next()
+            .is_none(),
+        "status toast should auto-dismiss without clearing the underlying status"
+    );
+    assert_eq!(
+        harness.state().file_status.as_deref(),
+        Some("Created new project")
+    );
 }
 
 /// Active tool settings live in the contextual options strip beside the canvas
