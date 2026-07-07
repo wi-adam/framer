@@ -156,6 +156,16 @@ fn join_label_visible(layers: ViewLayers, hovered: bool, selected: bool) -> bool
     layers.joins || hovered || selected
 }
 
+fn resolve_empty_canvas_click(
+    object_hit: bool,
+    over_element: bool,
+    clicked: bool,
+    pointer_in_drawing: bool,
+    tool_active: bool,
+) -> bool {
+    !object_hit && clicked && pointer_in_drawing && !over_element && !tool_active
+}
+
 /// Resolve a wall-endpoint drag to a snapped model point: ortho-locked to the
 /// wall's fixed far end, snapping to other walls' endpoints/midpoints/alignment
 /// (the moving node and its coincident neighbours are excluded).
@@ -976,14 +986,17 @@ pub(super) fn draw_project_plan(
         .or(clicked_mep)
         .or(clicked_wall)
         .or(clicked_room);
-    if object_click.is_some() {
+    let object_hit = object_click.is_some();
+    let empty_canvas_click = resolve_empty_canvas_click(
+        object_hit,
+        over_element,
+        response.clicked(),
+        pointer.is_some_and(|position| drawing.contains(position)),
+        draw_tool.active || region_tool_active,
+    );
+    if object_hit {
         object_click
-    } else if !draw_tool.active
-        && !region_tool_active
-        && response.clicked()
-        && pointer.is_some_and(|position| drawing.contains(position))
-        && !over_element
-    {
+    } else if empty_canvas_click {
         Some(ViewClick::EmptyCanvas)
     } else {
         None
@@ -1354,6 +1367,42 @@ mod tests {
 
         layers.joins = true;
         assert!(join_label_visible(layers, false, false));
+    }
+
+    #[test]
+    fn empty_canvas_click_resolution_requires_clear_canvas_click() {
+        let cases = [
+            (false, false, true, true, false, true, "clear canvas click"),
+            (true, false, true, true, false, false, "object hit wins"),
+            (
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                "hovered element blocks",
+            ),
+            (false, false, false, true, false, false, "unclicked canvas"),
+            (false, false, true, false, false, false, "outside drawing"),
+            (false, false, true, true, true, false, "active tool blocks"),
+        ];
+
+        for (object_hit, over_element, clicked, pointer_in_drawing, tool_active, expected, label) in
+            cases
+        {
+            assert_eq!(
+                resolve_empty_canvas_click(
+                    object_hit,
+                    over_element,
+                    clicked,
+                    pointer_in_drawing,
+                    tool_active,
+                ),
+                expected,
+                "{label}",
+            );
+        }
     }
 
     #[test]
