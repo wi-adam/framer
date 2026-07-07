@@ -188,7 +188,7 @@ fn header_owns_non_modeling_command_surfaces() {
 }
 
 #[test]
-fn header_menus_and_tree_section_headings_render_on_default_theme() {
+fn header_menus_and_tree_sections_are_reachable_on_default_theme() {
     use eframe::egui::accesskit::Role;
 
     let mut harness = demo_harness();
@@ -206,7 +206,7 @@ fn header_menus_and_tree_section_headings_render_on_default_theme() {
 
     assert!(
         harness.query_all_by_label("Wall joins").next().is_some(),
-        "the default light model tree should render the Wall joins section heading"
+        "the default light model tree should expose the Wall joins section heading"
     );
 }
 

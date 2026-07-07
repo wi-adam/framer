@@ -183,6 +183,7 @@ fn configure_style(ctx: &Context, theme: Theme) {
 
     v.widgets.open = v.widgets.hovered;
 
+    let style = std::sync::Arc::new(style);
     ctx.set_style_of(egui_theme, style.clone());
     ctx.set_global_style(style);
     ctx.request_repaint();

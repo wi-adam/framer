@@ -46,14 +46,10 @@ pub(crate) fn ghost_icon_button(ui: &mut Ui, icon: Icon, fg: Color32, tooltip: &
 
 /// A menu trigger for the forced-dark app header.
 pub(crate) fn header_menu_button(label: &str, head: Theme) -> Button<'static> {
-    Button::new(
-        RichText::new(label.to_owned())
-            .size(text_size::LABEL)
-            .color(head.text),
-    )
-    .fill(head.control)
-    .stroke(head.border_stroke())
-    .corner_radius(radius::SM)
+    Button::new(RichText::new(label).size(text_size::LABEL).color(head.text))
+        .fill(head.control)
+        .stroke(head.border_stroke())
+        .corner_radius(radius::SM)
 }
 
 /// The icon-over-label toolbar button with the mockup's blue active state.
