@@ -166,6 +166,24 @@ fn resolve_empty_canvas_click(
     !object_hit && clicked && pointer_in_drawing && !over_element && !tool_active
 }
 
+fn selection_interactions_enabled(
+    draw_tool_active: bool,
+    region_tool_active: bool,
+    roof_empty: bool,
+) -> bool {
+    !draw_tool_active && !region_tool_active && !roof_empty
+}
+
+fn draw_roof_empty_state(painter: &egui::Painter, drawing: Rect) {
+    let sheet = theme::sheet();
+    painter.rect_filled(
+        drawing,
+        0.0,
+        Color32::from_rgba_unmultiplied(sheet.r(), sheet.g(), sheet.b(), 214),
+    );
+    draw_view_empty(painter, drawing, "No roofs yet — add one in the Roofs tab");
+}
+
 /// Resolve a wall-endpoint drag to a snapped model point: ortho-locked to the
 /// wall's fixed far end, snapping to other walls' endpoints/midpoints/alignment
 /// (the moving node and its coincident neighbours are excluded).
@@ -500,10 +518,13 @@ pub(super) fn draw_project_plan(
     let mut clicked_join = None;
     let mut clicked_roof = None;
     let mut over_element = false;
+    let roof_empty = roof_plan_mode && model.roof_planes.is_empty();
+    let selection_interactions =
+        selection_interactions_enabled(draw_tool.active, region_tool_active, roof_empty);
 
     // Which selected-wall handle the cursor is over (for hover emphasis + cursor),
     // only in selection mode.
-    let hovered_wall_handle = (!draw_tool.active && !region_tool_active)
+    let hovered_wall_handle = selection_interactions
         .then(|| {
             response.hover_pos().and_then(|hover| {
                 hit_selected_wall_handle(
@@ -547,7 +568,7 @@ pub(super) fn draw_project_plan(
             .iter()
             .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
             .collect();
-        let selected = matches!(selection, Selection::Room(id) if id == &room.id.0);
+        let selected = !roof_empty && matches!(selection, Selection::Room(id) if id == &room.id.0);
         let fill = if selected {
             theme::active_blue().gamma_multiply(0.22)
         } else {
@@ -605,8 +626,8 @@ pub(super) fn draw_project_plan(
         );
         let hovered = pointer.is_some_and(|position| rect.contains(position));
         over_element |= hovered;
-        let selected =
-            matches!(selection, Selection::FurnishingInstance(id) if id == &instance.id.0);
+        let selected = !roof_empty
+            && matches!(selection, Selection::FurnishingInstance(id) if id == &instance.id.0);
         draw_object_footprint(
             &painter,
             rect,
@@ -644,7 +665,8 @@ pub(super) fn draw_project_plan(
         );
         let hovered = pointer.is_some_and(|position| rect.contains(position));
         over_element |= hovered;
-        let selected = matches!(selection, Selection::MepInstance(id) if id == &instance.id.0);
+        let selected =
+            !roof_empty && matches!(selection, Selection::MepInstance(id) if id == &instance.id.0);
         draw_object_footprint(
             &painter,
             rect,
@@ -667,7 +689,7 @@ pub(super) fn draw_project_plan(
         let point = plan_point(join.point, bounds, drawing, camera);
         let hovered = pointer.is_some_and(|position| position.distance(point) <= 9.0);
         over_element |= hovered;
-        let selected = matches!(selection, Selection::Join(id) if id == &join.id.0);
+        let selected = !roof_empty && matches!(selection, Selection::Join(id) if id == &join.id.0);
         if join_label_visible(layers, hovered, selected) {
             let ink = theme::framing_line_dark();
             let marker_radius = if selected || hovered { 5.0 } else { 4.0 };
@@ -694,7 +716,8 @@ pub(super) fn draw_project_plan(
         let hovered =
             pointer.is_some_and(|position| distance_to_segment(position, start, end) < 8.0);
         over_element |= hovered;
-        let selected = selected_wall == index && matches!(selection, Selection::Wall);
+        let selected =
+            !roof_empty && selected_wall == index && matches!(selection, Selection::Wall);
         // The wall body, per display mode. The centerline stroke is drawn on top
         // in every mode (hit-testing, handles, and snapping all stay on the
         // centerline below), so selection/hover read regardless of mode.
@@ -749,7 +772,8 @@ pub(super) fn draw_project_plan(
             let opening_hovered =
                 pointer.is_some_and(|position| distance_to_segment(position, left, right) < 9.0);
             over_element |= opening_hovered;
-            let opening_selected = matches!(selection, Selection::Opening(id) if id == &opening.id.0)
+            let opening_selected = !roof_empty
+                && matches!(selection, Selection::Opening(id) if id == &opening.id.0)
                 && selected_wall == index;
             if opening_selected {
                 *toolbar_out = Some(toolbar_anchor_above(
@@ -797,13 +821,18 @@ pub(super) fn draw_project_plan(
         }
     }
 
+    if roof_empty {
+        draw_roof_empty_state(&painter, drawing);
+        *toolbar_out = None;
+    }
+
     let scale = (drawing.width() / (bounds.max_x - bounds.min_x).max(1.0))
         .min(drawing.height() / (bounds.max_y - bounds.min_y).max(1.0))
         * camera.zoom;
 
     // Wall-endpoint editing (selection mode only): drag the selected wall's
     // start/end handles. The app owns the drag state and applies the events.
-    if !draw_tool.active && !region_tool_active {
+    if selection_interactions {
         if let Some((wall_index, handle)) = active_wall_drag {
             if response.drag_stopped() {
                 *wall_drag_out = Some(WallDragEvent::Stopped);
@@ -979,13 +1008,17 @@ pub(super) fn draw_project_plan(
 
     // In the roof-plan view a roof outline is the top-priority hit; elsewhere the
     // ordinary wall/opening/room priority applies (clicked_roof is always None).
-    let object_click = clicked_roof
-        .or(clicked_opening)
-        .or(clicked_join)
-        .or(clicked_furnishing)
-        .or(clicked_mep)
-        .or(clicked_wall)
-        .or(clicked_room);
+    let object_click = if roof_empty {
+        None
+    } else {
+        clicked_roof
+            .or(clicked_opening)
+            .or(clicked_join)
+            .or(clicked_furnishing)
+            .or(clicked_mep)
+            .or(clicked_wall)
+            .or(clicked_room)
+    };
     let object_hit = object_click.is_some();
     let empty_canvas_click = resolve_empty_canvas_click(
         object_hit,
@@ -1399,6 +1432,24 @@ mod tests {
                     pointer_in_drawing,
                     tool_active,
                 ),
+                expected,
+                "{label}",
+            );
+        }
+    }
+
+    #[test]
+    fn roof_empty_disables_selection_interactions() {
+        let cases = [
+            (false, false, false, true, "plain selection mode"),
+            (false, false, true, false, "roof empty overlay"),
+            (true, false, false, false, "draw tool active"),
+            (false, true, false, false, "region tool active"),
+        ];
+
+        for (draw_tool_active, region_tool_active, roof_empty, expected, label) in cases {
+            assert_eq!(
+                selection_interactions_enabled(draw_tool_active, region_tool_active, roof_empty),
                 expected,
                 "{label}",
             );

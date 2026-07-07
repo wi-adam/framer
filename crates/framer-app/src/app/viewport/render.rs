@@ -6,12 +6,11 @@
 //! `crate::app::render` (the path tracer) is aliased `path_render` here so it does
 //! not shadow this `viewport::render` module.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Ui, Vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, StrokeKind, Ui, Vec2};
 
 use super::theme;
 use super::view_common::{
-    draw_view_background, draw_view_border, draw_view_empty, draw_view_title, render_resolution,
-    viewport_drawing_rect, viewport_size,
+    draw_view_background, draw_view_border, draw_view_empty, render_resolution, viewport_size,
 };
 use crate::app::render as path_render;
 use crate::app::{FramerApp, render_job};
@@ -23,6 +22,27 @@ const MOTION_COOLDOWN_FRAMES: u32 = 6;
 /// Internal-resolution scale for the Render view while the camera is moving
 /// (0.5 ⇒ quarter the pixels, ~4× faster per frame).
 const MOTION_RESOLUTION_SCALE: f32 = 0.5;
+
+fn render_progress_chip_rect(drawing: Rect, label: &str) -> Rect {
+    let width = (label.chars().count() as f32 * 6.6 + 18.0).clamp(118.0, 260.0);
+    Rect::from_min_size(
+        drawing.left_bottom() + Vec2::new(8.0, -30.0),
+        Vec2::new(width, 22.0),
+    )
+}
+
+fn draw_render_progress_chip(painter: &egui::Painter, drawing: Rect, label: &str) {
+    let chip = render_progress_chip_rect(drawing, label);
+    painter.rect_filled(chip, 4.0, theme::overlay());
+    painter.rect_stroke(chip, 4.0, theme::soft_stroke(), StrokeKind::Outside);
+    painter.text(
+        chip.left_center() + Vec2::new(8.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(11.0),
+        theme::text_primary(),
+    );
+}
 
 impl FramerApp {
     // === method body appended below; super:: paths rewritten ===
@@ -36,7 +56,7 @@ impl FramerApp {
         let painter = ui.painter_at(rect);
 
         draw_view_background(&painter, rect, theme::sheet());
-        let drawing = viewport_drawing_rect(rect, 42.0);
+        let drawing = rect.shrink(1.0);
         draw_view_border(&painter, drawing);
 
         // Orbit / pan / dolly / telephoto zoom, mirroring the 3D workspace controls.
@@ -168,19 +188,38 @@ impl FramerApp {
         } else {
             format!("Render complete — {samples} spp")
         };
-        painter.text(
-            drawing.left_bottom() + Vec2::new(8.0, -8.0),
-            Align2::LEFT_BOTTOM,
-            label,
-            FontId::proportional(11.0),
-            theme::text_muted(),
-        );
-        draw_view_title(&painter, drawing, "Render");
+        draw_render_progress_chip(&painter, drawing, &label);
 
         // Keep refining until converged, while interacting, or while the motion
         // cooldown is still ticking down (so it can settle back to full resolution).
         if accumulating || response.dragged() || moving {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_progress_chip_stays_inside_the_drawing_rect() {
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
+        let chip = render_progress_chip_rect(drawing, "Rendering — 128/256 spp");
+
+        assert!(drawing.contains(chip.left_top()));
+        assert!(drawing.contains(chip.right_bottom()));
+    }
+
+    #[test]
+    fn render_progress_chip_width_is_bounded_for_long_labels() {
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
+        let chip = render_progress_chip_rect(
+            drawing,
+            "Render complete — 123456789012345678901234567890 spp",
+        );
+
+        assert!(chip.width() <= 260.0);
+        assert!(drawing.contains(chip.right_bottom()));
     }
 }

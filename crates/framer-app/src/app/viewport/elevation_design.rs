@@ -2,7 +2,7 @@
 //! (`elevation_dimensions`), and opening editing (`elevation_openings`) for a
 //! single wall, returning a `DesignElevationResponse` of clicks + drag events.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Ui, Vec2};
+use eframe::egui::{self, Color32, Rect, Sense, Ui, Vec2};
 use framer_core::{DimensionAnchor, DimensionAxis, Length, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
@@ -16,7 +16,8 @@ use super::elevation_openings::{
 };
 use super::theme;
 use super::view_common::{
-    WallElevationLayout, draw_drafting_grid, draw_drafting_rulers, draw_view_border, opening_rect,
+    WallElevationLayout, draw_drafting_grid, draw_drafting_rulers, draw_view_border,
+    draw_view_title, opening_rect,
 };
 use crate::app::model_edit::OpeningDragState;
 
@@ -144,7 +145,7 @@ pub(super) fn draw_wall_design_elevation(
         draw_opening_guide(
             &painter,
             opening_rect,
-            opening.kind,
+            &opening.name,
             selected || active,
             hovered || handle_hovered,
         );
@@ -274,12 +275,13 @@ pub(super) fn draw_wall_design_elevation(
         }
     }
 
-    painter.text(
-        Pos2::new(wall_rect.left(), wall_rect.bottom() + 20.0),
-        Align2::LEFT_CENTER,
-        format!("{} x {}", wall.length, wall.height),
-        FontId::proportional(13.0),
-        theme::framing_line_dark(),
+    draw_view_title(
+        &painter,
+        drawing,
+        format!(
+            "{} elevation - {} x {}",
+            wall.name, wall.length, wall.height
+        ),
     );
 
     reset_view_on_empty_double_click(&response, camera, over_element);

@@ -17,7 +17,7 @@ use super::view_common::draw_view_empty;
 
 pub(super) fn view_cube_rect(drawing: Rect) -> Rect {
     Rect::from_min_size(
-        drawing.right_top() + Vec2::new(-118.0, 12.0),
+        drawing.right_top() + Vec2::new(-152.0, 12.0),
         Vec2::splat(104.0),
     )
 }

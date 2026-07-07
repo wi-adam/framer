@@ -143,7 +143,7 @@ pub(super) fn draw_opening_guides(
         draw_opening_guide(
             painter,
             opening_rect(drawing, sx, sy, opening),
-            opening.kind,
+            &opening.name,
             false,
             false,
         );

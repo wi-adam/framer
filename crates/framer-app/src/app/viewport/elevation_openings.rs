@@ -5,11 +5,10 @@
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2,
 };
-use framer_core::{Length, OpeningKind, Wall};
+use framer_core::{Length, Wall};
 
 use super::theme;
 use super::view_common::opening_rect;
-use crate::app::labels::kind_label;
 use crate::app::model_edit::OpeningEditHandle;
 
 // === extracted opening items appended below; visibility adjusted in place ===
@@ -208,7 +207,7 @@ pub(super) fn cursor_for_opening_handle(handle: OpeningEditHandle, active: bool)
 pub(super) fn draw_opening_guide(
     painter: &egui::Painter,
     rect: Rect,
-    kind: OpeningKind,
+    label: &str,
     selected: bool,
     hovered: bool,
 ) {
@@ -228,7 +227,7 @@ pub(super) fn draw_opening_guide(
     painter.text(
         rect.left_top() + Vec2::new(4.0, 12.0),
         Align2::LEFT_CENTER,
-        kind_label(kind),
+        label,
         FontId::proportional(11.0),
         Color32::from_rgb(99, 74, 39),
     );
