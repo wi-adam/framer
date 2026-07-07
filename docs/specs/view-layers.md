@@ -11,7 +11,7 @@
 >
 > **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) ·
 > **Plan:** [2026-06-19-visual-layering.md](../plans/2026-06-19-visual-layering.md) ·
-> **Last reviewed:** 2026-06-19
+> **Last reviewed:** 2026-07-07
 
 ## Intent / Purpose
 
@@ -36,13 +36,20 @@ controllable presentation surfaces over the authored model.
   - **Full** — the true-thickness colored construction-layer bands (2D opaque; 3D
     translucent so framing members show through). Openings cut the bands.
 - **Per-layer visibility toggles** (independent on/off) for Plan-view annotations:
-  **Grid**, **Rooms** (fills + labels), **Joins** (markers + labels), **Wall
-  labels** (names). All default on.
+  **Grid**, **Rooms** (fills + labels), **Corners** (wall-join markers + labels),
+  **Wall labels** (names). Grid, Rooms, and Wall labels default on; Corner labels
+  default off so a fresh shell stays a clean line drawing.
+- Corner labels are contextual even when the Corner layer is off: hovering a wall
+  join or selecting a corner reveals that one quiet marker/label. Turning the
+  Corner layer on reveals all corner markers/labels.
 - Switching wall display mode never changes selection, hit-testing, snapping, or
   wall-endpoint editing — those stay on the wall centerline (2D) / pick envelope
   (3D) in every mode.
 - Hiding a layer also removes its click targets (you cannot select what you cannot
-  see); walls and openings remain clickable in all modes.
+  see); walls and openings remain clickable in all modes. Corners are the
+  exception: their point target remains hoverable/clickable while the Corner layer
+  is hidden so the hover/selected label lifecycle has a discoverable target without
+  making all corner labels permanent.
 - Controls live in a single **Layers** popover; it stays open while the user flips
   multiple toggles in one visit.
 - The path-traced **Render** view is unaffected.
@@ -52,6 +59,10 @@ controllable presentation surfaces over the authored model.
 - **Outline is the default.** The cleanest reading is the one a freshly loaded shell
   should present; Full (the prior always-on behavior) is opt-in. Rationale: the
   colored cross-section is reference detail, not the primary read.
+- **Corner labels default off.** Corner markers are useful diagnostics for
+  junctions but read like selection badges when every label is always visible.
+  Rationale: keep the default plan quiet, while hover, selection, and the Corner
+  layer still make the junction metadata available.
 - **Wall display is a 3-state mode, not three independent toggles.** The three looks
   are alternatives for the same wall body, so a mode prevents nonsensical
   combinations.
@@ -83,8 +94,10 @@ controllable presentation surfaces over the authored model.
   `match layers.wall_display` — `Outline` draws nothing extra, `Width` calls
   `draw_wall_width` (two dashed faces via `band_quad` + `draw_dashed_line`), `Full`
   calls the existing `draw_wall_layers`. The centerline, handles, and hit-test stay
-  unconditional. `draw_opening_gap` runs only in `Full`. Rooms/joins/wall-labels are
-  gated by the matching `layers.*` flags.
+  unconditional. `draw_opening_gap` runs only in `Full`. Rooms and wall labels are
+  gated by the matching `layers.*` flags. Wall joins are user-facing Corners:
+  `layers.joins` reveals all labels, while hover/selection reveals one quiet corner
+  marker and label even when the layer is off.
 - **3D rendering** (`framer-app/src/app/viewport/scene_build.rs`): `from_project`
   takes a `WallDisplay`; `push_wall_envelope` branches — `Full` keeps the per-layer
   bands, `Width` pushes one neutral full-thickness band, `Outline` pushes the
