@@ -33,8 +33,8 @@ user-facing severity. Each PR leaves the workspace green.
   `crates/framer-app/src/app/ui_shots_tests.rs` if the deck doesn't cover what you
   changed. Only *interactive* checks (drags, hover, live toggling, camera feel)
   need the `.claude/skills/install-app` skill (`scripts/install-app.sh`, then drive
-  `~/Applications/Framer.app`, bundle id `dev.framer.app`; `cargo run` windows are
-  invisible to screenshot tooling).
+  `~/Applications/Framer.app` — that skill documents the bundle id; `cargo run`
+  windows are invisible to screenshot tooling).
 - Headless UI tests live in `crates/framer-app/src/app/ui_harness_tests.rs`
   (egui_kittest). Gotchas: build the UI through `FramerApp::ui_root`, and warm up
   fonts before asserting on text (see existing tests for the pattern).
