@@ -112,12 +112,22 @@ fn capture_ui_shot_deck() {
         (actions::WorkflowTab::Openings, "openings-tab"),
         (actions::WorkflowTab::Roofs, "roofs-tab"),
         (actions::WorkflowTab::Annotate, "annotate-tab"),
-        (actions::WorkflowTab::Inspect, "inspect-tab"),
         (actions::WorkflowTab::Plan, "plan-workspace"),
     ] {
         select_tab(&mut harness, tab);
         shot(&mut harness, &dir, &mut index, name);
     }
+
+    // Transient statuses are canvas toasts, not toolbar rows, so capture them
+    // once before clearing the state for the rest of the deck.
+    harness.state_mut().file_status = Some("Reset to multi-wall demo shell".to_owned());
+    harness.state_mut().artifact_status = Some("Exported plan artifacts".to_owned());
+    harness.state_mut().dimension_status = Some("Pick two anchors, then place".to_owned());
+    shot(&mut harness, &dir, &mut index, "status-toast");
+    harness.state_mut().file_status = None;
+    harness.state_mut().artifact_status = None;
+    harness.state_mut().dimension_status = None;
+    harness.run_ok();
 
     // Selection states (back in the Frame tab): wall, opening, corner — the
     // three inspector layouts. Tree row labels are unique in the AccessKit

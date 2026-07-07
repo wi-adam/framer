@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{
-    self, Align, Color32, ComboBox, Frame, Layout, Margin, PopupCloseBehavior, Response, RichText,
-    ScrollArea, Stroke, Ui, Vec2,
+    self, Align, Color32, ComboBox, Frame, Layout, Margin, PopupCloseBehavior, Pos2, Response,
+    RichText, ScrollArea, Stroke, Ui, Vec2,
     containers::menu::{MenuButton, MenuConfig},
 };
 use framer_core::{
@@ -195,7 +195,17 @@ impl FramerApp {
             ui.spacing_mut().item_spacing = Vec2::new(design::space::SM, design::space::SM);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = design::space::XS;
-                for tab in WORKFLOW_TABS {
+                for tab in AUTHORING_WORKFLOW_TABS {
+                    if widgets::workflow_tab(ui, workflow_tab_label(*tab), self.command_tab == *tab)
+                        .clicked()
+                    {
+                        self.select_workflow_tab(*tab);
+                    }
+                }
+                ui.add_space(design::space::SM);
+                toolbar_divider(ui);
+                ui.add_space(design::space::SM);
+                for tab in OUTPUT_WORKFLOW_TABS {
                     if widgets::workflow_tab(ui, workflow_tab_label(*tab), self.command_tab == *tab)
                         .clicked()
                     {
@@ -209,30 +219,69 @@ impl FramerApp {
                 self.workflow_command_panels(ui);
             });
         });
+    }
 
-        if self.file_status.is_some()
-            || self.artifact_status.is_some()
-            || self.dimension_status.is_some()
-        {
-            Frame::new()
-                .fill(theme::chrome_mid())
-                .stroke(theme::soft_stroke())
-                .inner_margin(Margin::symmetric(10, 4))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
-                        if let Some(status) = &self.file_status {
-                            status_chip(ui, status, StatusTone::Info);
-                        }
-                        if let Some(status) = &self.artifact_status {
-                            status_chip(ui, status, StatusTone::Success);
-                        }
-                        if let Some(status) = &self.dimension_status {
-                            status_chip(ui, status, StatusTone::Warning);
-                        }
-                    });
-                });
+    pub(super) fn status_toast_overlay(&mut self, ui: &mut Ui, anchor: Pos2) {
+        let Some(signature) = self.status_toast_signature() else {
+            self.status_toast_signature = None;
+            self.status_toast_until = 0.0;
+            return;
+        };
+
+        let now = ui.ctx().input(|input| input.time);
+        if self.status_toast_signature.as_deref() != Some(signature.as_str()) {
+            self.status_toast_signature = Some(signature);
+            self.status_toast_until = now + STATUS_TOAST_SECONDS;
         }
+        if now > self.status_toast_until {
+            return;
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(
+                (self.status_toast_until - now).max(0.0),
+            ));
+
+        egui::Area::new(egui::Id::new("canvas-status-toast"))
+            .fixed_pos(anchor)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::new()
+                    .fill(theme::chrome_mid())
+                    .stroke(theme::soft_stroke())
+                    .corner_radius(design::radius::SM)
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_max_width(460.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 3.0);
+                            if let Some(status) = &self.file_status {
+                                status_chip(ui, status, StatusTone::Info);
+                            }
+                            if let Some(status) = &self.artifact_status {
+                                status_chip(ui, status, StatusTone::Success);
+                            }
+                            if let Some(status) = &self.dimension_status {
+                                status_chip(ui, status, StatusTone::Warning);
+                            }
+                        });
+                    });
+            });
+    }
+
+    fn status_toast_signature(&self) -> Option<String> {
+        if self.file_status.is_none()
+            && self.artifact_status.is_none()
+            && self.dimension_status.is_none()
+        {
+            return None;
+        }
+
+        Some(format!(
+            "file={};artifact={};dimension={}",
+            self.file_status.as_deref().unwrap_or_default(),
+            self.artifact_status.as_deref().unwrap_or_default(),
+            self.dimension_status.as_deref().unwrap_or_default()
+        ))
     }
 
     pub(super) fn select_workflow_tab(&mut self, tab: WorkflowTab) {
@@ -3349,15 +3398,18 @@ fn flyout_action(ui: &mut Ui, id: ActionId) -> Response {
     action_response_with_tooltip(response, true, action_tooltip(*action, None))
 }
 
-const WORKFLOW_TABS: &[WorkflowTab] = &[
+const AUTHORING_WORKFLOW_TABS: &[WorkflowTab] = &[
     WorkflowTab::Design,
     WorkflowTab::Frame,
     WorkflowTab::Openings,
     WorkflowTab::Roofs,
     WorkflowTab::Annotate,
-    WorkflowTab::Inspect,
-    WorkflowTab::Plan,
+    // WorkflowTab::Inspect stays in the enum for future command routing, but it
+    // stays hidden while it would render an empty command strip.
 ];
+
+const OUTPUT_WORKFLOW_TABS: &[WorkflowTab] = &[WorkflowTab::Plan];
+const STATUS_TOAST_SECONDS: f64 = 4.0;
 
 pub(crate) fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
     match tab {
