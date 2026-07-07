@@ -17,7 +17,9 @@ scripts/install-app.sh --no-launch  # install without opening
 scripts/install-app.sh --restore    # put back the pre-dev binary (from .orig.bak)
 ```
 
-Then in computer-use: `request_access(["Framer"])` (bundle id `industries.winstanley.framer`),
+Then in computer-use: launch the app first with `open ~/Applications/Framer.app`
+(request_access only resolves the app once it is installed **and running**), then
+`request_access(["Framer"])` (bundle id `industries.winstanley.framer`),
 `open_application("industries.winstanley.framer")`, and `screenshot`.
 
 ## Gotchas (learned the hard way)
