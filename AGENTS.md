@@ -83,6 +83,8 @@ Feature-specific checks when relevant:
 
 - GPU↔CPU path-tracer parity: `cargo test -p framer-app --test gpu_parity -- --nocapture`
   (skips without a GPU adapter; CI runs it on macOS Metal + Linux lavapipe).
+- UI screenshots for visual review: `scripts/ui-shots.sh` renders the full app UI
+  off-screen to `target/ui-shots/*.png` (~15 s, no install/window needed).
 - Golden render regen (intentional only): `UPDATE_GOLDEN=1 cargo test -p framer-render --test golden`.
 - Editing example `.framer` files still requires `cargo test --workspace` (round-trip fixtures).
 - Editing docs/markdown: `python3 scripts/check-markdown-links.py` (relative-link check; CI's

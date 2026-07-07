@@ -74,7 +74,9 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 - Linux system deps for `eframe`/`winit`/`wgpu` are installed in the jobs that build the app
   (`libxkbcommon`, `libwayland`, `libxcb-*`; plus `mesa-vulkan-drivers`/`vulkan-tools` for `gpu`).
 - Local helpers: [`scripts/install-app.sh`](../../scripts/install-app.sh) (build + ad-hoc-sign +
-  install the macOS bundle for GUI/visual verification); the `.codex/skills/framer-commit` skill
+  install the macOS bundle for GUI/visual verification);
+  [`scripts/ui-shots.sh`](../../scripts/ui-shots.sh) (render the off-screen UI screenshot deck
+  to `target/ui-shots/` — needs a wgpu adapter); the `.codex/skills/framer-commit` skill
   runs the gate before committing.
 
 ## Constraints & invariants

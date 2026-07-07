@@ -12,8 +12,11 @@ the verification gates. Everything below is Claude-specific and additive.
 
 ## Claude-specific
 
-- **Visual verification:** GUI tools (computer-use/screenshots) only see *installed*
-  app bundles, never a `cargo run`/`target` binary. Use the
+- **Visual verification:** for static UI review, use the
+  [`ui-shots`](.claude/skills/ui-shots) skill (`scripts/ui-shots.sh`) — it renders
+  the whole UI off-screen to PNGs in seconds, no install needed. For *interactive*
+  verification (drags, hover, camera feel): GUI tools (computer-use/screenshots)
+  only see *installed* app bundles, never a `cargo run`/`target` binary — use the
   [`install-app`](.claude/skills/install-app) skill to build + install
   `~/Applications/Framer.app`, then drive that.
 - **Before committing**, run the gates from [AGENTS.md](AGENTS.md#verification-gates-must-pass-before-commit):

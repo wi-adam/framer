@@ -13,6 +13,8 @@ mod render_job;
 mod theme;
 #[cfg(test)]
 mod ui_harness_tests;
+#[cfg(test)]
+mod ui_shots_tests;
 mod viewport;
 
 use std::collections::HashMap;
