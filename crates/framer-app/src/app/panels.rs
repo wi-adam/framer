@@ -128,49 +128,51 @@ impl FramerApp {
     fn project_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
         let can_export = self.workspace_mode.shows_generated_plan();
         let can_export_compliance = self.action_enabled(ActionId::ExportComplianceReport);
-        let (response, _) = MenuButton::new(header_menu_text("Project", head)).ui(ui, |ui| {
-            ui.set_min_width(176.0);
-            if header_menu_action(ui, ActionId::NewProject, true).clicked() {
-                self.new_project();
-                ui.close();
-            }
-            if header_menu_action(ui, ActionId::OpenProject, true).clicked() {
-                self.load_project_file();
-                ui.close();
-            }
-            if header_menu_action(ui, ActionId::SaveProject, true).clicked() {
-                self.save_project_file();
-                ui.close();
-            }
-            ui.separator();
-            if header_menu_action(ui, ActionId::ExportArtifacts, can_export).clicked() {
-                self.export_current_artifacts();
-                ui.close();
-            }
-            if header_menu_action(ui, ActionId::ExportComplianceReport, can_export_compliance)
-                .clicked()
-            {
-                self.export_compliance_report();
-                ui.close();
-            }
-        });
+        let (response, _) = MenuButton::from_button(widgets::header_menu_button("Project", head))
+            .ui(ui, |ui| {
+                ui.set_min_width(176.0);
+                if header_menu_action(ui, ActionId::NewProject, true).clicked() {
+                    self.new_project();
+                    ui.close();
+                }
+                if header_menu_action(ui, ActionId::OpenProject, true).clicked() {
+                    self.load_project_file();
+                    ui.close();
+                }
+                if header_menu_action(ui, ActionId::SaveProject, true).clicked() {
+                    self.save_project_file();
+                    ui.close();
+                }
+                ui.separator();
+                if header_menu_action(ui, ActionId::ExportArtifacts, can_export).clicked() {
+                    self.export_current_artifacts();
+                    ui.close();
+                }
+                if header_menu_action(ui, ActionId::ExportComplianceReport, can_export_compliance)
+                    .clicked()
+                {
+                    self.export_compliance_report();
+                    ui.close();
+                }
+            });
         response
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Project"));
         response.on_hover_text("Project actions");
     }
 
     fn examples_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
-        let (response, _) = MenuButton::new(header_menu_text("Examples", head)).ui(ui, |ui| {
-            ui.set_min_width(176.0);
-            if header_menu_action(ui, ActionId::LoadShellDemo, true).clicked() {
-                self.reset_demo();
-                ui.close();
-            }
-            if header_menu_action(ui, ActionId::LoadWallDemo, true).clicked() {
-                self.reset_wall_demo();
-                ui.close();
-            }
-        });
+        let (response, _) = MenuButton::from_button(widgets::header_menu_button("Examples", head))
+            .ui(ui, |ui| {
+                ui.set_min_width(176.0);
+                if header_menu_action(ui, ActionId::LoadShellDemo, true).clicked() {
+                    self.reset_demo();
+                    ui.close();
+                }
+                if header_menu_action(ui, ActionId::LoadWallDemo, true).clicked() {
+                    self.reset_wall_demo();
+                    ui.close();
+                }
+            });
         response
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Examples"));
         response.on_hover_text("Example projects");
@@ -730,7 +732,7 @@ impl FramerApp {
 
                     if !joins.is_empty() {
                         ui.separator();
-                        ui.strong("Wall joins");
+                        strong_label(ui, "Wall joins");
                         for (join_id, join_name, join_kind) in joins {
                             let selected =
                                 matches!(&self.selected, Selection::Join(id) if id == &join_id);
@@ -973,7 +975,7 @@ impl FramerApp {
         egui::CollapsingHeader::new("Library")
             .default_open(false)
             .show(ui, |ui| {
-                ui.strong("Systems");
+                strong_label(ui, "Systems");
                 for (id, name, kind, from_library) in &systems {
                     let selected = matches!(&self.selected, Selection::System(s) if s == id);
                     if ui
@@ -1012,7 +1014,7 @@ impl FramerApp {
                 }
 
                 ui.separator();
-                ui.strong("Materials");
+                strong_label(ui, "Materials");
                 for (id, name, color, from_library) in &materials {
                     let selected = matches!(&self.selected, Selection::Material(m) if m == id);
                     let [r, g, b] = *color;
@@ -1035,7 +1037,7 @@ impl FramerApp {
                 }
 
                 ui.separator();
-                ui.strong("Furnishings");
+                strong_label(ui, "Furnishings");
                 for (id, name, size, from_library) in &furnishings {
                     let selected = matches!(&self.selected, Selection::Furnishing(f) if f == id);
                     if ui
@@ -1054,7 +1056,7 @@ impl FramerApp {
                 }
 
                 ui.separator();
-                ui.strong("MEP");
+                strong_label(ui, "MEP");
                 for (id, name, kind, size, from_library) in &mep_objects {
                     let selected = matches!(&self.selected, Selection::MepObject(m) if m == id);
                     if ui
@@ -1081,7 +1083,7 @@ impl FramerApp {
                         || !starter_mep_objects.is_empty())
                 {
                     ui.separator();
-                    ui.strong("Starter");
+                    strong_label(ui, "Starter");
                     for (id, name, kind) in &starter_systems {
                         ui.horizontal(|ui| {
                             ui.label(format!("{name} ({kind})"));
@@ -1946,7 +1948,7 @@ impl FramerApp {
                         }
 
                         ui.separator();
-                        ui.strong("Join point");
+                        strong_label(ui, "Join point");
                         changed |= coordinate_drag(ui, "X", &mut join.point.x);
                         changed |= coordinate_drag(ui, "Y", &mut join.point.y);
                     } else {
@@ -3063,12 +3065,6 @@ fn header_command_button(
     response.on_hover_text(tooltip_override.unwrap_or(action.tooltip))
 }
 
-fn header_menu_text(label: &str, head: design::Theme) -> RichText {
-    RichText::new(label)
-        .size(design::text_size::LABEL)
-        .color(head.text)
-}
-
 fn header_menu_action(ui: &mut Ui, id: ActionId, enabled: bool) -> Response {
     let action = actions::metadata(id);
     let response = ui
@@ -3077,6 +3073,10 @@ fn header_menu_action(ui: &mut Ui, id: ActionId, enabled: bool) -> Response {
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
     response
+}
+
+fn strong_label(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).strong().color(theme::text_primary()));
 }
 
 fn header_save_pill(ui: &mut Ui, head: design::Theme, status: Option<&str>) {
@@ -3597,7 +3597,7 @@ fn standards_stack_panel(
         .collect::<Vec<_>>();
     if !inactive.is_empty() {
         ui.separator();
-        ui.strong("Inactive packs");
+        strong_label(ui, "Inactive packs");
         for pack in inactive {
             ui.horizontal(|ui| {
                 if ui
@@ -5031,28 +5031,28 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.strong("Use");
+            strong_label(ui, "Use");
             ui.label(member.kind.label());
             ui.end_row();
-            ui.strong("Profile");
+            strong_label(ui, "Profile");
             ui.label(member.profile.label());
             ui.end_row();
-            ui.strong("Source");
+            strong_label(ui, "Source");
             ui.label(&member.source.0);
             ui.end_row();
-            ui.strong("X");
+            strong_label(ui, "X");
             ui.label(member.x.to_string());
             ui.end_row();
-            ui.strong("Elevation");
+            strong_label(ui, "Elevation");
             ui.label(member.elevation.to_string());
             ui.end_row();
-            ui.strong("Cut length");
+            strong_label(ui, "Cut length");
             ui.label(member.cut_length.to_string());
             ui.end_row();
-            ui.strong("Drawn depth");
+            strong_label(ui, "Drawn depth");
             ui.label(member.cross_section_depth.to_string());
             ui.end_row();
-            ui.strong("Rule");
+            strong_label(ui, "Rule");
             ui.label(&member.provenance.rule_id);
             ui.end_row();
         });
@@ -5412,11 +5412,11 @@ fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
             .spacing([12.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.strong("Qty");
-                ui.strong("Profile");
-                ui.strong("Cut");
-                ui.strong("Total");
-                ui.strong("Use");
+                strong_label(ui, "Qty");
+                strong_label(ui, "Profile");
+                strong_label(ui, "Cut");
+                strong_label(ui, "Total");
+                strong_label(ui, "Use");
                 ui.end_row();
 
                 for item in plan.bom() {
@@ -5438,11 +5438,11 @@ fn bom_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
                 .spacing([12.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.strong("Material");
-                    ui.strong("Function");
-                    ui.strong("Thickness");
-                    ui.strong("Area");
-                    ui.strong("Volume");
+                    strong_label(ui, "Material");
+                    strong_label(ui, "Function");
+                    strong_label(ui, "Thickness");
+                    strong_label(ui, "Area");
+                    strong_label(ui, "Volume");
                     ui.end_row();
 
                     for item in layers {
@@ -5474,10 +5474,10 @@ fn room_schedule_panel(ui: &mut Ui, plan: Option<&ProjectFramePlan>) {
             .spacing([12.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.strong("Room");
-                ui.strong("Usage");
-                ui.strong("Area");
-                ui.strong("Perimeter");
+                strong_label(ui, "Room");
+                strong_label(ui, "Usage");
+                strong_label(ui, "Area");
+                strong_label(ui, "Perimeter");
                 ui.end_row();
 
                 for room in &plan.rooms {

@@ -544,7 +544,8 @@ impl Default for FramerApp {
 
 impl FramerApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        design::install(&cc.egui_ctx, design::studio_light());
+        let theme = design::theme_from_storage(cc.storage);
+        design::install(&cc.egui_ctx, theme);
 
         let render_state = cc.wgpu_render_state.as_ref();
         Self {
@@ -3409,6 +3410,10 @@ impl eframe::App for FramerApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.ui_root(ui);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        design::save_theme(storage);
     }
 }
 
