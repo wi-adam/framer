@@ -205,8 +205,76 @@ fn header_menus_and_tree_sections_are_reachable_on_default_theme() {
     }
 
     assert!(
-        harness.query_all_by_label("Wall joins").next().is_some(),
-        "the default light model tree should expose the Wall joins section heading"
+        harness.query_all_by_label("Corners").next().is_some(),
+        "the default light model tree should expose the Corners section heading"
+    );
+}
+
+#[test]
+fn model_tree_and_status_use_names_and_corner_language() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    assert!(
+        harness.query_all_by_label("Back wall").next().is_some(),
+        "model tree rows should lead with object names"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Window: Back left window")
+            .next()
+            .is_none(),
+        "model tree rows should not use Type: Name labels"
+    );
+    assert!(
+        harness.query_all_by_label("Corners").next().is_some(),
+        "wall junctions should use Corner as the visible concept name"
+    );
+    assert!(
+        harness.query_all_by_label("Wall joins").next().is_none(),
+        "wall junctions should not expose Join in section labels"
+    );
+
+    harness.get_by_label("Back left corner").click();
+    harness.run();
+    assert_eq!(
+        harness.state().selected,
+        Selection::Join("join-back-left".to_owned())
+    );
+    assert!(
+        harness
+            .query_all_by_label("Corner: Back left corner")
+            .next()
+            .is_some(),
+        "status breadcrumb should use the corner display name"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Join: join-back-left")
+            .next()
+            .is_none(),
+        "status breadcrumb should not expose the internal join id"
+    );
+
+    harness.get_by_label("Back left window").click();
+    harness.run();
+    assert_eq!(
+        harness.state().selected,
+        Selection::Opening("opening-back-left-window".to_owned())
+    );
+    assert!(
+        harness
+            .query_all_by_label("Opening: Back left window")
+            .next()
+            .is_some(),
+        "status breadcrumb should use opening display names"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Opening: opening-back-left-window")
+            .next()
+            .is_none(),
+        "status breadcrumb should not expose opening ids"
     );
 }
 
