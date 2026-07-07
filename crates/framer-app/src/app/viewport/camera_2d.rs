@@ -38,6 +38,12 @@ impl Default for View2dState {
 }
 
 impl View2dState {
+    /// Display percentage for the live view scale. The camera's stored zoom is a
+    /// multiplier on the fit-to-bounds transform, so 1.0 displays as 100%.
+    pub(crate) fn zoom_percent(&self) -> u32 {
+        (self.zoom * 100.0).round() as u32
+    }
+
     /// Maps a base (fit-to-bounds) screen point to its final on-screen position:
     /// `c + (base − c)·zoom + pan`, anchored at the viewport center `c`.
     pub(super) fn apply(&self, base: Pos2, drawing: Rect) -> Pos2 {
@@ -174,6 +180,27 @@ mod view_2d_tests {
 
     fn close(a: Pos2, b: Pos2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn zoom_percent_reports_fit_relative_scale() {
+        assert_eq!(View2dState::default().zoom_percent(), 100);
+        assert_eq!(
+            View2dState {
+                zoom: 2.5,
+                pan: Vec2::ZERO,
+            }
+            .zoom_percent(),
+            250
+        );
+        assert_eq!(
+            View2dState {
+                zoom: 0.375,
+                pan: Vec2::ZERO,
+            }
+            .zoom_percent(),
+            38
+        );
     }
 
     #[test]
