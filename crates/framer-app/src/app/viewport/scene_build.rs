@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{Color32, Pos2};
+use eframe::egui::{Color32, Pos2, Rgba};
 use framer_core::{
     AssemblyFace, BuildingModel, ConstructionSystem, ElementId, Length, Material, Point2,
     RoofPlane, SurfaceRegion, Wall,
@@ -13,6 +13,7 @@ use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan
 
 use super::geom::{OrbitProjector, Point3, point_hits_projected_quad, point_in_polygon};
 use super::gpu::GpuVertex;
+use super::theme;
 use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
 
 // === extracted block appended below; visibility adjusted in place ===
@@ -290,7 +291,7 @@ impl SceneBuilder {
             ),
         };
         let color = if selected {
-            Color32::from_rgb(49, 116, 178)
+            theme::active_blue()
         } else if wall_selected {
             brighten(member_color(member.kind), 20)
         } else {
@@ -811,7 +812,7 @@ const LAYER_BAND_ALPHA: u8 = 168;
 /// the wall remain visible through it.
 pub(super) fn material_color_to_rgba(material: &Material) -> Color32 {
     let [r, g, b] = material.color();
-    Color32::from_rgba_unmultiplied(r, g, b, LAYER_BAND_ALPHA)
+    Color32::from(Rgba::from_srgba_unmultiplied(r, g, b, LAYER_BAND_ALPHA))
 }
 
 /// Which way a wall's layer stack runs on the side axis (`(-along_y, along_x)`):
@@ -867,39 +868,38 @@ fn material_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color32
 /// The neutral fallback band color (translucent) used when a layer or wall has no
 /// resolvable material/system.
 fn neutral_band_color() -> Color32 {
-    Color32::from_rgba_unmultiplied(188, 179, 158, LAYER_BAND_ALPHA)
+    theme::with_alpha(theme::sheet_ruler(), LAYER_BAND_ALPHA)
 }
 
 pub(super) fn brighten(color: Color32, amount: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(
+    Color32::from(Rgba::from_srgba_unmultiplied(
         color.r().saturating_add(amount),
         color.g().saturating_add(amount),
         color.b().saturating_add(amount),
         color.a(),
-    )
+    ))
 }
 
 pub(super) fn member_color(kind: MemberKind) -> Color32 {
     match kind {
-        MemberKind::BottomPlate | MemberKind::TopPlate => Color32::from_rgb(99, 85, 67),
-        MemberKind::CornerPost => Color32::from_rgb(52, 95, 127),
-        MemberKind::PartitionStud => Color32::from_rgb(79, 127, 95),
-        MemberKind::BackingStud => Color32::from_rgb(127, 111, 79),
-        MemberKind::CommonStud => Color32::from_rgb(186, 145, 94),
-        MemberKind::KingStud => Color32::from_rgb(151, 100, 61),
-        MemberKind::JackStud => Color32::from_rgb(211, 168, 95),
-        MemberKind::Header => Color32::from_rgb(115, 130, 99),
-        MemberKind::RoughSill => Color32::from_rgb(92, 121, 144),
-        MemberKind::CrippleStud => Color32::from_rgb(218, 190, 139),
-        MemberKind::FloorJoist => Color32::from_rgb(156, 123, 79),
-        MemberKind::CeilingJoist => Color32::from_rgb(127, 156, 143),
-        MemberKind::RimJoist => Color32::from_rgb(111, 85, 53),
-        MemberKind::Blocking => Color32::from_rgb(181, 154, 106),
-        MemberKind::Rafter => Color32::from_rgb(138, 111, 74),
-        MemberKind::RidgeBoard => Color32::from_rgb(93, 74, 50),
-        MemberKind::HipRafter => Color32::from_rgb(127, 104, 72),
-        MemberKind::ValleyRafter => Color32::from_rgb(114, 95, 127),
-        MemberKind::JackRafter => Color32::from_rgb(168, 132, 79),
+        MemberKind::BottomPlate | MemberKind::TopPlate | MemberKind::RimJoist => {
+            theme::framing_line_dark()
+        }
+        MemberKind::CornerPost | MemberKind::RoughSill | MemberKind::ValleyRafter => {
+            theme::dimension_line()
+        }
+        MemberKind::PartitionStud | MemberKind::Header | MemberKind::CeilingJoist => {
+            theme::success().gamma_multiply(0.72)
+        }
+        MemberKind::BackingStud | MemberKind::Blocking => theme::warning().gamma_multiply(0.72),
+        MemberKind::CommonStud | MemberKind::FloorJoist | MemberKind::Rafter => {
+            brighten(theme::framing_line(), 42)
+        }
+        MemberKind::KingStud | MemberKind::JackStud | MemberKind::CrippleStud => {
+            brighten(theme::warning(), 26)
+        }
+        MemberKind::RidgeBoard | MemberKind::HipRafter => theme::framing_line(),
+        MemberKind::JackRafter => brighten(theme::framing_line(), 28),
     }
 }
 
@@ -926,10 +926,10 @@ enum SurfaceFace {
 /// a neutral tone so it stays visible when the system or material is missing.
 fn surface_color(model: &BuildingModel, system_id: &ElementId, face: SurfaceFace) -> Color32 {
     let (fallback, assembly_face) = match face {
-        SurfaceFace::Roof => (Color32::from_rgb(96, 99, 107), AssemblyFace::Finished),
-        SurfaceFace::RoofUnderside => (Color32::from_rgb(226, 226, 222), AssemblyFace::Underside),
-        SurfaceFace::Ceiling => (Color32::from_rgb(226, 226, 222), AssemblyFace::Finished),
-        SurfaceFace::Floor => (Color32::from_rgb(150, 120, 86), AssemblyFace::Finished),
+        SurfaceFace::Roof => (theme::dimension_line(), AssemblyFace::Finished),
+        SurfaceFace::RoofUnderside => (theme::sheet_ruler(), AssemblyFace::Underside),
+        SurfaceFace::Ceiling => (theme::sheet_ruler(), AssemblyFace::Finished),
+        SurfaceFace::Floor => (theme::framing_line(), AssemblyFace::Finished),
     };
     model
         .systems

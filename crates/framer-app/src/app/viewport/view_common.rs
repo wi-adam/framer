@@ -8,6 +8,7 @@ use framer_core::{Opening, Wall};
 
 use super::camera_2d::View2dState;
 use super::theme;
+use crate::app::design::text_size;
 
 // === extracted ranges appended below; visibility adjusted in place ===
 
@@ -67,7 +68,7 @@ pub(super) fn draw_view_title(painter: &egui::Painter, drawing: Rect, title: imp
         drawing.left_top() + Vec2::new(0.0, -20.0),
         Align2::LEFT_CENTER,
         title.into(),
-        FontId::proportional(13.0),
+        FontId::proportional(text_size::BODY),
         theme::framing_line_dark(),
     );
 }
@@ -77,7 +78,7 @@ pub(super) fn draw_view_empty(painter: &egui::Painter, rect: Rect, label: &str) 
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(14.0),
+        FontId::proportional(text_size::HEADING),
         theme::text_muted(),
     );
 }
@@ -163,7 +164,7 @@ pub(super) fn draw_drafting_rulers(painter: &egui::Painter, rect: Rect, drawing:
                 Pos2::new(x + 3.0, top_ruler.bottom() - 18.0),
                 Align2::LEFT_CENTER,
                 format!("{}'", index * 2),
-                FontId::proportional(10.0),
+                FontId::proportional(text_size::MICRO),
                 tick,
             );
         }
@@ -189,7 +190,7 @@ pub(super) fn draw_drafting_rulers(painter: &egui::Painter, rect: Rect, drawing:
                 Pos2::new(left_ruler.right() - 16.0, y - 2.0),
                 Align2::RIGHT_CENTER,
                 format!("{}'", index * 2),
-                FontId::proportional(10.0),
+                FontId::proportional(text_size::MICRO),
                 tick,
             );
         }
@@ -209,14 +210,14 @@ pub(super) fn draw_plan_axis_indicator(painter: &egui::Painter, rect: Rect) {
         x_end + Vec2::new(7.0, 0.0),
         Align2::LEFT_CENTER,
         "X",
-        FontId::proportional(11.0),
+        FontId::proportional(text_size::LABEL),
         theme::framing_line_dark(),
     );
     painter.text(
         y_end + Vec2::new(0.0, -7.0),
         Align2::CENTER_BOTTOM,
         "Y",
-        FontId::proportional(11.0),
+        FontId::proportional(text_size::LABEL),
         theme::framing_line_dark(),
     );
 }
@@ -266,14 +267,14 @@ pub(super) fn draw_scale_bar(painter: &egui::Painter, drawing: Rect, scale: f32)
         Pos2::new(x0, y + 6.0),
         Align2::CENTER_TOP,
         "0",
-        FontId::proportional(9.5),
+        FontId::proportional(text_size::MICRO),
         theme::text_muted(),
     );
     painter.text(
         Pos2::new(x1, y + 6.0),
         Align2::CENTER_TOP,
         format!("{feet:.0}'"),
-        FontId::proportional(9.5),
+        FontId::proportional(text_size::MICRO),
         theme::text_muted(),
     );
 }

@@ -11,7 +11,9 @@ use super::camera_3d::{View3dState, ViewCubeAction, ViewCubeOrientation};
 use super::geom::{OrbitProjector, Point3, distance_to_segment, point_in_polygon};
 use super::gpu::{Framer3dCallback, Framer3dFrameKey, GpuUniforms, GpuVertex};
 use super::scene_build::{brighten, color_to_rgba};
+use super::theme;
 use super::view_common::draw_view_empty;
+use crate::app::design::text_size;
 
 // === extracted block appended below; visibility adjusted in place ===
 
@@ -185,37 +187,37 @@ fn view_cube_face_specs() -> [ViewCubeFaceSpec; 6] {
             action: ViewCubeAction::BOTTOM,
             face: [0, 3, 2, 1],
             normal: -Point3::Z,
-            color: Color32::from_rgb(192, 197, 193),
+            color: theme::sheet_grid_major(),
         },
         ViewCubeFaceSpec {
             action: ViewCubeAction::TOP,
             face: [4, 5, 6, 7],
             normal: Point3::Z,
-            color: Color32::from_rgb(228, 235, 232),
+            color: theme::sheet(),
         },
         ViewCubeFaceSpec {
             action: ViewCubeAction::BACK,
             face: [0, 1, 5, 4],
             normal: -Point3::Y,
-            color: Color32::from_rgb(196, 201, 196),
+            color: theme::sheet_grid_major(),
         },
         ViewCubeFaceSpec {
             action: ViewCubeAction::RIGHT,
             face: [1, 2, 6, 5],
             normal: Point3::X,
-            color: Color32::from_rgb(230, 232, 229),
+            color: theme::sheet_ruler(),
         },
         ViewCubeFaceSpec {
             action: ViewCubeAction::FRONT,
             face: [2, 3, 7, 6],
             normal: Point3::Y,
-            color: Color32::from_rgb(238, 238, 234),
+            color: theme::sheet(),
         },
         ViewCubeFaceSpec {
             action: ViewCubeAction::LEFT,
             face: [3, 0, 4, 7],
             normal: -Point3::X,
-            color: Color32::from_rgb(186, 191, 188),
+            color: theme::sheet_grid_major(),
         },
     ]
 }
@@ -275,38 +277,34 @@ pub(super) fn draw_view_cube(
     let hovered_action = pointer.and_then(|position| geometry.hit(position));
     let hovered_home = hovered_action == Some(ViewCubeAction::Home);
 
-    painter.rect_filled(
-        rect,
-        4.0,
-        Color32::from_rgba_unmultiplied(250, 250, 248, 215),
-    );
+    painter.rect_filled(rect, 4.0, theme::with_alpha(theme::sheet(), 215));
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(174, 176, 170)),
+        Stroke::new(1.0, theme::sheet_grid_major()),
         StrokeKind::Outside,
     );
     painter.rect_filled(
         geometry.home_rect,
         3.0,
         if hovered_home {
-            Color32::from_rgb(214, 225, 232)
+            theme::active_blue_soft()
         } else {
-            Color32::from_rgb(232, 234, 229)
+            theme::sheet_ruler()
         },
     );
     painter.rect_stroke(
         geometry.home_rect,
         3.0,
-        Stroke::new(1.0, Color32::from_rgb(129, 132, 127)),
+        Stroke::new(1.0, theme::dimension_line()),
         StrokeKind::Outside,
     );
     painter.text(
         geometry.home_rect.center(),
         Align2::CENTER_CENTER,
         "H",
-        FontId::proportional(11.0),
-        Color32::from_rgb(61, 67, 71),
+        FontId::proportional(text_size::LABEL),
+        theme::dimension_line(),
     );
 
     let body_rect = view_cube_body_rect(rect);
@@ -440,7 +438,7 @@ fn draw_view_cube_edges(
     geometry: &ViewCubeGeometry,
     hovered_action: Option<ViewCubeAction>,
 ) {
-    let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(82, 89, 88, 128));
+    let stroke = Stroke::new(1.0, theme::with_alpha(theme::dimension_line(), 128));
     for face in &geometry.faces {
         for index in 0..face.points.len() {
             painter.line_segment(
@@ -457,7 +455,7 @@ fn draw_view_cube_edges(
         return;
     };
 
-    let highlight = Stroke::new(2.25, Color32::from_rgb(42, 124, 186));
+    let highlight = Stroke::new(2.25, theme::active_blue());
     match orientation.component_count() {
         1 => {
             if let Some(face) = geometry
@@ -494,7 +492,7 @@ fn draw_view_cube_edges(
                 painter.circle_filled(
                     corner.center,
                     4.0,
-                    Color32::from_rgba_unmultiplied(42, 124, 186, 130),
+                    theme::with_alpha(theme::active_blue(), 130),
                 );
                 painter.circle_stroke(corner.center, 4.0, highlight);
             }
@@ -520,8 +518,12 @@ fn draw_view_cube_projected_label(
     projector: &OrbitProjector,
     spec: ViewCubeLabelSpec,
 ) {
-    let color = Color32::from_rgba_unmultiplied(53, 60, 62, 215);
-    let galley = painter.layout_no_wrap(spec.text.to_owned(), FontId::proportional(12.0), color);
+    let color = theme::with_alpha(theme::framing_line_dark(), 215);
+    let galley = painter.layout_no_wrap(
+        spec.text.to_owned(),
+        FontId::proportional(text_size::BODY),
+        color,
+    );
     let size = galley.rect.size();
     if size.x <= f32::EPSILON || size.y <= f32::EPSILON {
         return;

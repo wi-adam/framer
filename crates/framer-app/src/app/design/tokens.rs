@@ -37,7 +37,9 @@ pub(crate) struct Theme {
     pub accent: Color32,
     pub accent_soft: Color32,
     pub success: Color32,
+    pub success_soft: Color32,
     pub warning: Color32,
+    pub warning_soft: Color32,
     pub danger: Color32,
 
     // Lines.

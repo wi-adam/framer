@@ -16,6 +16,7 @@ use super::view_common::{
     WallElevationLayout, draw_drafting_grid, draw_drafting_rulers, draw_view_border, opening_rect,
 };
 use crate::app::Selection;
+use crate::app::design::text_size;
 
 // === extracted framing block appended below; visibility adjusted in place ===
 
@@ -90,7 +91,7 @@ pub(super) fn draw_wall_elevation(
         Pos2::new(wall_rect.left(), wall_rect.bottom() + 20.0),
         Align2::LEFT_CENTER,
         format!("{} x {}", wall.length, wall.height),
-        FontId::proportional(13.0),
+        FontId::proportional(text_size::BODY),
         theme::framing_line_dark(),
     );
 
@@ -159,11 +160,11 @@ pub(super) fn draw_member_rect(
 ) {
     painter.rect_filled(rect, 1.0, member_color(kind));
     let stroke = if selected {
-        Stroke::new(2.0, Color32::from_rgb(34, 95, 155))
+        Stroke::new(2.0, theme::active_blue())
     } else if hovered {
-        Stroke::new(1.5, Color32::from_rgb(40, 40, 40))
+        Stroke::new(1.5, theme::framing_line_dark())
     } else {
-        Stroke::new(0.75, Color32::from_rgb(87, 70, 52))
+        Stroke::new(0.75, theme::framing_line())
     };
     painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Outside);
 }
@@ -175,14 +176,14 @@ pub(super) fn draw_section_line(painter: &egui::Painter, drawing: Rect, sx: f32,
             Pos2::new(px, drawing.top()),
             Pos2::new(px, drawing.bottom()),
         ],
-        Stroke::new(1.5, Color32::from_rgb(45, 91, 138)),
+        Stroke::new(1.5, theme::active_blue()),
     );
     painter.text(
         Pos2::new(px + 5.0, drawing.top() + 14.0),
         Align2::LEFT_CENTER,
         "A-A",
-        FontId::proportional(12.0),
-        Color32::from_rgb(45, 91, 138),
+        FontId::proportional(text_size::BODY),
+        theme::active_blue(),
     );
 }
 
@@ -212,7 +213,7 @@ pub(super) fn draw_section_swatch(
         Pos2::new(anchor.x, anchor.y - 4.0),
         Align2::LEFT_BOTTOM,
         format!("A-A  {}", system.total_thickness()),
-        FontId::proportional(11.0),
+        FontId::proportional(text_size::LABEL),
         theme::framing_line_dark(),
     );
 
@@ -226,7 +227,7 @@ pub(super) fn draw_section_swatch(
                 let [r, g, b] = m.color();
                 Color32::from_rgb(r, g, b)
             })
-            .unwrap_or(Color32::from_gray(150));
+            .unwrap_or_else(theme::sheet_ruler);
         let width = (layer.thickness.inches() as f32 * scale).max(SWATCH_MIN_BAND);
         let band = Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + width, bottom));
 
@@ -237,7 +238,7 @@ pub(super) fn draw_section_swatch(
         painter.rect_stroke(
             band,
             0.0,
-            Stroke::new(0.75, Color32::from_rgb(60, 48, 36)),
+            Stroke::new(0.75, theme::framing_line_dark()),
             StrokeKind::Inside,
         );
 
@@ -256,7 +257,7 @@ pub(super) fn draw_section_swatch(
             Pos2::new(x + width / 2.0, bottom + 3.0),
             Align2::CENTER_TOP,
             caption,
-            FontId::proportional(9.0),
+            FontId::proportional(text_size::MICRO),
             theme::text_muted(),
         );
 
@@ -297,9 +298,9 @@ fn draw_band_hatch(painter: &egui::Painter, band: Rect, color: Color32) {
 fn hatch_color(fill: Color32) -> Color32 {
     let luma = 0.299 * fill.r() as f32 + 0.587 * fill.g() as f32 + 0.114 * fill.b() as f32;
     if luma > 128.0 {
-        Color32::from_rgba_unmultiplied(20, 16, 12, 150)
+        theme::with_alpha(theme::framing_line_dark(), 150)
     } else {
-        Color32::from_rgba_unmultiplied(235, 230, 220, 150)
+        theme::with_alpha(theme::sheet(), 150)
     }
 }
 

@@ -11,6 +11,7 @@ use framer_core::{
 use super::geom::distance_to_segment;
 use super::theme;
 use super::view_common::opening_rect;
+use crate::app::design::text_size;
 
 // === extracted dimension items appended below; visibility adjusted in place ===
 
@@ -99,7 +100,7 @@ pub(super) fn draw_wall_dimension_annotations(
         } else if dimension.kind == DimensionKind::Reference {
             theme::text_muted()
         } else {
-            theme::framing_line()
+            theme::dimension_line()
         };
         let stroke = Stroke::new(if selected || hovered { 2.0 } else { 1.25 }, color);
 
@@ -166,7 +167,7 @@ pub(super) fn draw_wall_dimension_annotations(
             label_pos,
             Align2::CENTER_CENTER,
             label,
-            FontId::proportional(11.0),
+            FontId::proportional(text_size::LABEL),
             color,
         );
 
@@ -345,7 +346,7 @@ pub(super) fn draw_pending_dimension_preview(
         dimension_label_position(line_start, line_end, axis),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.0),
+        FontId::proportional(text_size::LABEL),
         color,
     );
 
@@ -441,11 +442,11 @@ pub(super) fn draw_dimension_anchors(
         let fill = if selected {
             theme::active_blue()
         } else if marker.kind == DimensionAnchorKind::Center {
-            Color32::from_rgb(224, 240, 225)
+            theme::success_soft()
         } else if marker.kind == DimensionAnchorKind::Vertex {
-            Color32::from_rgb(235, 241, 247)
+            theme::active_blue_soft()
         } else {
-            Color32::from_rgb(247, 247, 242)
+            theme::sheet()
         };
         let stroke = if on_axis {
             theme::active_blue()

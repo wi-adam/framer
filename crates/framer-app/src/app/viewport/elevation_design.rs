@@ -2,7 +2,7 @@
 //! (`elevation_dimensions`), and opening editing (`elevation_openings`) for a
 //! single wall, returning a `DesignElevationResponse` of clicks + drag events.
 
-use eframe::egui::{self, Color32, Rect, Sense, Ui, Vec2};
+use eframe::egui::{self, Rect, Sense, Ui, Vec2};
 use framer_core::{DimensionAnchor, DimensionAxis, Length, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
@@ -122,11 +122,7 @@ pub(super) fn draw_wall_design_elevation(
     }
     let mut over_element = hovered_handle.is_some() || hovered_dimension_move.is_some();
 
-    painter.rect_filled(
-        wall_rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(188, 179, 158, 34),
-    );
+    painter.rect_filled(wall_rect, 0.0, theme::with_alpha(theme::sheet_ruler(), 34));
     draw_view_border(&painter, wall_rect);
     for opening in &wall.openings {
         let opening_rect = opening_rect(wall_rect, scale, scale, opening);

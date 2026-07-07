@@ -4,7 +4,7 @@
 //! call sites keep working while the design system drives the colors. New code
 //! should prefer `design::active()` / `design::theme(ui)` and read tokens by name.
 
-use eframe::egui::{Color32, Stroke};
+use eframe::egui::{Color32, Rgba, Stroke};
 
 use super::design;
 
@@ -52,6 +52,10 @@ pub(super) fn success() -> Color32 {
     design::active().success
 }
 
+pub(super) fn success_soft() -> Color32 {
+    design::active().success_soft
+}
+
 pub(super) fn warning() -> Color32 {
     design::active().warning
 }
@@ -82,6 +86,19 @@ pub(super) fn framing_line() -> Color32 {
 
 pub(super) fn framing_line_dark() -> Color32 {
     design::active().framing_dark
+}
+
+pub(super) fn dimension_line() -> Color32 {
+    design::active().dimension
+}
+
+pub(super) fn with_alpha(color: Color32, alpha: u8) -> Color32 {
+    Color32::from(Rgba::from_srgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        alpha,
+    ))
 }
 
 pub(super) fn soft_stroke() -> Stroke {

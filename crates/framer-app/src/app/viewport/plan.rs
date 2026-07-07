@@ -19,6 +19,7 @@ use super::view_common::{
     viewport_drawing_rect, viewport_size,
 };
 use super::{DrawWallPlanInput, theme};
+use crate::app::design::text_size;
 use crate::app::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
 use crate::app::labels::join_kind_label;
 use crate::app::model_edit::WallEditHandle;
@@ -175,12 +176,7 @@ fn selection_interactions_enabled(
 }
 
 fn draw_roof_empty_state(painter: &egui::Painter, drawing: Rect) {
-    let sheet = theme::sheet();
-    painter.rect_filled(
-        drawing,
-        0.0,
-        Color32::from_rgba_unmultiplied(sheet.r(), sheet.g(), sheet.b(), 214),
-    );
+    painter.rect_filled(drawing, 0.0, theme::with_alpha(theme::sheet(), 214));
     draw_view_empty(painter, drawing, "No roofs yet — add one in the Roofs tab");
 }
 
@@ -316,7 +312,7 @@ fn plan_layer_color(model: &BuildingModel, id: &framer_core::ElementId) -> Color
             let [r, g, b] = material.color();
             Color32::from_rgb(r, g, b)
         }
-        None => Color32::from_rgb(188, 179, 158),
+        None => theme::sheet_ruler(),
     }
 }
 
@@ -371,7 +367,7 @@ fn draw_wall_layers(
             );
             painter.add(egui::Shape::convex_polygon(
                 quad.to_vec(),
-                Color32::from_rgb(188, 179, 158),
+                theme::sheet_ruler(),
                 Stroke::NONE,
             ));
         }
@@ -591,8 +587,8 @@ pub(super) fn draw_project_plan(
             label,
             Align2::CENTER_CENTER,
             format!("{}\n{:.0} sq ft", room.name, boundary.area_square_feet()),
-            FontId::proportional(11.0),
-            theme::framing_line_dark(),
+            FontId::proportional(text_size::LABEL),
+            theme::dimension_line(),
         );
         // Selecting a room by click is the lowest-priority hit (walls/openings win),
         // and only when no tool is active.
@@ -634,7 +630,7 @@ pub(super) fn draw_project_plan(
             &instance.name,
             selected,
             hovered,
-            Color32::from_rgb(190, 172, 132),
+            theme::warning(),
         );
         if selected {
             *toolbar_out = Some(toolbar_anchor_above(rect.expand(8.0)));
@@ -673,7 +669,7 @@ pub(super) fn draw_project_plan(
             &instance.name,
             selected,
             hovered,
-            Color32::from_rgb(124, 162, 186),
+            theme::dimension_line(),
         );
         if selected {
             *toolbar_out = Some(toolbar_anchor_above(rect.expand(8.0)));
@@ -691,7 +687,11 @@ pub(super) fn draw_project_plan(
         over_element |= hovered;
         let selected = !roof_empty && matches!(selection, Selection::Join(id) if id == &join.id.0);
         if join_label_visible(layers, hovered, selected) {
-            let ink = theme::framing_line_dark();
+            let ink = if selected {
+                theme::active_blue()
+            } else {
+                theme::dimension_line()
+            };
             let marker_radius = if selected || hovered { 5.0 } else { 4.0 };
             painter.circle_filled(point, marker_radius, theme::sheet());
             painter.circle_stroke(point, marker_radius, Stroke::new(1.25, ink));
@@ -699,7 +699,7 @@ pub(super) fn draw_project_plan(
                 point + Vec2::new(6.0, -7.0),
                 Align2::LEFT_CENTER,
                 join_kind_label(join.kind),
-                FontId::proportional(10.0),
+                FontId::proportional(text_size::MICRO),
                 ink,
             );
         }
@@ -759,8 +759,8 @@ pub(super) fn draw_project_plan(
                 midpoint + Vec2::new(5.0, -10.0),
                 Align2::LEFT_CENTER,
                 &wall.name,
-                FontId::proportional(12.0),
-                theme::framing_line_dark(),
+                FontId::proportional(text_size::BODY),
+                theme::dimension_line(),
             );
         }
 
@@ -945,8 +945,8 @@ pub(super) fn draw_project_plan(
                     centroid,
                     Align2::CENTER_CENTER,
                     &plane.name,
-                    FontId::proportional(11.0),
-                    theme::framing_line_dark(),
+                    FontId::proportional(text_size::LABEL),
+                    theme::dimension_line(),
                 );
             }
             if response.clicked()
@@ -1107,8 +1107,8 @@ fn draw_object_footprint(
             rect.center(),
             Align2::CENTER_CENTER,
             name,
-            FontId::proportional(10.0),
-            theme::framing_line_dark(),
+            FontId::proportional(text_size::MICRO),
+            theme::dimension_line(),
         );
     }
 }
@@ -1204,7 +1204,7 @@ fn draw_wall_overlay(
                 mid + Vec2::new(8.0, -8.0),
                 Align2::LEFT_CENTER,
                 length.to_string(),
-                FontId::proportional(12.0),
+                FontId::proportional(text_size::BODY),
                 theme::active_blue(),
             );
         }
@@ -1260,7 +1260,7 @@ fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspen
             at + Vec2::new(10.0, -10.0),
             Align2::LEFT_CENTER,
             "snap off",
-            FontId::proportional(11.0),
+            FontId::proportional(text_size::LABEL),
             color,
         );
         return;
@@ -1337,7 +1337,7 @@ fn draw_snap_indicator(painter: &egui::Painter, at: Pos2, kind: SnapKind, suspen
             at + Vec2::new(10.0, -10.0),
             Align2::LEFT_CENTER,
             label,
-            FontId::proportional(11.0),
+            FontId::proportional(text_size::LABEL),
             color,
         );
     }

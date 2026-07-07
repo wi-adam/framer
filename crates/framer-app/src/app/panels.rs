@@ -333,12 +333,12 @@ impl FramerApp {
                 });
             }
             WorkflowTab::Openings => {
-                widgets::command_panel(ui, "Openings", |ui| {
+                widgets::command_panel(ui, "", |ui| {
                     self.opening_flyout(ui);
                 });
             }
             WorkflowTab::Roofs => {
-                widgets::command_panel(ui, "Roofs", |ui| {
+                widgets::command_panel(ui, "", |ui| {
                     self.roof_flyout(ui);
                 });
             }
@@ -892,13 +892,13 @@ impl FramerApp {
             } else {
                 ui.separator();
                 panel_subheader(ui, "Catalog");
-                if ui.button("+ Door").clicked() {
+                if widgets::catalog_add_button(ui, "Door").clicked() {
                     self.add_opening(OpeningKind::Door);
                 }
-                if ui.button("+ Window").clicked() {
+                if widgets::catalog_add_button(ui, "Window").clicked() {
                     self.add_opening(OpeningKind::Window);
                 }
-                if ui.button("+ Garage Door").clicked() {
+                if widgets::catalog_add_button(ui, "Garage Door").clicked() {
                     self.add_opening(OpeningKind::GarageDoor);
                 }
             }
@@ -3618,20 +3618,18 @@ fn toolbar_divider(ui: &mut Ui) {
 fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
     let t = design::active();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).strong().size(17.0).color(t.text));
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(design::text_size::HEADING)
+                .color(t.text),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            Frame::new()
-                .fill(t.control)
-                .stroke(t.soft_stroke())
-                .corner_radius(design::radius::SM)
-                .inner_margin(Margin::symmetric(8, 2))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(badge)
-                            .size(design::text_size::LABEL)
-                            .color(t.text_secondary),
-                    );
-                });
+            ui.label(
+                RichText::new(badge)
+                    .size(design::text_size::LABEL)
+                    .color(t.text_muted),
+            );
         });
     });
     ui.add_space(design::space::SM);
@@ -3787,7 +3785,7 @@ fn panel_subheader(ui: &mut Ui, title: &str) {
     ui.label(
         RichText::new(title)
             .strong()
-            .size(12.0)
+            .size(design::text_size::BODY)
             .color(theme::text_muted()),
     );
     ui.add_space(3.0);
@@ -4326,22 +4324,11 @@ enum StatusTone {
 }
 
 fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
+    let t = design::active();
     let (fill, stroke, text_color) = match tone {
-        StatusTone::Info => (
-            theme::active_blue_soft(),
-            theme::active_blue(),
-            theme::text_primary(),
-        ),
-        StatusTone::Success => (
-            Color32::from_rgb(28, 67, 45),
-            theme::success(),
-            Color32::from_rgb(217, 245, 225),
-        ),
-        StatusTone::Warning => (
-            Color32::from_rgb(82, 63, 25),
-            theme::warning(),
-            Color32::from_rgb(250, 232, 188),
-        ),
+        StatusTone::Info => (t.accent_soft, t.accent, t.text),
+        StatusTone::Success => (t.success_soft, t.success, t.text),
+        StatusTone::Warning => (t.warning_soft, t.warning, t.text),
     };
 
     Frame::new()
@@ -4350,7 +4337,11 @@ fn status_chip(ui: &mut Ui, text: &str, tone: StatusTone) {
         .corner_radius(3)
         .inner_margin(Margin::symmetric(7, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).size(11.0).color(text_color));
+            ui.label(
+                RichText::new(text)
+                    .size(design::text_size::LABEL)
+                    .color(text_color),
+            );
         });
 }
 
@@ -4895,7 +4886,7 @@ fn material_color(material_colors: &[(String, [u8; 3])], id: &str) -> Color32 {
         .iter()
         .find(|(candidate, _)| candidate == id)
         .map(|(_, [r, g, b])| Color32::from_rgb(*r, *g, *b))
-        .unwrap_or_else(|| Color32::from_rgb(188, 179, 158))
+        .unwrap_or_else(theme::sheet_ruler)
 }
 
 /// Look up a material's display name by id, falling back to the raw id.

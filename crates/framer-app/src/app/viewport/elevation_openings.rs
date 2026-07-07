@@ -2,13 +2,12 @@
 //! targets and handles, drawing the edit handles + guide, and mapping drag motion
 //! to wall-axis deltas. `OpeningDragEvent` is the event the design view emits.
 
-use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2,
-};
+use eframe::egui::{self, Align2, CursorIcon, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use framer_core::{Length, Wall};
 
 use super::theme;
 use super::view_common::opening_rect;
+use crate::app::design::text_size;
 use crate::app::model_edit::OpeningEditHandle;
 
 // === extracted opening items appended below; visibility adjusted in place ===
@@ -218,17 +217,13 @@ pub(super) fn draw_opening_guide(
     } else {
         Stroke::new(1.0, theme::framing_line())
     };
-    painter.rect_filled(
-        rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(255, 255, 255, 76),
-    );
+    painter.rect_filled(rect, 0.0, theme::with_alpha(theme::sheet(), 76));
     painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Outside);
     painter.text(
         rect.left_top() + Vec2::new(4.0, 12.0),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(11.0),
-        Color32::from_rgb(99, 74, 39),
+        FontId::proportional(text_size::LABEL),
+        theme::dimension_line(),
     );
 }
