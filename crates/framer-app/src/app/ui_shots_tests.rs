@@ -28,7 +28,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
-use super::{FramerApp, ViewportMode, actions, design};
+use super::{FramerApp, Selection, ViewportMode, actions, design};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -142,6 +142,8 @@ fn capture_ui_shot_deck() {
         harness.get_by_label(label).click();
         shot(&mut harness, &dir, &mut index, name);
     }
+    harness.state_mut().selected = Selection::None;
+    shot(&mut harness, &dir, &mut index, "empty-selection");
 
     // Views, with the back wall selected for the elevation.
     harness.get_by_label("Wall segment: Back wall").click();

@@ -1610,10 +1610,15 @@ impl FramerApp {
         };
         let selected_library_status =
             selected_library_status(&self.model, &selection, &self.library_issues);
+        let selected_inspector_id =
+            selection_inspector_id(&self.model, self.selected_wall, &selection);
 
         panel_header(ui, "Inspector", selection_badge(&selection));
 
         match selection {
+            Selection::None => {
+                empty_inspector_state(ui);
+            }
             Selection::Site => {
                 if can_edit {
                     widgets::section(ui, "site-context", "Site context", true, |ui| {
@@ -1636,7 +1641,6 @@ impl FramerApp {
             Selection::Level(id) => {
                 if let Some(level) = self.model.levels.iter_mut().find(|level| level.id.0 == id) {
                     if can_edit {
-                        ui.label(&level.id.0);
                         changed |= text_edit(ui, "Name", &mut level.name);
                         changed |= coordinate_drag(ui, "Elevation", &mut level.elevation);
                     } else {
@@ -1656,7 +1660,6 @@ impl FramerApp {
                         framer_core::room_boundary_on_level(&self.model, &room.level, room.seed)
                     });
                 if let Some(room) = self.model.rooms.iter_mut().find(|room| room.id.0 == id) {
-                    ui.label(&room.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut room.name);
                         ComboBox::from_id_salt("room-usage")
@@ -1700,17 +1703,18 @@ impl FramerApp {
                 let mut select_dimension = None;
                 if let Some(wall) = self.model.walls.get_mut(self.selected_wall) {
                     if can_edit {
-                        inspector_object_id(ui, &wall.id.0);
                         changed |= text_edit(ui, "Name", &mut wall.name);
 
                         let mut level_id = wall.level.0.clone();
-                        ComboBox::from_label("Level")
-                            .selected_text(level_display_name(&level_options, &level_id))
-                            .show_ui(ui, |ui| {
-                                for (id, name) in &level_options {
-                                    ui.selectable_value(&mut level_id, id.clone(), name);
-                                }
-                            });
+                        property_row(ui, "Level", |ui| {
+                            ComboBox::from_id_salt("wall-level")
+                                .selected_text(level_display_name(&level_options, &level_id))
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &level_options {
+                                        ui.selectable_value(&mut level_id, id.clone(), name);
+                                    }
+                                });
+                        });
                         if level_id != wall.level.0 {
                             wall.level = ElementId::new(level_id);
                             changed = true;
@@ -1847,33 +1851,34 @@ impl FramerApp {
                         wall.openings.iter_mut().find(|opening| opening.id.0 == id)
                     {
                         if can_edit {
-                            ui.label(&opening.id.0);
                             changed |= text_edit(ui, "Name", &mut opening.name);
-                            ComboBox::from_label("Kind")
-                                .selected_text(kind_label(opening.kind))
-                                .show_ui(ui, |ui| {
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut opening.kind,
-                                            OpeningKind::Door,
-                                            "Door",
-                                        )
-                                        .changed();
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut opening.kind,
-                                            OpeningKind::Window,
-                                            "Window",
-                                        )
-                                        .changed();
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut opening.kind,
-                                            OpeningKind::GarageDoor,
-                                            "Garage door",
-                                        )
-                                        .changed();
-                                });
+                            property_row(ui, "Kind", |ui| {
+                                ComboBox::from_id_salt("opening-kind")
+                                    .selected_text(kind_label(opening.kind))
+                                    .show_ui(ui, |ui| {
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut opening.kind,
+                                                OpeningKind::Door,
+                                                "Door",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut opening.kind,
+                                                OpeningKind::Window,
+                                                "Window",
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(
+                                                &mut opening.kind,
+                                                OpeningKind::GarageDoor,
+                                                "Garage door",
+                                            )
+                                            .changed();
+                                    });
+                            });
                             changed |= driven_length_drag(
                                 ui,
                                 "Center",
@@ -1913,7 +1918,7 @@ impl FramerApp {
                             );
 
                             ui.separator();
-                            if ui.button("Remove Opening").clicked() {
+                            if danger_button(ui, "Remove Opening").clicked() {
                                 remove = true;
                             }
                         } else {
@@ -1962,54 +1967,63 @@ impl FramerApp {
                     .find(|join| join.id.0 == id)
                 {
                     if can_edit {
-                        ui.label(&join.id.0);
                         changed |= text_edit(ui, "Name", &mut join.name);
-                        ComboBox::from_label("Kind")
-                            .selected_text(join_kind_label(join.kind))
-                            .show_ui(ui, |ui| {
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut join.kind,
-                                        WallJoinKind::Corner,
-                                        "Corner",
-                                    )
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut join.kind,
-                                        WallJoinKind::EndToEnd,
-                                        "End-to-end",
-                                    )
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(&mut join.kind, WallJoinKind::Tee, "Tee")
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(&mut join.kind, WallJoinKind::Cross, "Cross")
-                                    .changed();
-                            });
+                        property_row(ui, "Kind", |ui| {
+                            ComboBox::from_id_salt("join-kind")
+                                .selected_text(join_kind_label(join.kind))
+                                .show_ui(ui, |ui| {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut join.kind,
+                                            WallJoinKind::Corner,
+                                            "Corner",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut join.kind,
+                                            WallJoinKind::EndToEnd,
+                                            "End-to-end",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(&mut join.kind, WallJoinKind::Tee, "Tee")
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut join.kind,
+                                            WallJoinKind::Cross,
+                                            "Cross",
+                                        )
+                                        .changed();
+                                });
+                        });
 
                         let mut first_wall = join.first_wall.0.clone();
-                        ComboBox::from_label("First wall")
-                            .selected_text(wall_display_name(&wall_options, &first_wall))
-                            .show_ui(ui, |ui| {
-                                for (id, name) in &wall_options {
-                                    ui.selectable_value(&mut first_wall, id.clone(), name);
-                                }
-                            });
+                        property_row(ui, "First wall", |ui| {
+                            ComboBox::from_id_salt("join-first-wall")
+                                .selected_text(wall_display_name(&wall_options, &first_wall))
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &wall_options {
+                                        ui.selectable_value(&mut first_wall, id.clone(), name);
+                                    }
+                                });
+                        });
                         if first_wall != join.first_wall.0 {
                             join.first_wall = ElementId::new(first_wall);
                             changed = true;
                         }
 
                         let mut second_wall = join.second_wall.0.clone();
-                        ComboBox::from_label("Second wall")
-                            .selected_text(wall_display_name(&wall_options, &second_wall))
-                            .show_ui(ui, |ui| {
-                                for (id, name) in &wall_options {
-                                    ui.selectable_value(&mut second_wall, id.clone(), name);
-                                }
-                            });
+                        property_row(ui, "Second wall", |ui| {
+                            ComboBox::from_id_salt("join-second-wall")
+                                .selected_text(wall_display_name(&wall_options, &second_wall))
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in &wall_options {
+                                        ui.selectable_value(&mut second_wall, id.clone(), name);
+                                    }
+                                });
+                        });
                         if second_wall != join.second_wall.0 {
                             join.second_wall = ElementId::new(second_wall);
                             changed = true;
@@ -2028,7 +2042,6 @@ impl FramerApp {
             }
             Selection::Member { wall_id, member_id } => {
                 if let Some(member) = self.selected_member(&wall_id, &member_id) {
-                    ui.label(format!("Wall: {wall_id}"));
                     member_inspector(ui, member);
                 } else {
                     ui.label("Generated member no longer exists");
@@ -2041,7 +2054,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|system| system.id.0 == id)
                 {
-                    inspector_object_id(ui, &system.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut system.name);
 
@@ -2138,7 +2150,6 @@ impl FramerApp {
             }
             Selection::Material(id) => {
                 if let Some(material) = self.model.materials.iter_mut().find(|m| m.id.0 == id) {
-                    inspector_object_id(ui, &material.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut material.name);
                         if let Some(status) = selected_library_status.as_ref() {
@@ -2178,7 +2189,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|furnishing| furnishing.id.0 == id)
                 {
-                    inspector_object_id(ui, &furnishing.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut furnishing.name);
                         if let Some(status) = selected_library_status.as_ref() {
@@ -2217,7 +2227,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|object| object.id.0 == id)
                 {
-                    inspector_object_id(ui, &object.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut object.name);
                         property_row(ui, "Kind", |ui| {
@@ -2273,7 +2282,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|pack| pack.id.0 == id)
                 {
-                    inspector_object_id(ui, &pack.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut pack.name);
                         changed |= text_edit(ui, "Edition", &mut pack.edition);
@@ -2327,7 +2335,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|instance| instance.id.0 == id)
                 {
-                    inspector_object_id(ui, &instance.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut instance.name);
                         changed |=
@@ -2340,7 +2347,7 @@ impl FramerApp {
                             changed |= tags_editor(ui, &mut instance.tags);
                         });
                         ui.separator();
-                        if ui.button("Remove Furnishing").clicked() {
+                        if danger_button(ui, "Remove Furnishing").clicked() {
                             deferred_remove = Some(DeferredRemove::FurnishingInstance(id.clone()));
                         }
                     } else {
@@ -2365,7 +2372,6 @@ impl FramerApp {
                     .iter_mut()
                     .find(|instance| instance.id.0 == id)
                 {
-                    inspector_object_id(ui, &instance.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut instance.name);
                         changed |= family_picker(ui, "Family", &mut instance.family, &mep_options);
@@ -2377,7 +2383,7 @@ impl FramerApp {
                             changed |= tags_editor(ui, &mut instance.tags);
                         });
                         ui.separator();
-                        if ui.button("Remove MEP Object").clicked() {
+                        if danger_button(ui, "Remove MEP Object").clicked() {
                             deferred_remove = Some(DeferredRemove::MepInstance(id.clone()));
                         }
                     } else {
@@ -2400,18 +2406,19 @@ impl FramerApp {
             // height, span, system) land with the authoring tools in a later slice.
             Selection::RoofPlane(id) => {
                 if let Some(plane) = self.model.roof_planes.iter_mut().find(|p| p.id.0 == id) {
-                    inspector_object_id(ui, &plane.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut plane.name);
 
                         let mut level_id = plane.level.0.clone();
-                        ComboBox::from_label("Level")
-                            .selected_text(level_display_name(&level_options, &level_id))
-                            .show_ui(ui, |ui| {
-                                for (lid, name) in &level_options {
-                                    ui.selectable_value(&mut level_id, lid.clone(), name);
-                                }
-                            });
+                        property_row(ui, "Level", |ui| {
+                            ComboBox::from_id_salt("roof-level")
+                                .selected_text(level_display_name(&level_options, &level_id))
+                                .show_ui(ui, |ui| {
+                                    for (lid, name) in &level_options {
+                                        ui.selectable_value(&mut level_id, lid.clone(), name);
+                                    }
+                                });
+                        });
                         if level_id != plane.level.0 {
                             plane.level = ElementId::new(level_id);
                             changed = true;
@@ -2444,7 +2451,10 @@ impl FramerApp {
                             property_row(ui, "Eave edge", |ui| {
                                 let max = plane.outline.len().saturating_sub(1) as u32;
                                 let before = plane.eave_edge;
-                                ui.add(egui::DragValue::new(&mut plane.eave_edge).range(0..=max));
+                                editable_drag_value(
+                                    ui,
+                                    egui::DragValue::new(&mut plane.eave_edge).range(0..=max),
+                                );
                                 if plane.eave_edge != before {
                                     changed = true;
                                 }
@@ -2526,18 +2536,19 @@ impl FramerApp {
                             .map(|boundary| boundary.vertices),
                     });
                 if let Some(ceiling) = self.model.ceilings.iter_mut().find(|c| c.id.0 == id) {
-                    inspector_object_id(ui, &ceiling.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut ceiling.name);
 
                         let mut level_id = ceiling.level.0.clone();
-                        ComboBox::from_label("Level")
-                            .selected_text(level_display_name(&level_options, &level_id))
-                            .show_ui(ui, |ui| {
-                                for (lid, name) in &level_options {
-                                    ui.selectable_value(&mut level_id, lid.clone(), name);
-                                }
-                            });
+                        property_row(ui, "Level", |ui| {
+                            ComboBox::from_id_salt("ceiling-level")
+                                .selected_text(level_display_name(&level_options, &level_id))
+                                .show_ui(ui, |ui| {
+                                    for (lid, name) in &level_options {
+                                        ui.selectable_value(&mut level_id, lid.clone(), name);
+                                    }
+                                });
+                        });
                         if level_id != ceiling.level.0 {
                             ceiling.level = ElementId::new(level_id);
                             changed = true;
@@ -2613,7 +2624,8 @@ impl FramerApp {
                                 property_row(ui, "Low edge", |ui| {
                                     let max = outline_len.saturating_sub(1) as u32;
                                     let before = slope.low_edge;
-                                    ui.add(
+                                    editable_drag_value(
+                                        ui,
                                         egui::DragValue::new(&mut slope.low_edge).range(0..=max),
                                     );
                                     if slope.low_edge != before {
@@ -2653,18 +2665,19 @@ impl FramerApp {
             }
             Selection::FloorDeck(id) => {
                 if let Some(deck) = self.model.floor_decks.iter_mut().find(|d| d.id.0 == id) {
-                    inspector_object_id(ui, &deck.id.0);
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut deck.name);
 
                         let mut level_id = deck.level.0.clone();
-                        ComboBox::from_label("Level")
-                            .selected_text(level_display_name(&level_options, &level_id))
-                            .show_ui(ui, |ui| {
-                                for (lid, name) in &level_options {
-                                    ui.selectable_value(&mut level_id, lid.clone(), name);
-                                }
-                            });
+                        property_row(ui, "Level", |ui| {
+                            ComboBox::from_id_salt("floor-level")
+                                .selected_text(level_display_name(&level_options, &level_id))
+                                .show_ui(ui, |ui| {
+                                    for (lid, name) in &level_options {
+                                        ui.selectable_value(&mut level_id, lid.clone(), name);
+                                    }
+                                });
+                        });
                         if level_id != deck.level.0 {
                             deck.level = ElementId::new(level_id);
                             changed = true;
@@ -2713,6 +2726,10 @@ impl FramerApp {
                     ui.label("Floor deck no longer exists");
                 }
             }
+        }
+
+        if let Some(id) = selected_inspector_id.as_deref() {
+            inspector_object_id(ui, id);
         }
 
         // Replay a deferred Remove as one discrete, labelled undo step now that
@@ -3043,6 +3060,7 @@ impl FramerApp {
 
     fn selection_status(&self) -> String {
         match &self.selected {
+            Selection::None => "Nothing selected".to_owned(),
             Selection::Site => "Site & standards".to_owned(),
             Selection::Level(id) => format!("Level: {id}"),
             Selection::Wall => "Wall segment".to_owned(),
@@ -3230,6 +3248,7 @@ fn short_status(status: &str) -> String {
 /// so a single label per selected-object kind is the right granularity.
 fn inspector_edit_label(selection: &Selection) -> &'static str {
     match selection {
+        Selection::None => "Edit selection",
         Selection::Site => "Edit site context",
         Selection::Level(_) => "Edit level",
         Selection::Wall => "Edit wall",
@@ -3456,13 +3475,82 @@ fn panel_header(ui: &mut Ui, title: &str, badge: &str) {
     ui.add_space(design::space::MD);
 }
 
+fn selection_inspector_id(
+    model: &BuildingModel,
+    selected_wall: usize,
+    selection: &Selection,
+) -> Option<String> {
+    match selection {
+        Selection::None | Selection::Site => None,
+        Selection::Wall => model.walls.get(selected_wall).map(|wall| wall.id.0.clone()),
+        Selection::Level(id)
+        | Selection::Room(id)
+        | Selection::Opening(id)
+        | Selection::Dimension(id)
+        | Selection::Join(id)
+        | Selection::RoofPlane(id)
+        | Selection::Ceiling(id)
+        | Selection::FloorDeck(id)
+        | Selection::System(id)
+        | Selection::Material(id)
+        | Selection::Furnishing(id)
+        | Selection::MepObject(id)
+        | Selection::StandardsPack(id)
+        | Selection::FurnishingInstance(id)
+        | Selection::MepInstance(id) => Some(id.clone()),
+        Selection::Member { member_id, .. } => Some(member_id.clone()),
+    }
+}
+
+fn empty_inspector_state(ui: &mut Ui) {
+    ui.add_space(design::space::XL);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new("No selection")
+                .strong()
+                .color(design::active().text),
+        );
+        ui.label(
+            RichText::new("Select an object to edit its properties.")
+                .size(design::text_size::LABEL)
+                .color(design::active().text_muted),
+        );
+    });
+}
+
 fn inspector_object_id(ui: &mut Ui, id: &str) {
+    ui.add_space(design::space::LG);
+    ui.separator();
+    ui.add_space(design::space::SM);
     ui.label(
-        RichText::new(id)
+        RichText::new(format!("ID: {id}"))
+            .monospace()
             .size(design::text_size::LABEL)
             .color(design::active().text_muted),
     );
-    ui.add_space(2.0);
+}
+
+fn danger_button(ui: &mut Ui, label: &str) -> Response {
+    let t = design::active();
+    ui.add(
+        egui::Button::new(RichText::new(label).color(t.danger))
+            .fill(t.control)
+            .stroke(Stroke::new(1.0, t.danger))
+            .corner_radius(design::radius::SM),
+    )
+    .on_hover_text(label)
+}
+
+fn danger_icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
+    let t = design::active();
+    ui.add_sized(
+        Vec2::splat(design::control::ICON_BTN),
+        egui::Button::new(design::icon_text(icon, design::control::INLINE_ICON).color(t.danger))
+            .fill(t.control)
+            .stroke(Stroke::new(1.0, t.danger))
+            .corner_radius(design::radius::SM),
+    )
+    .on_hover_text(tooltip)
 }
 
 /// Removable tag chips plus an add field. Returns whether `tags` changed.
@@ -3487,7 +3575,7 @@ fn tags_editor(ui: &mut Ui, tags: &mut Vec<String>) -> bool {
                                 .size(design::text_size::LABEL)
                                 .color(t.text_secondary),
                         );
-                        ui.label(design::icon_text(Icon::Delete, 11.0).color(t.text_muted));
+                        ui.label(design::icon_text(Icon::Delete, 11.0).color(t.danger));
                     });
                 })
                 .response
@@ -3654,7 +3742,7 @@ fn standards_stack_panel(
             {
                 actions.move_stack = Some((id.0.clone(), 1));
             }
-            if widgets::icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
+            if danger_icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
                 actions.remove_stack = Some(id.0.clone());
             }
         });
@@ -3744,7 +3832,7 @@ fn standards_pack_stack_controls(
                 {
                     actions.move_stack = Some((id.to_owned(), 1));
                 }
-                if widgets::icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
+                if danger_icon_button(ui, Icon::Delete, "Remove from stack").clicked() {
                     actions.remove_stack = Some(id.to_owned());
                 }
             });
@@ -3927,14 +4015,15 @@ fn optional_u32_drag(
     property_row(ui, label, |ui| {
         let mut changed = false;
         if let Some(current) = value {
-            let response = ui.add(
+            let response = editable_drag_value(
+                ui,
                 egui::DragValue::new(current)
                     .range(min..=max)
                     .speed(1.0)
                     .suffix(format!(" {suffix}")),
             );
             changed |= response.changed();
-            if widgets::icon_button(ui, Icon::Delete, "Clear value").clicked() {
+            if danger_icon_button(ui, Icon::Delete, "Clear value").clicked() {
                 *value = None;
                 changed = true;
             }
@@ -3961,31 +4050,17 @@ fn optional_length_drag(
     property_row(ui, label, |ui| {
         let mut changed = false;
         if let Some(current) = value {
-            let mut display_value = if display_unit == "ft" {
-                current.feet()
-            } else {
-                current.inches()
-            };
-            let response = ui.add(
-                egui::DragValue::new(&mut display_value)
-                    .range(if display_unit == "ft" {
-                        min_inches / 12.0..=max_inches / 12.0
-                    } else {
-                        min_inches..=max_inches
-                    })
-                    .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
-                    .suffix(format!(" {display_unit}")),
+            let mut display_value = length_display_value(*current, display_unit);
+            let response = editable_drag_value(
+                ui,
+                length_drag_widget(&mut display_value, display_unit, min_inches, max_inches),
             );
             if response.changed() {
-                let next_inches = if display_unit == "ft" {
-                    display_value * 12.0
-                } else {
-                    display_value
-                };
+                let next_inches = length_from_display_value(display_value, display_unit).inches();
                 *current = Length::from_inches(next_inches.clamp(min_inches, max_inches));
                 changed = true;
             }
-            if widgets::icon_button(ui, Icon::Delete, "Clear value").clicked() {
+            if danger_icon_button(ui, Icon::Delete, "Clear value").clicked() {
                 *value = None;
                 changed = true;
             }
@@ -4044,6 +4119,7 @@ fn span_direction_label(span: framer_core::SpanDirection) -> &'static str {
 
 fn selection_badge(selection: &Selection) -> &'static str {
     match selection {
+        Selection::None => "None",
         Selection::Site => "Site",
         Selection::Level(_) => "Level",
         Selection::Wall => "Wall",
@@ -4242,7 +4318,6 @@ fn snap_label(step: Option<Length>) -> String {
 }
 
 fn level_summary(ui: &mut Ui, level: &Level) {
-    ui.label(&level.id.0);
     egui::Grid::new("level-summary")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -4727,7 +4802,7 @@ fn system_layer_editor(
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add_enabled(layer_count > 1 && !is_only_framing, |ui: &mut Ui| {
-                            widgets::icon_button(ui, Icon::Delete, "Remove layer")
+                            danger_icon_button(ui, Icon::Delete, "Remove layer")
                         })
                         .clicked()
                     {
@@ -4966,7 +5041,8 @@ fn material_properties_editor(ui: &mut Ui, material: &mut framer_core::Material)
             _ => 0,
         };
         let response = property_row(ui, label, |ui| {
-            ui.add(
+            editable_drag_value(
+                ui,
                 egui::DragValue::new(&mut value)
                     .speed(1.0)
                     .range(0..=i64::MAX),
@@ -5008,7 +5084,6 @@ fn material_summary(ui: &mut Ui, material: &framer_core::Material) {
 }
 
 fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)], system_name: &str) {
-    ui.label(&wall.id.0);
     egui::Grid::new("wall-summary")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -5029,7 +5104,6 @@ fn wall_summary(ui: &mut Ui, wall: &Wall, level_options: &[(String, String)], sy
 }
 
 fn opening_summary(ui: &mut Ui, opening: &Opening) {
-    ui.label(&opening.id.0);
     egui::Grid::new("opening-summary")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -5066,20 +5140,25 @@ fn dimension_inspector(
 
     {
         let dimension = &mut wall.dimensions[dimension_index];
-        ui.label(&dimension.id.0);
         changed |= text_edit(ui, "Name", &mut dimension.name);
 
         let previous_kind = dimension.kind;
-        ComboBox::from_label("Kind")
-            .selected_text(dimension_kind_label(dimension.kind))
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut dimension.kind, DimensionKind::Driving, "Driving")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut dimension.kind, DimensionKind::Reference, "Reference")
-                    .changed();
-            });
+        property_row(ui, "Kind", |ui| {
+            ComboBox::from_id_salt("dimension-kind")
+                .selected_text(dimension_kind_label(dimension.kind))
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut dimension.kind, DimensionKind::Driving, "Driving")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut dimension.kind,
+                            DimensionKind::Reference,
+                            "Reference",
+                        )
+                        .changed();
+                });
+        });
         if dimension.kind != previous_kind {
             match dimension.kind {
                 DimensionKind::Driving => {
@@ -5093,16 +5172,22 @@ fn dimension_inspector(
         }
 
         let previous_axis = dimension.axis;
-        ComboBox::from_label("Axis")
-            .selected_text(dimension_axis_label(dimension.axis))
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut dimension.axis, DimensionAxis::Horizontal, "Horizontal")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut dimension.axis, DimensionAxis::Vertical, "Vertical")
-                    .changed();
-            });
+        property_row(ui, "Axis", |ui| {
+            ComboBox::from_id_salt("dimension-axis")
+                .selected_text(dimension_axis_label(dimension.axis))
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(
+                            &mut dimension.axis,
+                            DimensionAxis::Horizontal,
+                            "Horizontal",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut dimension.axis, DimensionAxis::Vertical, "Vertical")
+                        .changed();
+                });
+        });
         axis_changed = dimension.axis != previous_axis;
 
         egui::Grid::new("dimension-inspector")
@@ -5132,7 +5217,7 @@ fn dimension_inspector(
         }
 
         ui.separator();
-        if ui.button("Remove Dimension").clicked() {
+        if danger_button(ui, "Remove Dimension").clicked() {
             *remove = true;
         }
     }
@@ -5160,7 +5245,6 @@ fn dimension_inspector(
 }
 
 fn dimension_summary(ui: &mut Ui, wall: &Wall, dimension: &DimensionConstraint) {
-    ui.label(&dimension.id.0);
     let measured = wall
         .dimension_measurement(dimension)
         .map(|value| value.to_string())
@@ -5187,7 +5271,6 @@ fn dimension_summary(ui: &mut Ui, wall: &Wall, dimension: &DimensionConstraint) 
 }
 
 fn join_summary(ui: &mut Ui, join: &WallJoin, wall_options: &[(String, String)]) {
-    ui.label(&join.id.0);
     egui::Grid::new("join-summary")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -5215,7 +5298,6 @@ fn summary_row(ui: &mut Ui, label: &str, value: impl ToString) {
 }
 
 fn member_inspector(ui: &mut Ui, member: &FrameMember) {
-    ui.label(&member.id);
     egui::Grid::new("member-inspector")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -6395,19 +6477,13 @@ fn readonly_length_field(
     driver: &DrivenField,
     select_dimension: &mut Option<String>,
 ) {
-    let mut display_value = if display_unit == "ft" {
-        value.feet()
-    } else {
-        value.inches()
-    };
+    let mut display_value = length_display_value(value, display_unit);
     let hover_text = driver.hover_text();
 
     property_row(ui, label, |ui| {
         let value_response = ui.add_enabled(
             false,
-            egui::DragValue::new(&mut display_value)
-                .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
-                .suffix(format!(" {display_unit}")),
+            length_drag_widget(&mut display_value, display_unit, f64::MIN, f64::MAX),
         );
         let value_response = ui
             .interact(
@@ -6478,31 +6554,17 @@ fn length_drag(
     max_inches: f64,
     display_unit: &str,
 ) -> bool {
-    let mut display_value = if display_unit == "ft" {
-        value.feet()
-    } else {
-        value.inches()
-    };
+    let mut display_value = length_display_value(*value, display_unit);
 
     let response = property_row(ui, label, |ui| {
-        ui.add(
-            egui::DragValue::new(&mut display_value)
-                .range(if display_unit == "ft" {
-                    min_inches / 12.0..=max_inches / 12.0
-                } else {
-                    min_inches..=max_inches
-                })
-                .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
-                .suffix(format!(" {display_unit}")),
+        editable_drag_value(
+            ui,
+            length_drag_widget(&mut display_value, display_unit, min_inches, max_inches),
         )
     });
 
     if response.changed() {
-        let next_inches = if display_unit == "ft" {
-            display_value * 12.0
-        } else {
-            display_value
-        };
+        let next_inches = length_from_display_value(display_value, display_unit).inches();
         *value = Length::from_inches(next_inches.clamp(min_inches, max_inches));
         true
     } else {
@@ -6511,21 +6573,173 @@ fn length_drag(
 }
 
 fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
-    let mut display_value = value.feet();
+    let mut display_value = length_display_value(*value, "ft");
     let response = property_row(ui, label, |ui| {
-        ui.add(
-            egui::DragValue::new(&mut display_value)
-                .range(-240.0..=240.0)
-                .speed(0.25)
-                .suffix(" ft"),
+        editable_drag_value(
+            ui,
+            length_drag_widget(
+                &mut display_value,
+                "ft",
+                Length::from_feet(-240.0).inches(),
+                Length::from_feet(240.0).inches(),
+            ),
         )
     });
 
     if response.changed() {
-        *value = Length::from_feet(display_value.clamp(-240.0, 240.0));
+        let next_inches = length_from_display_value(display_value, "ft").inches();
+        *value = Length::from_inches(next_inches.clamp(
+            Length::from_feet(-240.0).inches(),
+            Length::from_feet(240.0).inches(),
+        ));
         true
     } else {
         false
+    }
+}
+
+fn editable_drag_value(ui: &mut Ui, widget: egui::DragValue<'_>) -> Response {
+    let t = design::active();
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.bg_fill = t.field;
+        widgets.inactive.weak_bg_fill = t.field;
+        widgets.inactive.bg_stroke = t.border_stroke();
+        widgets.hovered.bg_fill = t.control_hover;
+        widgets.hovered.weak_bg_fill = t.control_hover;
+        widgets.hovered.bg_stroke = t.accent_stroke();
+        ui.add(widget)
+    })
+    .inner
+    .on_hover_cursor(egui::CursorIcon::Text)
+}
+
+fn length_drag_widget<'a>(
+    display_value: &'a mut f64,
+    display_unit: &'a str,
+    min_inches: f64,
+    max_inches: f64,
+) -> egui::DragValue<'a> {
+    egui::DragValue::new(display_value)
+        .range(length_display_range(min_inches, max_inches, display_unit))
+        .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
+        .custom_formatter(move |value, _| format_length_display_value(value, display_unit))
+        .custom_parser(move |text| parse_length_display_value(text, display_unit))
+}
+
+fn length_display_range(
+    min_inches: f64,
+    max_inches: f64,
+    display_unit: &str,
+) -> std::ops::RangeInclusive<f64> {
+    if display_unit == "ft" {
+        min_inches / 12.0..=max_inches / 12.0
+    } else {
+        min_inches..=max_inches
+    }
+}
+
+fn length_display_value(value: Length, display_unit: &str) -> f64 {
+    if display_unit == "ft" {
+        value.feet()
+    } else {
+        value.inches()
+    }
+}
+
+fn length_from_display_value(value: f64, display_unit: &str) -> Length {
+    if display_unit == "ft" {
+        Length::from_feet(value)
+    } else {
+        Length::from_inches(value)
+    }
+}
+
+fn format_length_display_value(value: f64, display_unit: &str) -> String {
+    length_from_display_value(value, display_unit).to_string()
+}
+
+fn parse_length_display_value(text: &str, display_unit: &str) -> Option<f64> {
+    let length = parse_length_expression(text).or_else(|| {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|value| length_from_display_value(value, display_unit))
+    })?;
+    Some(length_display_value(length, display_unit))
+}
+
+fn parse_length_expression(text: &str) -> Option<Length> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(value) = lower
+        .strip_suffix("feet")
+        .or_else(|| lower.strip_suffix("foot"))
+        .or_else(|| lower.strip_suffix("ft"))
+        .and_then(|value| value.trim().parse::<f64>().ok())
+    {
+        return Some(Length::from_feet(value));
+    }
+    if let Some(value) = lower
+        .strip_suffix("inches")
+        .or_else(|| lower.strip_suffix("inch"))
+        .or_else(|| lower.strip_suffix("in"))
+        .and_then(|value| value.trim().parse::<f64>().ok())
+    {
+        return Some(Length::from_inches(value));
+    }
+
+    if !(trimmed.contains('\'') || trimmed.contains('"')) {
+        return None;
+    }
+
+    let (sign, unsigned) = match trimmed.strip_prefix('-') {
+        Some(rest) => (-1.0, rest.trim()),
+        None => (1.0, trimmed),
+    };
+    let (feet, inches_text) = match unsigned.split_once('\'') {
+        Some((feet, rest)) => (feet.trim().parse::<f64>().ok()?, rest),
+        None => (0.0, unsigned),
+    };
+    let inches_text = inches_text.trim().trim_end_matches('"').trim();
+    let inches = if inches_text.is_empty() {
+        0.0
+    } else {
+        parse_inches_with_optional_fraction(inches_text)?
+    };
+
+    Some(Length::from_inches(sign * (feet * 12.0 + inches)))
+}
+
+fn parse_inches_with_optional_fraction(text: &str) -> Option<f64> {
+    let parts = text.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [whole] => parse_number_or_fraction(whole),
+        [whole, fraction] => Some(whole.parse::<f64>().ok()? + parse_fraction(fraction)?),
+        _ => None,
+    }
+}
+
+fn parse_number_or_fraction(text: &str) -> Option<f64> {
+    if text.contains('/') {
+        parse_fraction(text)
+    } else {
+        text.parse::<f64>().ok()
+    }
+}
+
+fn parse_fraction(text: &str) -> Option<f64> {
+    let (numerator, denominator) = text.split_once('/')?;
+    let numerator = numerator.trim().parse::<f64>().ok()?;
+    let denominator = denominator.trim().parse::<f64>().ok()?;
+    if denominator == 0.0 {
+        None
+    } else {
+        Some(numerator / denominator)
     }
 }
 
@@ -6536,6 +6750,29 @@ mod tests {
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults,
     };
+
+    #[test]
+    fn inspector_length_fields_format_with_canonical_length_display() {
+        assert_eq!(format_length_display_value(28.0, "ft"), "28' 0\"");
+        assert_eq!(format_length_display_value(48.0, "in"), "4' 0\"");
+        assert_eq!(format_length_display_value(8.1875, "in"), "0' 8 3/16\"");
+    }
+
+    #[test]
+    fn inspector_length_fields_accept_plain_native_unit_entry() {
+        assert_eq!(parse_length_display_value("4", "ft"), Some(4.0));
+        assert_eq!(parse_length_display_value("48", "in"), Some(48.0));
+    }
+
+    #[test]
+    fn inspector_length_fields_accept_canonical_length_entry() {
+        assert_eq!(parse_length_display_value("4' 0\"", "ft"), Some(4.0));
+        assert_eq!(parse_length_display_value("4' 0\"", "in"), Some(48.0));
+        assert_eq!(
+            parse_length_display_value("0' 8 3/16\"", "in"),
+            Some(8.1875)
+        );
+    }
 
     #[test]
     fn command_search_labels_use_categories_and_shortcuts() {

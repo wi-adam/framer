@@ -1004,6 +1004,22 @@ fn selection_context_toolbar_duplicates_selected_opening() {
     assert!(matches!(harness.state().selected, Selection::Opening(_)));
 }
 
+#[test]
+fn inspector_has_friendly_empty_selection_state() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.state_mut().selected = Selection::None;
+    harness.run();
+
+    assert_accessible_label(&harness, "No selection", "inspector empty state");
+    assert_accessible_label(
+        &harness,
+        "Select an object to edit its properties.",
+        "inspector empty state",
+    );
+}
+
 /// Tool shortcuts entered from the generated-plan workflow must return to a
 /// Design-compatible command tab before activating the tool.
 #[test]
