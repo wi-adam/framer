@@ -41,9 +41,13 @@ fn shots_dir() -> PathBuf {
 /// `ui_harness_tests::demo_harness` (same font warm-up first frame, same
 /// default desktop size) plus a renderer so frames can be rasterized.
 fn shots_harness(theme: design::Theme) -> Harness<'static, FramerApp> {
+    shots_harness_with_size(theme, egui::vec2(1360.0, 860.0))
+}
+
+fn shots_harness_with_size(theme: design::Theme, size: egui::Vec2) -> Harness<'static, FramerApp> {
     let mut fonts_bound = false;
     Harness::builder()
-        .with_size(egui::vec2(1360.0, 860.0))
+        .with_size(size)
         .with_max_steps(16)
         .wgpu()
         .build_ui_state(
@@ -182,6 +186,29 @@ fn capture_ui_shot_deck() {
     }
     harness.state_mut().viewport_mode = ViewportMode::Plan;
 
+    let mut small = shots_harness_with_size(design::studio_light(), egui::vec2(1040.0, 680.0));
+    small.run_ok();
+    let small_back_wall_index = small
+        .state()
+        .model
+        .walls
+        .iter()
+        .position(|wall| wall.id.0 == "wall-back")
+        .expect("demo shell has a back wall");
+    small.state_mut().selected_wall = small_back_wall_index;
+    small.state_mut().selected = Selection::Wall;
+    for (mode, name) in [
+        (ViewportMode::Axonometric, "small-3d-view"),
+        (ViewportMode::Render, "small-render-view"),
+    ] {
+        small.state_mut().viewport_mode = mode;
+        if mode == ViewportMode::Render {
+            small.run_steps(8);
+        }
+        shot(&mut small, &dir, &mut index, name);
+    }
+    drop(small);
+
     // Overlay surfaces: the command palette, diagnostics popover, then the
     // Project menu (menus are egui popup state, so open them through real clicks;
     // the palette is closed by resetting its state because Escape handling is
@@ -214,6 +241,9 @@ fn capture_ui_shot_deck() {
     dark.state_mut().selected_wall = dark_back_wall_index;
     dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
+    dark.state_mut().viewport_mode = ViewportMode::Render;
+    dark.run_steps(8);
+    shot(&mut dark, &dir, &mut index, "dark-render-view");
 
     println!(
         "ui-shots: deck complete — {} frames in {}",

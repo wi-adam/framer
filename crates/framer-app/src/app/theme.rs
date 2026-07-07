@@ -20,6 +20,10 @@ pub(super) fn panel_bg() -> Color32 {
     design::active().panel
 }
 
+pub(super) fn overlay() -> Color32 {
+    design::active().overlay
+}
+
 pub(super) fn workspace_bg() -> Color32 {
     design::active().canvas
 }

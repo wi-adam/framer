@@ -13,8 +13,7 @@ use super::gpu::{Framer3dCallback, Framer3dFrameKey, GpuUniforms};
 use super::scene_build::Scene3d;
 use super::theme;
 use super::view_common::{
-    draw_view_background, draw_view_border, draw_view_empty, draw_view_title,
-    pointer_started_in_rect, viewport_drawing_rect, viewport_size,
+    draw_view_background, draw_view_border, draw_view_empty, pointer_started_in_rect, viewport_size,
 };
 use super::view_cube::{draw_view_cube, view_cube_rect};
 use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
@@ -51,7 +50,7 @@ pub(super) fn draw_project_axonometric(
     let painter = ui.painter_at(rect);
 
     draw_view_background(&painter, rect, theme::sheet());
-    let drawing = viewport_drawing_rect(rect, 42.0);
+    let drawing = rect.shrink(1.0);
     draw_view_border(&painter, drawing);
     let cube_rect = view_cube_rect(drawing);
     let pointer = response.interact_pointer_pos();
@@ -168,8 +167,6 @@ pub(super) fn draw_project_axonometric(
         view.snap_to(action);
         return None;
     }
-
-    draw_view_title(&painter, drawing, "3D workspace");
 
     clicked
 }
