@@ -1726,7 +1726,7 @@ impl FramerApp {
                                 ui,
                                 "Length",
                                 &mut wall_length,
-                                length_drag_spec(24.0, 480.0, "ft"),
+                                length_drag_spec(24.0, 480.0, DisplayUnit::Feet),
                                 wall_length_driver.as_ref(),
                                 &mut select_dimension,
                             ) {
@@ -1737,7 +1737,7 @@ impl FramerApp {
                                 ui,
                                 "Height",
                                 &mut wall.height,
-                                length_drag_spec(48.0, 168.0, "ft"),
+                                length_drag_spec(48.0, 168.0, DisplayUnit::Feet),
                                 wall_height_driver.as_ref(),
                                 &mut select_dimension,
                             );
@@ -1883,7 +1883,7 @@ impl FramerApp {
                                 ui,
                                 "Center",
                                 &mut opening.center,
-                                length_drag_spec(0.0, 480.0, "ft"),
+                                length_drag_spec(0.0, 480.0, DisplayUnit::Feet),
                                 driven_fields.center.as_ref(),
                                 &mut select_dimension,
                             );
@@ -1891,7 +1891,7 @@ impl FramerApp {
                                 ui,
                                 "Width",
                                 &mut opening.width,
-                                length_drag_spec(12.0, 240.0, "in"),
+                                length_drag_spec(12.0, 240.0, DisplayUnit::Inches),
                                 driven_fields.width.as_ref(),
                                 &mut select_dimension,
                             );
@@ -1899,7 +1899,7 @@ impl FramerApp {
                                 ui,
                                 "Height",
                                 &mut opening.height,
-                                length_drag_spec(12.0, 120.0, "in"),
+                                length_drag_spec(12.0, 120.0, DisplayUnit::Inches),
                                 driven_fields.height.as_ref(),
                                 &mut select_dimension,
                             );
@@ -1911,7 +1911,7 @@ impl FramerApp {
                                     0.0,
                                     opening_max_bottom(wall_height, opening.height, top_clearance)
                                         .inches(),
-                                    "in",
+                                    DisplayUnit::Inches,
                                 ),
                                 driven_fields.bottom.as_ref(),
                                 &mut select_dimension,
@@ -2433,7 +2433,7 @@ impl FramerApp {
                                 &mut plane.slope.rise,
                                 0.0,
                                 144.0,
-                                "in",
+                                DisplayUnit::Inches,
                             );
                             changed |= length_drag(
                                 ui,
@@ -2441,7 +2441,7 @@ impl FramerApp {
                                 &mut plane.slope.run,
                                 1.0,
                                 144.0,
-                                "in",
+                                DisplayUnit::Inches,
                             );
                             summary_row(
                                 ui,
@@ -2471,7 +2471,7 @@ impl FramerApp {
                                 &mut plane.eave_overhang,
                                 0.0,
                                 48.0,
-                                "in",
+                                DisplayUnit::Inches,
                             );
                             changed |= length_drag(
                                 ui,
@@ -2479,7 +2479,7 @@ impl FramerApp {
                                 &mut plane.rake_overhang,
                                 0.0,
                                 48.0,
-                                "in",
+                                DisplayUnit::Inches,
                             );
                         });
 
@@ -2561,7 +2561,7 @@ impl FramerApp {
                                 &mut ceiling.height,
                                 0.0,
                                 480.0,
-                                "ft",
+                                DisplayUnit::Feet,
                             );
                             summary_row(ui, "Region", surface_region_summary(&ceiling.region));
                             // Slope editor. Flat stays the default; enabling a slope on
@@ -2606,7 +2606,7 @@ impl FramerApp {
                                     &mut slope.pitch.rise,
                                     0.0,
                                     144.0,
-                                    "in",
+                                    DisplayUnit::Inches,
                                 );
                                 changed |= length_drag(
                                     ui,
@@ -2614,7 +2614,7 @@ impl FramerApp {
                                     &mut slope.pitch.run,
                                     1.0,
                                     144.0,
-                                    "in",
+                                    DisplayUnit::Inches,
                                 );
                                 summary_row(
                                     ui,
@@ -3657,7 +3657,15 @@ fn site_context_editor(ui: &mut Ui, site: &mut framer_core::SiteContext) -> bool
         30,
         "psf",
     );
-    changed |= optional_length_drag(ui, "Frost", &mut site.frost_depth, 0.0, 120.0, 24.0, "in");
+    changed |= optional_length_drag(
+        ui,
+        "Frost",
+        &mut site.frost_depth,
+        0.0,
+        120.0,
+        24.0,
+        DisplayUnit::Inches,
+    );
     changed
 }
 
@@ -4045,18 +4053,18 @@ fn optional_length_drag(
     min_inches: f64,
     max_inches: f64,
     default_inches: f64,
-    display_unit: &str,
+    display_unit: DisplayUnit,
 ) -> bool {
     property_row(ui, label, |ui| {
         let mut changed = false;
         if let Some(current) = value {
-            let mut display_value = length_display_value(*current, display_unit);
+            let mut display_value = display_unit.value(*current);
             let response = editable_drag_value(
                 ui,
                 length_drag_widget(&mut display_value, display_unit, min_inches, max_inches),
             );
             if response.changed() {
-                let next_inches = length_from_display_value(display_value, display_unit).inches();
+                let next_inches = display_unit.length(display_value).inches();
                 *current = Length::from_inches(next_inches.clamp(min_inches, max_inches));
                 changed = true;
             }
@@ -4860,7 +4868,14 @@ fn system_layer_editor(
                     format!("follows {} = {}", depth.label(), layer.thickness),
                 );
             } else {
-                changed |= length_drag(ui, "Thickness", &mut layer.thickness, 0.0625, 48.0, "in");
+                changed |= length_drag(
+                    ui,
+                    "Thickness",
+                    &mut layer.thickness,
+                    0.0625,
+                    48.0,
+                    DisplayUnit::Inches,
+                );
             }
 
             // Function. Switching to/from Framing keeps `framing` consistent so the
@@ -4930,7 +4945,14 @@ fn system_layer_editor(
                         false
                     }
                 });
-                changed |= length_drag(ui, "Spacing", &mut framing.spacing, 1.0, 48.0, "in");
+                changed |= length_drag(
+                    ui,
+                    "Spacing",
+                    &mut framing.spacing,
+                    1.0,
+                    48.0,
+                    DisplayUnit::Inches,
+                );
                 changed |= property_row(ui, "Pattern", |ui| {
                     let before = framing.pattern;
                     ComboBox::from_id_salt(("layer-pattern", index))
@@ -5206,7 +5228,14 @@ fn dimension_inspector(
                 DimensionAxis::Horizontal => wall_length_inches,
                 DimensionAxis::Vertical => wall_height_inches,
             };
-            if length_drag(ui, "Distance", &mut value, 1.0, axis_bound_inches, "in") {
+            if length_drag(
+                ui,
+                "Distance",
+                &mut value,
+                1.0,
+                axis_bound_inches,
+                DisplayUnit::Inches,
+            ) {
                 dimension.value = Some(value);
                 changed = true;
                 apply_driving = true;
@@ -5331,9 +5360,28 @@ fn member_inspector(ui: &mut Ui, member: &FrameMember) {
 }
 
 fn object_size_editor(ui: &mut Ui, size: &mut framer_core::ObjectSize) -> bool {
-    length_drag(ui, "Width", &mut size.width, 1.0, 240.0, "in")
-        | length_drag(ui, "Depth", &mut size.depth, 1.0, 240.0, "in")
-        | length_drag(ui, "Height", &mut size.height, 1.0, 144.0, "in")
+    length_drag(
+        ui,
+        "Width",
+        &mut size.width,
+        1.0,
+        240.0,
+        DisplayUnit::Inches,
+    ) | length_drag(
+        ui,
+        "Depth",
+        &mut size.depth,
+        1.0,
+        240.0,
+        DisplayUnit::Inches,
+    ) | length_drag(
+        ui,
+        "Height",
+        &mut size.height,
+        1.0,
+        144.0,
+        DisplayUnit::Inches,
+    )
 }
 
 fn family_picker(
@@ -6424,14 +6472,46 @@ fn driving_dimension_source_label(wall: &Wall, dimension: &DimensionConstraint) 
 struct LengthDragSpec {
     min_inches: f64,
     max_inches: f64,
-    display_unit: &'static str,
+    display_unit: DisplayUnit,
 }
 
-fn length_drag_spec(
-    min_inches: f64,
-    max_inches: f64,
-    display_unit: &'static str,
-) -> LengthDragSpec {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayUnit {
+    Feet,
+    Inches,
+}
+
+impl DisplayUnit {
+    fn value(self, length: Length) -> f64 {
+        match self {
+            Self::Feet => length.feet(),
+            Self::Inches => length.inches(),
+        }
+    }
+
+    fn length(self, value: f64) -> Length {
+        match self {
+            Self::Feet => Length::from_feet(value),
+            Self::Inches => Length::from_inches(value),
+        }
+    }
+
+    fn range(self, min_inches: f64, max_inches: f64) -> std::ops::RangeInclusive<f64> {
+        match self {
+            Self::Feet => min_inches / 12.0..=max_inches / 12.0,
+            Self::Inches => min_inches..=max_inches,
+        }
+    }
+
+    fn speed(self) -> f64 {
+        match self {
+            Self::Feet => 0.25,
+            Self::Inches => 1.0,
+        }
+    }
+}
+
+fn length_drag_spec(min_inches: f64, max_inches: f64, display_unit: DisplayUnit) -> LengthDragSpec {
     LengthDragSpec {
         min_inches,
         max_inches,
@@ -6473,11 +6553,11 @@ fn readonly_length_field(
     ui: &mut Ui,
     label: &str,
     value: Length,
-    display_unit: &str,
+    display_unit: DisplayUnit,
     driver: &DrivenField,
     select_dimension: &mut Option<String>,
 ) {
-    let mut display_value = length_display_value(value, display_unit);
+    let mut display_value = display_unit.value(value);
     let hover_text = driver.hover_text();
 
     property_row(ui, label, |ui| {
@@ -6552,9 +6632,9 @@ fn length_drag(
     value: &mut Length,
     min_inches: f64,
     max_inches: f64,
-    display_unit: &str,
+    display_unit: DisplayUnit,
 ) -> bool {
-    let mut display_value = length_display_value(*value, display_unit);
+    let mut display_value = display_unit.value(*value);
 
     let response = property_row(ui, label, |ui| {
         editable_drag_value(
@@ -6564,7 +6644,7 @@ fn length_drag(
     });
 
     if response.changed() {
-        let next_inches = length_from_display_value(display_value, display_unit).inches();
+        let next_inches = display_unit.length(display_value).inches();
         *value = Length::from_inches(next_inches.clamp(min_inches, max_inches));
         true
     } else {
@@ -6573,13 +6653,13 @@ fn length_drag(
 }
 
 fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
-    let mut display_value = length_display_value(*value, "ft");
+    let mut display_value = DisplayUnit::Feet.value(*value);
     let response = property_row(ui, label, |ui| {
         editable_drag_value(
             ui,
             length_drag_widget(
                 &mut display_value,
-                "ft",
+                DisplayUnit::Feet,
                 Length::from_feet(-240.0).inches(),
                 Length::from_feet(240.0).inches(),
             ),
@@ -6587,7 +6667,7 @@ fn coordinate_drag(ui: &mut Ui, label: &str, value: &mut Length) -> bool {
     });
 
     if response.changed() {
-        let next_inches = length_from_display_value(display_value, "ft").inches();
+        let next_inches = DisplayUnit::Feet.length(display_value).inches();
         *value = Length::from_inches(next_inches.clamp(
             Length::from_feet(-240.0).inches(),
             Length::from_feet(240.0).inches(),
@@ -6616,57 +6696,29 @@ fn editable_drag_value(ui: &mut Ui, widget: egui::DragValue<'_>) -> Response {
 
 fn length_drag_widget<'a>(
     display_value: &'a mut f64,
-    display_unit: &'a str,
+    display_unit: DisplayUnit,
     min_inches: f64,
     max_inches: f64,
 ) -> egui::DragValue<'a> {
     egui::DragValue::new(display_value)
-        .range(length_display_range(min_inches, max_inches, display_unit))
-        .speed(if display_unit == "ft" { 0.25 } else { 1.0 })
+        .range(display_unit.range(min_inches, max_inches))
+        .speed(display_unit.speed())
         .custom_formatter(move |value, _| format_length_display_value(value, display_unit))
         .custom_parser(move |text| parse_length_display_value(text, display_unit))
 }
 
-fn length_display_range(
-    min_inches: f64,
-    max_inches: f64,
-    display_unit: &str,
-) -> std::ops::RangeInclusive<f64> {
-    if display_unit == "ft" {
-        min_inches / 12.0..=max_inches / 12.0
-    } else {
-        min_inches..=max_inches
-    }
+fn format_length_display_value(value: f64, display_unit: DisplayUnit) -> String {
+    display_unit.length(value).to_string()
 }
 
-fn length_display_value(value: Length, display_unit: &str) -> f64 {
-    if display_unit == "ft" {
-        value.feet()
-    } else {
-        value.inches()
-    }
-}
-
-fn length_from_display_value(value: f64, display_unit: &str) -> Length {
-    if display_unit == "ft" {
-        Length::from_feet(value)
-    } else {
-        Length::from_inches(value)
-    }
-}
-
-fn format_length_display_value(value: f64, display_unit: &str) -> String {
-    length_from_display_value(value, display_unit).to_string()
-}
-
-fn parse_length_display_value(text: &str, display_unit: &str) -> Option<f64> {
+fn parse_length_display_value(text: &str, display_unit: DisplayUnit) -> Option<f64> {
     let length = parse_length_expression(text).or_else(|| {
         text.trim()
             .parse::<f64>()
             .ok()
-            .map(|value| length_from_display_value(value, display_unit))
+            .map(|value| display_unit.length(value))
     })?;
-    Some(length_display_value(length, display_unit))
+    Some(display_unit.value(length))
 }
 
 fn parse_length_expression(text: &str) -> Option<Length> {
@@ -6753,24 +6805,61 @@ mod tests {
 
     #[test]
     fn inspector_length_fields_format_with_canonical_length_display() {
-        assert_eq!(format_length_display_value(28.0, "ft"), "28' 0\"");
-        assert_eq!(format_length_display_value(48.0, "in"), "4' 0\"");
-        assert_eq!(format_length_display_value(8.1875, "in"), "0' 8 3/16\"");
+        assert_eq!(
+            format_length_display_value(28.0, DisplayUnit::Feet),
+            "28' 0\""
+        );
+        assert_eq!(
+            format_length_display_value(48.0, DisplayUnit::Inches),
+            "4' 0\""
+        );
+        assert_eq!(
+            format_length_display_value(8.1875, DisplayUnit::Inches),
+            "0' 8 3/16\""
+        );
     }
 
     #[test]
     fn inspector_length_fields_accept_plain_native_unit_entry() {
-        assert_eq!(parse_length_display_value("4", "ft"), Some(4.0));
-        assert_eq!(parse_length_display_value("48", "in"), Some(48.0));
+        assert_eq!(
+            parse_length_display_value("4", DisplayUnit::Feet),
+            Some(4.0)
+        );
+        assert_eq!(
+            parse_length_display_value("48", DisplayUnit::Inches),
+            Some(48.0)
+        );
     }
 
     #[test]
     fn inspector_length_fields_accept_canonical_length_entry() {
-        assert_eq!(parse_length_display_value("4' 0\"", "ft"), Some(4.0));
-        assert_eq!(parse_length_display_value("4' 0\"", "in"), Some(48.0));
         assert_eq!(
-            parse_length_display_value("0' 8 3/16\"", "in"),
+            parse_length_display_value("4' 0\"", DisplayUnit::Feet),
+            Some(4.0)
+        );
+        assert_eq!(
+            parse_length_display_value("4' 0\"", DisplayUnit::Inches),
+            Some(48.0)
+        );
+        assert_eq!(
+            parse_length_display_value("0' 8 3/16\"", DisplayUnit::Inches),
             Some(8.1875)
+        );
+        assert_eq!(
+            parse_length_display_value("-4' 6\"", DisplayUnit::Feet),
+            Some(-4.5)
+        );
+        assert_eq!(
+            parse_length_display_value("6 feet", DisplayUnit::Feet),
+            Some(6.0)
+        );
+        assert_eq!(
+            parse_length_display_value("48 in", DisplayUnit::Inches),
+            Some(48.0)
+        );
+        assert_eq!(
+            parse_length_display_value("4' 6 3/16\"", DisplayUnit::Inches),
+            Some(54.1875)
         );
     }
 
