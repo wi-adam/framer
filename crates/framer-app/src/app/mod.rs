@@ -94,6 +94,7 @@ pub(crate) struct FramerApp {
     /// In-progress drag of a wall endpoint handle in the plan view.
     wall_drag: Option<WallDragState>,
     gpu_target_format: Option<eframe::wgpu::TextureFormat>,
+    gpu_depth_format: Option<eframe::wgpu::TextureFormat>,
     /// Whether the active adapter supports compute shaders (GPU path tracer);
     /// when false the Render view falls back to the CPU renderer.
     gpu_compute_ok: bool,
@@ -550,6 +551,7 @@ impl Default for FramerApp {
             opening_drag: None,
             wall_drag: None,
             gpu_target_format: None,
+            gpu_depth_format: None,
             gpu_compute_ok: false,
             gpu_ray_query_ok: false,
             render_smoke: None,
@@ -576,6 +578,7 @@ impl FramerApp {
         Self {
             config,
             gpu_target_format: render_state.map(|rs| rs.target_format),
+            gpu_depth_format: render_state.map(|_| eframe::wgpu::TextureFormat::Depth24Plus),
             // The GPU path tracer needs compute shaders; otherwise fall back to CPU.
             gpu_compute_ok: render_state.is_some_and(|rs| {
                 rs.adapter

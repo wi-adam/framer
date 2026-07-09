@@ -272,6 +272,7 @@ pub(super) fn draw_view_cube(
     clicked: bool,
     view: View3dState,
     gpu_target_format: Option<wgpu::TextureFormat>,
+    gpu_depth_format: Option<wgpu::TextureFormat>,
 ) -> Option<ViewCubeAction> {
     let geometry = ViewCubeGeometry::from_rect(rect, view);
     let hovered_action = pointer.and_then(|position| geometry.hit(position));
@@ -321,6 +322,7 @@ pub(super) fn draw_view_cube(
                 vertices,
                 indices,
                 target_format,
+                depth_format: gpu_depth_format,
             },
         ));
         draw_view_cube_edges(painter, &geometry, hovered_action);

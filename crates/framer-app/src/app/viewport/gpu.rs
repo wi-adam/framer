@@ -14,8 +14,6 @@ use super::geom::OrbitProjector;
 
 // === extracted block appended below; visibility adjusted in place ===
 
-const FRAMER_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
-
 const FRAMER_3D_SHADER: &str = r#"
 struct Uniforms {
     center: vec4<f32>,
@@ -141,10 +139,12 @@ pub(super) struct Framer3dCallback {
     pub(super) transparent_index_count: u32,
     pub(super) uniforms: GpuUniforms,
     pub(super) target_format: wgpu::TextureFormat,
+    pub(super) depth_format: Option<wgpu::TextureFormat>,
 }
 
 struct Framer3dResources {
     target_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
     bind_group_layout: wgpu::BindGroupLayout,
     opaque_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
@@ -172,11 +172,19 @@ impl egui_wgpu::CallbackTrait for Framer3dCallback {
         _egui_encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let needs_resources = callback_resources
-            .get::<Framer3dResources>()
-            .is_none_or(|resources| resources.target_format != self.target_format);
+        let needs_resources =
+            callback_resources
+                .get::<Framer3dResources>()
+                .is_none_or(|resources| {
+                    resources.target_format != self.target_format
+                        || resources.depth_format != self.depth_format
+                });
         if needs_resources {
-            callback_resources.insert(Framer3dResources::new(device, self.target_format));
+            callback_resources.insert(Framer3dResources::new(
+                device,
+                self.target_format,
+                self.depth_format,
+            ));
         }
         let resources = callback_resources
             .get::<Framer3dResources>()
@@ -261,7 +269,11 @@ impl egui_wgpu::CallbackTrait for Framer3dCallback {
 }
 
 impl Framer3dResources {
-    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
+    ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("framer_3d_bind_group_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -284,19 +296,28 @@ impl Framer3dResources {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let opaque_pipeline =
-            create_3d_pipeline(device, &pipeline_layout, &shader, target_format, None, true);
+        let opaque_pipeline = create_3d_pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            target_format,
+            depth_format,
+            None,
+            true,
+        );
         let transparent_pipeline = create_3d_pipeline(
             device,
             &pipeline_layout,
             &shader,
             target_format,
+            depth_format,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
         );
 
         Self {
             target_format,
+            depth_format,
             bind_group_layout,
             opaque_pipeline,
             transparent_pipeline,
@@ -309,6 +330,7 @@ fn create_3d_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     target_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
     blend: Option<wgpu::BlendState>,
     depth_write_enabled: bool,
 ) -> wgpu::RenderPipeline {
@@ -338,8 +360,8 @@ fn create_3d_pipeline(
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: FRAMER_DEPTH_FORMAT,
+        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+            format,
             depth_write_enabled: Some(depth_write_enabled),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
