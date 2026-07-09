@@ -45,6 +45,14 @@ fn draw_render_progress_chip(painter: &egui::Painter, drawing: Rect, label: &str
     );
 }
 
+fn render_progress_label(renderer: &str, samples: u32, target: u32, accumulating: bool) -> String {
+    if accumulating {
+        format!("{renderer} — {samples}/{target} spp")
+    } else {
+        format!("{renderer} complete — {samples} spp")
+    }
+}
+
 impl FramerApp {
     // === method body appended below; super:: paths rewritten ===
     /// Draws the path-traced Render view. Geometry, materials, and lighting come
@@ -136,8 +144,9 @@ impl FramerApp {
 
         // Prefer the real-time GPU compute path tracer; fall back to the
         // background-thread CPU renderer when compute isn't available.
-        let (samples, target, accumulating) =
+        let (samples, target, accumulating, renderer) =
             if let (true, Some(format)) = (self.gpu_compute_ok, self.gpu_target_format) {
+                let backend = path_render::PathTraceBackend::from_env(self.gpu_ray_query_ok);
                 let prepared = path_render::paint(
                     &mut self.render_gpu,
                     &painter,
@@ -148,6 +157,7 @@ impl FramerApp {
                     height,
                     moving,
                     format,
+                    backend,
                 );
                 if !prepared {
                     draw_view_empty(&painter, drawing, "Preparing render…");
@@ -156,6 +166,7 @@ impl FramerApp {
                     self.render_gpu.samples(),
                     self.render_gpu.target_spp(),
                     self.render_gpu.is_accumulating(),
+                    backend.label(),
                 )
             } else {
                 // Reuse the GPU path's accumulation key so the CPU fallback resets
@@ -180,15 +191,12 @@ impl FramerApp {
                     self.render_view.samples(),
                     self.render_view.target_spp(),
                     self.render_view.is_accumulating(),
+                    "CPU",
                 )
             };
 
         // Progress / quality readout.
-        let label = if accumulating {
-            format!("Rendering — {samples}/{target} spp")
-        } else {
-            format!("Render complete — {samples} spp")
-        };
+        let label = render_progress_label(renderer, samples, target, accumulating);
         draw_render_progress_chip(&painter, drawing, &label);
 
         // Keep refining until converged, while interacting, or while the motion
@@ -206,7 +214,7 @@ mod tests {
     #[test]
     fn render_progress_chip_stays_inside_the_drawing_rect() {
         let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
-        let chip = render_progress_chip_rect(drawing, "Rendering — 128/256 spp");
+        let chip = render_progress_chip_rect(drawing, "GPU ray query — 128/256 spp");
 
         assert!(drawing.contains(chip.left_top()));
         assert!(drawing.contains(chip.right_bottom()));
@@ -222,5 +230,21 @@ mod tests {
 
         assert!(chip.width() <= 260.0);
         assert!(drawing.contains(chip.right_bottom()));
+    }
+
+    #[test]
+    fn render_progress_label_names_renderer_backend() {
+        assert_eq!(
+            render_progress_label("GPU ray query", 128, 256, true),
+            "GPU ray query — 128/256 spp"
+        );
+        assert_eq!(
+            render_progress_label("GPU BVH", 256, 256, false),
+            "GPU BVH complete — 256 spp"
+        );
+        assert_eq!(
+            render_progress_label("CPU", 12, 256, true),
+            "CPU — 12/256 spp"
+        );
     }
 }

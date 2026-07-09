@@ -232,6 +232,12 @@ What shipped:
   before `finish`), fullscreen blit in `paint`. Pipelines/buffers cached in
   `CallbackResources`, rebuilt on target-format / scene-hash / resolution change;
   progressive accumulation via `request_repaint`, reset on camera/model change.
+- **Experimental ray-query backend** (`FRAMER_RENDER_RAY_QUERY=1`): when the
+  active native `wgpu` adapter exposes `EXPERIMENTAL_RAY_QUERY`, the app requests
+  the feature and the Render view may swap the software WGSL BVH traversal for a
+  BLAS/TLAS-backed `ray_query` shader. The default path remains the software BVH
+  compute shader, and `framer-render`'s CPU tracer remains the correctness
+  reference.
 - **Validation** (`framer-app/tests/gpu_parity.rs`, headless `wgpu`, skips
   gracefully without an adapter): (1) the GPU PCG reproduces the CPU canary +
   `pixel_rng` bit-for-bit; (2) the compute kernel renders the golden reference

@@ -169,6 +169,7 @@ fn onb_to_local(o: Onb, w: vec3<f32>) -> vec3<f32> {
 }
 
 // ---- Geometry intersection (Möller–Trumbore, no backface cull) --------------
+// BEGIN SOFTWARE_BVH_INTERSECTION
 
 fn aabb_hit(lo: vec3<f32>, hi: vec3<f32>, ray: Ray, t_max: f32) -> bool {
     let t0 = (lo - ray.origin) * ray.inv_dir;
@@ -304,6 +305,8 @@ fn occluded(ray: Ray) -> bool {
     }
     return false;
 }
+
+// END SOFTWARE_BVH_INTERSECTION
 
 // ---- Sampling ---------------------------------------------------------------
 
