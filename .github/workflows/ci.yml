@@ -236,22 +236,61 @@ jobs:
             --model "claude-opus-4-8"
 
       - name: Gate merge on Claude's review verdict
-        # request-changes → red `pr-review` check (blocks merge). Only when we
-        # actually reviewed; if the review was skipped (CI not green) this is skipped
-        # and the failed CI checks are the blockers. PR number via env (zizmor-safe).
+        # request-changes on the current PR head → red `pr-review` check (blocks
+        # merge). Stale request-changes reviews from earlier commits are ignored:
+        # a fresh review may clear the issue without GitHub dismissing the old
+        # review quickly enough for this gate. Only when we actually reviewed; if
+        # the review was skipped (CI not green) this is skipped and the failed CI
+        # checks are the blockers. PR number via env (zizmor-safe).
         if: ${{ always() && steps.gate.outputs.run == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          state=$(gh pr view "$PR" --json reviews \
-            --jq '[.reviews[] | select(.author.login | ascii_downcase | startswith("claude"))] | last | .state // ""')
-          echo "Latest claude[bot] review state: ${state:-<none>}"
-          if [ "$state" = "CHANGES_REQUESTED" ]; then
-            echo "::error::Claude requested changes on this PR — resolve the [blocking] items, then push to re-review."
+          set -o pipefail
+          head_sha=$(gh pr view "$PR" --json headRefOid --jq '.headRefOid')
+          reviews_json=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
+            | jq -s 'if length == 1 and (.[0] | type) == "array" then .[0] else add end')
+          latest=$(jq -r '
+            [.[] | select(.user.login | ascii_downcase | startswith("claude"))]
+            | sort_by(.submitted_at)
+            | last
+            | if . == null then "<none>\t\t" else "\(.state)\t\(.commit_id // "")\t\(.submitted_at)" end
+          ' <<<"$reviews_json")
+          mapfile -t stale_review_ids < <(jq -r --arg head "$head_sha" '
+            .[]
+              | select((.user.login | ascii_downcase | startswith("claude"))
+                  and .state == "CHANGES_REQUESTED"
+                  and (.commit_id // "") != $head)
+              | .id
+          ' <<<"$reviews_json")
+          current_head_requests=$(jq -r --arg head "$head_sha" '
+            [.[] | select((.user.login | ascii_downcase | startswith("claude"))
+                  and .state == "CHANGES_REQUESTED"
+                  and (.commit_id // "") == $head)]
+            | length
+          ' <<<"$reviews_json")
+
+          IFS=$'\t' read -r latest_state latest_commit latest_submitted_at <<<"$latest"
+          echo "PR head: $head_sha"
+          echo "Latest Claude review: state=${latest_state:-<none>} commit=${latest_commit:-<none>} submitted_at=${latest_submitted_at:-<none>}"
+          if [ "${#stale_review_ids[@]}" -gt 0 ]; then
+            echo "Dismissing ${#stale_review_ids[@]} stale Claude change-request review(s) from earlier commits."
+            for review_id in "${stale_review_ids[@]}"; do
+              if gh api --method PUT "repos/$REPO/pulls/$PR/reviews/$review_id/dismissals" \
+                -f message="Superseded by review of current PR head $head_sha." >/dev/null; then
+                echo "Dismissed stale Claude change-request review $review_id."
+              else
+                echo "::warning::Could not dismiss stale Claude change-request review $review_id; continuing because it is not on the current PR head."
+              fi
+            done
+          fi
+          if [ "$current_head_requests" -gt 0 ]; then
+            echo "::error::Claude requested changes on the current PR head — resolve the [blocking] items, then push to re-review."
             exit 1
           fi
-          echo "No blocking verdict; merge gate passes."
+          echo "No current-head Claude change request; merge gate passes."
 
       - name: Upload review trace to R2 (private)
         # Sends the full execution transcript to a private R2 bucket (S3-compatible)
