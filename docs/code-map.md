@@ -343,7 +343,10 @@ selected-object lifecycle actions.
 `mod.rs` holds **`GpuRenderState`** (the WGSL compute path tracer driving the Render view) and
 the shaders: `pathtrace.wgsl`, `blit.wgsl`, `denoise.wgsl`, `rng.wgsl`. **These mirror
 `framer-render`'s CPU math exactly** — the CPU path is the reference; `tests/gpu_parity.rs`
-validates equivalence. Edit both together.
+validates equivalence. The default GPU backend traverses the uploaded flat BVH in WGSL; an
+experimental native `wgpu` ray-query backend can be enabled with `FRAMER_RENDER_RAY_QUERY=1`
+when the device exposes `EXPERIMENTAL_RAY_QUERY`, building a BLAS/TLAS from the same triangle
+stream. Edit render math in both CPU and WGSL paths together.
 
 ---
 

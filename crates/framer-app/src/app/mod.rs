@@ -95,6 +95,9 @@ pub(crate) struct FramerApp {
     /// Whether the active adapter supports compute shaders (GPU path tracer);
     /// when false the Render view falls back to the CPU renderer.
     gpu_compute_ok: bool,
+    /// Whether the active wgpu device has experimental ray-query support enabled;
+    /// when true, the Render view may opt into hardware traversal.
+    gpu_ray_query_ok: bool,
     /// Smoke test for the GPU path-trace callback: when `FRAMER_RENDER_SMOKE=N`
     /// is set, force the Render view for N frames then close. `None` normally.
     render_smoke: Option<u32>,
@@ -545,6 +548,7 @@ impl Default for FramerApp {
             wall_drag: None,
             gpu_target_format: None,
             gpu_compute_ok: false,
+            gpu_ray_query_ok: false,
             render_smoke: None,
             show_section: true,
             layers: ViewLayers::default(),
@@ -573,6 +577,11 @@ impl FramerApp {
                     .get_downlevel_capabilities()
                     .flags
                     .contains(eframe::wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            }),
+            gpu_ray_query_ok: render_state.is_some_and(|rs| {
+                rs.device
+                    .features()
+                    .contains(eframe::wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             }),
             render_smoke: std::env::var("FRAMER_RENDER_SMOKE")
                 .ok()

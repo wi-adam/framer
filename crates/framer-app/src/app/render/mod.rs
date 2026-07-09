@@ -1,4 +1,4 @@
-//! In-app GPU compute path tracer for the Render view.
+//! In-app GPU path tracer for the Render view.
 //!
 //! A WGSL compute kernel (mirroring `framer-render`'s CPU math — see the headless
 //! parity test in `tests/gpu_parity.rs`) accumulates path-traced radiance into a
@@ -9,8 +9,12 @@
 //! and resets when the camera or model changes.
 //!
 //! GPU resources are cached in `egui_wgpu::CallbackResources` and rebuilt only on
-//! target-format, scene-geometry, or resolution changes. When the adapter lacks
-//! compute support the caller falls back to the CPU renderer (`render_job`).
+//! target-format, scene-geometry, backend, or resolution changes. The default
+//! backend traverses Framer's own BVH in WGSL. When the app was started with
+//! `FRAMER_RENDER_RAY_QUERY=1` and the wgpu device exposes
+//! `EXPERIMENTAL_RAY_QUERY`, an experimental backend uses hardware ray-query
+//! traversal over a BLAS/TLAS instead. When the adapter lacks compute support the
+//! caller falls back to the CPU renderer (`render_job`).
 
 use std::sync::Arc;
 
@@ -53,12 +57,117 @@ const PATHTRACE_WGSL: &str = include_str!("pathtrace.wgsl");
 const BLIT_WGSL: &str = include_str!("blit.wgsl");
 const DENOISE_WGSL: &str = include_str!("denoise.wgsl");
 
+const SOFTWARE_INTERSECTION_BEGIN: &str = "// BEGIN SOFTWARE_BVH_INTERSECTION";
+const SOFTWARE_INTERSECTION_END: &str = "// END SOFTWARE_BVH_INTERSECTION";
+
+const RAY_QUERY_INTERSECTION_WGSL: &str = r#"
+// ---- Geometry intersection (hardware ray-query traversal) -------------------
+
+@group(0) @binding(6) var scene_tlas: acceleration_structure;
+
+fn intersect_scene(ray: Ray) -> Hit {
+    var hit: Hit;
+    hit.t = ray.t_max;
+    hit.valid = false;
+
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_tlas, RayDesc(0u, 0xffu, ray.t_min, ray.t_max, ray.origin, ray.dir));
+    while (rayQueryProceed(&rq)) {}
+
+    let intersection = rayQueryGetCommittedIntersection(&rq);
+    if (intersection.kind == RAY_QUERY_INTERSECTION_NONE) {
+        return hit;
+    }
+
+    let ti = intersection.primitive_index;
+    if (ti >= arrayLength(&triangles)) {
+        return hit;
+    }
+
+    let tri = triangles[ti];
+    hit.t = intersection.t;
+    hit.point = ray.origin + ray.dir * intersection.t;
+    hit.u = intersection.barycentrics.x;
+    hit.v = intersection.barycentrics.y;
+    let front = dot(ray.dir, tri.normal) < 0.0;
+    hit.front_face = front;
+    hit.normal = select(-tri.normal, tri.normal, front);
+    hit.geom_normal = tri.normal;
+    hit.material = tri.material;
+    hit.valid = true;
+    return hit;
+}
+
+fn occluded(ray: Ray) -> bool {
+    var rq: ray_query;
+    rayQueryInitialize(&rq, scene_tlas, RayDesc(0x5u, 0xffu, ray.t_min, ray.t_max, ray.origin, ray.dir));
+    while (rayQueryProceed(&rq)) {}
+    let intersection = rayQueryGetCommittedIntersection(&rq);
+    return intersection.kind != RAY_QUERY_INTERSECTION_NONE;
+}
+"#;
+
 /// Accumulated samples below which the display-only À-Trous denoiser runs (and
 /// cross-fades out). A camera move resets the sample count to 0, so this also
 /// governs how aggressively a freshly-moved (grainy) frame is denoised.
 const DENOISE_SPP_LIMIT: u32 = 32;
 /// À-Trous wavelet levels (tap strides 1, 2, 4, 8, 16).
 const ATROUS_PASSES: usize = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PathTraceBackend {
+    ComputeBvh,
+    RayQuery,
+}
+
+impl PathTraceBackend {
+    pub(crate) fn from_env(ray_query_supported: bool) -> Self {
+        if ray_query_supported && env_flag_enabled("FRAMER_RENDER_RAY_QUERY") {
+            Self::RayQuery
+        } else {
+            Self::ComputeBvh
+        }
+    }
+
+    fn shader_source(self) -> String {
+        match self {
+            Self::ComputeBvh => format!("{RNG_WGSL}\n{PATHTRACE_WGSL}"),
+            Self::RayQuery => format!("enable wgpu_ray_query;\n{RNG_WGSL}\n{}", ray_query_wgsl()),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ComputeBvh => "GPU BVH",
+            Self::RayQuery => "GPU ray query",
+        }
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn ray_query_wgsl() -> String {
+    let begin = PATHTRACE_WGSL
+        .find(SOFTWARE_INTERSECTION_BEGIN)
+        .expect("pathtrace.wgsl missing software intersection start marker");
+    let end_marker = PATHTRACE_WGSL
+        .find(SOFTWARE_INTERSECTION_END)
+        .expect("pathtrace.wgsl missing software intersection end marker");
+    let end = end_marker + SOFTWARE_INTERSECTION_END.len();
+    format!(
+        "{}{}{}",
+        &PATHTRACE_WGSL[..begin],
+        RAY_QUERY_INTERSECTION_WGSL,
+        &PATHTRACE_WGSL[end..]
+    )
+}
 
 /// App-side cache for the GPU render: the current scene, its flattened GPU
 /// payload, and the progressive sample counter. Lives on `FramerApp`.
@@ -131,6 +240,7 @@ impl GpuRenderState {
         srgb_target: bool,
         moving: bool,
         target_format: wgpu::TextureFormat,
+        backend: PathTraceBackend,
     ) -> Option<PathTraceCallback> {
         let scene = self.scene.as_ref()?;
         let gpu_scene = Arc::clone(self.gpu_scene.as_ref()?);
@@ -175,6 +285,7 @@ impl GpuRenderState {
             dispatch,
             denoise,
             target_format,
+            backend,
         })
     }
 }
@@ -234,6 +345,7 @@ pub(crate) fn paint(
     height: u32,
     moving: bool,
     target_format: wgpu::TextureFormat,
+    backend: PathTraceBackend,
 ) -> bool {
     state.sync(model, opts, width, height);
     let Some(callback) = state.callback(
@@ -242,6 +354,7 @@ pub(crate) fn paint(
         target_format.is_srgb(),
         moving,
         target_format,
+        backend,
     ) else {
         return false;
     };
@@ -261,6 +374,7 @@ struct PathTraceCallback {
     /// Whether to run the display-only À-Trous denoise passes and blit the result.
     denoise: bool,
     target_format: wgpu::TextureFormat,
+    backend: PathTraceBackend,
 }
 
 impl CallbackTrait for PathTraceCallback {
@@ -274,7 +388,7 @@ impl CallbackTrait for PathTraceCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let needs_rebuild = resources
             .get::<PtResources>()
-            .is_none_or(|r| r.target_format != self.target_format);
+            .is_none_or(|r| r.target_format != self.target_format || r.backend != self.backend);
         if needs_rebuild {
             let res = PtResources::new(
                 device,
@@ -283,7 +397,9 @@ impl CallbackTrait for PathTraceCallback {
                 self.scene_key,
                 self.width,
                 self.height,
+                self.backend,
             );
+            res.build_acceleration_structures(device, queue);
             resources.insert(res);
         } else {
             let res = resources
@@ -291,6 +407,7 @@ impl CallbackTrait for PathTraceCallback {
                 .expect("pathtrace resources exist");
             if res.scene_key != self.scene_key {
                 res.upload_scene(device, &self.gpu_scene, self.scene_key);
+                res.build_acceleration_structures(device, queue);
             }
             if res.width != self.width || res.height != self.height {
                 res.resize(device, self.width, self.height);
@@ -363,6 +480,7 @@ impl CallbackTrait for PathTraceCallback {
 /// GPU pipelines and buffers cached across frames in `CallbackResources`.
 struct PtResources {
     target_format: wgpu::TextureFormat,
+    backend: PathTraceBackend,
     compute_pipeline: wgpu::ComputePipeline,
     blit_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
@@ -370,6 +488,7 @@ struct PtResources {
     scene_bg: wgpu::BindGroup,
     // Held so the bind group's buffer references stay alive.
     _scene_buffers: [wgpu::Buffer; 6],
+    rt_scene: Option<RtSceneResources>,
     width: u32,
     height: u32,
     accum_buf: wgpu::Buffer,
@@ -397,14 +516,21 @@ impl PtResources {
         scene_key: u64,
         width: u32,
         height: u32,
+        backend: PathTraceBackend,
     ) -> Self {
-        let compute_src = format!("{RNG_WGSL}\n{PATHTRACE_WGSL}");
+        let compute_src = backend.shader_source();
         let compute_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("framer_pathtrace"),
+            label: Some(match backend {
+                PathTraceBackend::ComputeBvh => "framer_pathtrace",
+                PathTraceBackend::RayQuery => "framer_pathtrace_ray_query",
+            }),
             source: wgpu::ShaderSource::Wgsl(compute_src.into()),
         });
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("framer_pathtrace_pipeline"),
+            label: Some(match backend {
+                PathTraceBackend::ComputeBvh => "framer_pathtrace_pipeline",
+                PathTraceBackend::RayQuery => "framer_pathtrace_ray_query_pipeline",
+            }),
             layout: None,
             module: &compute_module,
             entry_point: Some("main"),
@@ -488,7 +614,14 @@ impl PtResources {
         });
 
         let scene_buffers = make_scene_buffers(device, gpu_scene);
-        let scene_bg = make_scene_bind_group(device, &compute_pipeline, &scene_buffers);
+        let rt_scene = (backend == PathTraceBackend::RayQuery)
+            .then(|| make_rt_scene_resources(device, gpu_scene));
+        let scene_bg = make_scene_bind_group(
+            device,
+            &compute_pipeline,
+            &scene_buffers,
+            rt_scene.as_ref().map(|rt| &rt.tlas),
+        );
         let accum_buf = make_accum_buffer(device, width, height);
         let gbuffer = make_pixel_buffer(device, "framer_pt_gbuffer", width, height);
         let color_a = make_pixel_buffer(device, "framer_pt_color_a", width, height);
@@ -519,12 +652,14 @@ impl PtResources {
 
         Self {
             target_format,
+            backend,
             compute_pipeline,
             blit_pipeline,
             uniform_buf,
             scene_key,
             scene_bg,
             _scene_buffers: scene_buffers,
+            rt_scene,
             width,
             height,
             accum_buf,
@@ -544,9 +679,42 @@ impl PtResources {
 
     fn upload_scene(&mut self, device: &wgpu::Device, gpu_scene: &GpuScene, scene_key: u64) {
         let scene_buffers = make_scene_buffers(device, gpu_scene);
-        self.scene_bg = make_scene_bind_group(device, &self.compute_pipeline, &scene_buffers);
+        self.rt_scene = (self.backend == PathTraceBackend::RayQuery)
+            .then(|| make_rt_scene_resources(device, gpu_scene));
+        self.scene_bg = make_scene_bind_group(
+            device,
+            &self.compute_pipeline,
+            &scene_buffers,
+            self.rt_scene.as_ref().map(|rt| &rt.tlas),
+        );
         self._scene_buffers = scene_buffers;
         self.scene_key = scene_key;
+    }
+
+    fn build_acceleration_structures(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let Some(rt) = &self.rt_scene else {
+            return;
+        };
+
+        let geometry = wgpu::BlasTriangleGeometry {
+            size: &rt.geometry_size,
+            vertex_buffer: &rt.vertex_buf,
+            first_vertex: 0,
+            vertex_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+            index_buffer: None,
+            first_index: None,
+            transform_buffer: None,
+            transform_buffer_offset: None,
+        };
+        let entry = wgpu::BlasBuildEntry {
+            blas: &rt.blas,
+            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![geometry]),
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("framer_rt_build_encoder"),
+        });
+        encoder.build_acceleration_structures(std::iter::once(&entry), std::iter::once(&rt.tlas));
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -594,6 +762,82 @@ impl PtResources {
         self.width = width;
         self.height = height;
     }
+}
+
+struct RtSceneResources {
+    vertex_buf: wgpu::Buffer,
+    geometry_size: wgpu::BlasTriangleGeometrySizeDescriptor,
+    blas: wgpu::Blas,
+    tlas: wgpu::Tlas,
+}
+
+fn make_rt_scene_resources(device: &wgpu::Device, scene: &GpuScene) -> RtSceneResources {
+    use wgpu::util::DeviceExt as _;
+
+    let vertices = rt_vertices(scene);
+    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("framer_rt_vertices"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::BLAS_INPUT,
+    });
+    let geometry_size = wgpu::BlasTriangleGeometrySizeDescriptor {
+        vertex_format: wgpu::VertexFormat::Float32x3,
+        vertex_count: vertices.len() as u32,
+        index_format: None,
+        index_count: None,
+        flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+    };
+    let blas = device.create_blas(
+        &wgpu::CreateBlasDescriptor {
+            label: Some("framer_rt_blas"),
+            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        },
+        wgpu::BlasGeometrySizeDescriptors::Triangles {
+            descriptors: vec![geometry_size.clone()],
+        },
+    );
+    let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
+        label: Some("framer_rt_tlas"),
+        max_instances: 1,
+        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+    });
+    tlas[0] = Some(wgpu::TlasInstance::new(
+        &blas,
+        [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ],
+        0,
+        0xff,
+    ));
+
+    RtSceneResources {
+        vertex_buf,
+        geometry_size,
+        blas,
+        tlas,
+    }
+}
+
+fn rt_vertices(scene: &GpuScene) -> Vec<[f32; 3]> {
+    if scene.triangles.is_empty() {
+        return vec![[1.0e20, 1.0e20, 1.0e20]; 3];
+    }
+
+    let mut vertices = Vec::with_capacity(scene.triangles.len() * 3);
+    for tri in &scene.triangles {
+        vertices.push(tri.v0);
+        vertices.push(add3(tri.v0, tri.edge1));
+        vertices.push(add3(tri.v0, tri.edge2));
+    }
+    vertices
+}
+
+fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 fn storage_init(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
@@ -644,11 +888,33 @@ fn make_scene_bind_group(
     device: &wgpu::Device,
     compute_pipeline: &wgpu::ComputePipeline,
     buffers: &[wgpu::Buffer; 6],
+    tlas: Option<&wgpu::Tlas>,
 ) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("framer_pt_scene_bg"),
-        layout: &compute_pipeline.get_bind_group_layout(0),
-        entries: &[
+    let entries = if let Some(tlas) = tlas {
+        vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffers[0].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buffers[3].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buffers[4].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buffers[5].as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: tlas.as_binding(),
+            },
+        ]
+    } else {
+        vec![
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: buffers[0].as_entire_binding(),
@@ -673,7 +939,13 @@ fn make_scene_bind_group(
                 binding: 5,
                 resource: buffers[5].as_entire_binding(),
             },
-        ],
+        ]
+    };
+
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("framer_pt_scene_bg"),
+        layout: &compute_pipeline.get_bind_group_layout(0),
+        entries: &entries,
     })
 }
 
@@ -846,6 +1118,34 @@ fn make_atrous_bind_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ray_query_shader_replaces_only_intersection_layer() {
+        let source = PathTraceBackend::RayQuery.shader_source();
+        assert!(source.starts_with("enable wgpu_ray_query;"));
+        assert!(source.contains("@group(0) @binding(6) var scene_tlas"));
+        assert!(!source.contains(SOFTWARE_INTERSECTION_BEGIN));
+        assert!(!source.contains(SOFTWARE_INTERSECTION_END));
+        assert_eq!(source.matches("fn intersect_scene").count(), 1);
+        assert_eq!(source.matches("fn occluded").count(), 1);
+
+        let compute_source = PathTraceBackend::ComputeBvh.shader_source();
+        assert!(compute_source.contains(SOFTWARE_INTERSECTION_BEGIN));
+        assert!(compute_source.contains("var<storage, read> nodes"));
+    }
+
+    #[test]
+    fn rt_vertices_preserve_triangle_primitive_order() {
+        let gpu = framer_render::scenes::reference_scene().to_gpu();
+        let vertices = rt_vertices(&gpu);
+        assert_eq!(vertices.len(), gpu.triangles.len() * 3);
+
+        for (tri, chunk) in gpu.triangles.iter().zip(vertices.chunks_exact(3)) {
+            assert_eq!(chunk[0], tri.v0);
+            assert_eq!(chunk[1], add3(tri.v0, tri.edge1));
+            assert_eq!(chunk[2], add3(tri.v0, tri.edge2));
+        }
+    }
 
     #[test]
     fn accumulation_key_reacts_to_pan_and_dolly() {
