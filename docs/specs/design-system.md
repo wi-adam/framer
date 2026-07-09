@@ -103,7 +103,8 @@ Each reads `theme(ui)` so it restyles for free:
   actions.
 - `icon_button(Icon, tooltip)` — bare icon (tree footer, status bar, help).
 - `toggle_switch(&mut bool, label)` — sliding Grid/Ortho/Snap switch.
-- `segmented(&mut T, options)` — Design/Plan + view segments.
+- `segmented(Segment[])` — compact mutually exclusive mode control (authoring
+  view segments).
 - `combo(Icon?, label, …)` — themed dropdown.
 - `section(title, default_open, body)` — collapsible inspector group.
 - `property_row(label, value_widget)` — left label / right-aligned value field.

@@ -155,6 +155,72 @@ pub(crate) fn workflow_tab(ui: &mut Ui, label: &str, selected: bool) -> Response
     response
 }
 
+pub(crate) struct Segment<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) selected: bool,
+    pub(crate) tooltip: &'a str,
+}
+
+/// A low-radius segmented control for mutually exclusive compact modes.
+pub(crate) fn segmented(ui: &mut Ui, segments: &[Segment<'_>]) -> Option<usize> {
+    let t = active();
+    let mut clicked = None;
+
+    Frame::new()
+        .fill(t.control)
+        .stroke(t.soft_stroke())
+        .corner_radius(radius::SM)
+        .inner_margin(Margin::symmetric(2, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, segment) in segments.iter().enumerate() {
+                    let selected = segment.selected;
+                    let fg = if selected {
+                        if t.dark { t.text } else { t.accent }
+                    } else {
+                        t.text_secondary
+                    };
+                    let fill = if selected {
+                        t.accent_soft
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let stroke = if selected {
+                        Stroke::new(1.0, t.accent)
+                    } else {
+                        Stroke::new(1.0, Color32::TRANSPARENT)
+                    };
+                    let response = ui.add_sized(
+                        Vec2::new(segment_width(segment.label), 22.0),
+                        Button::new(
+                            RichText::new(segment.label)
+                                .strong()
+                                .size(text_size::LABEL)
+                                .color(fg),
+                        )
+                        .fill(fill)
+                        .stroke(stroke)
+                        .corner_radius(radius::SM),
+                    );
+                    let response = with_tooltip(response, segment.tooltip);
+                    response.widget_info(|| {
+                        WidgetInfo::labeled(WidgetType::Button, true, segment.label)
+                    });
+                    if response.clicked() {
+                        clicked = Some(index);
+                    }
+                }
+            });
+        });
+
+    clicked
+}
+
+fn segment_width(label: &str) -> f32 {
+    (label.chars().count() as f32 * 7.2 + 18.0).clamp(38.0, 88.0)
+}
+
 /// A low-chrome command-strip panel: caption above compact icon commands.
 pub(crate) fn command_panel(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     let t = active();

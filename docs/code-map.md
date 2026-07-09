@@ -300,9 +300,9 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `src/app_config.rs` | App-only runtime configuration (`AppConfig`): TOML file loading via `--config`, `FRAMER__...` environment overrides, CLI flag overrides, and typed startup settings such as `render.ray_query` / `render.smoke_frames`. Durable policy lives in [app-configuration.md](specs/app-configuration.md). |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. Standards authoring edit ops (project-local pack creation, starter-pack import, stack add/reorder/remove, and waive overlays) also live here so every mutation goes through undoable `edit()`. The derived compliance report is regenerated with each plan, lowered into plan diagnostics, and exported as a CSV sidecar. |
-| `actions.rs` | UI-only command metadata (`ActionId`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; model mutations still live on `FramerApp`. |
-| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts, status bar — the egui panel bodies. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document; `RenderSettings` is also session-only presentation state for sun/exposure controls. `WorkflowTab`, `WorkspaceMode`, and `ViewportMode` coupling lives here: output workflow tabs enter Render/Plan workspaces, authoring tabs restore the Design workspace and apply soft default views. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. Standards authoring edit ops (project-local pack creation, starter-pack import, stack add/reorder/remove, and waive overlays) also live here so every mutation goes through undoable `edit()`. The derived compliance report is regenerated with each plan, lowered into plan diagnostics, and exported as a CSV sidecar. |
+| `actions.rs` | UI-only command metadata (`ActionId`, `EnabledContext`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; enabled/disabled state is evaluated by `FramerApp`, and model mutations still live on `FramerApp`. |
+| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation, including `next_standards_pack_id`). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + same-level auto-join derivation. |
 | `history.rs` | `History<Snapshot>` undo/redo stack (+ `history_integration_tests.rs`). |
@@ -314,16 +314,18 @@ mirrors this exact math.
 ### `src/app/design/` — design system
 
 `mod.rs` (theme install + tokens), `tokens.rs`, `palette.rs`, `icons.rs` (Lucide icon font),
-`widgets.rs` (semantic custom controls, including workflow tabs and command-strip panels). New UI
+`widgets.rs` (semantic custom controls, including workflow tabs, command-strip panels, and the
+segmented authoring view control). New UI
 styling goes here, not inline; command routing policy belongs in
 [command-surfaces.md](specs/command-surfaces.md).
 
 ### `src/app/viewport/` — the viewports (layered modules)
 
 `workspace` (`viewport/mod.rs:91`) renders the workspace/view bar, contextual tool options
-strip, selection context toolbar, and one viewport per frame based on `ViewportMode`. The
-workspace/view bar owns Design/Plan switching and Shell/Plan, Wall/Elevation, Roof, 3D, and
-Render view tabs; the tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
+strip, selection context toolbar, and one viewport per frame based on `ViewportMode`. Workflow
+tabs in `panels.rs` own Design/Render/Plan workspace switching; the workspace/view bar owns the
+authoring camera segmented control (`Shell`/`Plan`, `Wall`/`Elevation`, `Roof`, `3D`) and hides it
+in the Render workspace. The tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
 placement context, including the active drafting level, and the selection context toolbar owns
 selected-object lifecycle actions.
 
@@ -347,8 +349,10 @@ the shaders: `pathtrace.wgsl`, `blit.wgsl`, `denoise.wgsl`, `rng.wgsl`. **These 
 validates equivalence. The default GPU backend traverses the uploaded flat BVH in WGSL; an
 experimental native `wgpu` ray-query backend can be enabled with app runtime config
 (`render.ray_query`, `FRAMER__RENDER__RAY_QUERY=true`, or `--render-ray-query`) when the device
-exposes `EXPERIMENTAL_RAY_QUERY`, building a BLAS/TLAS from the same triangle stream. Edit render
-math in both CPU and WGSL paths together.
+exposes `EXPERIMENTAL_RAY_QUERY`, building a BLAS/TLAS from the same triangle stream. Its
+accumulation key covers geometry, camera, render size, lighting, sky, and exposure so Render tab
+settings restart progressive refinement without rebuilding unchanged geometry. Edit render math
+in both CPU and WGSL paths together.
 
 ---
 

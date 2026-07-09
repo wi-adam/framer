@@ -4,9 +4,10 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented; in-app render settings specced 2026-07-08, not yet built ·
+> **Status:** Implemented; in-app render settings landed 2026-07-09 ·
 > **Linked goal:** — · **Plan:** [2026-06-15-render-view-mode](../plans/2026-06-15-render-view-mode.md),
-> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md)
+> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
+> **Last reviewed:** 2026-07-09
 
 ## Goal
 

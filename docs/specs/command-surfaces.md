@@ -5,12 +5,12 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented; view–workflow alignment (Render output tab, soft default
-> views, applicability gating, render settings, view-strip restyle) specced
-> 2026-07-08, not yet built · **Linked goal:** G-011 (CAD Workspace UX) ·
+> views, applicability gating, render settings, view-strip restyle) landed
+> 2026-07-09 · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
 > [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
 > [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
-> **Last reviewed:** 2026-07-08
+> **Last reviewed:** 2026-07-09
 
 ## Intent / Purpose
 
@@ -130,8 +130,8 @@ workbench, but purpose-built for wood-framed structures.
   palette) derives disabled state and tooltip from the same `action_enabled` /
   `action_disabled_reason` pair. No surface hard-codes a command as
   always-enabled.
-- The Render workflow tab hosts **render settings** panels (sun direction,
-  environment/exposure, quality) surfacing the engine's existing
+- The Render workflow tab hosts **render settings** panels (sun direction and
+  environment/exposure) surfacing the engine's existing
   `RenderOptions`. Render settings are session view state, not authored model
   data — no `.framer` schema change — and any settings change resets
   progressive accumulation. See [render-view.md](render-view.md).
@@ -188,7 +188,7 @@ workbench, but purpose-built for wood-framed structures.
 | Sample/demo loaders | Project menu or examples picker | Command search | Workflow command strip |
 | Workspace mode (`Design`, `Render`, `Plan`) | Workflow tab strip (output tabs `Render`/`Plan` = output workspaces) | Command search | A second standalone switcher row |
 | View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`) | Viewport view tabs (segmented control) | Command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns; a `Render` view tab |
-| Render settings (sun, environment, exposure, quality) | Render workflow tab panels | Command search | Always-visible authoring chrome; inspector |
+| Render settings (sun azimuth/elevation, exposure) | Render workflow tab panels | None yet | Always-visible authoring chrome; inspector |
 | Diagnostics (errors, warnings, unsupported, info) | Status-bar counters → diagnostics popover | Plan workspace inspector / command search | Visible-but-dead counters; buried in a single workspace |
 | Drafting/view state (`Grid`, `Snap`, `Ortho`, layers) | Status/view-control bar | Command search | Inspector property rows |
 | Modal authoring tools (`Wall`, `Room`, `Ceiling`, `Floor`, `Dimension`) | Workflow command strip tab/panel | Shortcuts / command search | Inspector |
