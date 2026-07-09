@@ -25,8 +25,8 @@ use super::model_edit::{
     set_wall_length_keep_direction,
 };
 use super::{
-    DrawWallToolState, FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode,
-    design, theme,
+    DrawWallToolState, FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design,
+    theme,
 };
 
 impl FramerApp {
@@ -42,14 +42,38 @@ impl FramerApp {
                     .color(head.text),
             );
             header_divider(ui, head.divider);
-            if header_command_button(ui, head, ActionId::NewProject, true, None).clicked() {
-                self.new_project();
+            if header_command_button(
+                ui,
+                head,
+                ActionId::NewProject,
+                self.action_enabled(ActionId::NewProject),
+                self.action_disabled_reason(ActionId::NewProject),
+            )
+            .clicked()
+            {
+                self.execute_action(ActionId::NewProject);
             }
-            if header_command_button(ui, head, ActionId::OpenProject, true, None).clicked() {
-                self.load_project_file();
+            if header_command_button(
+                ui,
+                head,
+                ActionId::OpenProject,
+                self.action_enabled(ActionId::OpenProject),
+                self.action_disabled_reason(ActionId::OpenProject),
+            )
+            .clicked()
+            {
+                self.execute_action(ActionId::OpenProject);
             }
-            if header_command_button(ui, head, ActionId::SaveProject, true, None).clicked() {
-                self.save_project_file();
+            if header_command_button(
+                ui,
+                head,
+                ActionId::SaveProject,
+                self.action_enabled(ActionId::SaveProject),
+                self.action_disabled_reason(ActionId::SaveProject),
+            )
+            .clicked()
+            {
+                self.execute_action(ActionId::SaveProject);
             }
             header_divider(ui, head.divider);
             let undo_tip = match self.history.undo_label() {
@@ -60,12 +84,12 @@ impl FramerApp {
                 ui,
                 head,
                 ActionId::Undo,
-                self.history.can_undo(),
+                self.action_enabled(ActionId::Undo),
                 Some(undo_tip.as_str()),
             )
             .clicked()
             {
-                self.undo();
+                self.execute_action(ActionId::Undo);
             }
             let redo_tip = match self.history.redo_label() {
                 Some(label) => format!("Redo {label}  (⌘⇧Z / Ctrl+Y)"),
@@ -75,17 +99,25 @@ impl FramerApp {
                 ui,
                 head,
                 ActionId::Redo,
-                self.history.can_redo(),
+                self.action_enabled(ActionId::Redo),
                 Some(redo_tip.as_str()),
             )
             .clicked()
             {
-                self.redo();
+                self.execute_action(ActionId::Redo);
             }
             header_divider(ui, head.divider);
             self.project_header_menu(ui, head);
             self.examples_header_menu(ui, head);
-            if header_command_button(ui, head, ActionId::CommandSearch, true, None).clicked() {
+            if header_command_button(
+                ui,
+                head,
+                ActionId::CommandSearch,
+                self.action_enabled(ActionId::CommandSearch),
+                self.action_disabled_reason(ActionId::CommandSearch),
+            )
+            .clicked()
+            {
                 self.execute_action(ActionId::CommandSearch);
             }
             let path_width = (ui.available_width() * 0.34).clamp(220.0, 460.0);
@@ -126,44 +158,63 @@ impl FramerApp {
     }
 
     fn project_header_menu(&mut self, ui: &mut Ui, head: design::Theme) {
-        let can_export = self.workspace_mode.shows_generated_plan();
-        let can_export_compliance = self.action_enabled(ActionId::ExportComplianceReport);
         let (response, _) = MenuButton::from_button(widgets::header_menu_button("Project", head))
             .ui(ui, |ui| {
                 ui.set_min_width(176.0);
-                if header_menu_action(ui, ActionId::NewProject, true, None).clicked() {
-                    self.new_project();
+                if header_menu_action(
+                    ui,
+                    ActionId::NewProject,
+                    self.action_enabled(ActionId::NewProject),
+                    self.action_disabled_reason(ActionId::NewProject),
+                )
+                .clicked()
+                {
+                    self.execute_action(ActionId::NewProject);
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::OpenProject, true, None).clicked() {
-                    self.load_project_file();
+                if header_menu_action(
+                    ui,
+                    ActionId::OpenProject,
+                    self.action_enabled(ActionId::OpenProject),
+                    self.action_disabled_reason(ActionId::OpenProject),
+                )
+                .clicked()
+                {
+                    self.execute_action(ActionId::OpenProject);
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::SaveProject, true, None).clicked() {
-                    self.save_project_file();
+                if header_menu_action(
+                    ui,
+                    ActionId::SaveProject,
+                    self.action_enabled(ActionId::SaveProject),
+                    self.action_disabled_reason(ActionId::SaveProject),
+                )
+                .clicked()
+                {
+                    self.execute_action(ActionId::SaveProject);
                     ui.close();
                 }
                 ui.separator();
                 if header_menu_action(
                     ui,
                     ActionId::ExportArtifacts,
-                    can_export,
+                    self.action_enabled(ActionId::ExportArtifacts),
                     self.action_disabled_reason(ActionId::ExportArtifacts),
                 )
                 .clicked()
                 {
-                    self.export_current_artifacts();
+                    self.execute_action(ActionId::ExportArtifacts);
                     ui.close();
                 }
                 if header_menu_action(
                     ui,
                     ActionId::ExportComplianceReport,
-                    can_export_compliance,
+                    self.action_enabled(ActionId::ExportComplianceReport),
                     self.action_disabled_reason(ActionId::ExportComplianceReport),
                 )
                 .clicked()
                 {
-                    self.export_compliance_report();
+                    self.execute_action(ActionId::ExportComplianceReport);
                     ui.close();
                 }
             });
@@ -176,12 +227,26 @@ impl FramerApp {
         let (response, _) = MenuButton::from_button(widgets::header_menu_button("Examples", head))
             .ui(ui, |ui| {
                 ui.set_min_width(176.0);
-                if header_menu_action(ui, ActionId::LoadShellDemo, true, None).clicked() {
-                    self.reset_demo();
+                if header_menu_action(
+                    ui,
+                    ActionId::LoadShellDemo,
+                    self.action_enabled(ActionId::LoadShellDemo),
+                    self.action_disabled_reason(ActionId::LoadShellDemo),
+                )
+                .clicked()
+                {
+                    self.execute_action(ActionId::LoadShellDemo);
                     ui.close();
                 }
-                if header_menu_action(ui, ActionId::LoadWallDemo, true, None).clicked() {
-                    self.reset_wall_demo();
+                if header_menu_action(
+                    ui,
+                    ActionId::LoadWallDemo,
+                    self.action_enabled(ActionId::LoadWallDemo),
+                    self.action_disabled_reason(ActionId::LoadWallDemo),
+                )
+                .clicked()
+                {
+                    self.execute_action(ActionId::LoadWallDemo);
                     ui.close();
                 }
             });
@@ -308,34 +373,69 @@ impl FramerApp {
         match self.command_tab {
             WorkflowTab::Design => {
                 widgets::command_panel(ui, "Structure", |ui| {
-                    if action_tool_button(ui, ActionId::ToolRoom, self.room_tool_active, true)
-                        .clicked()
+                    let id = ActionId::ToolRoom;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.room_tool_active,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.toggle_room_tool();
+                        self.execute_action(id);
                     }
                 });
             }
             WorkflowTab::Frame => {
                 widgets::command_panel(ui, "Structure", |ui| {
-                    if action_tool_button(ui, ActionId::ToolWall, self.draw_wall_tool.active, true)
-                        .clicked()
+                    let id = ActionId::ToolWall;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.draw_wall_tool.active,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.toggle_draw_wall_tool();
+                        self.execute_action(id);
                     }
-                    if action_tool_button(ui, ActionId::ToolCeiling, self.ceiling_tool_active, true)
-                        .clicked()
+                    let id = ActionId::ToolCeiling;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.ceiling_tool_active,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.toggle_ceiling_tool();
+                        self.execute_action(id);
                     }
-                    if action_tool_button(ui, ActionId::ToolVault, self.vault_tool_active, true)
-                        .clicked()
+                    let id = ActionId::ToolVault;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.vault_tool_active,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.toggle_vault_tool();
+                        self.execute_action(id);
                     }
-                    if action_tool_button(ui, ActionId::ToolFloor, self.floor_tool_active, true)
-                        .clicked()
+                    let id = ActionId::ToolFloor;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.floor_tool_active,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.toggle_floor_tool();
+                        self.execute_action(id);
                     }
                 });
             }
@@ -351,15 +451,17 @@ impl FramerApp {
             }
             WorkflowTab::Annotate => {
                 widgets::command_panel(ui, "Dimensions", |ui| {
+                    let id = ActionId::ToolDimensionLinear;
                     if action_tool_button(
                         ui,
-                        ActionId::ToolDimensionLinear,
+                        id,
                         self.dimension_tool.active,
-                        true,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
                     )
                     .clicked()
                     {
-                        self.toggle_dimension_tool();
+                        self.execute_action(id);
                     }
                 });
             }
@@ -367,10 +469,17 @@ impl FramerApp {
             WorkflowTab::Render => {}
             WorkflowTab::Plan => {
                 widgets::command_panel(ui, "Generated", |ui| {
-                    if action_tool_button(ui, ActionId::ToggleSection, self.show_section, true)
-                        .clicked()
+                    let id = ActionId::ToggleSection;
+                    if action_tool_button(
+                        ui,
+                        id,
+                        self.show_section,
+                        self.action_enabled(id),
+                        self.action_disabled_reason(id),
+                    )
+                    .clicked()
                     {
-                        self.show_section = !self.show_section;
+                        self.execute_action(id);
                     }
                 });
             }
@@ -380,16 +489,40 @@ impl FramerApp {
     fn opening_flyout(&mut self, ui: &mut Ui) {
         command_flyout_button(ui, "Opening", "Add an opening variant", |ui| {
             ui.set_min_width(156.0);
-            if flyout_action(ui, ActionId::AddDoor).clicked() {
-                self.add_opening(OpeningKind::Door);
+            let id = ActionId::AddDoor;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
-            if flyout_action(ui, ActionId::AddWindow).clicked() {
-                self.add_opening(OpeningKind::Window);
+            let id = ActionId::AddWindow;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
-            if flyout_action(ui, ActionId::AddGarageDoor).clicked() {
-                self.add_opening(OpeningKind::GarageDoor);
+            let id = ActionId::AddGarageDoor;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
         });
@@ -398,16 +531,40 @@ impl FramerApp {
     fn roof_flyout(&mut self, ui: &mut Ui) {
         command_flyout_button(ui, "Roof form", "Generate a roof form", |ui| {
             ui.set_min_width(156.0);
-            if flyout_action(ui, ActionId::AddGableRoof).clicked() {
-                self.add_roof(RoofForm::Gable);
+            let id = ActionId::AddGableRoof;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
-            if flyout_action(ui, ActionId::AddShedRoof).clicked() {
-                self.add_roof(RoofForm::Shed);
+            let id = ActionId::AddShedRoof;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
-            if flyout_action(ui, ActionId::AddHipRoof).clicked() {
-                self.add_roof(RoofForm::Hip);
+            let id = ActionId::AddHipRoof;
+            if flyout_action(
+                ui,
+                id,
+                self.action_enabled(id),
+                self.action_disabled_reason(id),
+            )
+            .clicked()
+            {
+                self.execute_action(id);
                 ui.close();
             }
         });
@@ -497,7 +654,7 @@ impl FramerApp {
         }
     }
 
-    fn toggle_dimension_tool(&mut self) {
+    pub(super) fn toggle_dimension_tool(&mut self) {
         self.dimension_tool.active = !self.dimension_tool.active;
         self.dimension_tool.clear_picks();
         if self.dimension_tool.active {
@@ -900,14 +1057,41 @@ impl FramerApp {
             } else {
                 ui.separator();
                 panel_subheader(ui, "Catalog");
-                if widgets::catalog_add_button(ui, "Door").clicked() {
-                    self.add_opening(OpeningKind::Door);
+                let id = ActionId::AddDoor;
+                if widgets::catalog_add_button(
+                    ui,
+                    "Door",
+                    self.action_enabled(id),
+                    self.action_disabled_reason(id)
+                        .unwrap_or(actions::metadata(id).tooltip),
+                )
+                .clicked()
+                {
+                    self.execute_action(id);
                 }
-                if widgets::catalog_add_button(ui, "Window").clicked() {
-                    self.add_opening(OpeningKind::Window);
+                let id = ActionId::AddWindow;
+                if widgets::catalog_add_button(
+                    ui,
+                    "Window",
+                    self.action_enabled(id),
+                    self.action_disabled_reason(id)
+                        .unwrap_or(actions::metadata(id).tooltip),
+                )
+                .clicked()
+                {
+                    self.execute_action(id);
                 }
-                if widgets::catalog_add_button(ui, "Garage Door").clicked() {
-                    self.add_opening(OpeningKind::GarageDoor);
+                let id = ActionId::AddGarageDoor;
+                if widgets::catalog_add_button(
+                    ui,
+                    "Garage Door",
+                    self.action_enabled(id),
+                    self.action_disabled_reason(id)
+                        .unwrap_or(actions::metadata(id).tooltip),
+                )
+                .clicked()
+                {
+                    self.execute_action(id);
                 }
             }
         });
@@ -3528,10 +3712,16 @@ fn command_search_action(
     action_response_with_tooltip(response, enabled, action_tooltip(action, disabled_reason))
 }
 
-fn action_tool_button(ui: &mut Ui, id: ActionId, active: bool, enabled: bool) -> Response {
+fn action_tool_button(
+    ui: &mut Ui,
+    id: ActionId,
+    active: bool,
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) -> Response {
     let action = actions::metadata(id);
     let response = widgets::tool_button(ui, action.icon, action.label, active, enabled);
-    action_response_with_tooltip(response, enabled, action_tooltip(*action, None))
+    action_response_with_tooltip(response, enabled, action_tooltip(*action, disabled_reason))
 }
 
 fn command_search_label(action: actions::ActionMetadata) -> String {
@@ -3587,12 +3777,17 @@ fn command_flyout_button(
     response.on_hover_text(tooltip)
 }
 
-fn flyout_action(ui: &mut Ui, id: ActionId) -> Response {
+fn flyout_action(
+    ui: &mut Ui,
+    id: ActionId,
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) -> Response {
     let action = actions::metadata(id);
-    let response = ui.add(egui::Button::new(action.label));
+    let response = ui.add_enabled(enabled, egui::Button::new(action.label));
     response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, action.label));
-    action_response_with_tooltip(response, true, action_tooltip(*action, None))
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
+    action_response_with_tooltip(response, enabled, action_tooltip(*action, disabled_reason))
 }
 
 const AUTHORING_WORKFLOW_TABS: &[WorkflowTab] = &[

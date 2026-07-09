@@ -181,20 +181,35 @@ pub(crate) fn command_panel(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui))
         });
 }
 
-pub(crate) fn catalog_add_button(ui: &mut Ui, label: &str) -> Response {
+pub(crate) fn catalog_add_button(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    tooltip: &str,
+) -> Response {
     let t = active();
-    let response = ui.add(
+    let text_color = if enabled {
+        t.text_secondary
+    } else {
+        t.text_muted
+    };
+    let response = ui.add_enabled(
+        enabled,
         Button::new(
             RichText::new(format!("+ {label}"))
                 .size(text_size::LABEL)
                 .strong()
-                .color(t.text_secondary),
+                .color(text_color),
         )
         .fill(t.control)
         .stroke(t.soft_stroke())
         .corner_radius(radius::SM),
     );
-    with_tooltip(response, &format!("Add {label}"))
+    if enabled {
+        response.on_hover_text(tooltip)
+    } else {
+        response.on_disabled_hover_text(tooltip)
+    }
 }
 
 /// A vertical divider sized to a toolbar group's button row.

@@ -1221,25 +1221,47 @@ impl FramerApp {
         )
     }
 
+    fn action_context_enabled(&self, context: actions::EnabledContext) -> bool {
+        match context {
+            actions::EnabledContext::Always => true,
+            actions::EnabledContext::Authoring => self.workspace_mode.allows_design_edits(),
+            actions::EnabledContext::PlanWorkspace => self.workspace_mode.shows_generated_plan(),
+        }
+    }
+
+    fn action_context_disabled_reason(
+        &self,
+        context: actions::EnabledContext,
+    ) -> Option<&'static str> {
+        if self.action_context_enabled(context) {
+            return None;
+        }
+
+        match context {
+            actions::EnabledContext::Always => None,
+            actions::EnabledContext::Authoring => Some(
+                "Available in an authoring workflow tab; Render and Plan are output workspaces",
+            ),
+            actions::EnabledContext::PlanWorkspace => Some("Available in the Plan workspace"),
+        }
+    }
+
     fn action_enabled(&self, id: actions::ActionId) -> bool {
+        let action = actions::metadata(id);
+        if !self.action_context_enabled(action.enabled_context) {
+            return false;
+        }
+
         match id {
             actions::ActionId::Undo => self.history.can_undo(),
             actions::ActionId::Redo => self.history.can_redo(),
-            actions::ActionId::ExportArtifacts => self.workspace_mode.shows_generated_plan(),
-            actions::ActionId::ExportComplianceReport => {
-                self.workspace_mode.shows_generated_plan() && self.compliance_report.is_some()
-            }
+            actions::ActionId::ExportComplianceReport => self.compliance_report.is_some(),
             actions::ActionId::DeleteSelection => self.is_selection_deletable(),
-            actions::ActionId::AddDoor
-            | actions::ActionId::AddWindow
-            | actions::ActionId::AddGarageDoor
-            | actions::ActionId::AddGableRoof
-            | actions::ActionId::AddShedRoof
-            | actions::ActionId::AddHipRoof => self.workspace_mode.allows_design_edits(),
             actions::ActionId::CommandSearch
             | actions::ActionId::NewProject
             | actions::ActionId::OpenProject
             | actions::ActionId::SaveProject
+            | actions::ActionId::ExportArtifacts
             | actions::ActionId::LoadShellDemo
             | actions::ActionId::LoadWallDemo
             | actions::ActionId::WorkspaceDesign
@@ -1255,6 +1277,12 @@ impl FramerApp {
             | actions::ActionId::ToolVault
             | actions::ActionId::ToolFloor
             | actions::ActionId::ToolDimensionLinear
+            | actions::ActionId::AddDoor
+            | actions::ActionId::AddWindow
+            | actions::ActionId::AddGarageDoor
+            | actions::ActionId::AddGableRoof
+            | actions::ActionId::AddShedRoof
+            | actions::ActionId::AddHipRoof
             | actions::ActionId::DimensionKind
             | actions::ActionId::DimensionAxis
             | actions::ActionId::ToggleSection => true,
@@ -1266,27 +1294,21 @@ impl FramerApp {
             return None;
         }
 
+        let action = actions::metadata(id);
+        if let Some(reason) = self.action_context_disabled_reason(action.enabled_context) {
+            return Some(reason);
+        }
+
         match id {
             actions::ActionId::Undo => Some("Nothing to undo"),
             actions::ActionId::Redo => Some("Nothing to redo"),
-            actions::ActionId::ExportArtifacts => Some("Available in the Plan workspace"),
-            actions::ActionId::ExportComplianceReport
-                if !self.workspace_mode.shows_generated_plan() =>
-            {
-                Some("Available in the Plan workspace")
-            }
             actions::ActionId::ExportComplianceReport => Some("No compliance report available"),
             actions::ActionId::DeleteSelection => Some("Select an object to delete"),
-            actions::ActionId::AddDoor
-            | actions::ActionId::AddWindow
-            | actions::ActionId::AddGarageDoor
-            | actions::ActionId::AddGableRoof
-            | actions::ActionId::AddShedRoof
-            | actions::ActionId::AddHipRoof => Some("Available in the Design workspace"),
             actions::ActionId::CommandSearch
             | actions::ActionId::NewProject
             | actions::ActionId::OpenProject
             | actions::ActionId::SaveProject
+            | actions::ActionId::ExportArtifacts
             | actions::ActionId::LoadShellDemo
             | actions::ActionId::LoadWallDemo
             | actions::ActionId::WorkspaceDesign
@@ -1302,6 +1324,12 @@ impl FramerApp {
             | actions::ActionId::ToolVault
             | actions::ActionId::ToolFloor
             | actions::ActionId::ToolDimensionLinear
+            | actions::ActionId::AddDoor
+            | actions::ActionId::AddWindow
+            | actions::ActionId::AddGarageDoor
+            | actions::ActionId::AddGableRoof
+            | actions::ActionId::AddShedRoof
+            | actions::ActionId::AddHipRoof
             | actions::ActionId::DimensionKind
             | actions::ActionId::DimensionAxis
             | actions::ActionId::ToggleSection => None,
@@ -1349,7 +1377,7 @@ impl FramerApp {
             actions::ActionId::AddGableRoof => self.add_roof(RoofForm::Gable),
             actions::ActionId::AddShedRoof => self.add_roof(RoofForm::Shed),
             actions::ActionId::AddHipRoof => self.add_roof(RoofForm::Hip),
-            actions::ActionId::ToolDimensionLinear => self.activate_dimension_tool(),
+            actions::ActionId::ToolDimensionLinear => self.toggle_dimension_tool(),
             actions::ActionId::DimensionKind | actions::ActionId::DimensionAxis => {
                 self.activate_dimension_tool();
             }
@@ -1410,25 +1438,25 @@ impl FramerApp {
         });
 
         if undo_pressed {
-            self.undo();
+            self.execute_action(actions::ActionId::Undo);
         } else if redo_pressed {
-            self.redo();
+            self.execute_action(actions::ActionId::Redo);
         } else if escape_pressed {
             self.exit_current_context();
         } else if delete_pressed {
-            self.delete_selected();
+            self.execute_action(actions::ActionId::DeleteSelection);
         } else if dimension_pressed {
-            self.activate_dimension_tool();
+            self.execute_action(actions::ActionId::ToolDimensionLinear);
         } else if draw_wall_pressed {
-            self.toggle_draw_wall_tool();
+            self.execute_action(actions::ActionId::ToolWall);
         } else if room_pressed {
-            self.toggle_room_tool();
+            self.execute_action(actions::ActionId::ToolRoom);
         } else if ceiling_pressed {
-            self.toggle_ceiling_tool();
+            self.execute_action(actions::ActionId::ToolCeiling);
         } else if floor_pressed {
-            self.toggle_floor_tool();
+            self.execute_action(actions::ActionId::ToolFloor);
         } else if vault_pressed {
-            self.toggle_vault_tool();
+            self.execute_action(actions::ActionId::ToolVault);
         }
     }
 
@@ -3895,6 +3923,55 @@ mod tests {
         app.select_workflow_tab(actions::WorkflowTab::Annotate);
 
         assert_eq!(app.viewport_mode, ViewportMode::Plan);
+    }
+
+    #[test]
+    fn action_enabled_context_gates_authoring_and_plan_commands() {
+        let mut app = FramerApp {
+            selected: Selection::Wall,
+            ..Default::default()
+        };
+
+        assert!(app.action_enabled(actions::ActionId::ToolWall));
+        assert!(app.action_enabled(actions::ActionId::DeleteSelection));
+        assert!(!app.action_enabled(actions::ActionId::ToggleSection));
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::ToggleSection),
+            Some("Available in the Plan workspace")
+        );
+
+        app.set_workspace_mode(WorkspaceMode::Plan);
+
+        assert!(!app.action_enabled(actions::ActionId::ToolWall));
+        assert!(!app.action_enabled(actions::ActionId::DeleteSelection));
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::ToolWall),
+            Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+        );
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::DeleteSelection),
+            Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+        );
+        assert!(app.action_enabled(actions::ActionId::ToggleSection));
+
+        app.execute_action(actions::ActionId::ToolWall);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Plan);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Plan);
+        assert!(!app.draw_wall_tool.active);
+
+        app.set_workspace_mode(WorkspaceMode::Render);
+
+        assert!(!app.action_enabled(actions::ActionId::ToolWall));
+        assert!(!app.action_enabled(actions::ActionId::ToolDimensionLinear));
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::ToolWall),
+            Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+        );
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::ToolDimensionLinear),
+            Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+        );
     }
 
     #[test]

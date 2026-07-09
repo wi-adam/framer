@@ -120,6 +120,13 @@ pub(crate) enum CommandPresentation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnabledContext {
+    Always,
+    Authoring,
+    PlanWorkspace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CommandStripRoute {
     pub(crate) tab: WorkflowTab,
     pub(crate) panel: CommandPanel,
@@ -136,6 +143,7 @@ pub(crate) struct ActionMetadata {
     pub(crate) primary_surface: CommandSurface,
     pub(crate) secondary_surfaces: &'static [CommandSurface],
     pub(crate) command_strip: Option<CommandStripRoute>,
+    pub(crate) enabled_context: EnabledContext,
     pub(crate) mutates_authored_intent: bool,
 }
 
@@ -217,6 +225,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -228,6 +237,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -239,6 +249,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -250,6 +261,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -261,6 +273,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::PlanWorkspace,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::PlanWorkspace,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -272,6 +285,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::PlanWorkspace,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::PlanWorkspace,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -283,6 +297,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -294,6 +309,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::AppQuickAccess,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -305,6 +321,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::ExamplesPicker,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -316,6 +333,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::ExamplesPicker,
         secondary_surfaces: SEARCH_PROJECT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -327,6 +345,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -338,6 +357,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -349,6 +369,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -360,6 +381,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -371,6 +393,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -382,6 +405,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkspaceViewBar,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -393,6 +417,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::WorkflowTabStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -408,6 +433,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Structure,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -423,6 +449,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Structure,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -438,6 +465,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Structure,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -453,6 +481,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Structure,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -468,6 +497,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Structure,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -479,6 +509,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::ContextToolbar,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -494,6 +525,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Openings,
             CommandPresentation::FlyoutVariant { flyout: "Opening" },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -509,6 +541,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Openings,
             CommandPresentation::FlyoutVariant { flyout: "Opening" },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -524,6 +557,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Openings,
             CommandPresentation::FlyoutVariant { flyout: "Opening" },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -541,6 +575,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
                 flyout: "Roof form",
             },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -558,6 +593,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
                 flyout: "Roof form",
             },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -575,6 +611,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
                 flyout: "Roof form",
             },
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -590,6 +627,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::Dimensions,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: true,
     },
     ActionMetadata {
@@ -601,6 +639,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::ToolOptionsStrip,
         secondary_surfaces: SEARCH,
         command_strip: None,
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -612,6 +651,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         primary_surface: CommandSurface::ToolOptionsStrip,
         secondary_surfaces: SEARCH,
         command_strip: None,
+        enabled_context: EnabledContext::Authoring,
         mutates_authored_intent: false,
     },
     ActionMetadata {
@@ -627,6 +667,7 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
             CommandPanel::GeneratedPlan,
             CommandPresentation::TopLevel,
         )),
+        enabled_context: EnabledContext::PlanWorkspace,
         mutates_authored_intent: false,
     },
 ];
@@ -749,6 +790,69 @@ mod tests {
                 seen.contains(&action.id),
                 "{:?} exists in ACTIONS but not ALL_ACTION_IDS",
                 action.id
+            );
+        }
+    }
+
+    #[test]
+    fn actions_have_expected_enabled_contexts() {
+        for id in [
+            ActionId::ToolWall,
+            ActionId::ToolRoom,
+            ActionId::ToolCeiling,
+            ActionId::ToolVault,
+            ActionId::ToolFloor,
+            ActionId::DeleteSelection,
+            ActionId::AddDoor,
+            ActionId::AddWindow,
+            ActionId::AddGarageDoor,
+            ActionId::AddGableRoof,
+            ActionId::AddShedRoof,
+            ActionId::AddHipRoof,
+            ActionId::ToolDimensionLinear,
+            ActionId::DimensionKind,
+            ActionId::DimensionAxis,
+        ] {
+            assert_eq!(
+                metadata(id).enabled_context,
+                EnabledContext::Authoring,
+                "{id:?} must be available only while authoring"
+            );
+        }
+
+        for id in [
+            ActionId::ExportArtifacts,
+            ActionId::ExportComplianceReport,
+            ActionId::ToggleSection,
+        ] {
+            assert_eq!(
+                metadata(id).enabled_context,
+                EnabledContext::PlanWorkspace,
+                "{id:?} must be available only in the generated Plan workspace"
+            );
+        }
+
+        for id in [
+            ActionId::CommandSearch,
+            ActionId::NewProject,
+            ActionId::OpenProject,
+            ActionId::SaveProject,
+            ActionId::Undo,
+            ActionId::Redo,
+            ActionId::LoadShellDemo,
+            ActionId::LoadWallDemo,
+            ActionId::WorkspaceDesign,
+            ActionId::WorkspacePlan,
+            ActionId::ViewPlan,
+            ActionId::ViewElevation,
+            ActionId::ViewRoof,
+            ActionId::View3d,
+            ActionId::ViewRender,
+        ] {
+            assert_eq!(
+                metadata(id).enabled_context,
+                EnabledContext::Always,
+                "{id:?} must keep its state-specific or always-available behavior"
             );
         }
     }
