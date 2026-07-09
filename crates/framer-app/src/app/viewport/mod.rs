@@ -265,6 +265,7 @@ impl FramerApp {
                         workspace_mode: self.workspace_mode,
                         wall_display: self.layers.wall_display,
                         gpu_target_format: self.gpu_target_format,
+                        gpu_depth_format: self.gpu_depth_format,
                     },
                     &mut self.view_3d,
                 )

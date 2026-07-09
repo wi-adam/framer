@@ -23,12 +23,14 @@
 //! docs/plans/2026-07-07-ui-ux-hardening.md).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use eframe::egui;
+use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
-use super::{FramerApp, Selection, ViewportMode, actions, design};
+use super::{FramerApp, RoofForm, Selection, ViewportMode, actions, design};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -60,7 +62,10 @@ fn shots_harness_with_size(theme: design::Theme, size: egui::Vec2) -> Harness<'s
                 app.handle_keyboard_shortcuts(ui.ctx());
                 app.ui_root(ui);
             },
-            FramerApp::default(),
+            FramerApp {
+                gpu_target_format: Some(wgpu::TextureFormat::Rgba8Unorm),
+                ..FramerApp::default()
+            },
         )
 }
 
@@ -82,6 +87,22 @@ fn shot(harness: &mut Harness<'_, FramerApp>, dir: &Path, index: &mut u32, name:
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
     println!("ui-shots: wrote {}", path.display());
     *index += 1;
+}
+
+/// Let the progressive Render view publish at least one frame before capturing.
+/// The off-screen deck is visual QA, not a convergence benchmark, so keep the
+/// camera in low-resolution preview mode and stop as soon as either renderer has
+/// an image.
+fn warm_render(harness: &mut Harness<'_, FramerApp>) {
+    harness.state_mut().render_motion_cooldown = 24;
+    for _ in 0..80 {
+        harness.run_steps(1);
+        let state = harness.state();
+        if state.render_view.samples() > 0 || state.render_gpu.samples() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Selects a workflow tab through the app's own toolbar handler (tab + coupled
@@ -178,9 +199,22 @@ fn capture_ui_shot_deck() {
     ] {
         harness.state_mut().viewport_mode = mode;
         if mode == ViewportMode::Render {
-            // The progressive path tracer never reports idle; give it a few
-            // frames to produce a first image instead of settling.
-            harness.run_steps(8);
+            warm_render(&mut harness);
+        }
+        shot(&mut harness, &dir, &mut index, name);
+    }
+    harness.state_mut().viewport_mode = ViewportMode::Plan;
+
+    // A roof-specific checkpoint: the default shell has no authored roof, so
+    // capture the two views that caught regressions only after generating one.
+    harness.state_mut().add_roof(RoofForm::Gable);
+    for (mode, name) in [
+        (ViewportMode::Axonometric, "roofed-3d-view"),
+        (ViewportMode::Render, "roofed-render-view"),
+    ] {
+        harness.state_mut().viewport_mode = mode;
+        if mode == ViewportMode::Render {
+            warm_render(&mut harness);
         }
         shot(&mut harness, &dir, &mut index, name);
     }
@@ -203,7 +237,7 @@ fn capture_ui_shot_deck() {
     ] {
         small.state_mut().viewport_mode = mode;
         if mode == ViewportMode::Render {
-            small.run_steps(8);
+            warm_render(&mut small);
         }
         shot(&mut small, &dir, &mut index, name);
     }
@@ -242,7 +276,7 @@ fn capture_ui_shot_deck() {
     dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
     dark.state_mut().viewport_mode = ViewportMode::Render;
-    dark.run_steps(8);
+    warm_render(&mut dark);
     shot(&mut dark, &dir, &mut index, "dark-render-view");
 
     println!(

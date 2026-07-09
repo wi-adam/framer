@@ -143,20 +143,27 @@ impl Scene3d {
         // than re-resolving each Room ceiling per plane on every repaint.
         let cathedral = model.roof_cathedral_flags();
         for (index, plane) in model.roof_planes.iter().enumerate() {
-            let Some(verts) = roof_plane_outline_world(plane) else {
+            let Some(bearing_verts) = roof_plane_outline_world(plane) else {
                 continue;
             };
             let triangles = framer_core::triangulate_simple_polygon(&plane.outline);
             let color = surface_color(model, &plane.system, SurfaceFace::Roof);
-            // A cathedral plane (no ceiling below) shows the assembly's interior
-            // finish on its underside, dropped one assembly-thickness clear.
-            let underside = cathedral.get(index).copied().unwrap_or(false).then(|| {
-                let under = surface_color(model, &plane.system, SurfaceFace::RoofUnderside);
-                (under, roof_assembly_drop(model, &plane.system))
-            });
+            // The authored roof plane springs at the bearing line. Draw the weather
+            // face above that plane by the assembly thickness and keep an underside
+            // face at the bearing plane so the roof assembly sits on the walls
+            // instead of floating above them or sinking through them. Cathedral
+            // regions use the conditioned-side finish for that underside.
+            let lift = roof_assembly_lift(model, &plane.system);
+            let weather_verts = lift_roof_face(&bearing_verts, lift);
+            let underside_color = if cathedral.get(index).copied().unwrap_or(false) {
+                surface_color(model, &plane.system, SurfaceFace::RoofUnderside)
+            } else {
+                color
+            };
+            let underside = Some((underside_color, bearing_verts));
             let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
             builder.push_surface(
-                &verts,
+                &weather_verts,
                 &triangles,
                 color,
                 underside,
@@ -554,7 +561,7 @@ impl SceneBuilder {
         outline: &[Point3],
         triangles: &[[usize; 3]],
         color: Color32,
-        underside: Option<(Color32, f32)>,
+        underside: Option<(Color32, Vec<Point3>)>,
         click: ViewClick,
         selected: bool,
     ) {
@@ -567,19 +574,15 @@ impl SceneBuilder {
         let up = polygon_normal(outline);
         self.push_face(outline, triangles, up, shade(color));
         match underside {
-            // A cathedral roof underside: a distinct interior finish, dropped one
-            // assembly-thickness below the weather face (backface culling is off, so
-            // coincident faces of different colors would z-fight).
-            Some((under_color, drop)) => {
-                let lowered: Vec<Point3> = outline
-                    .iter()
-                    .map(|p| Point3::vector(p.x, p.y, p.z - drop))
-                    .collect();
-                self.push_face(&lowered, triangles, -up, shade(under_color));
-                self.points.extend_from_slice(&lowered);
+            // A cathedral roof underside: a distinct interior finish at the
+            // springing/bearing plane. The weather face is already lifted clear,
+            // avoiding z-fighting without pushing the underside into the wall.
+            Some((under_color, under_verts)) => {
+                self.push_face(&under_verts, triangles, -up, shade(under_color));
+                self.points.extend_from_slice(&under_verts);
             }
-            // A flat surface (or a roof with a ceiling below): both faces share one
-            // color, so the coincident back face has no z-fight to resolve.
+            // Flat ceiling/floor surfaces: both faces share one color, so the
+            // coincident back face has no z-fight to resolve.
             None => self.push_face(outline, triangles, -up, shade(color)),
         }
         self.points.extend_from_slice(outline);
@@ -966,21 +969,30 @@ fn surface_color(model: &BuildingModel, system_id: &ElementId, face: SurfaceFace
         .unwrap_or(fallback)
 }
 
-/// Vertical drop from a roof plane's structural face to its conditioned-side
-/// underside: the assembly's through-thickness (a default when the system is
-/// missing). Separates the two coplanar faces so, with backface culling off, the
-/// distinctly colored underside reads from inside while the weather face reads
-/// from outside.
-fn roof_assembly_drop(model: &BuildingModel, system_id: &ElementId) -> f32 {
-    /// Nominal drop when no system resolves a real thickness (≈ a 2×6 roof).
-    const DEFAULT_DROP_IN: f32 = 6.0;
+/// Vertical lift from a roof plane's bearing/underside face to the weather face:
+/// the assembly's through-thickness (a default when the system is missing).
+/// Separates the faces so the underside reads from inside while the weather face
+/// reads from outside, without drawing the underside below the wall top.
+fn roof_assembly_lift(model: &BuildingModel, system_id: &ElementId) -> f32 {
+    /// Nominal lift when no system resolves a real thickness (≈ a 2×6 roof).
+    const DEFAULT_LIFT_IN: f32 = 6.0;
     model
         .systems
         .iter()
         .find(|system| system.id == *system_id)
         .map(|system| system.total_thickness().inches() as f32)
-        .filter(|drop| *drop > 0.0)
-        .unwrap_or(DEFAULT_DROP_IN)
+        .filter(|lift| *lift > 0.0)
+        .unwrap_or(DEFAULT_LIFT_IN)
+}
+
+/// Lift a sloped roof face vertically while preserving its plan outline and
+/// slope. The model's roof plane is the springing/bearing face; this derives the
+/// visible weather face above it.
+fn lift_roof_face(outline: &[Point3], lift: f32) -> Vec<Point3> {
+    outline
+        .iter()
+        .map(|p| Point3::vector(p.x, p.y, p.z + lift))
+        .collect()
 }
 
 /// A level's floor elevation (inches), or 0 when the level is missing.
@@ -1317,11 +1329,12 @@ mod surface_tests {
         let zs: Vec<f32> = scene.vertices.iter().map(|v| v.position[2]).collect();
         let lo = zs.iter().cloned().fold(f32::INFINITY, f32::min);
         let hi = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        // Floor deck at level elevation 0; roof ridge at 96 + 96*(6/12) = 144".
+        // Floor deck at level elevation 0; roof ridge weather face at
+        // 96 + 96*(6/12) + 7" assembly lift = 151".
         assert!((lo - 0.0).abs() < 0.5, "lowest surface z {lo}, want ~0");
         assert!(
-            (hi - 144.0).abs() < 0.5,
-            "highest surface z {hi}, want ~144"
+            (hi - 151.0).abs() < 0.5,
+            "highest surface z {hi}, want ~151"
         );
         // Pin the flat ceiling at level top (108") − height (12") = 96". It shares
         // the roof's eave elevation, so check a fully-horizontal triangle (which the
@@ -1373,8 +1386,8 @@ mod surface_tests {
         );
         let lo = tilted_zs.iter().cloned().fold(f32::INFINITY, f32::min);
         let hi = tilted_zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!((lo - 96.0).abs() < 0.5, "hip eaves at {lo}, want ~96in");
-        assert!((hi - 120.0).abs() < 0.5, "hip ridge at {hi}, want ~120in");
+        assert!((lo - 103.0).abs() < 0.5, "hip eaves at {lo}, want ~103in");
+        assert!((hi - 127.0).abs() < 0.5, "hip ridge at {hi}, want ~127in");
     }
 
     /// The elevations of every fully-horizontal triangle (all three vertices at one
@@ -1492,13 +1505,18 @@ mod surface_tests {
             weather_color, underside_color,
             "cathedral underside should differ from the weather face"
         );
-        // ...and it is dropped one assembly-thickness (1 + 6 + 1 = 8in) below it.
+        // ...and the weather face is lifted one assembly-thickness (1 + 6 + 1 =
+        // 8in) above the underside.
         let weather_lo = weather.iter().map(|f| f.1).fold(f32::INFINITY, f32::min);
         let underside_lo = underside.iter().map(|f| f.1).fold(f32::INFINITY, f32::min);
-        let drop = weather_lo - underside_lo;
         assert!(
-            (drop - 8.0).abs() < 0.5,
-            "underside dropped {drop}in below the weather face, want ~8"
+            (underside_lo - 96.0).abs() < 0.5,
+            "cathedral underside springs at {underside_lo}in, want ~96"
+        );
+        let lift = weather_lo - underside_lo;
+        assert!(
+            (lift - 8.0).abs() < 0.5,
+            "weather face lifted {lift}in above the underside, want ~8"
         );
     }
 
@@ -1623,9 +1641,9 @@ mod surface_tests {
         let centroid = Point3::vector(
             Length::from_feet(6.0).inches() as f32,
             Length::from_feet(4.0).inches() as f32,
-            // The plane elevation at the centroid: springing 96" + 48" up-slope ×
-            // 6/12 = 120".
-            120.0,
+            // The weather-face elevation at the centroid: springing 96" + 48"
+            // up-slope × 6/12 + 7" assembly lift = 127".
+            127.0,
         );
         let screen = projector.project_point(centroid).pos;
         match scene.pick(screen, &projector) {

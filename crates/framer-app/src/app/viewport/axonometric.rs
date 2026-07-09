@@ -28,6 +28,7 @@ pub(super) struct AxonometricView<'a> {
     pub(super) workspace_mode: WorkspaceMode,
     pub(super) wall_display: WallDisplay,
     pub(super) gpu_target_format: Option<wgpu::TextureFormat>,
+    pub(super) gpu_depth_format: Option<wgpu::TextureFormat>,
 }
 
 pub(super) fn draw_project_axonometric(
@@ -43,6 +44,7 @@ pub(super) fn draw_project_axonometric(
         workspace_mode,
         wall_display,
         gpu_target_format,
+        gpu_depth_format,
     } = axonometric;
 
     let desired = viewport_size(ui);
@@ -119,6 +121,7 @@ pub(super) fn draw_project_axonometric(
                     transparent_index_count: scene.transparent_index_count,
                     uniforms: GpuUniforms::from_projector(&projector, drawing),
                     target_format,
+                    depth_format: gpu_depth_format,
                 },
             );
             painter.add(callback);
@@ -162,6 +165,7 @@ pub(super) fn draw_project_axonometric(
         response.clicked() && !dragging_from_cube,
         *view,
         gpu_target_format,
+        gpu_depth_format,
     );
     if let Some(action) = cube_action {
         view.snap_to(action);

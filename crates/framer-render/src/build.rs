@@ -678,25 +678,26 @@ fn push_polygon(
     }
 }
 
-/// Vertical drop from a roof plane's structural face to its conditioned-side
-/// underside: the assembly's through-thickness (a default when the system is
-/// missing). Enough to separate the two coplanar faces so the tracer never sees a
-/// coincident-triangle tie between the weather face and the cathedral underside.
-fn roof_assembly_drop(system: Option<&ConstructionSystem>) -> f32 {
-    /// Nominal drop when no system resolves a real thickness (≈ a 2×6 roof).
-    const DEFAULT_DROP_IN: f32 = 6.0;
+/// Vertical lift from a roof plane's bearing/underside face to the weather face:
+/// the assembly's through-thickness (a default when the system is missing).
+/// Enough to separate the two faces so the tracer never sees a coincident-triangle
+/// tie between the weather face and the cathedral underside.
+fn roof_assembly_lift(system: Option<&ConstructionSystem>) -> f32 {
+    /// Nominal lift when no system resolves a real thickness (≈ a 2×6 roof).
+    const DEFAULT_LIFT_IN: f32 = 6.0;
     system
         .map(|system| system.total_thickness().inches() as f32)
-        .filter(|drop| *drop > 0.0)
-        .unwrap_or(DEFAULT_DROP_IN)
+        .filter(|lift| *lift > 0.0)
+        .unwrap_or(DEFAULT_LIFT_IN)
 }
 
 /// Emit a roof plane's finished surface: its plan outline lifted onto the sloped
-/// plane, ear-clip triangulated with the system's weather-face material. A
-/// **cathedral** plane (`is_cathedral`, no ceiling below) additionally emits a
-/// downward underside at the assembly's interior finish, dropped one
-/// assembly-thickness below the weather face so a room with no ceiling sees the
-/// interior finish, not roofing.
+/// bearing plane, then raised by the roof assembly thickness for the weather face
+/// and ear-clip triangulated with the system's weather-face material. The bearing
+/// plane is also emitted as the underside so the roof assembly sits on the walls;
+/// a **cathedral** plane (`is_cathedral`, no ceiling below) uses the assembly's
+/// interior finish for that underside so a room with no ceiling sees the interior
+/// finish, not roofing.
 fn push_roof_plane(
     tris: &mut Vec<Triangle>,
     bounds: &mut Aabb,
@@ -710,27 +711,35 @@ fn push_roof_plane(
     };
     let system = system_by_id(model, &plane.system);
     let material = surface_material(model, system, SurfaceFace::Roof, palette);
-    let verts: Vec<Vec3> = plane
+    let underside_verts: Vec<Vec3> = plane
         .outline
         .iter()
         .map(|&p| project_onto_plane(&frame, p))
         .collect();
+    let lift = roof_assembly_lift(system);
+    let verts: Vec<Vec3> = underside_verts
+        .iter()
+        .map(|v| Vec3::new(v.x, v.y, v.z + lift))
+        .collect();
     let triangles = triangulate_simple_polygon(&plane.outline);
     push_polygon(tris, bounds, &verts, &triangles, material);
 
-    if is_cathedral {
-        let underside_material =
-            surface_material(model, system, SurfaceFace::RoofUnderside, palette);
-        let drop = roof_assembly_drop(system);
-        // Same winding (the tracer flips the shading normal toward the ray, so a
-        // diffuse underside lights correctly from below); a parallel vertical drop
-        // keeps the plane coplanar with the weather face, just lower.
-        let underside: Vec<Vec3> = verts
-            .iter()
-            .map(|v| Vec3::new(v.x, v.y, v.z - drop))
-            .collect();
-        push_polygon(tris, bounds, &underside, &triangles, underside_material);
-    }
+    let underside_material = if is_cathedral {
+        surface_material(model, system, SurfaceFace::RoofUnderside, palette)
+    } else {
+        material
+    };
+    // Same winding (the tracer flips the shading normal toward the ray, so a
+    // diffuse underside lights correctly from below). The underside is the
+    // authored bearing plane; the weather face above it is what keeps the two
+    // faces separated.
+    push_polygon(
+        tris,
+        bounds,
+        &underside_verts,
+        &triangles,
+        underside_material,
+    );
 }
 
 /// Emit a horizontal surface (a flat ceiling or floor deck) at constant `z`: its
@@ -1320,7 +1329,8 @@ mod tests {
             "mat-floor",
             true,
         ));
-        // 4:12 gable plane springing at 8ft; ridge rises 8ft run × 4/12 = 32" to 128".
+        // 4:12 gable plane springing at 8ft; ridge underside rises 8ft run ×
+        // 4/12 = 32" to 128", and the weather face lifts 7" above that.
         model.roof_planes.push(RoofPlane::new(
             "roof-1",
             "Roof",
@@ -1368,9 +1378,9 @@ mod tests {
         assert!(!sloped_zs.is_empty(), "no sloped roof triangles emitted");
         let lo = sloped_zs.iter().cloned().fold(f32::INFINITY, f32::min);
         let hi = sloped_zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        // Eave springs at 96" (8ft); ridge at 96 + 96*(4/12) = 128".
+        // Bearing underside eave sits at 96"; weather ridge sits at 128" + 7".
         assert!((lo - 96.0).abs() < 0.5, "eave elevation {lo}, want ~96");
-        assert!((hi - 128.0).abs() < 0.5, "ridge elevation {hi}, want ~128");
+        assert!((hi - 135.0).abs() < 0.5, "ridge elevation {hi}, want ~135");
     }
 
     #[test]
@@ -1706,18 +1716,23 @@ mod tests {
             !underside.is_empty(),
             "cathedral roof emitted no interior-finish underside"
         );
-        // The underside sits below the weather face by ~the assembly thickness
-        // (1in finish + 6in nominal 2×6 + 1in roofing = 8in), so a room with no
-        // ceiling sees it from below.
-        let max_z = |tris: &[&Triangle]| {
+        // The weather face sits above the underside by ~the assembly thickness
+        // (1in finish + 6in nominal 2×6 + 1in roofing = 8in), while the underside
+        // itself stays at the authored bearing/springing plane.
+        let min_z = |tris: &[&Triangle]| {
             tris.iter()
                 .flat_map(|t| [t.v0.z, (t.v0 + t.edge1).z, (t.v0 + t.edge2).z])
-                .fold(f32::NEG_INFINITY, f32::max)
+                .fold(f32::INFINITY, f32::min)
         };
-        let drop = max_z(&weather) - max_z(&underside);
+        let underside_lo = min_z(&underside);
         assert!(
-            (drop - 8.0).abs() < 0.5,
-            "underside dropped {drop}in below the weather face, want ~8"
+            (underside_lo - 96.0).abs() < 0.5,
+            "underside springs at {underside_lo}in, want ~96"
+        );
+        let lift = min_z(&weather) - underside_lo;
+        assert!(
+            (lift - 8.0).abs() < 0.5,
+            "weather face lifted {lift}in above the underside, want ~8"
         );
     }
 

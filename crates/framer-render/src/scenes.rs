@@ -574,8 +574,8 @@ mod tests {
             .collect();
         assert_eq!(
             tilted.len(),
-            6,
-            "two trapezoids plus two triangles emit six sloped roof triangles"
+            12,
+            "two trapezoids plus two triangles emit six weather and six underside triangles"
         );
         let zs = tilted
             .iter()
@@ -584,7 +584,7 @@ mod tests {
             (lo.min(z), hi.max(z))
         });
         assert!((lo - 96.0).abs() < 0.5, "hip eaves at {lo}, want ~96in");
-        assert!((hi - 156.0).abs() < 0.5, "hip ridge at {hi}, want ~156in");
+        assert!((hi - 163.0).abs() < 0.5, "hip ridge at {hi}, want ~163in");
         assert!(!scene.bvh.nodes.is_empty());
     }
 }
