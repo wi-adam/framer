@@ -29,6 +29,7 @@ use framer_core::{
     concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
     save_project as save_project_document,
 };
+use framer_render::math::Vec3;
 use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
     export_project_svg, generate_project_plan,
@@ -75,6 +76,9 @@ pub(crate) struct FramerApp {
     /// id and shared across the Design- and Plan-workspace elevation variants.
     /// Presentation state: never serialized, cleared on new/load.
     elevation_views: HashMap<String, View2dState>,
+    /// Session-only render controls surfaced by the Render workflow tab.
+    /// Presentation state: never serialized.
+    render_settings: RenderSettings,
     render_view: render_job::RenderViewState,
     render_gpu: render::GpuRenderState,
     /// Frames remaining in "camera moving" mode (hysteresis after the last orbit/
@@ -548,6 +552,83 @@ struct DrawWallToolState {
     previous_snap: Option<SnapResult>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RenderSettings {
+    sun_azimuth_deg: f32,
+    sun_elevation_deg: f32,
+    exposure: f32,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        let defaults = framer_render::RenderOptions::default();
+        let (sun_azimuth_deg, sun_elevation_deg) = sun_angles_from_dir(defaults.sun.dir);
+        Self {
+            sun_azimuth_deg,
+            sun_elevation_deg,
+            exposure: defaults.exposure,
+        }
+    }
+}
+
+impl RenderSettings {
+    fn apply_to_options(self, opts: &mut framer_render::RenderOptions) {
+        let settings = self.sanitized();
+        opts.exposure = settings.exposure;
+
+        if !settings.uses_default_sun_direction() {
+            opts.sun.dir =
+                sun_direction_from_angles(settings.sun_azimuth_deg, settings.sun_elevation_deg);
+        }
+    }
+
+    fn sanitized(self) -> Self {
+        let defaults = Self::default();
+        Self {
+            sun_azimuth_deg: if self.sun_azimuth_deg.is_finite() {
+                self.sun_azimuth_deg.rem_euclid(360.0)
+            } else {
+                defaults.sun_azimuth_deg
+            },
+            sun_elevation_deg: if self.sun_elevation_deg.is_finite() {
+                self.sun_elevation_deg.clamp(0.0, 85.0)
+            } else {
+                defaults.sun_elevation_deg
+            },
+            exposure: if self.exposure.is_finite() {
+                self.exposure.clamp(0.1, 4.0)
+            } else {
+                defaults.exposure
+            },
+        }
+    }
+
+    fn uses_default_sun_direction(self) -> bool {
+        let defaults = Self::default();
+        self.sun_azimuth_deg.to_bits() == defaults.sun_azimuth_deg.to_bits()
+            && self.sun_elevation_deg.to_bits() == defaults.sun_elevation_deg.to_bits()
+    }
+}
+
+fn sun_angles_from_dir(dir: Vec3) -> (f32, f32) {
+    let dir = dir.normalize();
+    let azimuth = dir.y.atan2(dir.x).to_degrees().rem_euclid(360.0);
+    let elevation = dir.z.clamp(-1.0, 1.0).asin().to_degrees();
+    (azimuth, elevation)
+}
+
+fn sun_direction_from_angles(azimuth_deg: f32, elevation_deg: f32) -> Vec3 {
+    let azimuth = azimuth_deg.to_radians();
+    let elevation = elevation_deg.to_radians();
+    let horizontal = elevation.cos();
+    Vec3::new(
+        horizontal * azimuth.cos(),
+        horizontal * azimuth.sin(),
+        elevation.sin(),
+    )
+    .normalize()
+}
+
 fn dimension_kind_name(kind: DimensionKind) -> &'static str {
     match kind {
         DimensionKind::Driving => "driving",
@@ -588,6 +669,7 @@ impl Default for FramerApp {
             view_3d: View3dState::default(),
             plan_view: View2dState::default(),
             elevation_views: HashMap::new(),
+            render_settings: RenderSettings::default(),
             render_view: render_job::RenderViewState::default(),
             render_gpu: render::GpuRenderState::default(),
             render_motion_cooldown: 0,
@@ -3972,6 +4054,60 @@ mod tests {
             app.action_disabled_reason(actions::ActionId::ToolDimensionLinear),
             Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
         );
+    }
+
+    #[test]
+    fn render_settings_default_preserves_render_options_defaults() {
+        let settings = RenderSettings::default();
+        let defaults = framer_render::RenderOptions::default();
+        let mut opts = defaults;
+
+        settings.apply_to_options(&mut opts);
+
+        assert_eq!(opts.exposure.to_bits(), defaults.exposure.to_bits());
+        assert_eq!(opts.sun.dir.x.to_bits(), defaults.sun.dir.x.to_bits());
+        assert_eq!(opts.sun.dir.y.to_bits(), defaults.sun.dir.y.to_bits());
+        assert_eq!(opts.sun.dir.z.to_bits(), defaults.sun.dir.z.to_bits());
+        assert_eq!(
+            opts.sun.irradiance.x.to_bits(),
+            defaults.sun.irradiance.x.to_bits()
+        );
+        assert_eq!(opts.sky.zenith.x.to_bits(), defaults.sky.zenith.x.to_bits());
+    }
+
+    #[test]
+    fn render_settings_apply_sun_direction_and_exposure() {
+        let settings = RenderSettings {
+            sun_azimuth_deg: 90.0,
+            sun_elevation_deg: 0.0,
+            exposure: 1.75,
+        };
+        let mut opts = framer_render::RenderOptions::default();
+
+        settings.apply_to_options(&mut opts);
+
+        assert!((opts.sun.dir.x - 0.0).abs() < 1.0e-5);
+        assert!((opts.sun.dir.y - 1.0).abs() < 1.0e-5);
+        assert!((opts.sun.dir.z - 0.0).abs() < 1.0e-5);
+        assert_eq!(opts.exposure.to_bits(), 1.75_f32.to_bits());
+    }
+
+    #[test]
+    fn render_settings_sanitize_invalid_values_before_rendering() {
+        let settings = RenderSettings {
+            sun_azimuth_deg: f32::NAN,
+            sun_elevation_deg: f32::INFINITY,
+            exposure: f32::NEG_INFINITY,
+        };
+        let defaults = framer_render::RenderOptions::default();
+        let mut opts = defaults;
+
+        settings.apply_to_options(&mut opts);
+
+        assert_eq!(opts.exposure.to_bits(), defaults.exposure.to_bits());
+        assert_eq!(opts.sun.dir.x.to_bits(), defaults.sun.dir.x.to_bits());
+        assert_eq!(opts.sun.dir.y.to_bits(), defaults.sun.dir.y.to_bits());
+        assert_eq!(opts.sun.dir.z.to_bits(), defaults.sun.dir.z.to_bits());
     }
 
     #[test]

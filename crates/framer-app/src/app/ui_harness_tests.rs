@@ -453,6 +453,35 @@ fn workflow_command_strip_routes_tabbed_panels() {
     assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
 }
 
+#[test]
+fn render_workflow_exposes_session_render_settings() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+    for label in ["Sun", "Azimuth", "Elevation", "Environment", "Exposure"] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "Render tab should expose the '{label}' setting"
+        );
+    }
+
+    harness.state_mut().render_settings.sun_azimuth_deg = 90.0;
+    harness.state_mut().render_settings.sun_elevation_deg = 0.0;
+    harness.state_mut().render_settings.exposure = 1.75;
+
+    let mut opts = framer_render::RenderOptions::default();
+    harness.state().render_settings.apply_to_options(&mut opts);
+
+    assert!((opts.sun.dir.x - 0.0).abs() < 1.0e-5);
+    assert!((opts.sun.dir.y - 1.0).abs() < 1.0e-5);
+    assert!((opts.sun.dir.z - 0.0).abs() < 1.0e-5);
+    assert_eq!(opts.exposure.to_bits(), 1.75_f32.to_bits());
+}
+
 /// The command metadata seam and rendered command strip should stay in lockstep:
 /// every top-level command-strip action must be reachable on its owning workflow
 /// tab, or future commands can be documented without actually being surfaced.

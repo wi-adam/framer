@@ -466,7 +466,9 @@ impl FramerApp {
                 });
             }
             WorkflowTab::Inspect => {}
-            WorkflowTab::Render => {}
+            WorkflowTab::Render => {
+                self.render_settings_panels(ui);
+            }
             WorkflowTab::Plan => {
                 widgets::command_panel(ui, "Generated", |ui| {
                     let id = ActionId::ToggleSection;
@@ -484,6 +486,31 @@ impl FramerApp {
                 });
             }
         }
+    }
+
+    fn render_settings_panels(&mut self, ui: &mut Ui) {
+        widgets::command_panel(ui, "Sun", |ui| {
+            render_setting_drag(
+                ui,
+                "Azimuth",
+                &mut self.render_settings.sun_azimuth_deg,
+                RenderSettingDrag::degrees(0.0..=360.0, "Set the sun direction around the project"),
+            );
+            render_setting_drag(
+                ui,
+                "Elevation",
+                &mut self.render_settings.sun_elevation_deg,
+                RenderSettingDrag::degrees(0.0..=85.0, "Set the sun height above the horizon"),
+            );
+        });
+        widgets::command_panel(ui, "Environment", |ui| {
+            render_setting_drag(
+                ui,
+                "Exposure",
+                &mut self.render_settings.exposure,
+                RenderSettingDrag::exposure("Adjust render exposure"),
+            );
+        });
     }
 
     fn opening_flyout(&mut self, ui: &mut Ui) {
@@ -3788,6 +3815,67 @@ fn flyout_action(
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, action.label));
     action_response_with_tooltip(response, enabled, action_tooltip(*action, disabled_reason))
+}
+
+struct RenderSettingDrag {
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+    fixed_decimals: usize,
+    suffix: &'static str,
+    tooltip: &'static str,
+}
+
+impl RenderSettingDrag {
+    fn degrees(range: std::ops::RangeInclusive<f32>, tooltip: &'static str) -> Self {
+        Self {
+            range,
+            speed: 1.0,
+            fixed_decimals: 0,
+            suffix: "°",
+            tooltip,
+        }
+    }
+
+    fn exposure(tooltip: &'static str) -> Self {
+        Self {
+            range: 0.1..=4.0,
+            speed: 0.05,
+            fixed_decimals: 2,
+            suffix: "×",
+            tooltip,
+        }
+    }
+}
+
+fn render_setting_drag(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    config: RenderSettingDrag,
+) -> Response {
+    let t = design::active();
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.label(
+            RichText::new(label)
+                .size(design::text_size::MICRO)
+                .strong()
+                .color(t.text_muted),
+        );
+        let response = editable_drag_value(
+            ui,
+            egui::DragValue::new(value)
+                .range(config.range)
+                .speed(config.speed)
+                .fixed_decimals(config.fixed_decimals)
+                .suffix(config.suffix),
+        )
+        .on_hover_text(config.tooltip);
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, true, label));
+        response
+    })
+    .inner
 }
 
 const AUTHORING_WORKFLOW_TABS: &[WorkflowTab] = &[
