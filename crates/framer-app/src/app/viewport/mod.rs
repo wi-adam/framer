@@ -220,9 +220,10 @@ impl FramerApp {
                         return;
                     };
                     let selected_member = match &self.selected {
-                        Selection::Member { wall_id, member_id } if wall_id == &wall.id.0 => {
-                            Some(member_id.as_str())
-                        }
+                        Selection::Member {
+                            source_id,
+                            member_id,
+                        } if source_id == &wall.id.0 => Some(member_id.as_str()),
                         _ => None,
                     };
                     let section_x = if self.show_section {
@@ -244,7 +245,7 @@ impl FramerApp {
                         camera,
                     )
                     .map(|member_id| ViewClick::Member {
-                        wall_id: wall.id.0.clone(),
+                        source_id: wall.id.0.clone(),
                         member_id,
                     })
                 }

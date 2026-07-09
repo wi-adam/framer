@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{Color32, Pos2, Rgba};
 use framer_core::{
-    AssemblyFace, BuildingModel, ConstructionSystem, ElementId, Length, Material, Point2,
-    RoofPlane, SurfaceRegion, Wall,
+    AssemblyFace, BuildingModel, ConstructionSystem, ElementId, GableWallProfile, Length, Material,
+    Point2, RoofPlane, SurfaceRegion, Wall,
 };
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
@@ -48,6 +48,15 @@ struct SceneBuilder {
     picks: Vec<PickSolid>,
     outline_edges: Vec<OutlineEdge>,
     opaque_index_count: u32,
+}
+
+enum SurfaceReverseFace {
+    /// A cutaway/translucent presentation uses one face so alpha is applied once.
+    Omit,
+    /// Coincident reverse face with the same material (flat ceiling/deck).
+    Same,
+    /// Physically separated underside with its own material (finished roof).
+    Distinct { color: Color32, verts: Vec<Point3> },
 }
 
 struct WallSegmentSpan {
@@ -107,72 +116,64 @@ impl Scene3d {
         // once per frame. Layers (and members) lay out interior -> exterior from
         // this, so reversing a wall no longer mirrors the assembly.
         let interior_sides = framer_core::wall_interior_sides(model);
+        // Derive gable profiles once. The per-wall helper rebuilds level topology,
+        // which is needlessly expensive in this hot per-frame path.
+        let gable_profiles = model.gable_wall_profiles();
         let mut builder = SceneBuilder::default();
+        let shows_generated_plan = workspace_mode.shows_generated_plan();
 
-        if workspace_mode.shows_generated_plan() {
+        if shows_generated_plan {
             for (wall_index, wall) in model.walls.iter().enumerate() {
                 let total = wall_total_thickness(model, wall, fallback_depth);
                 let sign = interior_sign(&interior_sides, &wall.id);
+                let base_elevation = level_elevation(model, &wall.level);
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
-                    let wall_selected = selected_wall == wall_index;
+                    // `selected_wall` remains the active editing context when a
+                    // roof/ceiling/floor member is selected. Do not let that stale
+                    // index highlight an unrelated wall's entire generated plan.
+                    let wall_selected =
+                        selected_wall == wall_index && matches!(selection, Selection::Wall);
                     for member in &wall_plan.members {
                         let member_selected = matches!(
                             selection,
-                            Selection::Member { wall_id, member_id }
-                                if wall_id == &wall.id.0 && member_id == &member.id
+                            Selection::Member { source_id, member_id }
+                                if source_id == &wall.id.0 && member_id == &member.id
                         );
-                        builder.push_member(
-                            wall,
-                            member,
-                            total,
-                            sign,
-                            wall_selected,
-                            member_selected,
-                        );
+                        let color =
+                            highlighted_member_color(member.kind, wall_selected, member_selected);
+                        builder.push_member(wall, member, total, sign, base_elevation, color);
                     }
+                }
+            }
+
+            // Roof members are no longer reconstructed from wall-local x/run data:
+            // every solver member carries exact plan endpoints plus absolute endpoint
+            // elevations, so arbitrary common/ridge/hip/valley directions share one
+            // spatial board-prism path.
+            for roof_plan in &plan.roof_plans {
+                for member in &roof_plan.members {
+                    let source_selected =
+                        matches!(selection, Selection::RoofPlane(id) if id == &roof_plan.roof.0);
+                    let member_selected = matches!(
+                        selection,
+                        Selection::Member { source_id, member_id }
+                            if source_id == &roof_plan.roof.0 && member_id == &member.id
+                    );
+                    let color =
+                        highlighted_member_color(member.kind, source_selected, member_selected);
+                    builder.push_spatial_member(&roof_plan.roof, member, color);
                 }
             }
         }
 
-        // Authored roof planes, flat ceilings, and floor decks: opaque surface
-        // slabs that frame and pick like wall envelopes, shown in every workspace
-        // mode (the model carries them whether or not the generated plan is shown).
-        // Each outline is ear-clipped once (concave room loops included) and the
-        // resulting triangulation drives the lifted/sloped vertices.
-        // Cathedral classification for every plane in one wall-graph pass, rather
-        // than re-resolving each Room ceiling per plane on every repaint.
-        let cathedral = model.roof_cathedral_flags();
-        for (index, plane) in model.roof_planes.iter().enumerate() {
-            let Some(bearing_verts) = roof_plane_outline_world(plane) else {
-                continue;
-            };
-            let triangles = framer_core::triangulate_simple_polygon(&plane.outline);
-            let color = surface_color(model, &plane.system, SurfaceFace::Roof);
-            // The authored roof plane springs at the bearing line. Draw the weather
-            // face above that plane by the assembly thickness and keep an underside
-            // face at the bearing plane so the roof assembly sits on the walls
-            // instead of floating above them or sinking through them. Cathedral
-            // regions use the conditioned-side finish for that underside.
-            let lift = roof_assembly_lift(model, &plane.system);
-            let weather_verts = lift_roof_face(&bearing_verts, lift);
-            let underside_color = if cathedral.get(index).copied().unwrap_or(false) {
-                surface_color(model, &plane.system, SurfaceFace::RoofUnderside)
-            } else {
-                color
-            };
-            let underside = Some((underside_color, bearing_verts));
-            let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
-            builder.push_surface(
-                &weather_verts,
-                &triangles,
-                color,
-                underside,
-                ViewClick::RoofPlane {
-                    id: plane.id.0.clone(),
-                },
-                selected,
-            );
+        // In Design, authored roof assemblies are ordinary opaque model surfaces.
+        // In Plan, defer them until after the opaque member pass and draw them with
+        // alpha so the spatial roof framing remains legible through the skin.
+        if !shows_generated_plan {
+            push_roof_surfaces(&mut builder, model, selection, false);
         }
+
+        // Ceilings and floor decks remain opaque authored surfaces in every mode.
         for ceiling in &model.ceilings {
             let Some(plan) = region_outline_plan(model, &ceiling.region) else {
                 continue;
@@ -204,7 +205,7 @@ impl Scene3d {
                 &verts,
                 &triangles,
                 color,
-                None,
+                SurfaceReverseFace::Same,
                 ViewClick::Ceiling {
                     id: ceiling.id.0.clone(),
                 },
@@ -224,7 +225,7 @@ impl Scene3d {
                 &verts,
                 &triangles,
                 color,
-                None,
+                SurfaceReverseFace::Same,
                 ViewClick::FloorDeck {
                     id: deck.id.0.clone(),
                 },
@@ -234,9 +235,14 @@ impl Scene3d {
 
         builder.finish_opaque();
 
+        if shows_generated_plan {
+            push_roof_surfaces(&mut builder, model, selection, true);
+        }
+
         for (wall_index, wall) in model.walls.iter().enumerate() {
             let total = wall_total_thickness(model, wall, fallback_depth);
             let sign = interior_sign(&interior_sides, &wall.id);
+            let base_elevation = level_elevation(model, &wall.level);
             let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
             builder.push_wall_envelope(
                 model,
@@ -244,11 +250,20 @@ impl Scene3d {
                 wall_index,
                 total,
                 sign,
+                base_elevation,
+                gable_profiles.get(&wall.id),
                 wall_selected,
                 wall_display,
             );
             for opening in &wall.openings {
-                builder.push_opening_pick(wall, wall_index, opening.id.0.clone(), total, sign);
+                builder.push_opening_pick(
+                    wall,
+                    wall_index,
+                    opening.id.0.clone(),
+                    total,
+                    sign,
+                    base_elevation,
+                );
             }
         }
 
@@ -279,30 +294,33 @@ impl SceneBuilder {
         member: &FrameMember,
         total: Length,
         interior_sign: f32,
-        wall_selected: bool,
-        selected: bool,
+        base_elevation: f32,
+        color: Color32,
     ) {
+        // Rake plates are wall-owned but spatially sloped. Their explicit endpoint
+        // elevations are already absolute, unlike ordinary wall-local stud/plate z.
+        if member.kind == MemberKind::RakePlate && member.sloped.is_some() {
+            self.push_rake_plate(wall, member, total, interior_sign, color);
+            return;
+        }
+        if member.sloped.is_some() {
+            self.push_spatial_member(&wall.id, member, color);
+            return;
+        }
         let half_member = member.cross_section_depth.inches() as f32 / 2.0;
         let (x0, x1, z0, z1) = match member.orientation {
             MemberOrientation::Horizontal => (
                 member.x.inches() as f32,
                 (member.x + member.cut_length).inches() as f32,
-                member.elevation.inches() as f32,
-                (member.elevation + member.cross_section_depth).inches() as f32,
+                base_elevation + member.elevation.inches() as f32,
+                base_elevation + (member.elevation + member.cross_section_depth).inches() as f32,
             ),
             MemberOrientation::Vertical => (
                 member.x.inches() as f32 - half_member,
                 member.x.inches() as f32 + half_member,
-                member.elevation.inches() as f32,
-                (member.elevation + member.cut_length).inches() as f32,
+                base_elevation + member.elevation.inches() as f32,
+                base_elevation + (member.elevation + member.cut_length).inches() as f32,
             ),
-        };
-        let color = if selected {
-            theme::active_blue()
-        } else if wall_selected {
-            brighten(member_color(member.kind), 20)
-        } else {
-            member_color(member.kind)
         };
         // Studs/plates sit inside the framing-layer band: the solver gives the
         // band as [side_offset, side_offset + side_depth] running interior ->
@@ -313,7 +331,7 @@ impl SceneBuilder {
         self.push_cuboid(&solid, color_to_rgba(color));
         self.picks.push(PickSolid::cuboid(
             ViewClick::Member {
-                wall_id: wall.id.0.clone(),
+                source_id: wall.id.0.clone(),
                 member_id: member.id.clone(),
             },
             3,
@@ -329,6 +347,8 @@ impl SceneBuilder {
         wall_index: usize,
         total: Length,
         interior_sign: f32,
+        base_elevation: f32,
+        gable: Option<&GableWallProfile>,
         selected: bool,
         wall_display: WallDisplay,
     ) {
@@ -342,8 +362,8 @@ impl SceneBuilder {
             visual_x1.inches() as f32,
             env0,
             env1,
-            0.0,
-            wall.height.inches() as f32,
+            base_elevation,
+            base_elevation + wall.height.inches() as f32,
         );
         match wall_display {
             // Render a true layered cross-section: one cuboid per (layer x wall
@@ -365,7 +385,11 @@ impl SceneBuilder {
                             LayerBand::new(side0, side1, color),
                             visual_x0,
                             visual_x1,
+                            base_elevation,
                         );
+                        if let Some(gable) = gable {
+                            self.push_gable_layer(wall, gable, side0, side1, color);
+                        }
                     }
                 }
                 // Degenerate model with no resolvable system: draw a single band
@@ -377,7 +401,11 @@ impl SceneBuilder {
                         LayerBand::new(env0, env1, color),
                         visual_x0,
                         visual_x1,
+                        base_elevation,
                     );
+                    if let Some(gable) = gable {
+                        self.push_gable_layer(wall, gable, env0, env1, color);
+                    }
                 }
             },
             // One monochrome full-thickness band: the wall reads as a solid volume
@@ -390,12 +418,21 @@ impl SceneBuilder {
                     LayerBand::new(env0, env1, color),
                     visual_x0,
                     visual_x1,
+                    base_elevation,
                 );
+                if let Some(gable) = gable {
+                    self.push_gable_layer(wall, gable, env0, env1, color);
+                }
             }
             // No fill triangles: collect the envelope's 12 edges for the painter
             // overlay (and feed its corners into `points` so the projector still
             // frames the scene when nothing fills it).
-            WallDisplay::Outline => self.push_wall_outline(&envelope, selected),
+            WallDisplay::Outline => {
+                self.push_wall_outline(&envelope, selected);
+                if let Some(gable) = gable {
+                    self.push_gable_outline(wall, gable, env0, env1, selected);
+                }
+            }
         }
 
         // The pick envelope spans the full wall thickness regardless of layering,
@@ -405,6 +442,14 @@ impl SceneBuilder {
             1,
             envelope.corners,
         ));
+        if let Some(gable) = gable {
+            let prism = GablePrism::new(wall, gable, env0, env1);
+            self.picks.push(PickSolid::gable_prism(
+                ViewClick::Wall(wall_index),
+                1,
+                prism.corners,
+            ));
+        }
     }
 
     /// Collect the 12 edges of the wall's full-thickness envelope for the
@@ -424,6 +469,148 @@ impl SceneBuilder {
         }
     }
 
+    /// Add the triangular gable prism to Outline mode. The rectangle below keeps
+    /// its ordinary 12 edges; these nine edges close the two triangular faces and
+    /// connect them through the same full wall-system thickness.
+    fn push_gable_outline(
+        &mut self,
+        wall: &Wall,
+        profile: &GableWallProfile,
+        side0: f32,
+        side1: f32,
+        selected: bool,
+    ) {
+        let prism = GablePrism::new(wall, profile, side0, side1);
+        self.points.extend(prism.corners);
+        for [a, b] in GablePrism::EDGES {
+            self.outline_edges.push(OutlineEdge {
+                a: prism.corners[a],
+                b: prism.corners[b],
+                selected,
+            });
+        }
+    }
+
+    /// Extrude one wall-system layer through the derived triangular gable profile.
+    /// Authored openings remain in the rectangular wall below. When one reaches
+    /// the wall top, cap just that exposed part of the shared gable base.
+    fn push_gable_layer(
+        &mut self,
+        wall: &Wall,
+        profile: &GableWallProfile,
+        side0: f32,
+        side1: f32,
+        color: Color32,
+    ) {
+        let prism = GablePrism::new(wall, profile, side0, side1);
+        let color = color_to_rgba(color);
+        self.push_gable_prism(&prism, color);
+        let basis = WallBasis::new(wall);
+        let z = profile.base_elevation.inches() as f32;
+        for opening in wall
+            .openings
+            .iter()
+            .filter(|opening| opening.top() == wall.height)
+        {
+            let cap = [
+                basis.point(opening.left().inches() as f32, side0, z),
+                basis.point(opening.left().inches() as f32, side1, z),
+                basis.point(opening.right().inches() as f32, side1, z),
+                basis.point(opening.right().inches() as f32, side0, z),
+            ];
+            self.points.extend(cap);
+            self.push_quad(cap, color);
+        }
+    }
+
+    /// Mesh a roof member from the solver's exact spatial endpoints. The profile
+    /// thickness lies horizontally across the member; its nominal depth lies in
+    /// the orthogonal in-plane section axis.
+    fn push_spatial_member(&mut self, host_id: &ElementId, member: &FrameMember, color: Color32) {
+        let Some(sloped) = member.sloped else {
+            return;
+        };
+        let start = Point3::vector(
+            sloped.start.x.inches() as f32,
+            sloped.start.y.inches() as f32,
+            sloped.low_elevation.inches() as f32,
+        );
+        let end = Point3::vector(
+            sloped.end.x.inches() as f32,
+            sloped.end.y.inches() as f32,
+            sloped.high_elevation.inches() as f32,
+        );
+        let Some(prism) = BoardPrism::new(
+            start,
+            end,
+            member.cross_section_depth.inches() as f32 * -0.5,
+            member.cross_section_depth.inches() as f32 * 0.5,
+            member.side_offset.inches() as f32,
+            (member.side_offset + member.side_depth).inches() as f32,
+        ) else {
+            return;
+        };
+        self.push_board_prism(&prism, color_to_rgba(color));
+        self.picks.push(PickSolid::cuboid(
+            ViewClick::Member {
+                source_id: host_id.0.clone(),
+                member_id: member.id.clone(),
+            },
+            3,
+            prism.corners,
+        ));
+    }
+
+    /// A wall-owned rake plate follows explicit spatial endpoints but keeps wall
+    /// construction axes: the framing-band depth spans through the wall and the
+    /// board thickness drops inside the gable plane below the roof rake.
+    fn push_rake_plate(
+        &mut self,
+        wall: &Wall,
+        member: &FrameMember,
+        total: Length,
+        interior_sign: f32,
+        color: Color32,
+    ) {
+        let Some(sloped) = member.sloped else {
+            return;
+        };
+        let start = Point3::vector(
+            sloped.start.x.inches() as f32,
+            sloped.start.y.inches() as f32,
+            sloped.low_elevation.inches() as f32,
+        );
+        let end = Point3::vector(
+            sloped.end.x.inches() as f32,
+            sloped.end.y.inches() as f32,
+            sloped.high_elevation.inches() as f32,
+        );
+        let (side0, side1) =
+            layer_band_span(interior_sign, total, member.side_offset, member.side_depth);
+        let basis = WallBasis::new(wall);
+        let across = Point3::vector(basis.side_x, basis.side_y, 0.0);
+        let Some(prism) = BoardPrism::new_with_across(
+            start,
+            end,
+            across,
+            side0,
+            side1,
+            -member.cross_section_depth.inches() as f32,
+            0.0,
+        ) else {
+            return;
+        };
+        self.push_board_prism(&prism, color_to_rgba(color));
+        self.picks.push(PickSolid::cuboid(
+            ViewClick::Member {
+                source_id: wall.id.0.clone(),
+                member_id: member.id.clone(),
+            },
+            3,
+            prism.corners,
+        ));
+    }
+
     /// Extrude one layer band across the wall face, applying the 4-segment
     /// opening decomposition (clear span left/right + sill apron + header apron)
     /// so the layer is cut by every opening.
@@ -433,6 +620,7 @@ impl SceneBuilder {
         band: LayerBand,
         visual_x0: Length,
         visual_x1: Length,
+        base_elevation: f32,
     ) {
         let mut openings = wall.openings.iter().collect::<Vec<_>>();
         openings.sort_by_key(|opening| opening.left());
@@ -443,6 +631,7 @@ impl SceneBuilder {
                 wall,
                 WallSegmentSpan::new(cursor, opening.left(), Length::ZERO, wall.height),
                 band,
+                base_elevation,
             );
             if opening.sill_height > Length::ZERO {
                 self.push_wall_segment(
@@ -454,6 +643,7 @@ impl SceneBuilder {
                         opening.sill_height,
                     ),
                     band,
+                    base_elevation,
                 );
             }
             if opening.top() < wall.height {
@@ -466,6 +656,7 @@ impl SceneBuilder {
                         wall.height,
                     ),
                     band,
+                    base_elevation,
                 );
             }
             cursor = opening.right();
@@ -474,10 +665,17 @@ impl SceneBuilder {
             wall,
             WallSegmentSpan::new(cursor, visual_x1, Length::ZERO, wall.height),
             band,
+            base_elevation,
         );
     }
 
-    fn push_wall_segment(&mut self, wall: &Wall, span: WallSegmentSpan, band: LayerBand) {
+    fn push_wall_segment(
+        &mut self,
+        wall: &Wall,
+        span: WallSegmentSpan,
+        band: LayerBand,
+        base_elevation: f32,
+    ) {
         if span.x1 <= span.x0 || span.z1 <= span.z0 {
             return;
         }
@@ -487,8 +685,8 @@ impl SceneBuilder {
             span.x1.inches() as f32,
             band.side0,
             band.side1,
-            span.z0.inches() as f32,
-            span.z1.inches() as f32,
+            base_elevation + span.z0.inches() as f32,
+            base_elevation + span.z1.inches() as f32,
         );
         self.push_cuboid(&solid, color_to_rgba(band.color));
     }
@@ -500,6 +698,7 @@ impl SceneBuilder {
         opening_id: String,
         total: Length,
         interior_sign: f32,
+        base_elevation: f32,
     ) {
         let Some(opening) = wall
             .openings
@@ -516,8 +715,8 @@ impl SceneBuilder {
             opening.right().inches() as f32,
             side0,
             side1,
-            opening.sill_height.inches() as f32,
-            opening.top().inches() as f32,
+            base_elevation + opening.sill_height.inches() as f32,
+            base_elevation + opening.top().inches() as f32,
         );
         self.picks.push(PickSolid::cuboid(
             ViewClick::Opening {
@@ -550,10 +749,56 @@ impl SceneBuilder {
         }
     }
 
-    /// Push one flat surface (a roof plane / flat ceiling / floor deck) from its
-    /// world-space outline polygon: an opaque double-faced sheet (top + bottom,
-    /// opposite normals — the axonometric pipeline does not cull, so both sides
-    /// light correctly), feeding the orbit framing and a polygon pick volume. The
+    fn push_board_prism(&mut self, prism: &BoardPrism, color: [f32; 4]) {
+        self.points.extend(prism.corners);
+        for face in CUBOID_FACE_INDICES {
+            self.push_quad(face.map(|index| prism.corners[index]), color);
+        }
+    }
+
+    fn push_gable_prism(&mut self, prism: &GablePrism, color: [f32; 4]) {
+        self.points.extend(prism.corners);
+        for face in GABLE_TRIANGLE_FACES {
+            self.push_triangle(face.map(|index| prism.corners[index]), color);
+        }
+        // The base closes against the rectangular wall below; omitting that
+        // coincident face avoids z-fighting and double alpha blending.
+        for face in GABLE_RENDER_QUAD_FACES {
+            self.push_quad(face.map(|index| prism.corners[index]), color);
+        }
+    }
+
+    fn push_triangle(&mut self, points: [Point3; 3], color: [f32; 4]) {
+        let normal = face_normal(points[0], points[1], points[2]);
+        let base = self.vertices.len() as u32;
+        for point in points {
+            self.vertices.push(GpuVertex {
+                position: [point.x, point.y, point.z],
+                color,
+                normal: [normal.x, normal.y, normal.z],
+            });
+        }
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    fn push_quad(&mut self, points: [Point3; 4], color: [f32; 4]) {
+        let normal = face_normal(points[0], points[1], points[2]);
+        let base = self.vertices.len() as u32;
+        for point in points {
+            self.vertices.push(GpuVertex {
+                position: [point.x, point.y, point.z],
+                color,
+                normal: [normal.x, normal.y, normal.z],
+            });
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// Push one surface (a roof plane / flat ceiling / floor deck) from its
+    /// world-space outline polygon, with an optional same-material or distinct
+    /// reverse face for finished assemblies. The Plan cutaway omits that reverse
+    /// face so transparency is composited once. Also feeds orbit framing and a polygon pick volume. The
     /// outline lies on the same plane the path-traced render uses, so the two views
     /// agree. Brightened when selected, like a wall envelope.
     fn push_surface(
@@ -561,7 +806,7 @@ impl SceneBuilder {
         outline: &[Point3],
         triangles: &[[usize; 3]],
         color: Color32,
-        underside: Option<(Color32, Vec<Point3>)>,
+        reverse_face: SurfaceReverseFace,
         click: ViewClick,
         selected: bool,
     ) {
@@ -573,17 +818,21 @@ impl SceneBuilder {
         // decides which way each lights, so winding need not be reversed.
         let up = polygon_normal(outline);
         self.push_face(outline, triangles, up, shade(color));
-        match underside {
+        match reverse_face {
+            SurfaceReverseFace::Omit => {}
+            // Flat ceiling/floor surfaces: both faces share one color, so the
+            // coincident back face has no z-fight to resolve.
+            SurfaceReverseFace::Same => self.push_face(outline, triangles, -up, shade(color)),
             // A cathedral roof underside: a distinct interior finish at the
             // springing/bearing plane. The weather face is already lifted clear,
             // avoiding z-fighting without pushing the underside into the wall.
-            Some((under_color, under_verts)) => {
+            SurfaceReverseFace::Distinct {
+                color: under_color,
+                verts: under_verts,
+            } => {
                 self.push_face(&under_verts, triangles, -up, shade(under_color));
                 self.points.extend_from_slice(&under_verts);
             }
-            // Flat ceiling/floor surfaces: both faces share one color, so the
-            // coincident back face has no z-fight to resolve.
-            None => self.push_face(outline, triangles, -up, shade(color)),
         }
         self.points.extend_from_slice(outline);
         self.picks.push(PickSolid::surface(
@@ -633,6 +882,146 @@ impl SceneBuilder {
             outline_edges: self.outline_edges,
         }
     }
+}
+
+/// A board whose centerline may run in any 3-D direction. Corner order matches
+/// [`CUBOID_FACE_INDICES`], so the existing pick and face topology works for
+/// common, jack, ridge, hip, valley, blocking, and rake-plate members alike.
+struct BoardPrism {
+    corners: [Point3; 8],
+}
+
+impl BoardPrism {
+    fn new(
+        start: Point3,
+        end: Point3,
+        across0: f32,
+        across1: f32,
+        section0: f32,
+        section1: f32,
+    ) -> Option<Self> {
+        let along = normalized(vector_between(start, end))?;
+        let plan_length = (along.x * along.x + along.y * along.y).sqrt();
+        let across = if plan_length > f32::EPSILON {
+            Point3::vector(-along.y / plan_length, along.x / plan_length, 0.0)
+        } else {
+            Point3::X
+        };
+        Self::new_with_across(start, end, across, across0, across1, section0, section1)
+    }
+
+    fn new_with_across(
+        start: Point3,
+        end: Point3,
+        across: Point3,
+        across0: f32,
+        across1: f32,
+        section0: f32,
+        section1: f32,
+    ) -> Option<Self> {
+        if across1 - across0 <= f32::EPSILON || section1 - section0 <= f32::EPSILON {
+            return None;
+        }
+        let along = normalized(vector_between(start, end))?;
+        let across = normalized(across)?;
+        let mut section = normalized(cross(along, across))?;
+        // Both roof-band offsets and the rake-plate "below the rake" convention
+        // depend on a consistently upward-facing section axis.
+        if section.z < 0.0 {
+            section = -section;
+        }
+        let point = |origin: Point3, across_offset: f32, section_offset: f32| {
+            offset(
+                offset(origin, across, across_offset),
+                section,
+                section_offset,
+            )
+        };
+        Some(Self {
+            corners: [
+                point(start, across0, section0),
+                point(end, across0, section0),
+                point(end, across1, section0),
+                point(start, across1, section0),
+                point(start, across0, section1),
+                point(end, across0, section1),
+                point(end, across1, section1),
+                point(start, across1, section1),
+            ],
+        })
+    }
+}
+
+/// The triangular solid between one authored wall top and its matched roof rakes,
+/// extruded through either one wall-system layer or the whole envelope thickness.
+struct GablePrism {
+    corners: [Point3; 6],
+}
+
+impl GablePrism {
+    fn new(wall: &Wall, profile: &GableWallProfile, side0: f32, side1: f32) -> Self {
+        let basis = WallBasis::new(wall);
+        let left_z = profile.base_elevation.inches() as f32;
+        let peak_z = profile.peak_elevation.inches() as f32;
+        let width = profile.width.inches() as f32;
+        let peak_x = profile.peak_x.inches() as f32;
+        Self {
+            corners: [
+                basis.point(0.0, side0, left_z),
+                basis.point(width, side0, left_z),
+                basis.point(peak_x, side0, peak_z),
+                basis.point(0.0, side1, left_z),
+                basis.point(width, side1, left_z),
+                basis.point(peak_x, side1, peak_z),
+            ],
+        }
+    }
+
+    const EDGES: [[usize; 2]; 9] = [
+        [0, 1],
+        [1, 2],
+        [2, 0],
+        [3, 4],
+        [4, 5],
+        [5, 3],
+        [0, 3],
+        [1, 4],
+        [2, 5],
+    ];
+}
+
+const GABLE_TRIANGLE_FACES: [[usize; 3]; 2] = [[0, 2, 1], [3, 4, 5]];
+const GABLE_RENDER_QUAD_FACES: [[usize; 4]; 2] = [[0, 3, 5, 2], [1, 2, 5, 4]];
+const GABLE_QUAD_FACES: [[usize; 4]; 3] = [[0, 1, 4, 3], [0, 3, 5, 2], [1, 2, 5, 4]];
+
+fn vector_between(start: Point3, end: Point3) -> Point3 {
+    Point3::vector(end.x - start.x, end.y - start.y, end.z - start.z)
+}
+
+fn offset(point: Point3, axis: Point3, amount: f32) -> Point3 {
+    Point3::vector(
+        point.x + axis.x * amount,
+        point.y + axis.y * amount,
+        point.z + axis.z * amount,
+    )
+}
+
+fn cross(a: Point3, b: Point3) -> Point3 {
+    Point3::vector(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+}
+
+fn normalized(vector: Point3) -> Option<Point3> {
+    let length = (vector.x * vector.x + vector.y * vector.y + vector.z * vector.z).sqrt();
+    (length > f32::EPSILON)
+        .then(|| Point3::vector(vector.x / length, vector.y / length, vector.z / length))
+}
+
+fn face_normal(a: Point3, b: Point3, c: Point3) -> Point3 {
+    normalized(cross(vector_between(a, b), vector_between(a, c))).unwrap_or(Point3::Z)
 }
 
 #[derive(Clone, Copy)]
@@ -721,6 +1110,7 @@ pub(super) struct PickSolid {
 /// against their projected outline polygon (which need not be a quad).
 enum PickShape {
     Cuboid([Point3; 8]),
+    GablePrism([Point3; 6]),
     Surface(Vec<Point3>),
 }
 
@@ -741,11 +1131,39 @@ impl PickSolid {
         }
     }
 
+    fn gable_prism(click: ViewClick, priority: u8, corners: [Point3; 6]) -> Self {
+        Self {
+            click,
+            priority,
+            shape: PickShape::GablePrism(corners),
+        }
+    }
+
     fn hit_depth(&self, pointer: Pos2, projector: &OrbitProjector) -> Option<f32> {
         match &self.shape {
             PickShape::Cuboid(corners) => {
                 let mut best_depth = None::<f32>;
                 for face in CUBOID_FACE_INDICES {
+                    let projected = face.map(|index| projector.project_point(corners[index]));
+                    let positions = projected.map(|point| point.pos);
+                    if point_hits_projected_quad(pointer, &positions) {
+                        let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 4.0;
+                        best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+                    }
+                }
+                best_depth
+            }
+            PickShape::GablePrism(corners) => {
+                let mut best_depth = None::<f32>;
+                for face in GABLE_TRIANGLE_FACES {
+                    let projected = face.map(|index| projector.project_point(corners[index]));
+                    let positions = projected.map(|point| point.pos).to_vec();
+                    if point_in_polygon(pointer, &positions) {
+                        let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 3.0;
+                        best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+                    }
+                }
+                for face in GABLE_QUAD_FACES {
                     let projected = face.map(|index| projector.project_point(corners[index]));
                     let positions = projected.map(|point| point.pos);
                     if point_hits_projected_quad(pointer, &positions) {
@@ -907,9 +1325,10 @@ pub(super) fn brighten(color: Color32, amount: u8) -> Color32 {
 
 pub(super) fn member_color(kind: MemberKind) -> Color32 {
     match kind {
-        MemberKind::BottomPlate | MemberKind::TopPlate | MemberKind::RimJoist => {
-            theme::framing_line_dark()
-        }
+        MemberKind::BottomPlate
+        | MemberKind::TopPlate
+        | MemberKind::RakePlate
+        | MemberKind::RimJoist => theme::framing_line_dark(),
         MemberKind::CornerPost | MemberKind::RoughSill | MemberKind::ValleyRafter => {
             theme::dimension_line()
         }
@@ -917,9 +1336,10 @@ pub(super) fn member_color(kind: MemberKind) -> Color32 {
             theme::success().gamma_multiply(0.72)
         }
         MemberKind::BackingStud | MemberKind::Blocking => theme::warning().gamma_multiply(0.72),
-        MemberKind::CommonStud | MemberKind::FloorJoist | MemberKind::Rafter => {
-            brighten(theme::framing_line(), 42)
-        }
+        MemberKind::CommonStud
+        | MemberKind::GableStud
+        | MemberKind::FloorJoist
+        | MemberKind::Rafter => brighten(theme::framing_line(), 42),
         MemberKind::KingStud | MemberKind::JackStud | MemberKind::CrippleStud => {
             brighten(theme::warning(), 26)
         }
@@ -928,11 +1348,28 @@ pub(super) fn member_color(kind: MemberKind) -> Color32 {
     }
 }
 
+fn highlighted_member_color(
+    kind: MemberKind,
+    source_selected: bool,
+    member_selected: bool,
+) -> Color32 {
+    if member_selected {
+        theme::active_blue()
+    } else if source_selected {
+        brighten(member_color(kind), 20)
+    } else {
+        member_color(kind)
+    }
+}
+
 // === roof / ceiling / floor surfaces ===
 
 /// Surfaces share the wall envelope's pick priority: a roof rarely overlaps a wall
 /// in screen space, and ties fall back to depth (the nearer solid wins).
 const SURFACE_PICK_PRIORITY: u8 = 1;
+/// Alpha of authored roof sheets in the generated Plan cutaway. They stay present
+/// for assembly context and picking without hiding the opaque framing members.
+const PLAN_ROOF_ALPHA: u8 = 88;
 
 /// Which finished face of a surface assembly is shown, so it picks the layer the
 /// viewer sees and a sensible fallback color.
@@ -967,6 +1404,63 @@ fn surface_color(model: &BuildingModel, system_id: &ElementId, face: SurfaceFace
             Color32::from_rgb(r, g, b)
         })
         .unwrap_or(fallback)
+}
+
+/// Emit every roof assembly through the model's shared overhang derivation. The
+/// original bearing frame projects the expanded points, so an eave-tail vertex
+/// falls below the springing elevation instead of redefining that datum.
+fn push_roof_surfaces(
+    builder: &mut SceneBuilder,
+    model: &BuildingModel,
+    selection: &Selection,
+    transparent: bool,
+) {
+    // Classify all planes in one wall-graph pass rather than resolving each Room
+    // ceiling again per plane.
+    let cathedral = model.roof_cathedral_flags();
+    for (index, plane) in model.roof_planes.iter().enumerate() {
+        let surface_outline = model.roof_surface_outline(plane);
+        let Some(bearing_verts) = roof_plane_outline_world(plane, &surface_outline) else {
+            continue;
+        };
+        let triangles = framer_core::triangulate_simple_polygon(&surface_outline);
+        let apply_alpha = |color| {
+            if transparent {
+                theme::with_alpha(color, PLAN_ROOF_ALPHA)
+            } else {
+                color
+            }
+        };
+        let color = apply_alpha(surface_color(model, &plane.system, SurfaceFace::Roof));
+        // The authored frame is the bearing/underside face. Lift only the weather
+        // face by assembly thickness so the two remain separated.
+        let lift = roof_assembly_lift(model, &plane.system);
+        let weather_verts = lift_roof_face(&bearing_verts, lift);
+        let underside_color = if cathedral.get(index).copied().unwrap_or(false) {
+            surface_color(model, &plane.system, SurfaceFace::RoofUnderside)
+        } else {
+            surface_color(model, &plane.system, SurfaceFace::Roof)
+        };
+        let reverse_face = if transparent {
+            SurfaceReverseFace::Omit
+        } else {
+            SurfaceReverseFace::Distinct {
+                color: underside_color,
+                verts: bearing_verts,
+            }
+        };
+        let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
+        builder.push_surface(
+            &weather_verts,
+            &triangles,
+            color,
+            reverse_face,
+            ViewClick::RoofPlane {
+                id: plane.id.0.clone(),
+            },
+            selected,
+        );
+    }
 }
 
 /// Vertical lift from a roof plane's bearing/underside face to the weather face:
@@ -1032,11 +1526,10 @@ fn lift_outline(outline: &[Point2], z: f32) -> Vec<Point3> {
 /// [`framer_core::RoofPlaneFrame`] — the same affine elevation field the solver's
 /// framing and the path-traced render use, so the slab lies on exactly the plane
 /// the rafters frame. `None` for a degenerate outline (no eave length).
-fn roof_plane_outline_world(plane: &RoofPlane) -> Option<Vec<Point3>> {
+fn roof_plane_outline_world(plane: &RoofPlane, outline: &[Point2]) -> Option<Vec<Point3>> {
     let frame = plane.frame()?;
     Some(
-        plane
-            .outline
+        outline
             .iter()
             .map(|p| {
                 let (x, y) = (p.x.inches(), p.y.inches());
@@ -1204,6 +1697,69 @@ mod surface_tests {
         model
     }
 
+    /// A 12×8 shell on a level elevated 10ft, capped by two opposing 6:12 roof
+    /// planes. The east/west walls therefore receive 2ft-tall gable profiles whose
+    /// absolute apex is 20ft, exercising both gable geometry and stacked-level z.
+    fn elevated_gable_model() -> BuildingModel {
+        let mut model = BuildingModel::new();
+        let level = model
+            .levels
+            .iter_mut()
+            .find(|level| level.id.0 == "level-1")
+            .unwrap();
+        level.elevation = Length::from_feet(10.0);
+        level.height = Length::from_feet(8.0);
+        let defaults = model.framing_defaults();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let wall = |id: &str, start, end| {
+            let mut wall = Wall::new(id, id, Length::from_feet(1.0), &defaults)
+                .with_placement("level-1", start, end);
+            wall.height = Length::from_feet(8.0);
+            wall
+        };
+        model.walls = vec![
+            wall("wall-south", p(0.0, 0.0), p(12.0, 0.0)),
+            wall("wall-east", p(12.0, 0.0), p(12.0, 8.0)),
+            wall("wall-north", p(12.0, 8.0), p(0.0, 8.0)),
+            wall("wall-west", p(0.0, 8.0), p(0.0, 0.0)),
+        ];
+        model
+            .materials
+            .push(Material::solid_color("mat-roof", "Shingle", [44, 46, 52]));
+        model.systems.push(finish_system(
+            "system-roof",
+            SystemKind::Roof,
+            LayerFunction::Roofing,
+            "mat-roof",
+            false,
+        ));
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        let springing = Length::from_feet(18.0);
+        model.roof_planes = vec![
+            RoofPlane::new(
+                "roof-south",
+                "South",
+                "level-1",
+                "system-roof",
+                vec![p(0.0, 0.0), p(12.0, 0.0), p(12.0, 4.0), p(0.0, 4.0)],
+                slope,
+                0,
+                springing,
+            ),
+            RoofPlane::new(
+                "roof-north",
+                "North",
+                "level-1",
+                "system-roof",
+                vec![p(0.0, 4.0), p(12.0, 4.0), p(12.0, 8.0), p(0.0, 8.0)],
+                slope,
+                2,
+                springing,
+            ),
+        ];
+        model
+    }
+
     /// The same 12×8 surface model, but capped by a rectangular hip roof: two
     /// trapezoid fields plus two triangular hip ends sharing a shortened ridge.
     fn hip_surface_model() -> BuildingModel {
@@ -1353,6 +1909,437 @@ mod surface_tests {
         for v in &scene.vertices {
             assert!(v.position.iter().all(|c| c.is_finite()));
             assert!(v.normal.iter().all(|c| c.is_finite()));
+        }
+    }
+
+    #[test]
+    fn roof_surface_overhang_expands_bounds_lowers_tail_and_is_pickable() {
+        let mut model = surface_model();
+        model.roof_planes[0].eave_overhang = Length::from_whole_inches(12);
+        model.roof_planes[0].rake_overhang = Length::from_whole_inches(8);
+        let scene = build(&model, &Selection::Wall);
+        let roof_pick = scene
+            .picks
+            .iter()
+            .find(|pick| matches!(&pick.click, ViewClick::RoofPlane { id } if id == "roof-1"))
+            .expect("roof pick surface");
+        let PickShape::Surface(outline) = &roof_pick.shape else {
+            panic!("a roof must pick from its derived surface outline");
+        };
+        let min = |axis: fn(&Point3) -> f32| outline.iter().map(axis).fold(f32::INFINITY, f32::min);
+        let max =
+            |axis: fn(&Point3) -> f32| outline.iter().map(axis).fold(f32::NEG_INFINITY, f32::max);
+        assert!((min(|p| p.x) + 8.0).abs() < 0.5);
+        assert!((max(|p| p.x) - 152.0).abs() < 0.5);
+        assert!((min(|p| p.y) + 12.0).abs() < 0.5);
+        assert!((max(|p| p.y) - 96.0).abs() < 0.5);
+        // 6:12 over a 12in plan tail drops the bearing face 6in; the 7in roof
+        // assembly lift leaves the weather-face pick outline at 97in.
+        assert!((min(|p| p.z) - 97.0).abs() < 0.5);
+
+        let drawing = Rect::from_min_size((0.0, 0.0).into(), (600.0, 400.0).into());
+        let projector = OrbitProjector::from_points(&scene.points, drawing, View3dState::default())
+            .expect("projector");
+        let overhang_only = Point3::vector(72.0, -6.0, 100.0);
+        match scene.pick(projector.project_point(overhang_only).pos, &projector) {
+            Some(ViewClick::RoofPlane { id }) => assert_eq!(id, "roof-1"),
+            _ => panic!("expected to pick the roof in its overhang-only region"),
+        }
+    }
+
+    #[test]
+    fn wall_member_picks_use_the_owning_plan_even_when_provenance_is_an_opening() {
+        let model = BuildingModel::demo_wall();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let wall_plan = plan.wall_plans.first().expect("demo wall plan");
+        let opening_member = wall_plan
+            .members
+            .iter()
+            .find(|member| member.source != wall_plan.wall)
+            .expect("opening-owned framing member");
+        assert!(
+            model.walls[0]
+                .openings
+                .iter()
+                .any(|opening| opening.id == opening_member.source)
+        );
+
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        assert!(scene.picks.iter().any(|pick| matches!(
+            &pick.click,
+            ViewClick::Member { source_id, member_id }
+                if source_id == &wall_plan.wall.0 && member_id == &opening_member.id
+        )));
+        assert!(scene.picks.iter().all(|pick| !matches!(
+            &pick.click,
+            ViewClick::Member { source_id, member_id }
+                if source_id == &opening_member.source.0 && member_id == &opening_member.id
+        )));
+    }
+
+    #[test]
+    fn generated_roof_members_are_plan_only_and_roof_skin_is_transparent() {
+        let model = surface_model();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let design = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Design,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let plan_scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+
+        assert!(
+            design
+                .picks
+                .iter()
+                .all(|pick| !matches!(pick.click, ViewClick::Member { .. })),
+            "Design must remain authored-assembly only"
+        );
+        assert!(plan.roof_plans.iter().any(|roof| !roof.members.is_empty()));
+        for roof in &plan.roof_plans {
+            for member in &roof.members {
+                assert!(
+                    member.sloped.is_some(),
+                    "{} lacks spatial endpoints",
+                    member.id
+                );
+                assert!(plan_scene.picks.iter().any(|pick| matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &roof.roof.0 && member_id == &member.id
+                )));
+            }
+        }
+        // Roof framing depth starts at the assembly's conditioned-side offset and
+        // extends outward; it must not be centered halfway below the bearing plane.
+        let (rafter_host, rafter) = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter().map(move |member| (&roof.roof, member)))
+            .find(|(_, member)| member.kind == MemberKind::Rafter)
+            .expect("a common rafter");
+        let rafter_pick = plan_scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &rafter_host.0 && member_id == &rafter.id
+                )
+            })
+            .unwrap();
+        let PickShape::Cuboid(corners) = &rafter_pick.shape else {
+            panic!("a spatial roof member must pick as a board prism");
+        };
+        let sloped = rafter.sloped.unwrap();
+        let start = Point3::vector(
+            sloped.start.x.inches() as f32,
+            sloped.start.y.inches() as f32,
+            sloped.low_elevation.inches() as f32,
+        );
+        let end = Point3::vector(
+            sloped.end.x.inches() as f32,
+            sloped.end.y.inches() as f32,
+            sloped.high_elevation.inches() as f32,
+        );
+        let along = normalized(vector_between(start, end)).unwrap();
+        let plan_length = (along.x * along.x + along.y * along.y).sqrt();
+        let across = Point3::vector(-along.y / plan_length, along.x / plan_length, 0.0);
+        let mut section = normalized(cross(along, across)).unwrap();
+        if section.z < 0.0 {
+            section = -section;
+        }
+        let section_positions: Vec<f32> = corners
+            .iter()
+            .map(|corner| vector_between(start, *corner).dot(section))
+            .collect();
+        let section_min = section_positions
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min);
+        let section_max = section_positions
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((section_min - rafter.side_offset.inches() as f32).abs() < 0.1);
+        assert!(
+            (section_max - (rafter.side_offset + rafter.side_depth).inches() as f32).abs() < 0.1
+        );
+        assert_eq!(design.transparent_index_count, 0);
+        let expected_transparent_indices = model
+            .roof_planes
+            .iter()
+            .map(|plane| {
+                framer_core::triangulate_simple_polygon(&model.roof_surface_outline(plane)).len()
+                    as u32
+                    * 3
+            })
+            .sum::<u32>();
+        assert_eq!(
+            plan_scene.transparent_index_count, expected_transparent_indices,
+            "Plan uses one translucent weather face per roof field so alpha is not double-applied"
+        );
+        let transparent_start = plan_scene.opaque_index_count as usize;
+        assert!(
+            plan_scene.indices[transparent_start..]
+                .iter()
+                .all(|index| { plan_scene.vertices[*index as usize].color[3] < 1.0 }),
+            "the Plan transparent pass should contain translucent roof sheets"
+        );
+    }
+
+    #[test]
+    fn gable_profiles_extend_all_wall_modes_at_absolute_level_elevation() {
+        let model = elevated_gable_model();
+        let profiles = model.gable_wall_profiles();
+        assert_eq!(profiles.len(), 2);
+
+        let outline = Scene3d::from_project(
+            &model,
+            &empty_plan(),
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Design,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        assert!(
+            outline
+                .outline_edges
+                .iter()
+                .all(|edge| edge.a.z >= 120.0 && edge.b.z >= 120.0),
+            "stacked-level walls must not fall back to world z=0"
+        );
+        assert!(outline.outline_edges.iter().any(|edge| {
+            [edge.a, edge.b]
+                .iter()
+                .any(|point| (point.y - 48.0).abs() < 0.5 && (point.z - 240.0).abs() < 0.5)
+        }));
+        assert_eq!(
+            outline
+                .picks
+                .iter()
+                .filter(|pick| matches!(pick.shape, PickShape::GablePrism(_)))
+                .count(),
+            2,
+            "each gable end needs a triangular wall pick prism"
+        );
+
+        for display in [WallDisplay::Full, WallDisplay::Width] {
+            let scene = Scene3d::from_project(
+                &model,
+                &empty_plan(),
+                0,
+                &Selection::Wall,
+                WorkspaceMode::Design,
+                display,
+            )
+            .unwrap();
+            assert!(
+                scene.vertices.iter().any(|vertex| {
+                    (vertex.position[1] - 48.0).abs() < 0.5
+                        && (vertex.position[2] - 240.0).abs() < 0.5
+                        && (vertex.position[0] - 144.0).abs() > 0.5
+                        && (vertex.position[0] - 144.0).abs() < 12.0
+                }),
+                "{display:?} omitted the wall-system gable prism"
+            );
+        }
+    }
+
+    #[test]
+    fn full_height_opening_under_gable_closes_each_layer_base() {
+        let model = elevated_gable_model();
+        let mut wall = model
+            .walls
+            .iter()
+            .find(|wall| wall.id.0 == "wall-east")
+            .unwrap()
+            .clone();
+        wall.openings.push(framer_core::Opening::door(
+            "opening-full-height",
+            "Full-height opening",
+            Length::from_feet(4.0),
+            Length::from_feet(3.0),
+            wall.height,
+        ));
+        let profile = model.gable_wall_profiles().get(&wall.id).copied().unwrap();
+        let mut builder = SceneBuilder::default();
+        builder.push_gable_layer(&wall, &profile, -3.0, 3.0, Color32::WHITE);
+
+        // Two triangular faces + two rake quads = 18 indices. The uncovered
+        // full-height opening adds one base quad (6 more indices).
+        assert_eq!(builder.indices.len(), 24);
+        assert!(builder.vertices[14..].iter().all(|vertex| {
+            (vertex.position[2] - profile.base_elevation.inches() as f32).abs() < 0.01
+                && vertex.normal[2] < -0.99
+        }));
+    }
+
+    #[test]
+    fn gable_rake_plates_use_spatial_member_prisms_and_source_picks() {
+        let model = elevated_gable_model();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let rake_plates: Vec<_> = plan
+            .wall_plans
+            .iter()
+            .flat_map(|wall| wall.members.iter())
+            .filter(|member| member.kind == MemberKind::RakePlate)
+            .collect();
+        assert_eq!(rake_plates.len(), 4);
+        for member in rake_plates {
+            let sloped = member.sloped.expect("rake plate endpoints");
+            assert!(sloped.high_elevation > sloped.low_elevation);
+            let pick = scene
+                .picks
+                .iter()
+                .find(|pick| {
+                    matches!(
+                        &pick.click,
+                        ViewClick::Member { source_id, member_id }
+                            if source_id == &member.source.0 && member_id == &member.id
+                    )
+                })
+                .expect("rake plate source pick");
+            let PickShape::Cuboid(corners) = &pick.shape else {
+                panic!("a rake plate must pick as a board prism");
+            };
+            let wall = model
+                .walls
+                .iter()
+                .find(|wall| wall.id == member.source)
+                .unwrap();
+            let basis = WallBasis::new(wall);
+            let through_positions: Vec<f32> = corners
+                .iter()
+                .map(|corner| {
+                    (corner.x - basis.origin_x) * basis.side_x
+                        + (corner.y - basis.origin_y) * basis.side_y
+                })
+                .collect();
+            let through_span = through_positions
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max)
+                - through_positions
+                    .iter()
+                    .copied()
+                    .fold(f32::INFINITY, f32::min);
+            assert!(
+                (through_span - member.side_depth.inches() as f32).abs() < 0.1,
+                "rake plate must use the wall framing-band depth through the wall"
+            );
+
+            let start = Point3::vector(
+                sloped.start.x.inches() as f32,
+                sloped.start.y.inches() as f32,
+                sloped.low_elevation.inches() as f32,
+            );
+            let end = Point3::vector(
+                sloped.end.x.inches() as f32,
+                sloped.end.y.inches() as f32,
+                sloped.high_elevation.inches() as f32,
+            );
+            let along = normalized(vector_between(start, end)).unwrap();
+            let across = Point3::vector(basis.side_x, basis.side_y, 0.0);
+            let mut section = normalized(cross(along, across)).unwrap();
+            if section.z < 0.0 {
+                section = -section;
+            }
+            let section_positions: Vec<f32> = corners
+                .iter()
+                .map(|corner| vector_between(start, *corner).dot(section))
+                .collect();
+            let section_min = section_positions
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min);
+            let section_max = section_positions
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(section_max.abs() < 0.1);
+            assert!(
+                (section_min + member.cross_section_depth.inches() as f32).abs() < 0.1,
+                "rake plate thickness must sit below the roof rake in the wall plane"
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_hip_member_uses_exact_plan_endpoints_and_host_pick() {
+        let model = hip_surface_model();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let (host, hip) = plan
+            .roof_plans
+            .iter()
+            .flat_map(|host| host.members.iter().map(move |member| (&host.roof, member)))
+            .find(|(_, member)| member.kind == MemberKind::HipRafter)
+            .expect("rectangular hip fixture emits a hip rafter");
+        let sloped = hip.sloped.expect("hip has exact spatial placement");
+        assert_ne!(sloped.start.x, sloped.end.x);
+        assert_ne!(sloped.start.y, sloped.end.y);
+        assert_ne!(sloped.low_elevation, sloped.high_elevation);
+
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &host.0 && member_id == &hip.id
+                )
+            })
+            .expect("diagonal hip member has an owning roof-plan pick");
+        let PickShape::Cuboid(corners) = &pick.shape else {
+            panic!("hip pick must use the shared board prism")
+        };
+        for point in [sloped.start, sloped.end] {
+            assert!(corners.iter().any(|corner| {
+                (corner.x - point.x.inches() as f32).abs() < hip.cross_section_depth.inches() as f32
+                    && (corner.y - point.y.inches() as f32).abs()
+                        < hip.cross_section_depth.inches() as f32
+            }));
         }
     }
 

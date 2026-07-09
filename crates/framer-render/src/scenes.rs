@@ -157,10 +157,11 @@ fn finish_system(
     }
 }
 
-/// The demo shell capped with a gable roof, plus a flat ceiling and a floor deck
-/// over its 28ft × 20ft footprint. Distinctly colored finishes (charcoal roof,
-/// white ceiling, wood subfloor) so the sloped + horizontal surfaces read in the
-/// render.
+/// The demo shell capped with a gable roof carrying the app-default eave/rake
+/// overhangs, plus a flat ceiling and a floor deck over its 28ft × 20ft bearing
+/// footprint. Distinctly colored finishes (charcoal roof, white ceiling, wood
+/// subfloor) make the overhung slopes, closed gable ends, and horizontal surfaces
+/// read in the render.
 fn roofed_model() -> BuildingModel {
     let ft = Length::from_feet;
     let mut model = BuildingModel::demo_shell();
@@ -211,36 +212,44 @@ fn roofed_model() -> BuildingModel {
     // ridge along the long axis at y = 10ft (ridge rises 120in × 6/12 = 60" to
     // 156"). The south plane's eave is the y=0 edge; the north plane's is y=20.
     let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
-    model.roof_planes.push(RoofPlane::new(
-        "roof-south",
-        "South roof",
-        "level-1",
-        "system-roof",
-        vec![
-            Point2::new(Length::ZERO, Length::ZERO),
-            Point2::new(ft(28.0), Length::ZERO),
-            Point2::new(ft(28.0), ft(10.0)),
-            Point2::new(Length::ZERO, ft(10.0)),
-        ],
-        slope,
-        0,
-        ft(8.0),
-    ));
-    model.roof_planes.push(RoofPlane::new(
-        "roof-north",
-        "North roof",
-        "level-1",
-        "system-roof",
-        vec![
-            Point2::new(Length::ZERO, ft(20.0)),
-            Point2::new(ft(28.0), ft(20.0)),
-            Point2::new(ft(28.0), ft(10.0)),
-            Point2::new(Length::ZERO, ft(10.0)),
-        ],
-        slope,
-        0,
-        ft(8.0),
-    ));
+    model.roof_planes.push(
+        RoofPlane::new(
+            "roof-south",
+            "South roof",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(ft(28.0), Length::ZERO),
+                Point2::new(ft(28.0), ft(10.0)),
+                Point2::new(Length::ZERO, ft(10.0)),
+            ],
+            slope,
+            0,
+            ft(8.0),
+        )
+        .with_eave_overhang(Length::from_whole_inches(12))
+        .with_rake_overhang(Length::from_whole_inches(8)),
+    );
+    model.roof_planes.push(
+        RoofPlane::new(
+            "roof-north",
+            "North roof",
+            "level-1",
+            "system-roof",
+            vec![
+                Point2::new(Length::ZERO, ft(20.0)),
+                Point2::new(ft(28.0), ft(20.0)),
+                Point2::new(ft(28.0), ft(10.0)),
+                Point2::new(Length::ZERO, ft(10.0)),
+            ],
+            slope,
+            0,
+            ft(8.0),
+        )
+        .with_eave_overhang(Length::from_whole_inches(12))
+        .with_rake_overhang(Length::from_whole_inches(8)),
+    );
 
     let footprint = vec![
         Point2::new(Length::ZERO, Length::ZERO),

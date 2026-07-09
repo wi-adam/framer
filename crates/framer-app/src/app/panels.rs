@@ -1014,64 +1014,133 @@ impl FramerApp {
             self.library_tree(ui);
 
             if self.workspace_mode.shows_generated_plan() {
-                let generated_count = self
-                    .project_plan
-                    .as_ref()
-                    .map(|plan| {
-                        plan.wall_plans
+                let has_plan = self.project_plan.is_some();
+                let mut generated_groups = Vec::<(
+                    String,
+                    String,
+                    Option<usize>,
+                    Vec<(String, framer_solver::MemberKind)>,
+                )>::new();
+                if let Some(plan) = &self.project_plan {
+                    for host in &plan.wall_plans {
+                        let wall_index = self
+                            .model
+                            .walls
                             .iter()
-                            .map(|wall_plan| wall_plan.members.len())
-                            .sum::<usize>()
-                    })
-                    .unwrap_or_default();
+                            .position(|wall| wall.id == host.wall);
+                        let name = wall_index
+                            .and_then(|index| self.model.walls.get(index))
+                            .map(|wall| wall.name.as_str())
+                            .unwrap_or(host.wall.0.as_str());
+                        generated_groups.push((
+                            host.wall.0.clone(),
+                            format!("Framing: {name}"),
+                            wall_index,
+                            host.members
+                                .iter()
+                                .map(|member| (member.id.clone(), member.kind))
+                                .collect(),
+                        ));
+                    }
+                    for host in &plan.roof_plans {
+                        let name = self
+                            .model
+                            .roof_planes
+                            .iter()
+                            .find(|plane| plane.id == host.roof)
+                            .map(|plane| plane.name.as_str())
+                            .unwrap_or(host.roof.0.as_str());
+                        generated_groups.push((
+                            host.roof.0.clone(),
+                            format!("Roof framing: {name}"),
+                            None,
+                            host.members
+                                .iter()
+                                .map(|member| (member.id.clone(), member.kind))
+                                .collect(),
+                        ));
+                    }
+                    for host in &plan.ceiling_plans {
+                        let name = self
+                            .model
+                            .ceilings
+                            .iter()
+                            .find(|ceiling| ceiling.id == host.ceiling)
+                            .map(|ceiling| ceiling.name.as_str())
+                            .unwrap_or(host.ceiling.0.as_str());
+                        generated_groups.push((
+                            host.ceiling.0.clone(),
+                            format!("Ceiling framing: {name}"),
+                            None,
+                            host.members
+                                .iter()
+                                .map(|member| (member.id.clone(), member.kind))
+                                .collect(),
+                        ));
+                    }
+                    for host in &plan.floor_plans {
+                        let name = self
+                            .model
+                            .floor_decks
+                            .iter()
+                            .find(|deck| deck.id == host.floor)
+                            .map(|deck| deck.name.as_str())
+                            .unwrap_or(host.floor.0.as_str());
+                        generated_groups.push((
+                            host.floor.0.clone(),
+                            format!("Floor framing: {name}"),
+                            None,
+                            host.members
+                                .iter()
+                                .map(|member| (member.id.clone(), member.kind))
+                                .collect(),
+                        ));
+                    }
+                }
+                let generated_count = generated_groups
+                    .iter()
+                    .map(|(_, _, _, members)| members.len())
+                    .sum::<usize>();
                 egui::CollapsingHeader::new(format!("Generated ({generated_count} members)"))
                     .default_open(true)
                     .show(ui, |ui| {
-                        if let Some(plan) = &self.project_plan {
-                            for wall_plan in &plan.wall_plans {
-                                let wall_name = self
-                                    .model
-                                    .walls
-                                    .iter()
-                                    .find(|wall| wall.id == wall_plan.wall)
-                                    .map(|wall| wall.name.as_str())
-                                    .unwrap_or(wall_plan.wall.0.as_str());
-                                let wall_selected = self
-                                    .model
-                                    .walls
-                                    .get(self.selected_wall)
-                                    .is_some_and(|wall| wall.id == wall_plan.wall);
+                        if has_plan {
+                            for (source_id, label, wall_index, members) in &generated_groups {
+                                let source_selected = matches!(
+                                    &self.selected,
+                                    Selection::Member {
+                                        source_id: selected_source,
+                                        ..
+                                    } if selected_source == source_id
+                                );
                                 egui::CollapsingHeader::new(format!(
-                                    "Framing: {wall_name} ({} members)",
-                                    wall_plan.members.len()
+                                    "{label} ({} members)",
+                                    members.len()
                                 ))
-                                .default_open(wall_selected)
+                                .default_open(source_selected)
                                 .show(ui, |ui| {
-                                    for member in &wall_plan.members {
+                                    for (member_id, kind) in members {
                                         let selected = matches!(
                                             &self.selected,
-                                            Selection::Member { wall_id, member_id }
-                                                if wall_id == &wall_plan.wall.0
-                                                    && member_id == &member.id
+                                            Selection::Member {
+                                                source_id: selected_source,
+                                                member_id: selected_member,
+                                            } if selected_source == source_id
+                                                && selected_member == member_id
                                         );
                                         if ui
                                             .selectable_label(
                                                 selected,
-                                                format!("{}: {}", member.kind.label(), member.id),
+                                                format!("{}: {}", kind.label(), member_id),
                                             )
                                             .clicked()
                                         {
-                                            if let Some(index) = self
-                                                .model
-                                                .walls
-                                                .iter()
-                                                .position(|wall| wall.id == wall_plan.wall)
-                                            {
-                                                self.selected_wall = index;
+                                            if let Some(index) = wall_index {
+                                                self.selected_wall = *index;
                                             }
                                             self.selected = Selection::Member {
-                                                wall_id: wall_plan.wall.0.clone(),
-                                                member_id: member.id.clone(),
+                                                source_id: source_id.clone(),
+                                                member_id: member_id.clone(),
                                             };
                                         }
                                     }
@@ -1726,6 +1795,10 @@ impl FramerApp {
         let mut deferred_resync_library: Option<framer_library::LibraryItem> = None;
         let mut deferred_detach_library: Option<framer_library::LibraryItem> = None;
         let mut deferred_standards = DeferredStandardsActions::default();
+        // Connected roof fields must share overhang values so their fixed seam
+        // edges intersect at identical endpoints. Apply an inspector change to
+        // the whole exact-edge component after the selected-plane borrow ends.
+        let mut deferred_roof_overhang_sync: Option<(ElementId, Length, Length)> = None;
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
@@ -2282,8 +2355,11 @@ impl FramerApp {
                     ui.label("Corner no longer exists");
                 }
             }
-            Selection::Member { wall_id, member_id } => {
-                if let Some(member) = self.selected_member(&wall_id, &member_id) {
+            Selection::Member {
+                source_id,
+                member_id,
+            } => {
+                if let Some(member) = self.selected_member(&source_id, &member_id) {
                     member_inspector(ui, member);
                 } else {
                     ui.label("Generated member no longer exists");
@@ -2664,6 +2740,8 @@ impl FramerApp {
                         if level_id != plane.level.0 {
                             plane.level = ElementId::new(level_id);
                             changed = true;
+                            deferred_roof_overhang_sync =
+                                Some((plane.id.clone(), plane.eave_overhang, plane.rake_overhang));
                         }
 
                         widgets::section(ui, "roof-geometry", "Geometry", true, |ui| {
@@ -2707,7 +2785,7 @@ impl FramerApp {
                                 "Springing elevation",
                                 &mut plane.reference_elevation,
                             );
-                            changed |= length_drag(
+                            let eave_changed = length_drag(
                                 ui,
                                 "Eave overhang",
                                 &mut plane.eave_overhang,
@@ -2715,7 +2793,7 @@ impl FramerApp {
                                 48.0,
                                 DisplayUnit::Inches,
                             );
-                            changed |= length_drag(
+                            let rake_changed = length_drag(
                                 ui,
                                 "Rake overhang",
                                 &mut plane.rake_overhang,
@@ -2723,6 +2801,14 @@ impl FramerApp {
                                 48.0,
                                 DisplayUnit::Inches,
                             );
+                            changed |= eave_changed || rake_changed;
+                            if eave_changed || rake_changed {
+                                deferred_roof_overhang_sync = Some((
+                                    plane.id.clone(),
+                                    plane.eave_overhang,
+                                    plane.rake_overhang,
+                                ));
+                            }
                         });
 
                         changed |= surface_system_picker(
@@ -3063,6 +3149,9 @@ impl FramerApp {
         }
         if let Some(system_id) = deferred_select_system {
             self.selected = Selection::System(system_id);
+        }
+        if let Some((roof_id, eave, rake)) = deferred_roof_overhang_sync {
+            sync_connected_roof_overhangs(&mut self.model, &roof_id, eave, rake);
         }
 
         if changed {
@@ -7300,13 +7389,76 @@ fn parse_fraction(text: &str) -> Option<f64> {
     }
 }
 
+fn sync_connected_roof_overhangs(
+    model: &mut BuildingModel,
+    roof_id: &ElementId,
+    eave: Length,
+    rake: Length,
+) {
+    let connected = model.connected_roof_plane_ids(roof_id);
+    for plane in &mut model.roof_planes {
+        if connected.contains(&plane.id) {
+            plane.eave_overhang = eave;
+            plane.rake_overhang = rake;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use framer_core::{
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
-        DimensionVerticalReference, FramingDefaults,
+        DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
+
+    #[test]
+    fn reconnecting_a_roof_plane_reconciles_the_component_overhangs() {
+        let mut model = BuildingModel::new();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        model.roof_planes = vec![
+            RoofPlane::new(
+                "roof-south",
+                "South",
+                "level-1",
+                "system-roof-1",
+                vec![p(0.0, 0.0), p(12.0, 0.0), p(12.0, 4.0), p(0.0, 4.0)],
+                slope,
+                0,
+                Length::from_feet(8.0),
+            )
+            .with_eave_overhang(Length::from_whole_inches(12))
+            .with_rake_overhang(Length::from_whole_inches(8)),
+            RoofPlane::new(
+                "roof-north",
+                "North",
+                "detached-level",
+                "system-roof-1",
+                vec![p(0.0, 4.0), p(12.0, 4.0), p(12.0, 8.0), p(0.0, 8.0)],
+                slope,
+                2,
+                Length::from_feet(8.0),
+            )
+            .with_eave_overhang(Length::from_whole_inches(6))
+            .with_rake_overhang(Length::from_whole_inches(4)),
+        ];
+
+        let moved = model.roof_planes[1].id.clone();
+        model.roof_planes[1].level = ElementId::new("level-1");
+        sync_connected_roof_overhangs(
+            &mut model,
+            &moved,
+            Length::from_whole_inches(6),
+            Length::from_whole_inches(4),
+        );
+
+        assert!(model.roof_planes.iter().all(|plane| {
+            plane.eave_overhang == Length::from_whole_inches(6)
+                && plane.rake_overhang == Length::from_whole_inches(4)
+        }));
+        model.validate().unwrap();
+    }
 
     #[test]
     fn inspector_length_fields_format_with_canonical_length_display() {

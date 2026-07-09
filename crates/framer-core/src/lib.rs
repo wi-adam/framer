@@ -16,11 +16,11 @@ pub use model::{
     ConstructionLayer, ConstructionSystem, DimensionAnchor, DimensionAxis, DimensionConstraint,
     DimensionDirection, DimensionHorizontalReference, DimensionKind, DimensionVerticalReference,
     ElementId, FloorDeck, FramingPattern, FramingSpec, Furnishing, FurnishingInstance,
-    LayerFunction, Level, LibraryStamp, Material, MaterialSource, MemberFamily, MepInstance,
-    MepObject, MepObjectKind, ModelError, ObjectSize, Opening, OpeningKind, PropertyValue,
-    Provenance, QuarterTurn, RoofOpening, RoofPlane, RoofPlaneFrame, Room, RoomUsage, Sheathing,
-    Slope, SpanDirection, SurfaceRegion, SystemKind, TextureRole, Wall, WallEnd, WallExposure,
-    WallJoin, WallJoinKind, is_blake3_hash, surface_frame,
+    GableWallProfile, LayerFunction, Level, LibraryStamp, Material, MaterialSource, MemberFamily,
+    MepInstance, MepObject, MepObjectKind, ModelError, ObjectSize, Opening, OpeningKind,
+    PropertyValue, Provenance, QuarterTurn, RoofOpening, RoofPlane, RoofPlaneFrame, Room,
+    RoomUsage, Sheathing, Slope, SpanDirection, SurfaceRegion, SystemKind, TextureRole, Wall,
+    WallEnd, WallExposure, WallJoin, WallJoinKind, is_blake3_hash, surface_frame,
 };
 pub use project::{
     PROJECT_FORMAT, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, load_project,
@@ -38,6 +38,6 @@ pub use topology::{
     RoomBoundary, concave_polygon_corners, enclosed_room_count, enclosed_room_count_on_level,
     level_wall_loop_outline, point_in_polygon, polygon_area_square_inches, room_boundaries,
     room_boundaries_for_rooms, room_boundaries_on_level, room_boundary, room_boundary_on_level,
-    triangulate_simple_polygon, wall_interior_sides,
+    triangulate_simple_polygon, wall_interior_sides, wall_interior_sides_on_level,
 };
 pub use units::{Length, Point2};
