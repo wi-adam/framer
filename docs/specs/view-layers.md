@@ -11,7 +11,7 @@
 >
 > **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) ·
 > **Plan:** [2026-06-19-visual-layering.md](../plans/2026-06-19-visual-layering.md) ·
-> **Last reviewed:** 2026-07-07
+> **Last reviewed:** 2026-07-09
 
 ## Intent / Purpose
 
@@ -35,6 +35,9 @@ controllable presentation surfaces over the authored model.
     Openings still cut the wall.
   - **Full** — the true-thickness colored construction-layer bands (2D opaque; 3D
     translucent so framing members show through). Openings cut the bands.
+- In every 3D wall display mode, the wall envelope is the derived physical body,
+  not merely the authored centerline span: `Corner`-joined wall ends extend to the
+  adjoining wall's outside face so closed shell corners draw as closed boxes.
 - **Per-layer visibility toggles** (independent on/off) for Plan-view annotations:
   **Grid**, **Rooms** (fills + labels), **Corners** (wall-join markers + labels),
   **Wall labels** (names). Grid, Rooms, and Wall labels default on; Corner labels
@@ -52,7 +55,8 @@ controllable presentation surfaces over the authored model.
   making all corner labels permanent.
 - Controls live in a single **Layers** popover; it stays open while the user flips
   multiple toggles in one visit.
-- The path-traced **Render** view is unaffected.
+- The path-traced **Render** view does not expose these wall-display modes, but it
+  follows the same corner-closed wall-envelope intent through `framer-render`.
 
 ## Decisions (locked)
 
@@ -99,19 +103,22 @@ controllable presentation surfaces over the authored model.
   `layers.joins` reveals all labels, while hover/selection reveals one quiet corner
   marker and label even when the layer is off.
 - **3D rendering** (`framer-app/src/app/viewport/scene_build.rs`): `from_project`
-  takes a `WallDisplay`; `push_wall_envelope` branches — `Full` keeps the per-layer
-  bands, `Width` pushes one neutral full-thickness band, `Outline` pushes the
-  envelope's 12 edges into `Scene3d.outline_edges` (and feeds the corners into
+  takes a `WallDisplay`; `push_wall_envelope` resolves the wall's derived visual
+  span via `BuildingModel::wall_envelope_span`, then branches — `Full` keeps the
+  per-layer bands, `Width` pushes one neutral full-thickness band, `Outline` pushes
+  the envelope's 12 edges into `Scene3d.outline_edges` (and feeds the corners into
   `points` so the projector stays framed). The pick envelope is pushed in every
   mode. `axonometric.rs` draws `outline_edges` as a painter overlay and skips the
   wgpu callback when there is no fill geometry.
 
 ## Constraints & invariants
 
-- `framer-core`/`framer-solver`/`framer-render` are untouched — this is pure
-  app-side presentation over the authored model and the solver plan.
-- No change to `.framer`, the schema, determinism, or the GPU↔CPU path-tracer
-  parity (`tests/gpu_parity.rs` covers only the Render view).
+- Wall display state remains app-side presentation over the authored model and
+  solver plan. The shared derived wall-envelope span lives in `framer-core` so
+  the app 3D view and `framer-render` close corners identically.
+- No change to `.framer`, the schema, or persisted authored intent. Geometry
+  changes that affect the path-traced Render view must keep render goldens and
+  GPU↔CPU path-tracer parity green.
 - Presentation never becomes a source of truth ([architecture.md](../architecture.md)).
 
 ## Out of scope (YAGNI)

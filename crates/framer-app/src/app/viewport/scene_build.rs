@@ -328,10 +328,11 @@ impl SceneBuilder {
         // The full-thickness span and envelope box, shared by Outline (its edges)
         // and the pick volume below, so the box is built once per wall.
         let (env0, env1) = layer_band_span(interior_sign, total, Length::ZERO, total);
+        let (visual_x0, visual_x1) = model.wall_envelope_span(wall);
         let envelope = WallCuboid::new(
             wall,
-            0.0,
-            wall.length.inches() as f32,
+            visual_x0.inches() as f32,
+            visual_x1.inches() as f32,
             env0,
             env1,
             0.0,
@@ -352,14 +353,24 @@ impl SceneBuilder {
                         off += layer.thickness;
                         let base = material_color(model, &layer.material);
                         let color = layer_band_color(base, selected);
-                        self.push_wall_layer(wall, LayerBand::new(side0, side1, color));
+                        self.push_wall_layer(
+                            wall,
+                            LayerBand::new(side0, side1, color),
+                            visual_x0,
+                            visual_x1,
+                        );
                     }
                 }
                 // Degenerate model with no resolvable system: draw a single band
                 // over the full thickness so the wall is still visible.
                 None => {
                     let color = layer_band_color(neutral_band_color(), selected);
-                    self.push_wall_layer(wall, LayerBand::new(env0, env1, color));
+                    self.push_wall_layer(
+                        wall,
+                        LayerBand::new(env0, env1, color),
+                        visual_x0,
+                        visual_x1,
+                    );
                 }
             },
             // One monochrome full-thickness band: the wall reads as a solid volume
@@ -367,7 +378,12 @@ impl SceneBuilder {
             // does the 4-segment decomposition).
             WallDisplay::Width => {
                 let color = layer_band_color(neutral_band_color(), selected);
-                self.push_wall_layer(wall, LayerBand::new(env0, env1, color));
+                self.push_wall_layer(
+                    wall,
+                    LayerBand::new(env0, env1, color),
+                    visual_x0,
+                    visual_x1,
+                );
             }
             // No fill triangles: collect the envelope's 12 edges for the painter
             // overlay (and feed its corners into `points` so the projector still
@@ -404,10 +420,16 @@ impl SceneBuilder {
     /// Extrude one layer band across the wall face, applying the 4-segment
     /// opening decomposition (clear span left/right + sill apron + header apron)
     /// so the layer is cut by every opening.
-    fn push_wall_layer(&mut self, wall: &Wall, band: LayerBand) {
+    fn push_wall_layer(
+        &mut self,
+        wall: &Wall,
+        band: LayerBand,
+        visual_x0: Length,
+        visual_x1: Length,
+    ) {
         let mut openings = wall.openings.iter().collect::<Vec<_>>();
         openings.sort_by_key(|opening| opening.left());
-        let mut cursor = Length::ZERO;
+        let mut cursor = visual_x0;
 
         for opening in openings {
             self.push_wall_segment(
@@ -443,7 +465,7 @@ impl SceneBuilder {
         }
         self.push_wall_segment(
             wall,
-            WallSegmentSpan::new(cursor, wall.length, Length::ZERO, wall.height),
+            WallSegmentSpan::new(cursor, visual_x1, Length::ZERO, wall.height),
             band,
         );
     }

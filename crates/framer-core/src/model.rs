@@ -883,6 +883,51 @@ impl BuildingModel {
         self.systems.iter().find(|system| system.id == wall.system)
     }
 
+    /// The local-x span used by visual wall envelopes. Authored wall length stays
+    /// centerline-based, but a corner-joined endpoint extends by half of the
+    /// adjoining wall's thickness so rendered wall solids fully meet at corners.
+    pub fn wall_envelope_span(&self, wall: &Wall) -> (Length, Length) {
+        let mut start_extension = Length::ZERO;
+        let mut end_extension = Length::ZERO;
+
+        for join in &self.wall_joins {
+            if join.kind != WallJoinKind::Corner {
+                continue;
+            }
+            let other_id = if join.first_wall == wall.id {
+                Some(&join.second_wall)
+            } else if join.second_wall == wall.id {
+                Some(&join.first_wall)
+            } else {
+                None
+            };
+            let Some(other_id) = other_id else {
+                continue;
+            };
+            let Some(other) = self
+                .walls
+                .iter()
+                .find(|candidate| candidate.id == *other_id)
+            else {
+                continue;
+            };
+            let extension = half_thickness_outward(self.wall_envelope_thickness(other));
+            if wall.start == join.point {
+                start_extension = start_extension.max(extension);
+            } else if wall.end == join.point {
+                end_extension = end_extension.max(extension);
+            }
+        }
+
+        (Length::ZERO - start_extension, wall.length + end_extension)
+    }
+
+    fn wall_envelope_thickness(&self, wall: &Wall) -> Length {
+        self.system_for(wall)
+            .map(ConstructionSystem::total_thickness)
+            .unwrap_or_else(|| self.framing_defaults().stud_profile.nominal_depth())
+    }
+
     /// Resolve a material by id from the project library.
     pub fn material(&self, id: &ElementId) -> Option<&Material> {
         self.materials.iter().find(|material| material.id == *id)
@@ -1239,6 +1284,10 @@ fn next_reconciled_join_id(existing: &[WallJoin], staged: &[WallJoin]) -> String
         }
         index += 1;
     }
+}
+
+fn half_thickness_outward(thickness: Length) -> Length {
+    Length::from_ticks((thickness.ticks() + 1) / 2)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5673,6 +5722,58 @@ mod tests {
         assert_eq!(model.wall_joins[0].kind, WallJoinKind::Corner);
         assert_eq!(model.wall_joins[0].point, rp(10.0, 0.0));
         model.validate().unwrap();
+    }
+
+    #[test]
+    fn wall_envelope_span_extends_corner_endpoints_by_joined_wall_half_thickness() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+        model.reconcile_joins();
+
+        let a_half =
+            half_thickness_outward(model.system_for(&model.walls[0]).unwrap().total_thickness());
+        let b_half =
+            half_thickness_outward(model.system_for(&model.walls[1]).unwrap().total_thickness());
+
+        assert_eq!(
+            model.wall_envelope_span(&model.walls[0]),
+            (Length::ZERO, Length::from_feet(10.0) + b_half)
+        );
+        assert_eq!(
+            model.wall_envelope_span(&model.walls[1]),
+            (Length::ZERO - a_half, Length::from_feet(8.0))
+        );
+    }
+
+    #[test]
+    fn wall_envelope_span_keeps_tee_walls_centerline_bounded() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(placed_wall("through", rp(0.0, 0.0), rp(20.0, 0.0), &code));
+        model.walls.push(placed_wall(
+            "partition",
+            rp(10.0, 0.0),
+            rp(10.0, 8.0),
+            &code,
+        ));
+        model.reconcile_joins();
+
+        assert_eq!(
+            model.wall_envelope_span(&model.walls[0]),
+            (Length::ZERO, Length::from_feet(20.0))
+        );
+        assert_eq!(
+            model.wall_envelope_span(&model.walls[1]),
+            (Length::ZERO, Length::from_feet(8.0))
+        );
     }
 
     #[test]

@@ -39,6 +39,13 @@ vision/scope (`docs/vision.md`), so this introduces a new authored primitive.
    feature — not diagnosed-and-deferred.
 6. **Room payload:** name + usage + derived area/perimeter. Height/volume deferred
    until Floors/Ceilings (M3) define a vertical extent.
+7. **Wall intent vs. wall envelope:** authored walls remain centerline segments:
+   `start`, `end`, `length`, opening offsets, and solver member positions are the
+   source of truth. The physical wall body used by 3D/render presentation is a
+   **derived envelope**. At a `Corner` join, each joined wall's visual envelope
+   extends to the adjoining wall's outside face so closed shells do not leave a
+   corner cavity. This derived envelope is never serialized and never mutates
+   authored dimensions.
 
 ## Out of scope for v1 (kept architecturally open)
 
@@ -172,6 +179,9 @@ existing `plan_inverse_point()` / camera `unapply()`.
   (mirror `history_integration_tests.rs`); snap/auto-join geometry units
   (mid-span → `Tee`, endpoint → `Corner`); canonical-JSON-stable-after-rebuild
   guard.
+- **3D/render:** a corner-joined shell has no visual cavity in both the app's
+  `Scene3d` wall envelope and `framer-render` scene extraction; render goldens
+  cover the path-traced result when this derived geometry changes.
 - **GUI:** via the `install-app` skill + computer-use — draw walls, close a loop,
   place a room, see area, delete a wall and watch the room go *open*.
 
