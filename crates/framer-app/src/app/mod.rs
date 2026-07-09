@@ -191,6 +191,52 @@ enum ViewportMode {
     Render,
 }
 
+fn default_view_for_tab(
+    tab: actions::WorkflowTab,
+    has_selected_wall: bool,
+) -> Option<ViewportMode> {
+    match tab {
+        actions::WorkflowTab::Design | actions::WorkflowTab::Frame => Some(ViewportMode::Plan),
+        actions::WorkflowTab::Openings | actions::WorkflowTab::Annotate if has_selected_wall => {
+            Some(ViewportMode::Elevation)
+        }
+        actions::WorkflowTab::Roofs => Some(ViewportMode::RoofPlan),
+        actions::WorkflowTab::Openings
+        | actions::WorkflowTab::Annotate
+        | actions::WorkflowTab::Inspect
+        | actions::WorkflowTab::Render
+        | actions::WorkflowTab::Plan => None,
+    }
+}
+
+fn view_serves_tab(tab: actions::WorkflowTab, view: ViewportMode) -> bool {
+    match view {
+        ViewportMode::Axonometric => matches!(
+            tab,
+            actions::WorkflowTab::Design
+                | actions::WorkflowTab::Frame
+                | actions::WorkflowTab::Openings
+                | actions::WorkflowTab::Roofs
+                | actions::WorkflowTab::Annotate
+                | actions::WorkflowTab::Inspect
+        ),
+        ViewportMode::Plan => {
+            matches!(
+                tab,
+                actions::WorkflowTab::Design | actions::WorkflowTab::Frame
+            )
+        }
+        ViewportMode::Elevation => {
+            matches!(
+                tab,
+                actions::WorkflowTab::Openings | actions::WorkflowTab::Annotate
+            )
+        }
+        ViewportMode::RoofPlan => matches!(tab, actions::WorkflowTab::Roofs),
+        ViewportMode::Render => false,
+    }
+}
+
 /// The roof form the auto-from-footprint roof tool generates. The tool writes
 /// explicit roof planes into the model; the form choice is transient authoring
 /// input, not a persisted roof-assembly parameter.
@@ -1131,6 +1177,23 @@ impl FramerApp {
         }
         self.viewport_mode = mode;
         self.last_authoring_viewport = mode;
+    }
+
+    fn has_selected_wall_elevation_context(&self) -> bool {
+        self.model.walls.get(self.selected_wall).is_some()
+            && matches!(
+                self.selected,
+                Selection::Wall | Selection::Opening(_) | Selection::Dimension(_)
+            )
+    }
+
+    fn apply_soft_default_view_for_tab(&mut self, tab: actions::WorkflowTab) {
+        if view_serves_tab(tab, self.viewport_mode) {
+            return;
+        }
+        if let Some(mode) = default_view_for_tab(tab, self.has_selected_wall_elevation_context()) {
+            self.set_authoring_viewport_mode(mode);
+        }
     }
 
     fn open_command_search(&mut self) {
@@ -3649,6 +3712,189 @@ mod tests {
         assert!(!app.dimension_tool.active);
         assert!(!app.draw_wall_tool.active);
         assert!(!app.room_tool_active);
+    }
+
+    #[test]
+    fn workflow_tab_default_view_mapping_matches_authoring_contexts() {
+        use actions::WorkflowTab;
+
+        for (tab, without_wall, with_wall) in [
+            (
+                WorkflowTab::Design,
+                Some(ViewportMode::Plan),
+                Some(ViewportMode::Plan),
+            ),
+            (
+                WorkflowTab::Frame,
+                Some(ViewportMode::Plan),
+                Some(ViewportMode::Plan),
+            ),
+            (WorkflowTab::Openings, None, Some(ViewportMode::Elevation)),
+            (
+                WorkflowTab::Roofs,
+                Some(ViewportMode::RoofPlan),
+                Some(ViewportMode::RoofPlan),
+            ),
+            (WorkflowTab::Annotate, None, Some(ViewportMode::Elevation)),
+            (WorkflowTab::Inspect, None, None),
+            (WorkflowTab::Render, None, None),
+            (WorkflowTab::Plan, None, None),
+        ] {
+            assert_eq!(
+                default_view_for_tab(tab, false),
+                without_wall,
+                "default without wall for {tab:?}"
+            );
+            assert_eq!(
+                default_view_for_tab(tab, true),
+                with_wall,
+                "default with wall for {tab:?}"
+            );
+        }
+
+        for (tab, views) in [
+            (
+                WorkflowTab::Design,
+                [
+                    (ViewportMode::Plan, true),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Frame,
+                [
+                    (ViewportMode::Plan, true),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Openings,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, true),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Roofs,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, true),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Annotate,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, true),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Inspect,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, true),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Render,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, false),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+            (
+                WorkflowTab::Plan,
+                [
+                    (ViewportMode::Plan, false),
+                    (ViewportMode::Elevation, false),
+                    (ViewportMode::RoofPlan, false),
+                    (ViewportMode::Axonometric, false),
+                    (ViewportMode::Render, false),
+                ],
+            ),
+        ] {
+            for (view, expected) in views {
+                assert_eq!(
+                    view_serves_tab(tab, view),
+                    expected,
+                    "{view:?} serves {tab:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_tabs_apply_soft_default_views_without_locking_3d() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+
+        app.select_workflow_tab(actions::WorkflowTab::Openings);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Openings);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+
+        app.viewport_mode = ViewportMode::Plan;
+        app.select_workflow_tab(actions::WorkflowTab::Roofs);
+
+        assert_eq!(app.command_tab, actions::WorkflowTab::Roofs);
+        assert_eq!(app.viewport_mode, ViewportMode::RoofPlan);
+    }
+
+    #[test]
+    fn reselecting_active_authoring_tab_does_not_lock_the_default_view() {
+        let mut app = FramerApp {
+            command_tab: actions::WorkflowTab::Openings,
+            viewport_mode: ViewportMode::Plan,
+            ..Default::default()
+        };
+
+        app.select_workflow_tab(actions::WorkflowTab::Openings);
+
+        assert_eq!(app.command_tab, actions::WorkflowTab::Openings);
+        assert_eq!(app.viewport_mode, ViewportMode::Plan);
+    }
+
+    #[test]
+    fn wall_workflow_tabs_need_wall_context_before_defaulting_to_elevation() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Plan,
+            ..Default::default()
+        };
+
+        app.select_workflow_tab(actions::WorkflowTab::Openings);
+
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+
+        app.viewport_mode = ViewportMode::Plan;
+        app.selected = Selection::None;
+
+        app.select_workflow_tab(actions::WorkflowTab::Annotate);
+
+        assert_eq!(app.viewport_mode, ViewportMode::Plan);
     }
 
     #[test]
