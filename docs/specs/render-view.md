@@ -90,7 +90,11 @@ From `BuildingModel` (no framing in the first slice — finished surfaces):
 Wall solids are built as cuboids (reusing the `WallBasis` math), with opening
 voids subtracted by emitting wall segments around each opening (same approach as
 the app's `push_wall_envelope`), and a thin glass/door panel placed in each
-opening. Outward-facing normals drive exterior-vs-interior material choice.
+opening. The local span of each wall cuboid comes from the same derived
+`BuildingModel::wall_envelope_span` used by the app's 3D view: at a `Corner`
+join, the visual wall body extends beyond the authored centerline endpoint to
+the adjoining wall's outside face, while openings remain cut from their authored
+local offsets. Outward-facing normals drive exterior-vs-interior material choice.
 
 ### Camera from orbit state
 
@@ -155,8 +159,9 @@ backface still hits); AABB slab; Fresnel (`R0≈0.04` at η=1.5 normal incidence
 continuity; PCG32 **canary** (first 8 outputs of `seed(42,54)` locked as
 constants, cross-checked vs reference).
 
-**Scene extraction:** wall → expected triangle count + outward normals; window →
-glass material; door → solid; ground plane present; bounds/center correct;
+**Scene extraction:** wall → expected triangle count + outward normals; joined
+corner walls close the outside quadrant with no visual cavity; window → glass
+material; door → solid; ground plane present; bounds/center correct;
 `demo-shell.framer` extracts without panic and is non-empty.
 
 **Physical / convergence:** furnace test (albedo=1 enclosure → environment

@@ -122,6 +122,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   `room_boundary_on_level(model, level, seed)` (`topology.rs`).
 - Mutation helpers on `BuildingModel`: `move_wall_endpoint`, `translate_wall`, `remove_wall`,
   `reconcile_joins` (re-derive joins after geometry edits), `system_for(wall)`,
+  `wall_envelope_span(wall)` (derived visual/render span that closes corner joins),
   `material(&ElementId)`, `sort_deterministically` / `into_deterministic`.
 
 ### `.framer` serialization (`src/project.rs`)
@@ -268,7 +269,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `src/lib.rs` | Public API: `accumulate`, `tonemap_accum`, `render`; re-exports `build::*`. |
-| `src/build.rs` | **Scene extraction from the model**: `scene_from_model`, `build_scene`, `RenderOptions`, `SceneFraming` (auto-derives cladding/drywall/glass/door/ground materials + sky + sun). |
+| `src/build.rs` | **Scene extraction from the model**: `scene_from_model`, `build_scene`, `RenderOptions`, `SceneFraming` (auto-derives cladding/drywall/glass/door/ground materials + sky + sun; wall solids use `BuildingModel::wall_envelope_span` so corner-joined walls close visually). |
 | `src/scenes.rs` | Shared render-test fixtures: the synthetic reference scene plus model-derived gable, scissor-vault, and hip-roof scenes used by golden and parity tests. |
 | `src/scene.rs` | `Scene`, lighting (`DirectionalSun`, `Sky`). |
 | `src/bvh.rs`, `src/aabb.rs`, `src/geom.rs`, `src/ray.rs` | BVH acceleration + geometry/ray primitives. |
@@ -332,7 +333,7 @@ selected-object lifecycle actions.
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
-| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; `pick()` for selection. |
+| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` so corner-joined walls close visually; `pick()` for selection. |
 | `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |

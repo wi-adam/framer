@@ -410,7 +410,9 @@ fn push_wall(
 ) {
     let base = level_elevation(model, wall);
     let height = wall.height.inches() as f32;
-    let length = wall.length.inches() as f32;
+    let (visual_start, visual_end) = model.wall_envelope_span(wall);
+    let visual_start = visual_start.inches() as f32;
+    let visual_end = visual_end.inches() as f32;
     // Through-wall depth and exposure come from the wall's construction system.
     // Fall back to the code stud profile / Exterior when the system is missing
     // so scene building stays infallible.
@@ -428,10 +430,10 @@ fn push_wall(
 
     // Track the wall's footprint for camera framing.
     for &(lx, sd, z) in &[
-        (0.0, -half, base),
-        (length, half, base + height),
-        (0.0, half, base + height),
-        (length, -half, base),
+        (visual_start, -half, base),
+        (visual_end, half, base + height),
+        (visual_start, half, base + height),
+        (visual_end, -half, base),
     ] {
         bounds.grow(basis.point(lx, sd, z));
     }
@@ -439,7 +441,7 @@ fn push_wall(
     let mut openings: Vec<_> = wall.openings.iter().collect();
     openings.sort_by_key(|o| o.left());
 
-    let mut cursor = 0.0_f32;
+    let mut cursor = visual_start;
     for opening in openings {
         let left = opening.left().inches() as f32;
         let right = opening.right().inches() as f32;
@@ -495,7 +497,7 @@ fn push_wall(
         tris,
         &basis,
         cursor,
-        length,
+        visual_end,
         half,
         base,
         base + height,
@@ -846,7 +848,7 @@ fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
 mod tests {
     use super::*;
     use crate::geom::Hit;
-    use framer_core::{AssetRef, FramingDefaults, Length, Opening, Point2, TextureRole};
+    use framer_core::{AssetRef, FramingDefaults, Length, Opening, Point2, TextureRole, WallJoin};
 
     fn material_histogram(scene: &Scene) -> std::collections::HashMap<u32, usize> {
         let mut h = std::collections::HashMap::new();
@@ -868,6 +870,33 @@ mod tests {
         };
         wall.openings = openings;
         model.walls.push(wall);
+        model
+    }
+
+    fn corner_model() -> BuildingModel {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls.push(
+            Wall::new("wall-a", "Wall A", Length::from_feet(10.0), &code).with_placement(
+                "level-1",
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(10.0), Length::ZERO),
+            ),
+        );
+        model.walls.push(
+            Wall::new("wall-b", "Wall B", Length::from_feet(8.0), &code).with_placement(
+                "level-1",
+                Point2::new(Length::from_feet(10.0), Length::ZERO),
+                Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            ),
+        );
+        model.wall_joins.push(WallJoin::corner(
+            "join-corner",
+            "Corner",
+            "wall-a",
+            "wall-b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+        ));
         model
     }
 
@@ -931,6 +960,41 @@ mod tests {
         assert_eq!(scene.camera, direct.camera);
         assert_eq!(scene.triangles, direct.triangles);
         assert_eq!(scene.materials, direct.materials);
+    }
+
+    #[test]
+    fn joined_corner_wall_envelopes_fill_the_outside_quadrant() {
+        let model = corner_model();
+        let scene = scene_from_model(&model, &RenderOptions::default());
+        let (_, wall_a_end) = model.wall_envelope_span(&model.walls[0]);
+        let wall_a_half = model
+            .system_for(&model.walls[0])
+            .expect("wall resolves a system")
+            .total_thickness()
+            .inches() as f32
+            / 2.0;
+        let expected_x = wall_a_end.inches() as f32;
+        let expected_y = -wall_a_half;
+
+        let has_corner_vertex = scene
+            .triangles
+            .iter()
+            .filter(|triangle| triangle.material != MAT_GROUND)
+            .flat_map(|triangle| {
+                [
+                    triangle.v0,
+                    triangle.v0 + triangle.edge1,
+                    triangle.v0 + triangle.edge2,
+                ]
+            })
+            .any(|vertex| {
+                (vertex.x - expected_x).abs() < 1.0e-4 && (vertex.y - expected_y).abs() < 1.0e-4
+            });
+
+        assert!(
+            has_corner_vertex,
+            "corner wall envelope should include the quadrant beyond both centerline endpoints"
+        );
     }
 
     #[test]
