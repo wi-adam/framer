@@ -423,52 +423,41 @@ impl FramerApp {
             return;
         }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = design::space::XS;
-            let design_mode = self.workspace_mode.allows_design_edits();
-            let plan_label = if design_mode { "Shell" } else { "Plan" };
-            let elevation_label = if design_mode { "Wall" } else { "Elevation" };
-            if view_tab(
-                ui,
-                ActionId::ViewPlan,
-                plan_label,
-                self.viewport_mode == ViewportMode::Plan,
-            )
-            .clicked()
-            {
-                self.set_authoring_viewport_mode(ViewportMode::Plan);
-            }
-            if view_tab(
-                ui,
-                ActionId::ViewElevation,
-                elevation_label,
-                self.viewport_mode == ViewportMode::Elevation,
-            )
-            .clicked()
-            {
-                self.set_authoring_viewport_mode(ViewportMode::Elevation);
-            }
-            if view_tab(
-                ui,
-                ActionId::ViewRoof,
-                "Roof",
-                self.viewport_mode == ViewportMode::RoofPlan,
-            )
-            .clicked()
-            {
-                self.set_authoring_viewport_mode(ViewportMode::RoofPlan);
-            }
-            if view_tab(
-                ui,
-                ActionId::View3d,
-                "3D",
-                self.viewport_mode == ViewportMode::Axonometric,
-            )
-            .clicked()
-            {
-                self.set_authoring_viewport_mode(ViewportMode::Axonometric);
-            }
-        });
+        let design_mode = self.workspace_mode.allows_design_edits();
+        let plan_label = if design_mode { "Shell" } else { "Plan" };
+        let elevation_label = if design_mode { "Wall" } else { "Elevation" };
+        let segments = [
+            design::widgets::Segment {
+                label: plan_label,
+                selected: self.viewport_mode == ViewportMode::Plan,
+                tooltip: actions::metadata(ActionId::ViewPlan).tooltip,
+            },
+            design::widgets::Segment {
+                label: elevation_label,
+                selected: self.viewport_mode == ViewportMode::Elevation,
+                tooltip: actions::metadata(ActionId::ViewElevation).tooltip,
+            },
+            design::widgets::Segment {
+                label: "Roof",
+                selected: self.viewport_mode == ViewportMode::RoofPlan,
+                tooltip: actions::metadata(ActionId::ViewRoof).tooltip,
+            },
+            design::widgets::Segment {
+                label: "3D",
+                selected: self.viewport_mode == ViewportMode::Axonometric,
+                tooltip: actions::metadata(ActionId::View3d).tooltip,
+            },
+        ];
+        if let Some(index) = design::widgets::segmented(ui, &segments) {
+            let mode = match index {
+                0 => ViewportMode::Plan,
+                1 => ViewportMode::Elevation,
+                2 => ViewportMode::RoofPlan,
+                3 => ViewportMode::Axonometric,
+                _ => unreachable!("view segment index is bounded by the segment array"),
+            };
+            self.set_authoring_viewport_mode(mode);
+        }
     }
 
     fn has_active_tool_options(&self) -> bool {
@@ -609,11 +598,6 @@ impl FramerApp {
             .map(|system| system.name.clone())
             .unwrap_or_else(|| "Wall system".to_owned())
     }
-}
-
-fn view_tab(ui: &mut Ui, action_id: ActionId, label: &str, selected: bool) -> egui::Response {
-    let action = actions::metadata(action_id);
-    design::widgets::tab(ui, label, selected).on_hover_text(action.tooltip)
 }
 
 fn option_strip_title(ui: &mut Ui, label: &str) {

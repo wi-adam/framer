@@ -557,6 +557,9 @@ fn command_surfaces_remain_reachable_at_minimum_window_size() {
     for label in ["Framer", "Project", "Examples", "Commands"] {
         assert_accessible_label(&harness, label, "minimum-width app header");
     }
+    for label in ["Shell", "Wall", "Roof", "3D"] {
+        assert_accessible_button(&harness, label, "minimum-width segmented view control");
+    }
 
     for tab in [
         (actions::WorkflowTab::Design, "Room"),
