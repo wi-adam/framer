@@ -164,7 +164,7 @@ fn ray_query_wgsl() -> String {
 /// payload, and the progressive sample counter. Lives on `FramerApp`.
 #[derive(Default)]
 pub(crate) struct GpuRenderState {
-    /// Key over (geometry, camera, size): a change restarts accumulation.
+    /// Key over (geometry, camera, lighting, exposure, size): a change restarts accumulation.
     accum_key: u64,
     scene: Option<Scene>,
     /// Orbit framing (pivot + radius) of the cached scene, used to re-aim the
@@ -191,7 +191,7 @@ impl GpuRenderState {
     }
 
     /// Refreshes the cached scene for the current model + view, resetting the
-    /// progressive counter when geometry, camera, or size changed.
+    /// progressive counter when geometry, camera, lighting, exposure, or size changed.
     ///
     /// Triangles + BVH (and their GPU upload) are geometry-only, so they are
     /// rebuilt only when the geometry signature changes. A pure camera move
@@ -210,9 +210,13 @@ impl GpuRenderState {
             self.framing = Some(framing);
             self.scene_key = geom_key;
         } else if self.accum_key != accum_key {
-            // Same geometry, new view: re-aim the camera only.
+            // Same geometry, new view or render settings: update the cached
+            // scene fields that feed uniforms without rebuilding triangles/BVH.
             if let (Some(framing), Some(scene)) = (self.framing, self.scene.as_mut()) {
                 scene.camera = framing.camera(opts);
+                scene.sun = opts.sun;
+                scene.sky = opts.sky;
+                scene.exposure = opts.exposure;
             }
         }
 
@@ -299,7 +303,8 @@ fn dispatch_spp(frame: u32, pixels: u64, moving: bool) -> u32 {
 }
 
 /// Hashes everything that, if changed, invalidates progressive accumulation:
-/// geometry, the full camera (orbit + pan + dolly + zoom), and the render size.
+/// geometry, the full camera (orbit + pan + dolly + zoom), lighting/exposure,
+/// sky, and the render size.
 /// Shared by the GPU path and the CPU fallback so they reset identically.
 pub(crate) fn accumulation_key(
     geom_key: u64,
@@ -317,9 +322,26 @@ pub(crate) fn accumulation_key(
     ((opts.pan.y * 2000.0) as i64).hash(&mut hasher);
     ((opts.pan.z * 2000.0) as i64).hash(&mut hasher);
     ((opts.dolly * 1000.0) as i64).hash(&mut hasher);
+    hash_f32(opts.exposure, &mut hasher);
+    hash_vec3(opts.sun.dir, &mut hasher);
+    hash_vec3(opts.sun.irradiance, &mut hasher);
+    hash_f32(opts.sun.angular_radius, &mut hasher);
+    hash_vec3(opts.sky.zenith, &mut hasher);
+    hash_vec3(opts.sky.horizon, &mut hasher);
+    hash_vec3(opts.sky.ground, &mut hasher);
     width.hash(&mut hasher);
     height.hash(&mut hasher);
     hasher.finish()
+}
+
+fn hash_f32(value: f32, state: &mut impl std::hash::Hasher) {
+    std::hash::Hash::hash(&value.to_bits(), state);
+}
+
+fn hash_vec3(value: framer_render::math::Vec3, state: &mut impl std::hash::Hasher) {
+    hash_f32(value.x, state);
+    hash_f32(value.y, state);
+    hash_f32(value.z, state);
 }
 
 /// Registers the GPU path-trace callback for `drawing`, syncing cached state and
@@ -1139,10 +1161,10 @@ mod tests {
     }
 
     #[test]
-    fn accumulation_key_reacts_to_pan_and_dolly() {
+    fn accumulation_key_reacts_to_view_and_render_settings() {
         use framer_render::math::Vec3;
-        // A pan or dolly is a camera move and must restart progressive
-        // accumulation, exactly like yaw/pitch/zoom already do.
+        // View movement and render settings must restart progressive
+        // accumulation without needing a geometry rebuild.
         let base = RenderOptions::default();
         let key = |opts: &RenderOptions| accumulation_key(42, opts, 800, 600);
         let base_key = key(&base);
@@ -1152,6 +1174,24 @@ mod tests {
             ..base
         };
         let dollied = RenderOptions { dolly: 0.5, ..base };
+        let exposed = RenderOptions {
+            exposure: base.exposure * 1.25,
+            ..base
+        };
+        let sun_shifted = RenderOptions {
+            sun: framer_render::scene::DirectionalSun {
+                dir: Vec3::new(-0.25, 0.45, 0.86).normalize(),
+                ..base.sun
+            },
+            ..base
+        };
+        let sky_shifted = RenderOptions {
+            sky: framer_render::scene::Sky {
+                horizon: Vec3::new(0.65, 0.72, 0.84),
+                ..base.sky
+            },
+            ..base
+        };
 
         assert_ne!(
             base_key,
@@ -1163,6 +1203,50 @@ mod tests {
             key(&dollied),
             "dolly must invalidate the accumulator"
         );
+        assert_ne!(
+            base_key,
+            key(&exposed),
+            "exposure must invalidate the accumulator"
+        );
+        assert_ne!(
+            base_key,
+            key(&sun_shifted),
+            "sun direction must invalidate the accumulator"
+        );
+        assert_ne!(
+            base_key,
+            key(&sky_shifted),
+            "sky colors must invalidate the accumulator"
+        );
+    }
+
+    #[test]
+    fn gpu_render_sync_updates_cached_scene_render_settings() {
+        use framer_render::math::Vec3;
+
+        let model = BuildingModel::demo_shell();
+        let mut state = GpuRenderState::default();
+        let base = RenderOptions::default();
+        state.sync(&model, &base, 320, 180);
+        state.frame = 12;
+        let scene_key = state.scene_key;
+
+        let changed = RenderOptions {
+            exposure: 1.75,
+            sun: framer_render::scene::DirectionalSun {
+                dir: Vec3::new(0.0, 1.0, 0.0),
+                ..base.sun
+            },
+            ..base
+        };
+
+        state.sync(&model, &changed, 320, 180);
+
+        let scene = state.scene.as_ref().expect("scene remains cached");
+        assert_eq!(state.scene_key, scene_key, "geometry should stay cached");
+        assert_eq!(state.frame, 0, "settings changes reset accumulation");
+        assert_eq!(scene.exposure.to_bits(), 1.75_f32.to_bits());
+        assert!((scene.sun.dir - Vec3::new(0.0, 1.0, 0.0)).length() < 1.0e-6);
     }
 
     /// The original budget-bounded burst, kept here as the reference the still

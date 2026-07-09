@@ -132,7 +132,7 @@ impl FramerApp {
         let res_scale = if moving { MOTION_RESOLUTION_SCALE } else { 1.0 };
         let (width, height) = render_resolution(drawing.width(), drawing.height(), ppp, res_scale);
 
-        let opts = framer_render::RenderOptions {
+        let mut opts = framer_render::RenderOptions {
             yaw: self.view_3d.yaw,
             pitch: self.view_3d.pitch,
             zoom: self.view_3d.zoom,
@@ -141,6 +141,7 @@ impl FramerApp {
             aspect: width as f32 / height as f32,
             ..framer_render::RenderOptions::default()
         };
+        self.render_settings.apply_to_options(&mut opts);
 
         // Prefer the real-time GPU compute path tracer; fall back to the
         // background-thread CPU renderer when compute isn't available.
