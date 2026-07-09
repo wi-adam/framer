@@ -724,6 +724,37 @@ fn command_search_does_not_execute_disabled_action() {
 }
 
 #[test]
+fn command_search_does_not_leave_output_workspace_for_disabled_authoring_action() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert!(!harness.state().action_enabled(ActionId::ToolWall));
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    harness.run();
+    harness.state_mut().command_search.query = "draw walls".to_owned();
+    harness.run();
+    assert!(
+        harness.query_all_by_label("Wall").next().is_some(),
+        "disabled authoring command should stay discoverable"
+    );
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
+    assert!(!harness.state().draw_wall_tool.active);
+    assert!(
+        harness.state().command_search.open,
+        "search should stay open when no enabled match can execute"
+    );
+}
+
+#[test]
 fn command_search_escape_closes_without_executing() {
     let mut harness = demo_harness();
     harness.run();
@@ -822,6 +853,43 @@ fn disabled_command_reasons_follow_enabled_context() {
             .state()
             .action_disabled_reason(ActionId::ExportArtifacts),
         None
+    );
+    assert!(!harness.state().action_enabled(ActionId::ToolWall));
+    assert_eq!(
+        harness.state().action_disabled_reason(ActionId::ToolWall),
+        Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+    );
+}
+
+#[test]
+fn command_strip_buttons_follow_enabled_context() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.state_mut().workspace_mode = WorkspaceMode::Plan;
+    harness.state_mut().command_tab = actions::WorkflowTab::Frame;
+    harness.run();
+
+    assert!(!harness.state().action_enabled(ActionId::ToolWall));
+    assert_eq!(
+        harness.state().action_disabled_reason(ActionId::ToolWall),
+        Some("Available in an authoring workflow tab; Render and Plan are output workspaces")
+    );
+
+    let wall_button = harness
+        .query_all_by_role_and_label(Role::Button, "Wall")
+        .next()
+        .expect("forced Frame command strip should render the Wall command");
+    wall_button.click();
+    harness.run();
+
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+    assert!(
+        !harness.state().draw_wall_tool.active,
+        "disabled Wall command-strip button must not activate"
     );
 }
 
@@ -1105,10 +1173,10 @@ fn inspector_has_friendly_empty_selection_state() {
     );
 }
 
-/// Tool shortcuts entered from the generated-plan workflow must return to a
-/// Design-compatible command tab before activating the tool.
+/// Tool shortcuts entered from an output workspace must stay disabled; leaving
+/// an output workspace is an explicit workflow-tab choice.
 #[test]
-fn tool_shortcut_from_plan_tab_returns_to_frame_commands() {
+fn tool_shortcut_from_plan_tab_does_not_activate_authoring_tool() {
     let mut harness = demo_harness();
     harness.run();
 
@@ -1123,22 +1191,18 @@ fn tool_shortcut_from_plan_tab_returns_to_frame_commands() {
 
     harness.key_press(egui::Key::W);
     harness.run();
-    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
-    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Frame);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
     assert!(
-        harness.state().draw_wall_tool.active,
-        "W should activate the wall tool"
-    );
-    assert!(
-        harness.query_all_by_label("Wall").next().is_some(),
-        "shortcut should route back to Frame commands"
+        !harness.state().draw_wall_tool.active,
+        "W should stay disabled from output workspaces"
     );
 }
 
-/// Dimension shortcuts entered from generated-plan workflow must reveal the
-/// annotation controls that configure the active dimension tool.
+/// Dimension shortcuts entered from generated-plan workflow must remain disabled
+/// instead of leaving the output workspace implicitly.
 #[test]
-fn dimension_shortcut_from_plan_tab_returns_to_annotate_commands() {
+fn dimension_shortcut_from_plan_tab_does_not_activate_authoring_tool() {
     let mut harness = demo_harness();
     harness.run();
 
@@ -1149,15 +1213,11 @@ fn dimension_shortcut_from_plan_tab_returns_to_annotate_commands() {
 
     harness.key_press(egui::Key::D);
     harness.run();
-    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
-    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Annotate);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Plan);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Plan);
     assert!(
-        harness.state().dimension_tool.active,
-        "D should activate the dimension tool"
-    );
-    assert!(
-        harness.query_all_by_label("Linear").next().is_some(),
-        "shortcut should route back to Annotate commands"
+        !harness.state().dimension_tool.active,
+        "D should stay disabled from output workspaces"
     );
 }
 

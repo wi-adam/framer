@@ -315,7 +315,7 @@ impl FramerApp {
 
     fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2, canvas: Rect) {
         let duplicate_opening = self.can_duplicate_selected_opening();
-        let delete_selection = self.can_delete_selected_from_context();
+        let delete_selection = self.action_enabled(ActionId::DeleteSelection);
         if !duplicate_opening && !delete_selection {
             return;
         }
@@ -381,7 +381,7 @@ impl FramerApp {
                                     )
                                 });
                                 if response.clicked() {
-                                    self.delete_selected();
+                                    self.execute_action(ActionId::DeleteSelection);
                                 }
                             }
                         });
@@ -391,27 +391,6 @@ impl FramerApp {
 
     fn can_duplicate_selected_opening(&self) -> bool {
         self.workspace_mode.allows_design_edits() && matches!(self.selected, Selection::Opening(_))
-    }
-
-    fn can_delete_selected_from_context(&self) -> bool {
-        self.workspace_mode.allows_design_edits()
-            && matches!(
-                self.selected,
-                Selection::Wall
-                    | Selection::Opening(_)
-                    | Selection::Room(_)
-                    | Selection::RoofPlane(_)
-                    | Selection::Ceiling(_)
-                    | Selection::FloorDeck(_)
-                    | Selection::System(_)
-                    | Selection::Material(_)
-                    | Selection::Furnishing(_)
-                    | Selection::MepObject(_)
-                    | Selection::Site
-                    | Selection::StandardsPack(_)
-                    | Selection::FurnishingInstance(_)
-                    | Selection::MepInstance(_)
-            )
     }
 
     fn workspace_header(&mut self, ui: &mut Ui) {
