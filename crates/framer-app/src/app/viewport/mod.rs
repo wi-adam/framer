@@ -4,7 +4,6 @@ use eframe::egui::{
 };
 use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
-#[cfg(test)]
 use super::WorkspaceMode;
 use super::actions::{self, ActionId};
 use super::draw_wall::SnapResult;
@@ -441,6 +440,10 @@ impl FramerApp {
     }
 
     fn viewport_tabs(&mut self, ui: &mut Ui) {
+        if self.workspace_mode == WorkspaceMode::Render {
+            return;
+        }
+
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = design::space::XS;
             let design_mode = self.workspace_mode.allows_design_edits();
@@ -454,7 +457,7 @@ impl FramerApp {
             )
             .clicked()
             {
-                self.viewport_mode = ViewportMode::Plan;
+                self.set_authoring_viewport_mode(ViewportMode::Plan);
             }
             if view_tab(
                 ui,
@@ -464,7 +467,7 @@ impl FramerApp {
             )
             .clicked()
             {
-                self.viewport_mode = ViewportMode::Elevation;
+                self.set_authoring_viewport_mode(ViewportMode::Elevation);
             }
             if view_tab(
                 ui,
@@ -474,7 +477,7 @@ impl FramerApp {
             )
             .clicked()
             {
-                self.viewport_mode = ViewportMode::RoofPlan;
+                self.set_authoring_viewport_mode(ViewportMode::RoofPlan);
             }
             if view_tab(
                 ui,
@@ -484,17 +487,7 @@ impl FramerApp {
             )
             .clicked()
             {
-                self.viewport_mode = ViewportMode::Axonometric;
-            }
-            if view_tab(
-                ui,
-                ActionId::ViewRender,
-                "Render",
-                self.viewport_mode == ViewportMode::Render,
-            )
-            .clicked()
-            {
-                self.viewport_mode = ViewportMode::Render;
+                self.set_authoring_viewport_mode(ViewportMode::Axonometric);
             }
         });
     }

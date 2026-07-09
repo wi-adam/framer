@@ -67,6 +67,7 @@ pub(crate) struct FramerApp {
     command_search: CommandSearchState,
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
+    last_authoring_viewport: ViewportMode,
     view_3d: View3dState,
     /// Pan/zoom camera for the whole-project Plan ("shell") view.
     plan_view: View2dState,
@@ -165,6 +166,7 @@ enum Selection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceMode {
     Design,
+    Render,
     Plan,
 }
 
@@ -536,6 +538,7 @@ impl Default for FramerApp {
             command_search: CommandSearchState::default(),
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
+            last_authoring_viewport: ViewportMode::Plan,
             view_3d: View3dState::default(),
             plan_view: View2dState::default(),
             elevation_views: HashMap::new(),
@@ -791,6 +794,8 @@ impl FramerApp {
         self.room_tool_active = false;
         self.opening_drag = None;
         self.wall_drag = None;
+        self.viewport_mode = ViewportMode::Plan;
+        self.last_authoring_viewport = ViewportMode::Plan;
     }
 
     fn new_project(&mut self) {
@@ -1068,27 +1073,64 @@ impl FramerApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if mode == WorkspaceMode::Render && self.viewport_mode != ViewportMode::Render {
+            self.last_authoring_viewport = self.viewport_mode;
+        }
+        let leaving_render =
+            self.workspace_mode == WorkspaceMode::Render && mode != WorkspaceMode::Render;
+
         match mode {
             WorkspaceMode::Plan => self.command_tab = actions::WorkflowTab::Plan,
-            WorkspaceMode::Design if self.command_tab == actions::WorkflowTab::Plan => {
+            WorkspaceMode::Render => self.command_tab = actions::WorkflowTab::Render,
+            WorkspaceMode::Design
+                if matches!(
+                    self.command_tab,
+                    actions::WorkflowTab::Plan | actions::WorkflowTab::Render
+                ) =>
+            {
                 self.command_tab = actions::WorkflowTab::Frame;
             }
             WorkspaceMode::Design => {}
         }
 
         if self.workspace_mode == mode {
+            if mode == WorkspaceMode::Render {
+                self.viewport_mode = ViewportMode::Render;
+            }
             return;
         }
         self.workspace_mode = mode;
         self.opening_drag = None;
         match mode {
-            WorkspaceMode::Design => self.select_authored_for_design_mode(),
+            WorkspaceMode::Design => {
+                if leaving_render {
+                    self.viewport_mode = self.last_authoring_viewport;
+                }
+                self.select_authored_for_design_mode();
+            }
+            WorkspaceMode::Render => {
+                self.deactivate_placement_tools();
+                self.dimension_status = None;
+                self.viewport_mode = ViewportMode::Render;
+            }
             WorkspaceMode::Plan => {
                 self.dimension_tool.active = false;
                 self.dimension_tool.clear_picks();
+                if leaving_render {
+                    self.viewport_mode = self.last_authoring_viewport;
+                }
                 self.rebuild();
             }
         }
+    }
+
+    fn set_authoring_viewport_mode(&mut self, mode: ViewportMode) {
+        debug_assert_ne!(mode, ViewportMode::Render);
+        if self.workspace_mode == WorkspaceMode::Render {
+            self.set_workspace_mode(WorkspaceMode::Design);
+        }
+        self.viewport_mode = mode;
+        self.last_authoring_viewport = mode;
     }
 
     fn open_command_search(&mut self) {
@@ -1221,11 +1263,17 @@ impl FramerApp {
             actions::ActionId::LoadWallDemo => self.reset_wall_demo(),
             actions::ActionId::WorkspaceDesign => self.set_workspace_mode(WorkspaceMode::Design),
             actions::ActionId::WorkspacePlan => self.set_workspace_mode(WorkspaceMode::Plan),
-            actions::ActionId::ViewPlan => self.viewport_mode = ViewportMode::Plan,
-            actions::ActionId::ViewElevation => self.viewport_mode = ViewportMode::Elevation,
-            actions::ActionId::ViewRoof => self.viewport_mode = ViewportMode::RoofPlan,
-            actions::ActionId::View3d => self.viewport_mode = ViewportMode::Axonometric,
-            actions::ActionId::ViewRender => self.viewport_mode = ViewportMode::Render,
+            actions::ActionId::ViewPlan => self.set_authoring_viewport_mode(ViewportMode::Plan),
+            actions::ActionId::ViewElevation => {
+                self.set_authoring_viewport_mode(ViewportMode::Elevation);
+            }
+            actions::ActionId::ViewRoof => self.set_authoring_viewport_mode(ViewportMode::RoofPlan),
+            actions::ActionId::View3d => {
+                self.set_authoring_viewport_mode(ViewportMode::Axonometric);
+            }
+            actions::ActionId::ViewRender => {
+                self.select_workflow_tab(actions::WorkflowTab::Render);
+            }
             actions::ActionId::ToolWall => self.toggle_draw_wall_tool(),
             actions::ActionId::ToolRoom => self.toggle_room_tool(),
             actions::ActionId::ToolCeiling => self.toggle_ceiling_tool(),
@@ -3450,7 +3498,7 @@ impl eframe::App for FramerApp {
         // device (which the headless tests can't reach). Enable with
         // `--render-smoke-frames <frames>`.
         if let Some(frames_left) = self.render_smoke {
-            self.viewport_mode = ViewportMode::Render;
+            self.set_workspace_mode(WorkspaceMode::Render);
             if frames_left == 0 {
                 eprintln!(
                     "render smoke complete: {} samples accumulated",
@@ -3579,6 +3627,8 @@ mod tests {
     fn reset_tools_returns_workflow_commands_to_frame() {
         let mut app = FramerApp {
             command_tab: actions::WorkflowTab::Plan,
+            viewport_mode: ViewportMode::Render,
+            last_authoring_viewport: ViewportMode::Axonometric,
             dimension_tool: DimensionToolState {
                 active: true,
                 ..Default::default()
@@ -3594,6 +3644,8 @@ mod tests {
         app.reset_tools();
 
         assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert_eq!(app.viewport_mode, ViewportMode::Plan);
+        assert_eq!(app.last_authoring_viewport, ViewportMode::Plan);
         assert!(!app.dimension_tool.active);
         assert!(!app.draw_wall_tool.active);
         assert!(!app.room_tool_active);
@@ -4052,6 +4104,82 @@ mod tests {
 
         assert_eq!(app.workspace_mode, WorkspaceMode::Design);
         assert_eq!(app.selected, Selection::Wall);
+    }
+
+    #[test]
+    fn render_workflow_tab_enters_render_workspace_and_restores_authoring_view() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            draw_wall_tool: DrawWallToolState {
+                active: true,
+                previous_snap: None,
+                start: None,
+            },
+            dimension_tool: DimensionToolState {
+                active: true,
+                first_anchor: Some(DimensionAnchorPick {
+                    wall_index: 0,
+                    anchor: DimensionAnchor::WallStart,
+                }),
+                ..Default::default()
+            },
+            room_tool_active: true,
+            ceiling_tool_active: true,
+            vault_tool_active: true,
+            floor_tool_active: true,
+            dimension_status: Some("tool guidance".to_owned()),
+            ..Default::default()
+        };
+
+        app.select_workflow_tab(actions::WorkflowTab::Render);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+        assert_eq!(app.viewport_mode, ViewportMode::Render);
+        assert_eq!(app.last_authoring_viewport, ViewportMode::Axonometric);
+        assert!(!app.draw_wall_tool.active);
+        assert!(!app.dimension_tool.active);
+        assert_eq!(app.dimension_tool.first_anchor, None);
+        assert!(!app.room_tool_active);
+        assert!(!app.ceiling_tool_active);
+        assert!(!app.vault_tool_active);
+        assert!(!app.floor_tool_active);
+        assert_eq!(app.dimension_status, None);
+
+        app.select_workflow_tab(actions::WorkflowTab::Plan);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Plan);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Plan);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+
+        app.select_workflow_tab(actions::WorkflowTab::Render);
+        app.select_workflow_tab(actions::WorkflowTab::Frame);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+    }
+
+    #[test]
+    fn view_actions_route_through_render_workspace_boundary() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::RoofPlan,
+            ..Default::default()
+        };
+
+        app.execute_action(actions::ActionId::ViewRender);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+        assert_eq!(app.viewport_mode, ViewportMode::Render);
+        assert_eq!(app.last_authoring_viewport, ViewportMode::RoofPlan);
+
+        app.execute_action(actions::ActionId::View3d);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(app.last_authoring_viewport, ViewportMode::Axonometric);
     }
 
     #[test]

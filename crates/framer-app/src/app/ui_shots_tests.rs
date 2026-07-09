@@ -130,16 +130,20 @@ fn capture_ui_shot_deck() {
     let mut harness = shots_harness(design::studio_light());
     harness.run_ok();
 
-    // Workflow tabs (Design workspace), default Shell/Plan view.
+    // Workflow tabs, including the output workspaces.
     for (tab, name) in [
         (actions::WorkflowTab::Frame, "frame-shell"),
         (actions::WorkflowTab::Design, "design-tab"),
         (actions::WorkflowTab::Openings, "openings-tab"),
         (actions::WorkflowTab::Roofs, "roofs-tab"),
         (actions::WorkflowTab::Annotate, "annotate-tab"),
+        (actions::WorkflowTab::Render, "render-workspace"),
         (actions::WorkflowTab::Plan, "plan-workspace"),
     ] {
         select_tab(&mut harness, tab);
+        if tab == actions::WorkflowTab::Render {
+            warm_render(&mut harness);
+        }
         shot(&mut harness, &dir, &mut index, name);
     }
 
@@ -195,12 +199,8 @@ fn capture_ui_shot_deck() {
         (ViewportMode::Elevation, "wall-elevation-view"),
         (ViewportMode::RoofPlan, "roof-view"),
         (ViewportMode::Axonometric, "3d-view"),
-        (ViewportMode::Render, "render-view"),
     ] {
         harness.state_mut().viewport_mode = mode;
-        if mode == ViewportMode::Render {
-            warm_render(&mut harness);
-        }
         shot(&mut harness, &dir, &mut index, name);
     }
     harness.state_mut().viewport_mode = ViewportMode::Plan;
@@ -208,16 +208,12 @@ fn capture_ui_shot_deck() {
     // A roof-specific checkpoint: the default shell has no authored roof, so
     // capture the two views that caught regressions only after generating one.
     harness.state_mut().add_roof(RoofForm::Gable);
-    for (mode, name) in [
-        (ViewportMode::Axonometric, "roofed-3d-view"),
-        (ViewportMode::Render, "roofed-render-view"),
-    ] {
-        harness.state_mut().viewport_mode = mode;
-        if mode == ViewportMode::Render {
-            warm_render(&mut harness);
-        }
-        shot(&mut harness, &dir, &mut index, name);
-    }
+    harness.state_mut().viewport_mode = ViewportMode::Axonometric;
+    shot(&mut harness, &dir, &mut index, "roofed-3d-view");
+    select_tab(&mut harness, actions::WorkflowTab::Render);
+    warm_render(&mut harness);
+    shot(&mut harness, &dir, &mut index, "roofed-render-view");
+    select_tab(&mut harness, actions::WorkflowTab::Frame);
     harness.state_mut().viewport_mode = ViewportMode::Plan;
 
     let mut small = shots_harness_with_size(design::studio_light(), egui::vec2(1040.0, 680.0));
@@ -231,16 +227,11 @@ fn capture_ui_shot_deck() {
         .expect("demo shell has a back wall");
     small.state_mut().selected_wall = small_back_wall_index;
     small.state_mut().selected = Selection::Wall;
-    for (mode, name) in [
-        (ViewportMode::Axonometric, "small-3d-view"),
-        (ViewportMode::Render, "small-render-view"),
-    ] {
-        small.state_mut().viewport_mode = mode;
-        if mode == ViewportMode::Render {
-            warm_render(&mut small);
-        }
-        shot(&mut small, &dir, &mut index, name);
-    }
+    small.state_mut().viewport_mode = ViewportMode::Axonometric;
+    shot(&mut small, &dir, &mut index, "small-3d-view");
+    select_tab(&mut small, actions::WorkflowTab::Render);
+    warm_render(&mut small);
+    shot(&mut small, &dir, &mut index, "small-render-view");
     drop(small);
 
     // Overlay surfaces: the command palette, diagnostics popover, then the
@@ -275,7 +266,7 @@ fn capture_ui_shot_deck() {
     dark.state_mut().selected_wall = dark_back_wall_index;
     dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
-    dark.state_mut().viewport_mode = ViewportMode::Render;
+    select_tab(&mut dark, actions::WorkflowTab::Render);
     warm_render(&mut dark);
     shot(&mut dark, &dir, &mut index, "dark-render-view");
 

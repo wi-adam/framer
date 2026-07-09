@@ -80,6 +80,7 @@ pub(crate) enum CommandSurface {
     AppQuickAccess,
     ProjectMenu,
     ExamplesPicker,
+    WorkflowTabStrip,
     WorkspaceViewBar,
     WorkflowCommandStrip,
     CommandStripFlyout,
@@ -99,6 +100,7 @@ pub(crate) enum WorkflowTab {
     Roofs,
     Annotate,
     Inspect,
+    Render,
     Plan,
 }
 
@@ -386,9 +388,9 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         id: ActionId::ViewRender,
         label: "Render",
         icon: Icon::ThemeLight,
-        tooltip: "Show the path-traced render view",
-        owner: ActionOwner::View,
-        primary_surface: CommandSurface::WorkspaceViewBar,
+        tooltip: "Open the path-traced Render workspace",
+        owner: ActionOwner::Workspace,
+        primary_surface: CommandSurface::WorkflowTabStrip,
         secondary_surfaces: SEARCH_SHORTCUT,
         command_strip: None,
         mutates_authored_intent: false,
@@ -873,7 +875,6 @@ mod tests {
             ActionId::ViewElevation,
             ActionId::ViewRoof,
             ActionId::View3d,
-            ActionId::ViewRender,
             ActionId::DeleteSelection,
         ] {
             assert_ne!(
@@ -882,6 +883,19 @@ mod tests {
                 "{id:?} is routed away from permanent command-strip space"
             );
         }
+    }
+
+    #[test]
+    fn render_action_is_classified_as_an_output_workspace() {
+        let action = metadata(ActionId::ViewRender);
+
+        assert_eq!(action.search_category(), "Workspace");
+        assert_eq!(action.primary_surface, CommandSurface::WorkflowTabStrip);
+        assert!(
+            action.tooltip.contains("Render workspace"),
+            "Render command search result should describe the output workspace"
+        );
+        assert!(action.command_strip.is_none());
     }
 
     #[test]
