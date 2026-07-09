@@ -375,7 +375,9 @@ fn workflow_command_strip_routes_tabbed_panels() {
     let mut harness = demo_harness();
     harness.run();
 
-    for tab in ["Design", "Frame", "Openings", "Roofs", "Annotate", "Plan"] {
+    for tab in [
+        "Design", "Frame", "Openings", "Roofs", "Annotate", "Render", "Plan",
+    ] {
         assert!(
             harness.query_all_by_label(tab).next().is_some(),
             "workflow tab '{tab}' should be visible"
@@ -440,6 +442,11 @@ fn workflow_command_strip_routes_tabbed_panels() {
         harness.query_all_by_label("Section").next().is_some(),
         "Plan tab should expose generated-plan tools"
     );
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+    assert_eq!(harness.state().viewport_mode, ViewportMode::Render);
 
     harness.get_by_label("Frame").click();
     harness.run();
@@ -537,6 +544,7 @@ fn command_surfaces_remain_reachable_at_minimum_window_size() {
         harness.run();
         assert_accessible_button(&harness, expected_label, panels::workflow_tab_label(tab));
     }
+    assert_accessible_label(&harness, "Render", "minimum-width workflow tabs");
 
     harness.get_by_label("Commands").click();
     harness.run();
@@ -824,7 +832,7 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
     let mut harness = demo_harness();
     harness.run();
 
-    for label in ["Shell", "Wall", "Roof", "3D", "Render"] {
+    for label in ["Shell", "Wall", "Roof", "3D"] {
         assert!(
             harness.query_all_by_label(label).next().is_some(),
             "workspace/view bar should expose '{label}'"
@@ -875,10 +883,19 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
 
     harness.get_by_label("Render").click();
     harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Render);
     assert_eq!(harness.state().viewport_mode, ViewportMode::Render);
+    for hidden_view in ["Shell", "Roof", "3D"] {
+        assert!(
+            harness.query_all_by_label(hidden_view).next().is_none(),
+            "Render workspace should hide the authoring view tab '{hidden_view}'"
+        );
+    }
 
-    harness.get_by_label("Roof").click();
+    harness.state_mut().execute_action(ActionId::ViewRoof);
     harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Design);
     assert_eq!(harness.state().viewport_mode, ViewportMode::RoofPlan);
 
     harness.get_by_label("3D").click();

@@ -287,6 +287,7 @@ impl FramerApp {
     pub(super) fn select_workflow_tab(&mut self, tab: WorkflowTab) {
         self.command_tab = tab;
         match tab {
+            WorkflowTab::Render => self.set_workspace_mode(WorkspaceMode::Render),
             WorkflowTab::Plan => self.set_workspace_mode(WorkspaceMode::Plan),
             WorkflowTab::Design
             | WorkflowTab::Frame
@@ -357,6 +358,7 @@ impl FramerApp {
                 });
             }
             WorkflowTab::Inspect => {}
+            WorkflowTab::Render => {}
             WorkflowTab::Plan => {
                 widgets::command_panel(ui, "Generated", |ui| {
                     if action_tool_button(ui, ActionId::ToggleSection, self.show_section, true)
@@ -2892,6 +2894,7 @@ impl FramerApp {
     fn workspace_badge(&self) -> &'static str {
         match self.workspace_mode {
             WorkspaceMode::Design => "Design",
+            WorkspaceMode::Render => "Render",
             WorkspaceMode::Plan => "Plan",
         }
     }
@@ -3596,7 +3599,7 @@ const AUTHORING_WORKFLOW_TABS: &[WorkflowTab] = &[
     // stays hidden while it would render an empty command strip.
 ];
 
-const OUTPUT_WORKFLOW_TABS: &[WorkflowTab] = &[WorkflowTab::Plan];
+const OUTPUT_WORKFLOW_TABS: &[WorkflowTab] = &[WorkflowTab::Render, WorkflowTab::Plan];
 const STATUS_TOAST_SECONDS: f64 = 4.0;
 
 pub(crate) fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
@@ -3607,6 +3610,7 @@ pub(crate) fn workflow_tab_label(tab: WorkflowTab) -> &'static str {
         WorkflowTab::Roofs => "Roofs",
         WorkflowTab::Annotate => "Annotate",
         WorkflowTab::Inspect => "Inspect",
+        WorkflowTab::Render => "Render",
         WorkflowTab::Plan => "Plan",
     }
 }
