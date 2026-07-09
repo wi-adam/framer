@@ -1,14 +1,23 @@
 mod app;
+mod app_config;
 
 use std::sync::Arc;
 
 fn main() -> eframe::Result {
     env_logger::init();
+    let app_config = match app_config::load() {
+        Ok(config) => config,
+        Err(app_config::AppConfigError::Cli(error)) => error.exit(),
+        Err(error) => {
+            eprintln!("failed to load Framer configuration: {error}");
+            std::process::exit(2);
+        }
+    };
 
     let options = eframe::NativeOptions {
         depth_buffer: 24,
         renderer: eframe::Renderer::Wgpu,
-        wgpu_options: wgpu_options(),
+        wgpu_options: wgpu_options(app_config.render.ray_query),
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([1040.0, 680.0])
@@ -19,11 +28,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Framer",
         options,
-        Box::new(|cc| Ok(Box::new(app::FramerApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::FramerApp::new(cc, app_config.clone())))),
     )
 }
 
-fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+fn wgpu_options(ray_query_enabled: bool) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::WgpuSetup;
     use eframe::wgpu;
 
@@ -32,7 +41,7 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
         return config;
     };
 
-    setup.device_descriptor = Arc::new(|adapter| {
+    setup.device_descriptor = Arc::new(move |adapter| {
         let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
             wgpu::Limits::downlevel_webgl2_defaults()
         } else {
@@ -47,7 +56,7 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
         };
         let mut experimental_features = wgpu::ExperimentalFeatures::disabled();
 
-        if env_flag_enabled("FRAMER_RENDER_RAY_QUERY")
+        if ray_query_enabled
             && adapter
                 .features()
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
@@ -70,13 +79,4 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     });
 
     config
-}
-
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }

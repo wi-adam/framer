@@ -10,11 +10,11 @@
 //!
 //! GPU resources are cached in `egui_wgpu::CallbackResources` and rebuilt only on
 //! target-format, scene-geometry, backend, or resolution changes. The default
-//! backend traverses Framer's own BVH in WGSL. When the app was started with
-//! `FRAMER_RENDER_RAY_QUERY=1` and the wgpu device exposes
-//! `EXPERIMENTAL_RAY_QUERY`, an experimental backend uses hardware ray-query
-//! traversal over a BLAS/TLAS instead. When the adapter lacks compute support the
-//! caller falls back to the CPU renderer (`render_job`).
+//! backend traverses Framer's own BVH in WGSL. When runtime configuration enables
+//! ray-query rendering and the wgpu device exposes `EXPERIMENTAL_RAY_QUERY`, an
+//! experimental backend uses hardware ray-query traversal over a BLAS/TLAS
+//! instead. When the adapter lacks compute support the caller falls back to the
+//! CPU renderer (`render_job`).
 
 use std::sync::Arc;
 
@@ -121,8 +121,8 @@ pub(crate) enum PathTraceBackend {
 }
 
 impl PathTraceBackend {
-    pub(crate) fn from_env(ray_query_supported: bool) -> Self {
-        if ray_query_supported && env_flag_enabled("FRAMER_RENDER_RAY_QUERY") {
+    pub(crate) fn from_config(ray_query_supported: bool, ray_query_enabled: bool) -> Self {
+        if ray_query_supported && ray_query_enabled {
             Self::RayQuery
         } else {
             Self::ComputeBvh
@@ -142,15 +142,6 @@ impl PathTraceBackend {
             Self::RayQuery => "GPU ray query",
         }
     }
-}
-
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn ray_query_wgsl() -> String {

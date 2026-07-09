@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_core::{
     BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
@@ -47,6 +48,7 @@ use project_io::{DEFAULT_PROJECT_PATH, compliance_report_path, export_paths, wri
 use viewport::{View2dState, View3dState, WallDragEvent};
 
 pub(crate) struct FramerApp {
+    config: AppConfig,
     model: BuildingModel,
     selected_wall: usize,
     selected: Selection,
@@ -98,8 +100,8 @@ pub(crate) struct FramerApp {
     /// Whether the active wgpu device has experimental ray-query support enabled;
     /// when true, the Render view may opt into hardware traversal.
     gpu_ray_query_ok: bool,
-    /// Smoke test for the GPU path-trace callback: when `FRAMER_RENDER_SMOKE=N`
-    /// is set, force the Render view for N frames then close. `None` normally.
+    /// Smoke test for the GPU path-trace callback: when configured, force the
+    /// Render view for N frames then close. `None` normally.
     render_smoke: Option<u32>,
     show_section: bool,
     /// Visual-layering state for the Plan and 3D views (wall display mode +
@@ -514,6 +516,7 @@ fn dimension_axis_name(axis: DimensionAxis) -> &'static str {
 impl Default for FramerApp {
     fn default() -> Self {
         let mut app = Self {
+            config: AppConfig::default(),
             model: BuildingModel::demo_shell(),
             selected_wall: 0,
             selected: Selection::Wall,
@@ -564,12 +567,14 @@ impl Default for FramerApp {
 }
 
 impl FramerApp {
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, config: AppConfig) -> Self {
         let theme = design::theme_from_storage(cc.storage);
         design::install(&cc.egui_ctx, theme);
 
         let render_state = cc.wgpu_render_state.as_ref();
+        let render_smoke = config.render.smoke_frames;
         Self {
+            config,
             gpu_target_format: render_state.map(|rs| rs.target_format),
             // The GPU path tracer needs compute shaders; otherwise fall back to CPU.
             gpu_compute_ok: render_state.is_some_and(|rs| {
@@ -583,9 +588,7 @@ impl FramerApp {
                     .features()
                     .contains(eframe::wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             }),
-            render_smoke: std::env::var("FRAMER_RENDER_SMOKE")
-                .ok()
-                .map(|v| v.parse().unwrap_or(180)),
+            render_smoke,
             ..Self::default()
         }
     }
@@ -3442,7 +3445,7 @@ impl eframe::App for FramerApp {
         // Smoke test: drive the GPU Render view for a fixed number of frames,
         // then close. Exercises the egui_wgpu compute+blit callback on the real
         // device (which the headless tests can't reach). Enable with
-        // `FRAMER_RENDER_SMOKE=<frames> cargo run -p framer-app`.
+        // `--render-smoke-frames <frames>`.
         if let Some(frames_left) = self.render_smoke {
             self.viewport_mode = ViewportMode::Render;
             if frames_left == 0 {

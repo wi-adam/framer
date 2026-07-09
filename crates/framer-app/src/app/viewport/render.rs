@@ -146,7 +146,10 @@ impl FramerApp {
         // background-thread CPU renderer when compute isn't available.
         let (samples, target, accumulating, renderer) =
             if let (true, Some(format)) = (self.gpu_compute_ok, self.gpu_target_format) {
-                let backend = path_render::PathTraceBackend::from_env(self.gpu_ray_query_ok);
+                let backend = path_render::PathTraceBackend::from_config(
+                    self.gpu_ray_query_ok,
+                    self.config.render.ray_query,
+                );
                 let prepared = path_render::paint(
                     &mut self.render_gpu,
                     &painter,
