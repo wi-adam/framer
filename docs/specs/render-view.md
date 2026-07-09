@@ -232,22 +232,23 @@ What shipped:
   before `finish`), fullscreen blit in `paint`. Pipelines/buffers cached in
   `CallbackResources`, rebuilt on target-format / scene-hash / resolution change;
   progressive accumulation via `request_repaint`, reset on camera/model change.
-- **Experimental ray-query backend** (`FRAMER_RENDER_RAY_QUERY=1`): when the
-  active native `wgpu` adapter exposes `EXPERIMENTAL_RAY_QUERY`, the app requests
-  the feature and the Render view may swap the software WGSL BVH traversal for a
-  BLAS/TLAS-backed `ray_query` shader. The default path remains the software BVH
-  compute shader, and `framer-render`'s CPU tracer remains the correctness
-  reference.
+- **Experimental ray-query backend**: when
+  [app runtime configuration](app-configuration.md) enables `render.ray_query`
+  and the active native `wgpu` adapter exposes `EXPERIMENTAL_RAY_QUERY`, the app
+  requests the feature and the Render view may swap the software WGSL BVH
+  traversal for a BLAS/TLAS-backed `ray_query` shader. The default path remains
+  the software BVH compute shader, and `framer-render`'s CPU tracer remains the
+  correctness reference.
 - **Validation** (`framer-app/tests/gpu_parity.rs`, headless `wgpu`, skips
   gracefully without an adapter): (1) the GPU PCG reproduces the CPU canary +
   `pixel_rng` bit-for-bit; (2) the compute kernel renders the golden reference
   scene and matches `framer_render::render` (MAE ≈ 0.03, max < 48 at 64 spp);
   (3) the actual blit shader renders to an offscreen target and matches the CPU
   reference (validating Y-orientation, ACES, and sRGB). The in-app
-  `CallbackTrait` wiring is exercised by a `FRAMER_RENDER_SMOKE=<frames>` startup
-  hook that drives the Render view on the real device and closes cleanly. macOS
-  screen-capture is bypassed entirely — egui's framebuffer readback path is used,
-  not OS screen capture.
+  `CallbackTrait` wiring is exercised by the `render.smoke_frames` config value
+  or `--render-smoke-frames <frames>` startup flag, which drives the Render view
+  on the real device and closes cleanly. macOS screen-capture is bypassed
+  entirely — egui's framebuffer readback path is used, not OS screen capture.
 
 ## Risks & mitigations
 

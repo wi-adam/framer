@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+clap.workspace = true
+config.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
 env_logger.workspace = true
 framer-core.workspace = true
@@ -14,6 +16,7 @@ framer-library.workspace = true
 framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true
 framer-standards.workspace = true
+serde.workspace = true
 
 # The headless UI smoke tests drive the app through the AccessKit tree only and
 # stay GPU-less/deterministic (they never opt into a renderer). The `wgpu` and

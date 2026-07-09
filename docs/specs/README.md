@@ -16,6 +16,7 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | [2D View Camera (Pan / Zoom)](2d-view-camera.md) | G-003 | Implemented |
 | [View Layers (Wall Display Modes & Visibility)](view-layers.md) | G-003 | Implemented |
 | [Render View Mode](render-view.md) | — | Implemented |
+| [App Configuration](app-configuration.md) | — | Implemented |
 | [Undo / Redo Infrastructure](undo-redo.md) | — | Implemented |
 | [Design System](design-system.md) | G-011 | Implemented (evolving) |
 | [Command Surfaces](command-surfaces.md) | G-011 | Implemented |
