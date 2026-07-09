@@ -285,6 +285,7 @@ impl FramerApp {
     }
 
     pub(super) fn select_workflow_tab(&mut self, tab: WorkflowTab) {
+        let previous_tab = self.command_tab;
         self.command_tab = tab;
         match tab {
             WorkflowTab::Render => self.set_workspace_mode(WorkspaceMode::Render),
@@ -294,7 +295,12 @@ impl FramerApp {
             | WorkflowTab::Openings
             | WorkflowTab::Roofs
             | WorkflowTab::Annotate
-            | WorkflowTab::Inspect => self.set_workspace_mode(WorkspaceMode::Design),
+            | WorkflowTab::Inspect => {
+                self.set_workspace_mode(WorkspaceMode::Design);
+                if previous_tab != tab {
+                    self.apply_soft_default_view_for_tab(tab);
+                }
+            }
         }
     }
 
