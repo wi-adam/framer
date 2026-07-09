@@ -4,10 +4,13 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented · **Linked goal:** G-011 (CAD Workspace UX) ·
+> **Status:** Implemented; view–workflow alignment (Render output tab, soft default
+> views, applicability gating, render settings, view-strip restyle) specced
+> 2026-07-08, not yet built · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
-> [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md) ·
-> **Last reviewed:** 2026-07-07
+> [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
+> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
+> **Last reviewed:** 2026-07-08
 
 ## Intent / Purpose
 
@@ -95,15 +98,43 @@ workbench, but purpose-built for wood-framed structures.
   UI: primary surface, secondary surface, enabled context, icon, label, tooltip,
   shortcut if any, undo label if model-mutating, and owning module.
 - The workflow command strip is tabbed by workflow (`Design`, `Frame`, `Openings`,
-  `Roofs`, `Annotate`, `Inspect`, `Plan`) and each tab contains compact command
+  `Roofs`, `Annotate`, `Inspect`, `Render`, `Plan`) and each tab contains compact command
   panels with small icons, short labels, dividers, and flyout arrows where variants
   belong. A workflow tab that currently has no commands ships **hidden** (today:
   `Inspect`) rather than rendering an empty strip. The strip keeps a constant
   height across tabs so switching never reflows the panels below.
-- The workflow tab strip is also the **workspace control**: selecting `Plan`
-  enters the Plan workspace, selecting any authoring tab returns to the Design
-  workspace, and the `Plan` tab is visually separated as an output tab. There is
-  no standalone workspace switcher row.
+- The workflow tab strip is also the **workspace control**: selecting an output
+  tab (`Render`, `Plan`) enters that output workspace, selecting any authoring
+  tab returns to the Design workspace, and the output tabs are visually
+  separated from the authoring tabs. There is no standalone workspace switcher
+  row.
+- The view tabs list **authoring cameras only** (`Shell`, `Wall/Elevation`,
+  `Roof`, `3D`), rendered as a compact segmented control in the viewport header
+  — not small floating text. `Render` is not a view tab; it is the Render
+  output workflow tab. The view strip is hidden in the Render workspace (that
+  workspace has exactly one view). Entering the Render workspace remembers the
+  current authoring view and restores it when an authoring tab is reselected.
+- Each authoring workflow tab has a **soft default view**, applied on tab switch
+  only when the current view does not already serve the tab (the 3D view serves
+  every authoring tab): `Design` → Shell, `Frame` → Shell, `Openings` → Wall
+  (the selected wall's elevation, when a wall is selected), `Roofs` → Roof,
+  `Annotate` → Wall. After the switch the view remains freely switchable — the
+  default never locks.
+- Within the authoring workspace, tool activation keeps the existing
+  **auto-snap**: activating a tool from any authoring view switches to the view
+  the tool operates in. In output workspaces (`Render`, `Plan`) authoring tools
+  are **disabled with an explanatory tooltip** rather than auto-snapping —
+  leaving an output workspace is an explicit workflow-tab choice.
+- Command applicability is **data, not call-site booleans**: each action's
+  metadata names its enabling context, and every surface (command strip, menus,
+  palette) derives disabled state and tooltip from the same `action_enabled` /
+  `action_disabled_reason` pair. No surface hard-codes a command as
+  always-enabled.
+- The Render workflow tab hosts **render settings** panels (sun direction,
+  environment/exposure, quality) surfacing the engine's existing
+  `RenderOptions`. Render settings are session view state, not authored model
+  data — no `.framer` schema change — and any settings change resets
+  progressive accumulation. See [render-view.md](render-view.md).
 - Disabled commands state their enabling context in a tooltip ("Available in the
   Plan workspace"), on every surface (menus, strip, palette).
 - Command search entries display a human-readable category and the command's
@@ -155,8 +186,9 @@ workbench, but purpose-built for wood-framed structures.
 | --- | --- | --- | --- |
 | Project/document actions (`New`, `Open`, `Save`, profile, help, theme) | App/quick-access bar or project menu | Command search / shortcuts | Workflow command strip |
 | Sample/demo loaders | Project menu or examples picker | Command search | Workflow command strip |
-| Workspace mode (`Design`, `Plan`) | Workflow tab strip (`Plan` tab = Plan workspace) | Command search | A second standalone switcher row |
-| View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`, `Render`) | Workspace/view tabs or view bar | Command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns |
+| Workspace mode (`Design`, `Render`, `Plan`) | Workflow tab strip (output tabs `Render`/`Plan` = output workspaces) | Command search | A second standalone switcher row |
+| View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`) | Viewport view tabs (segmented control) | Command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns; a `Render` view tab |
+| Render settings (sun, environment, exposure, quality) | Render workflow tab panels | Command search | Always-visible authoring chrome; inspector |
 | Diagnostics (errors, warnings, unsupported, info) | Status-bar counters → diagnostics popover | Plan workspace inspector / command search | Visible-but-dead counters; buried in a single workspace |
 | Drafting/view state (`Grid`, `Snap`, `Ortho`, layers) | Status/view-control bar | Command search | Inspector property rows |
 | Modal authoring tools (`Wall`, `Room`, `Ceiling`, `Floor`, `Dimension`) | Workflow command strip tab/panel | Shortcuts / command search | Inspector |
@@ -202,6 +234,26 @@ workbench, but purpose-built for wood-framed structures.
   `Plan` workflow tab *is* the Plan workspace; view tabs remain the view-mode
   control; the floating on-canvas 2D/3D dropdown is removed (nav cube + view tabs
   cover it).
+- **Render is an output workflow tab** (decided 2026-07-08): rendering is
+  producing an output, exactly like Plan — `Render` moves out of the view strip
+  into the output tab group (`Render`, `Plan`), enters a Render workspace on
+  selection, and owns the render-settings strip. This generalizes the
+  Plan-as-workflow-tab pattern instead of adding a new mechanism, and it
+  removes the worst workflow-tab × view mismatches (a modeling ribbon over a
+  path-traced view).
+- **Authoring tabs set a soft default view** (decided 2026-07-08): a workflow
+  tab switch jumps to the tab's natural view unless the current view already
+  serves that tab; the user can switch away immediately. This makes the
+  pre-existing tool-forces-view behavior legible at tab-switch time instead of
+  surprising at tool-activation time.
+- **Auto-snap inside authoring, hard-disable across workspaces** (decided
+  2026-07-08): a tool activated from a different authoring view snaps the view
+  (fast, low ceremony); a tool that would require leaving an output workspace
+  is disabled with a tooltip naming its enabling context.
+- **Render settings are session view state** (decided 2026-07-08): they do not
+  touch the `.framer` schema. If persistence is wanted later it rides
+  [app configuration](app-configuration.md) or a deliberate schema bump — a
+  separate spec change.
 - **Search as universal backstop:** once implemented, command search is the route
   for commands that are useful but not worth permanent chrome.
 - **No core command dependency:** command metadata and rendering live in
@@ -229,7 +281,8 @@ workbench, but purpose-built for wood-framed structures.
   that depend on canvas selection or placement state.
 - `crates/framer-app/src/app/actions.rs` holds lightweight command metadata
   (`ActionId`, workflow tab, panel, surfaces, labels, icons, flyout membership,
-  and intent-mutation flags) without becoming a generic command bus. Actual
+  enabling context, and intent-mutation flags) without becoming a generic
+  command bus. Actual
   mutations continue routing through existing `FramerApp` methods such as
   `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`, `undo`,
   and `redo`; command search reads this metadata and dispatches back through
@@ -265,3 +318,5 @@ workbench, but purpose-built for wood-framed structures.
 
 - Should object insertion use a single catalog surface for doors/windows/roof forms,
   or separate host-aware Add menus in the canvas and inspector?
+- Should render settings later persist per project (schema bump) or per user
+  (app configuration)? Session-only until decided.
