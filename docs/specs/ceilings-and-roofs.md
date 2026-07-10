@@ -19,13 +19,15 @@
 > eave/rake overhangs drive one shared derived roof outline in plan, 3-D, Render,
 > picking, and takeoff; generated roof members carry explicit plan endpoints and
 > appear in Plan-mode 3-D; and simple matched gables derive their wall infill,
-> studs, and rake plates from the authored walls plus roof planes ·
+> studs, and rake plates from the authored walls plus roof planes; generated common
+> stick rafters show plumb tail/ridge cuts and a wall-bearing birdsmouth in Plan-mode 3-D ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
 > [2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md) ·
 > [2026-07-09 — v3](../plans/2026-07-09-roof-overhangs-framing-gable-walls.md) ·
-> **Last reviewed:** 2026-07-09
+> [2026-07-10 — rafter cuts](../plans/2026-07-10-rafter-cuts.md) ·
+> **Last reviewed:** 2026-07-10
 
 ## Intent / Purpose
 
@@ -215,6 +217,17 @@ persisted intent or the `.framer` schema.
   non-buildable end slivers/overlapping near-apex marks are omitted. Wall and project elevation
   SVGs include the full gable height and draw rake plates as slopes. Hip ends, sheds, interior
   walls, incomplete or mismatched roof edges, and overhang-only geometry do not synthesize a gable.
+- **Common stick rafters show their construction cuts in the generated 3-D plan.** A
+  `MemberKind::Rafter` belonging to a roof system whose framing family is `Rafter` is meshed with
+  vertical (plumb) tail and ridge faces instead of square crosscuts. When the authored eave exactly
+  matches a wall bearing line and the rafter has enough tail stock, it also receives a horizontal
+  birdsmouth seat sized from the matched wall framing member's nominal depth; the notch is
+  geometrically capped so it cannot consume the rafter section. A manually floating or unmatched
+  roof keeps the plumb cuts but omits the birdsmouth rather than inventing a bearing. Ridge boards,
+  blocking, hip/valley/jack members,
+  rake plates, and roof systems tagged `Truss` keep their existing member geometry. This is derived
+  Plan-mode presentation only: authored roof intent, `.framer` schema v13, and BOM cut lengths do
+  not change.
 
 ## Decisions (locked)
 

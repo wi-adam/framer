@@ -29,8 +29,9 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use framer_solver::MemberKind;
 
-use super::{FramerApp, RoofForm, Selection, ViewportMode, actions, design};
+use super::{FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, actions, design};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -218,6 +219,45 @@ fn capture_ui_shot_deck() {
     harness.ctx.request_repaint();
     harness.run_steps(2);
     shot(&mut harness, &dir, &mut index, "roofed-plan-3d-view");
+    let full_roof_plan = harness.state().project_plan.clone();
+    let full_wall_display = harness.state().layers.wall_display;
+    harness.state_mut().layers.wall_display = WallDisplay::Outline;
+    // Isolate one interior common rafter per field for the two construction-detail
+    // shots; the full generated plan above remains the product-state checkpoint.
+    if let Some(plan) = harness.state_mut().project_plan.as_mut() {
+        for roof in &mut plan.roof_plans {
+            let rafters: Vec<_> = roof
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::Rafter)
+                .map(|member| member.id.clone())
+                .collect();
+            let middle = rafters.get(rafters.len() / 2).cloned();
+            roof.members
+                .retain(|member| Some(&member.id) == middle.as_ref());
+        }
+    }
+    harness.state_mut().view_3d = super::viewport::View3dState::roof_framing_detail_shot();
+    harness.ctx.request_repaint();
+    harness.run_steps(2);
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "roofed-plan-rafter-ridge-cuts-detail",
+    );
+    harness.state_mut().view_3d = super::viewport::View3dState::roof_framing_eave_detail_shot();
+    harness.ctx.request_repaint();
+    harness.run_steps(2);
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "roofed-plan-rafter-birdsmouth-detail",
+    );
+    harness.state_mut().project_plan = full_roof_plan;
+    harness.state_mut().layers.wall_display = full_wall_display;
+    harness.state_mut().view_3d = Default::default();
     select_tab(&mut harness, actions::WorkflowTab::Render);
     warm_render(&mut harness);
     shot(&mut harness, &dir, &mut index, "roofed-render-view");

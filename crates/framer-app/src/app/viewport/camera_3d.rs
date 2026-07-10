@@ -132,6 +132,26 @@ impl Default for View3dState {
 }
 
 impl View3dState {
+    #[cfg(test)]
+    pub(crate) fn roof_framing_detail_shot() -> Self {
+        Self {
+            zoom: 3.0,
+            pan: Vec3::new(0.0, 0.0, 0.28),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn roof_framing_eave_detail_shot() -> Self {
+        Self {
+            yaw: -FRAC_PI_2,
+            pitch: 0.05,
+            zoom: 3.0,
+            pan: Vec3::new(0.0, -0.55, 0.16),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn orbit(&mut self, delta: Vec2) {
         self.yaw += delta.x * 0.01;
         self.pitch = (self.pitch - delta.y * 0.01).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);

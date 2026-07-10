@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{Color32, Pos2, Rgba};
 use framer_core::{
     AssemblyFace, BuildingModel, ConstructionSystem, ElementId, GableWallProfile, Length, Material,
-    Point2, RoofPlane, SurfaceRegion, Wall,
+    MemberFamily, Point2, RoofPlane, SurfaceRegion, Wall,
 };
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
 
@@ -148,9 +148,13 @@ impl Scene3d {
 
             // Roof members are no longer reconstructed from wall-local x/run data:
             // every solver member carries exact plan endpoints plus absolute endpoint
-            // elevations, so arbitrary common/ridge/hip/valley directions share one
-            // spatial board-prism path.
+            // elevations, so arbitrary ridge/hip/valley directions share one
+            // spatial board-prism path while common stick rafters add their cut profile.
             for roof_plan in &plan.roof_plans {
+                let roof_plane = model
+                    .roof_planes
+                    .iter()
+                    .find(|plane| plane.id == roof_plan.roof);
                 for member in &roof_plan.members {
                     let source_selected =
                         matches!(selection, Selection::RoofPlane(id) if id == &roof_plan.roof.0);
@@ -161,7 +165,7 @@ impl Scene3d {
                     );
                     let color =
                         highlighted_member_color(member.kind, source_selected, member_selected);
-                    builder.push_spatial_member(&roof_plan.roof, member, color);
+                    builder.push_roof_member(model, roof_plane, &roof_plan.roof, member, color);
                 }
             }
         }
@@ -288,6 +292,33 @@ impl Scene3d {
 }
 
 impl SceneBuilder {
+    fn push_roof_member(
+        &mut self,
+        model: &BuildingModel,
+        plane: Option<&RoofPlane>,
+        host_id: &ElementId,
+        member: &FrameMember,
+        color: Color32,
+    ) {
+        let is_common_stick_rafter = member.kind == MemberKind::Rafter
+            && plane.is_some_and(|plane| {
+                roof_member_family(model, plane) == Some(MemberFamily::Rafter)
+            });
+        if is_common_stick_rafter
+            && let Some(plane) = plane
+            && self.push_common_rafter(
+                host_id,
+                plane,
+                member,
+                matched_bearing_depth(model, plane),
+                color,
+            )
+        {
+            return;
+        }
+        self.push_spatial_member(host_id, member, color);
+    }
+
     fn push_member(
         &mut self,
         wall: &Wall,
@@ -561,6 +592,55 @@ impl SceneBuilder {
         ));
     }
 
+    /// Mesh one generated common stick rafter with vertical tail/ridge faces and,
+    /// when its authored eave exactly matches a wall, a horizontal birdsmouth
+    /// seat. The solver's endpoints and BOM length remain unchanged; this is the
+    /// Plan-mode construction-detail presentation of that derived member.
+    fn push_common_rafter(
+        &mut self,
+        host_id: &ElementId,
+        plane: &RoofPlane,
+        member: &FrameMember,
+        bearing_depth: Option<Length>,
+        color: Color32,
+    ) -> bool {
+        let Some(sloped) = member.sloped else {
+            return false;
+        };
+        let start = Point3::vector(
+            sloped.start.x.inches() as f32,
+            sloped.start.y.inches() as f32,
+            sloped.low_elevation.inches() as f32,
+        );
+        let end = Point3::vector(
+            sloped.end.x.inches() as f32,
+            sloped.end.y.inches() as f32,
+            sloped.high_elevation.inches() as f32,
+        );
+        let Some(prism) = RafterPrism::new(
+            start,
+            end,
+            member.cross_section_depth.inches() as f32,
+            member.side_offset.inches() as f32,
+            (member.side_offset + member.side_depth).inches() as f32,
+            plane,
+            bearing_depth.map(|depth| depth.inches() as f32),
+        ) else {
+            return false;
+        };
+        self.push_profile_prism(&prism, color_to_rgba(color));
+        self.picks.push(PickSolid::mesh(
+            ViewClick::Member {
+                source_id: host_id.0.clone(),
+                member_id: member.id.clone(),
+            },
+            3,
+            prism.points.clone(),
+            prism.triangles.clone(),
+        ));
+        true
+    }
+
     /// A wall-owned rake plate follows explicit spatial endpoints but keeps wall
     /// construction axes: the framing-band depth spans through the wall and the
     /// board thickness drops inside the gable plane below the roof rake.
@@ -761,6 +841,13 @@ impl SceneBuilder {
         }
     }
 
+    fn push_profile_prism(&mut self, prism: &RafterPrism, color: [f32; 4]) {
+        self.points.extend_from_slice(&prism.points);
+        for &triangle in &prism.triangles {
+            self.push_triangle(triangle.map(|index| prism.points[index]), color);
+        }
+    }
+
     fn push_gable_prism(&mut self, prism: &GablePrism, color: [f32; 4]) {
         self.points.extend(prism.corners);
         for face in GABLE_TRIANGLE_FACES {
@@ -891,7 +978,8 @@ impl SceneBuilder {
 
 /// A board whose centerline may run in any 3-D direction. Corner order matches
 /// [`CUBOID_FACE_INDICES`], so the existing pick and face topology works for
-/// common, jack, ridge, hip, valley, blocking, and rake-plate members alike.
+/// jack, ridge, hip, valley, blocking, and rake-plate members alike. Common stick
+/// rafters use [`RafterPrism`] so their longitudinal cuts are explicit.
 struct BoardPrism {
     corners: [Point3; 8],
 }
@@ -953,6 +1041,134 @@ impl BoardPrism {
                 point(end, across1, section1),
                 point(start, across1, section1),
             ],
+        })
+    }
+}
+
+/// A common-rafter solid extruded through its board thickness from a concave
+/// longitudinal profile. `profile` is `(plan run, building elevation)` and is
+/// retained in tests so they can name the plumb and birdsmouth edges directly.
+struct RafterPrism {
+    #[cfg(test)]
+    profile: Vec<[f32; 2]>,
+    points: Vec<Point3>,
+    triangles: Vec<[usize; 3]>,
+}
+
+impl RafterPrism {
+    /// A geometry-safety cap, not a code-compliance judgment. It prevents a steep
+    /// pitch plus a deep bearing wall from consuming the rafter section.
+    const MAX_NOTCH_DEPTH_FRACTION: f32 = 1.0 / 3.0;
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        start: Point3,
+        end: Point3,
+        board_thickness: f32,
+        section0: f32,
+        section1: f32,
+        plane: &RoofPlane,
+        bearing_depth: Option<f32>,
+    ) -> Option<Self> {
+        if board_thickness <= f32::EPSILON || section1 - section0 <= f32::EPSILON {
+            return None;
+        }
+        let plan_dx = end.x - start.x;
+        let plan_dy = end.y - start.y;
+        let plan_run = (plan_dx * plan_dx + plan_dy * plan_dy).sqrt();
+        if plan_run <= f32::EPSILON {
+            return None;
+        }
+        let run = Point3::vector(plan_dx / plan_run, plan_dy / plan_run, 0.0);
+        let across = Point3::vector(-run.y, run.x, 0.0);
+        let rise_over_run = (end.z - start.z) / plan_run;
+        let slope_cosine = 1.0 / (1.0 + rise_over_run * rise_over_run).sqrt();
+        let lower_z = |u: f32| start.z + rise_over_run * u + section0 / slope_cosine;
+        let upper_z = |u: f32| start.z + rise_over_run * u + section1 / slope_cosine;
+
+        let mut profile = vec![[0.0, lower_z(0.0)]];
+        if let (Some(frame), Some(bearing_depth)) = (plane.frame(), bearing_depth)
+            && rise_over_run > f32::EPSILON
+            && bearing_depth > f32::EPSILON
+        {
+            let bearing_run = -frame.up_slope_distance(start.x as f64, start.y as f64) as f32;
+            let max_notch_depth =
+                (section1 - section0) / slope_cosine * Self::MAX_NOTCH_DEPTH_FRACTION;
+            let seat_run = bearing_depth.min(max_notch_depth / rise_over_run);
+            let heel_run = (bearing_run - seat_run).max(0.0);
+            let toe_run = bearing_run.min(plan_run);
+            let seat_z = lower_z(toe_run);
+            if toe_run - heel_run > 1.0e-3 && seat_z - lower_z(heel_run) > 1.0e-3 {
+                profile.extend([
+                    [heel_run, lower_z(heel_run)],
+                    [heel_run, seat_z],
+                    [toe_run, seat_z],
+                ]);
+            }
+        }
+        profile.extend([
+            [plan_run, lower_z(plan_run)],
+            [plan_run, upper_z(plan_run)],
+            [0.0, upper_z(0.0)],
+        ]);
+
+        // Reuse the core's deterministic concave-polygon ear clipper rather than
+        // maintaining a second triangulation kernel in the app.
+        let local_outline: Vec<Point2> = profile
+            .iter()
+            .map(|[u, z]| {
+                Point2::new(
+                    Length::from_inches(*u as f64),
+                    Length::from_inches(*z as f64),
+                )
+            })
+            .collect();
+        let end_triangles = framer_core::triangulate_simple_polygon(&local_outline);
+        if end_triangles.len() + 2 != profile.len() {
+            return None;
+        }
+
+        let half_thickness = board_thickness / 2.0;
+        let world_point = |[u, z]: [f32; 2], across_offset: f32| {
+            Point3::vector(
+                start.x + run.x * u + across.x * across_offset,
+                start.y + run.y * u + across.y * across_offset,
+                z,
+            )
+        };
+        let mut points = Vec::with_capacity(profile.len() * 2);
+        points.extend(
+            profile
+                .iter()
+                .copied()
+                .map(|point| world_point(point, -half_thickness)),
+        );
+        points.extend(
+            profile
+                .iter()
+                .copied()
+                .map(|point| world_point(point, half_thickness)),
+        );
+
+        let count = profile.len();
+        let mut triangles = Vec::with_capacity(end_triangles.len() * 2 + count * 2);
+        triangles.extend(end_triangles.iter().copied());
+        triangles.extend(
+            end_triangles
+                .iter()
+                .map(|[a, b, c]| [count + c, count + b, count + a]),
+        );
+        for index in 0..count {
+            let next = (index + 1) % count;
+            triangles.push([index, next, count + next]);
+            triangles.push([index, count + next, count + index]);
+        }
+
+        Some(Self {
+            #[cfg(test)]
+            profile,
+            points,
+            triangles,
         })
     }
 }
@@ -1117,6 +1333,10 @@ enum PickShape {
     Cuboid([Point3; 8]),
     GablePrism([Point3; 6]),
     Surface(Vec<Point3>),
+    Mesh {
+        points: Vec<Point3>,
+        triangles: Vec<[usize; 3]>,
+    },
 }
 
 impl PickSolid {
@@ -1141,6 +1361,19 @@ impl PickSolid {
             click,
             priority,
             shape: PickShape::GablePrism(corners),
+        }
+    }
+
+    fn mesh(
+        click: ViewClick,
+        priority: u8,
+        points: Vec<Point3>,
+        triangles: Vec<[usize; 3]>,
+    ) -> Self {
+        Self {
+            click,
+            priority,
+            shape: PickShape::Mesh { points, triangles },
         }
     }
 
@@ -1192,6 +1425,18 @@ impl PickSolid {
                 } else {
                     None
                 }
+            }
+            PickShape::Mesh { points, triangles } => {
+                let mut best_depth = None::<f32>;
+                for triangle in triangles {
+                    let projected = triangle.map(|index| projector.project_point(points[index]));
+                    let positions = projected.map(|point| point.pos).to_vec();
+                    if point_in_polygon(pointer, &positions) {
+                        let depth = projected.iter().map(|point| point.depth).sum::<f32>() / 3.0;
+                        best_depth = Some(best_depth.map_or(depth, |existing| existing.max(depth)));
+                    }
+                }
+                best_depth
             }
         }
     }
@@ -1287,6 +1532,41 @@ fn layer_band_span(interior_sign: f32, total: Length, off: Length, t: Length) ->
     let side_a = interior_sign * (half - off);
     let side_b = interior_sign * (half - (off + t));
     (side_a.min(side_b), side_a.max(side_b))
+}
+
+fn roof_member_family(model: &BuildingModel, plane: &RoofPlane) -> Option<MemberFamily> {
+    model
+        .systems
+        .iter()
+        .find(|system| system.id == plane.system)
+        .and_then(ConstructionSystem::framing_layer)
+        .and_then(|layer| layer.framing.as_ref())
+        .map(|framing| framing.member_family)
+}
+
+/// Nominal bearing width for a generated roof plane whose authored eave is the
+/// exact centerline segment of one same-level wall. Exact matching deliberately
+/// fails closed for manually floating/partial roof planes: the view must not
+/// invent a birdsmouth without a real authored bearing relationship.
+fn matched_bearing_depth(model: &BuildingModel, plane: &RoofPlane) -> Option<Length> {
+    let count = plane.outline.len();
+    if count < 2 || plane.eave_edge as usize >= count {
+        return None;
+    }
+    let index = plane.eave_edge as usize;
+    let eave = (plane.outline[index], plane.outline[(index + 1) % count]);
+    model
+        .walls
+        .iter()
+        .find(|wall| {
+            wall.level == plane.level
+                && ((wall.start == eave.0 && wall.end == eave.1)
+                    || (wall.start == eave.1 && wall.end == eave.0))
+        })
+        .and_then(|wall| model.system_for(wall))
+        .and_then(ConstructionSystem::framing_layer)
+        .and_then(|layer| layer.framing.as_ref())
+        .map(|framing| framing.member.nominal_depth())
 }
 
 /// The total through-wall thickness of a wall's construction system, falling back
@@ -2133,8 +2413,10 @@ mod surface_tests {
                 )
             })
             .unwrap();
-        let PickShape::Cuboid(corners) = &rafter_pick.shape else {
-            panic!("a spatial roof member must pick as a board prism");
+        let corners: &[Point3] = match &rafter_pick.shape {
+            PickShape::Cuboid(corners) => corners,
+            PickShape::Mesh { points, .. } => points,
+            _ => panic!("a spatial roof member must use solid pick geometry"),
         };
         let sloped = rafter.sloped.unwrap();
         let start = Point3::vector(
@@ -2191,6 +2473,240 @@ mod surface_tests {
                 .all(|index| { plan_scene.vertices[*index as usize].color[3] < 1.0 }),
             "the Plan transparent pass should contain translucent roof sheets"
         );
+    }
+
+    #[test]
+    fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
+        let mut model = elevated_gable_model();
+        for plane in &mut model.roof_planes {
+            plane.eave_overhang = Length::from_whole_inches(12);
+        }
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let roof_plan = plan
+            .roof_plans
+            .iter()
+            .find(|plan| plan.roof.0 == "roof-south")
+            .unwrap();
+        let member = roof_plan
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Rafter)
+            .unwrap();
+        let plane = model
+            .roof_planes
+            .iter()
+            .find(|plane| plane.id == roof_plan.roof)
+            .unwrap();
+        let sloped = member.sloped.unwrap();
+        let prism = RafterPrism::new(
+            Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
+            Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
+            member.cross_section_depth.inches() as f32,
+            member.side_offset.inches() as f32,
+            (member.side_offset + member.side_depth).inches() as f32,
+            plane,
+            matched_bearing_depth(&model, plane).map(|depth| depth.inches() as f32),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prism.profile.len(),
+            7,
+            "birdsmouth adds heel + seat vertices"
+        );
+        assert!((prism.profile[0][0] - prism.profile[6][0]).abs() < 1.0e-3);
+        assert!((prism.profile[4][0] - prism.profile[5][0]).abs() < 1.0e-3);
+        assert!(
+            (prism.profile[1][0] - prism.profile[2][0]).abs() < 1.0e-3,
+            "heel cut must be vertical"
+        );
+        assert!(
+            (prism.profile[2][1] - prism.profile[3][1]).abs() < 1.0e-3,
+            "birdsmouth seat must be horizontal"
+        );
+        assert!(prism.profile[3][0] > prism.profile[2][0]);
+
+        let north_plan = plan
+            .roof_plans
+            .iter()
+            .find(|plan| plan.roof.0 == "roof-north")
+            .unwrap();
+        let north_member = north_plan
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Rafter)
+            .unwrap();
+        let north_plane = model
+            .roof_planes
+            .iter()
+            .find(|plane| plane.id == north_plan.roof)
+            .unwrap();
+        let north_sloped = north_member.sloped.unwrap();
+        assert!(
+            north_sloped.end.y < north_sloped.start.y,
+            "north field runs toward -y"
+        );
+        let north_prism = RafterPrism::new(
+            Point3::new(
+                north_sloped.start.x,
+                north_sloped.start.y,
+                north_sloped.low_elevation,
+            ),
+            Point3::new(
+                north_sloped.end.x,
+                north_sloped.end.y,
+                north_sloped.high_elevation,
+            ),
+            north_member.cross_section_depth.inches() as f32,
+            north_member.side_offset.inches() as f32,
+            (north_member.side_offset + north_member.side_depth).inches() as f32,
+            north_plane,
+            matched_bearing_depth(&model, north_plane).map(|depth| depth.inches() as f32),
+        )
+        .unwrap();
+        assert_eq!(
+            north_prism.profile.len(),
+            7,
+            "reverse field keeps the cut profile"
+        );
+        assert!((north_prism.profile[2][1] - north_prism.profile[3][1]).abs() < 1.0e-3);
+
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &roof_plan.roof.0 && member_id == &member.id
+                )
+            })
+            .unwrap();
+        let PickShape::Mesh { points, triangles } = &pick.shape else {
+            panic!("a cut common rafter must pick from its rendered profile mesh");
+        };
+        assert_eq!(points.len(), prism.points.len());
+        assert_eq!(triangles, &prism.triangles);
+        let triangle = triangles[0].map(|index| points[index]);
+        let centroid = Point3::vector(
+            triangle.iter().map(|point| point.x).sum::<f32>() / 3.0,
+            triangle.iter().map(|point| point.y).sum::<f32>() / 3.0,
+            triangle.iter().map(|point| point.z).sum::<f32>() / 3.0,
+        );
+        let drawing = Rect::from_min_size((0.0, 0.0).into(), (600.0, 400.0).into());
+        let projector = OrbitProjector::from_points(&scene.points, drawing, View3dState::default())
+            .expect("projector");
+        assert!(
+            pick.hit_depth(projector.project_point(centroid).pos, &projector)
+                .is_some(),
+            "the rendered cut mesh must remain pickable"
+        );
+
+        let (ridge_host, ridge) = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter().map(move |member| (&roof.roof, member)))
+            .find(|(_, member)| member.kind == MemberKind::RidgeBoard)
+            .unwrap();
+        let ridge_pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &ridge_host.0 && member_id == &ridge.id
+                )
+            })
+            .unwrap();
+        assert!(matches!(ridge_pick.shape, PickShape::Cuboid(_)));
+
+        let (blocking_host, blocking) = plan
+            .roof_plans
+            .iter()
+            .flat_map(|roof| roof.members.iter().map(move |member| (&roof.roof, member)))
+            .find(|(_, member)| member.kind == MemberKind::Blocking)
+            .unwrap();
+        let blocking_pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, member_id }
+                        if source_id == &blocking_host.0 && member_id == &blocking.id
+                )
+            })
+            .unwrap();
+        assert!(matches!(blocking_pick.shape, PickShape::Cuboid(_)));
+    }
+
+    #[test]
+    fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
+        let mut model = surface_model();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let member = plan.roof_plans[0]
+            .members
+            .iter()
+            .find(|member| member.kind == MemberKind::Rafter)
+            .unwrap()
+            .clone();
+        let plane = model.roof_planes[0].clone();
+        let sloped = member.sloped.unwrap();
+        let prism = RafterPrism::new(
+            Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
+            Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
+            member.cross_section_depth.inches() as f32,
+            member.side_offset.inches() as f32,
+            (member.side_offset + member.side_depth).inches() as f32,
+            &plane,
+            matched_bearing_depth(&model, &plane).map(|depth| depth.inches() as f32),
+        )
+        .unwrap();
+        assert_eq!(
+            prism.profile.len(),
+            4,
+            "an unmatched roof gets plumb ends only"
+        );
+
+        let roof_system = model
+            .systems
+            .iter_mut()
+            .find(|system| system.id == plane.system)
+            .unwrap();
+        roof_system
+            .layers
+            .iter_mut()
+            .find_map(|layer| layer.framing.as_mut())
+            .unwrap()
+            .member_family = MemberFamily::Truss;
+        let truss_plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &truss_plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(&pick.click, ViewClick::Member { member_id, .. } if member_id == &member.id)
+            })
+            .unwrap();
+        assert!(matches!(pick.shape, PickShape::Cuboid(_)));
     }
 
     #[test]
