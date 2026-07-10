@@ -93,7 +93,8 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - Takeoff: `layer_bom()` / `LayerBomItem` and the layered rendering in
   [`framer-solver`](../../crates/framer-solver/src/lib.rs),
   [`framer-render/src/build.rs`](../../crates/framer-render/src/build.rs), and
-  `framer-app` `viewport/scene_build.rs` (layered plan walls + section swatch).
+  `framer-app` `viewport/scene_build/` (layered interactive 3-D walls) and
+  `viewport/elevation_framing.rs` (section swatch).
 
 ## Constraints & invariants
 

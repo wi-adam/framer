@@ -105,11 +105,12 @@ controllable presentation surfaces over the authored model.
   gated by the matching `layers.*` flags. Wall joins are user-facing Corners:
   `layers.joins` reveals all labels, while hover/selection reveals one quiet corner
   marker and label even when the layer is off.
-- **3D rendering** (`framer-app/src/app/viewport/scene_build.rs`): `from_project`
-  takes a `WallDisplay`; `push_wall_envelope` resolves the wall's derived physical
-  butt/lap span via `BuildingModel::wall_envelope_span`, then branches — `Full` keeps the
-  per-layer bands, `Width` pushes one neutral full-thickness band, `Outline` pushes
-  the envelope's 12 edges into `Scene3d.outline_edges` (and feeds the corners into
+- **3D rendering** (`framer-app/src/app/viewport/scene_build/`): the
+  `Scene3d::from_project` facade takes a `WallDisplay`, while `walls.rs`
+  resolves each wall's derived physical butt/lap span via
+  `BuildingModel::wall_envelope_span`, then branches — `Full` keeps the per-layer
+  bands, `Width` pushes one neutral full-thickness band, `Outline` pushes the
+  envelope's 12 edges into `Scene3d.outline_edges` (and feeds the corners into
   `points` so the projector stays framed). The pick envelope is pushed in every
   mode. `axonometric.rs` draws `outline_edges` as a painter overlay and skips the
   wgpu callback when there is no fill geometry.

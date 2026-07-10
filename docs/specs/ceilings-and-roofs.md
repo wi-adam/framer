@@ -370,8 +370,10 @@ non-axis-aligned framing member**.
   roof/ceiling layers through the existing `PaletteBuilder` so **no WGSL or GPU-parity change**
   is needed (opaque diffuse only in v1). New geometry must grow the same bounds `Aabb` feeding
   `SceneFraming`, and emit well-formed winding (degenerate tris are dropped at `PARALLEL_EPS`).
-- The app's separate 3-D mesher (`viewport/scene_build.rs`, wall-vertical `WallCuboid`) gains a
-  sloped roof solid + `PickSolid` + `member_color` entries so roofs/ceilings select like walls.
+- The app's separate 3-D mesher (`viewport/scene_build/`, with surface lowering in
+  `surfaces.rs` and generated framing in `members.rs`) gains sloped surface meshes
+  plus `PickSolid` surface selection; generated roof/ceiling/floor members use the
+  member-style policy in `style.rs` and retain their own member picks.
 - Model-derived golden scenes lock the sloped path: a gable roof, a scissor vault, and a
   multi-plane hip roof in `golden.rs`; `gpu_parity.rs` already pins the shared extraction path
   via the roofed/scissor scenes.
