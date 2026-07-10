@@ -899,15 +899,58 @@ impl BuildingModel {
         self.systems.iter().find(|system| system.id == wall.system)
     }
 
-    /// The local-x span used by visual wall envelopes. Authored wall length stays
-    /// centerline-based, but a corner-joined endpoint extends by half of the
-    /// adjoining wall's thickness so rendered wall solids fully meet at corners.
-    pub fn wall_envelope_span(&self, wall: &Wall) -> (Length, Length) {
-        let mut start_extension = Length::ZERO;
-        let mut end_extension = Length::ZERO;
+    /// The local-x span, in inches, used by physical wall envelopes. Authored
+    /// wall length stays centerline-based. At a corner, one wall runs through to
+    /// the adjoining wall's outside face and the adjoining wall retracts to the
+    /// through wall's inside face, producing one closed butt/lap with no doubled
+    /// volume. Half-tick values are retained exactly in this derived visual path.
+    pub fn wall_envelope_span(&self, wall: &Wall) -> (f64, f64) {
+        let span = self.wall_corner_span_half_ticks(
+            wall,
+            CornerLapPass::Primary,
+            WallPhysicalBand::Envelope,
+        );
+        (half_ticks_to_inches(span.0), half_ticks_to_inches(span.1))
+    }
+
+    /// The primary local-x span for generated studs, bottom plates, and lower
+    /// top plates. Structural joins meet at framing-layer faces rather than at
+    /// the finished wall envelope's faces.
+    pub fn wall_framing_span(&self, wall: &Wall) -> (Length, Length) {
+        let span = self.wall_corner_span_half_ticks(
+            wall,
+            CornerLapPass::Primary,
+            WallPhysicalBand::Framing,
+        );
+        half_tick_span_to_lengths(span)
+    }
+
+    /// The opposite structural corner lap used by the upper member of a double
+    /// top plate. Reversing the through/butt roles staggers its corner seam over
+    /// the primary plate seam and ties the intersecting walls together.
+    pub fn wall_counter_lap_framing_span(&self, wall: &Wall) -> (Length, Length) {
+        let span = self.wall_corner_span_half_ticks(
+            wall,
+            CornerLapPass::Counter,
+            WallPhysicalBand::Framing,
+        );
+        half_tick_span_to_lengths(span)
+    }
+
+    fn wall_corner_span_half_ticks(
+        &self,
+        wall: &Wall,
+        pass: CornerLapPass,
+        band: WallPhysicalBand,
+    ) -> (i64, i64) {
+        let interior_sides = crate::topology::wall_interior_sides_on_level(self, &wall.level);
+        let mut start_extension = None;
+        let mut start_retraction = None;
+        let mut end_extension = None;
+        let mut end_retraction = None;
 
         for join in &self.wall_joins {
-            if join.kind != WallJoinKind::Corner {
+            if join.kind != WallJoinKind::Corner || !wall.has_endpoint(join.point) {
                 continue;
             }
             let other_id = if join.first_wall == wall.id {
@@ -927,21 +970,173 @@ impl BuildingModel {
             else {
                 continue;
             };
-            let extension = half_thickness_outward(self.wall_envelope_thickness(other));
+            let Some(primary_through) = self.primary_corner_through_wall(join, &interior_sides)
+            else {
+                continue;
+            };
+            let through_id = match pass {
+                CornerLapPass::Primary => primary_through,
+                CornerLapPass::Counter if primary_through == join.first_wall => {
+                    join.second_wall.clone()
+                }
+                CornerLapPass::Counter => join.first_wall.clone(),
+            };
+            let is_through = wall.id == through_id;
+            let along = wall_along_axis(wall);
+            let direction = if is_through {
+                // Continue beyond the authored endpoint toward the far face of
+                // the adjoining wall's selected band.
+                if wall.start == join.point {
+                    negate_axis(along)
+                } else {
+                    along
+                }
+            } else {
+                // Move inward from the authored endpoint until reaching the far
+                // face of the through wall's selected band.
+                if wall.start == join.point {
+                    along
+                } else {
+                    negate_axis(along)
+                }
+            };
+            let adjustment =
+                self.wall_band_max_projection_half_ticks(other, direction, band, &interior_sides);
+
             if wall.start == join.point {
-                start_extension = start_extension.max(extension);
+                if is_through {
+                    update_max(&mut start_extension, adjustment);
+                } else {
+                    update_max(&mut start_retraction, adjustment);
+                }
             } else if wall.end == join.point {
-                end_extension = end_extension.max(extension);
+                if is_through {
+                    update_max(&mut end_extension, adjustment);
+                } else {
+                    update_max(&mut end_retraction, adjustment);
+                }
             }
         }
 
-        (Length::ZERO - start_extension, wall.length + end_extension)
+        let start = start_retraction.unwrap_or(0) - start_extension.unwrap_or(0);
+        let end =
+            wall.length.ticks() * 2 + end_extension.unwrap_or(0) - end_retraction.unwrap_or(0);
+        if start <= end {
+            (start, end)
+        } else {
+            // Degenerate/extremely short geometry must never invert a derived
+            // cuboid or member span. Collapse at the authored midpoint.
+            let midpoint = wall.length.ticks();
+            (midpoint, midpoint)
+        }
+    }
+
+    fn primary_corner_through_wall(
+        &self,
+        join: &WallJoin,
+        interior_sides: &BTreeMap<ElementId, bool>,
+    ) -> Option<ElementId> {
+        let first = self
+            .walls
+            .iter()
+            .find(|candidate| candidate.id == join.first_wall)?;
+        let second = self
+            .walls
+            .iter()
+            .find(|candidate| candidate.id == join.second_wall)?;
+
+        if first.level == second.level
+            && let (Some(first_plus), Some(second_plus)) = (
+                interior_sides.get(&first.id),
+                interior_sides.get(&second.id),
+            )
+        {
+            let first_incoming = wall_runs_into_ccw_corner(first, *first_plus, join.point);
+            let second_incoming = wall_runs_into_ccw_corner(second, *second_plus, join.point);
+            if first_incoming != second_incoming {
+                return Some(if first_incoming {
+                    first.id.clone()
+                } else {
+                    second.id.clone()
+                });
+            }
+        }
+
+        // Free/open geometry has no room side from which to infer a loop order.
+        // Element ids are canonical and independent of vector/join field order.
+        Some(if first.id <= second.id {
+            first.id.clone()
+        } else {
+            second.id.clone()
+        })
     }
 
     fn wall_envelope_thickness(&self, wall: &Wall) -> Length {
         self.system_for(wall)
             .map(ConstructionSystem::total_thickness)
             .unwrap_or_else(|| self.framing_defaults().stud_profile.nominal_depth())
+    }
+
+    fn wall_framing_thickness(&self, wall: &Wall) -> Length {
+        self.system_for(wall)
+            .and_then(ConstructionSystem::framing_layer)
+            .map(|layer| layer.thickness)
+            .unwrap_or_else(|| self.framing_defaults().stud_profile.nominal_depth())
+    }
+
+    fn wall_band_max_projection_half_ticks(
+        &self,
+        wall: &Wall,
+        direction: (i64, i64),
+        band: WallPhysicalBand,
+        interior_sides: &BTreeMap<ElementId, bool>,
+    ) -> i64 {
+        let (side0, side1) = match band {
+            WallPhysicalBand::Envelope => {
+                let half = self.wall_envelope_thickness(wall).ticks();
+                (-half, half)
+            }
+            WallPhysicalBand::Framing => {
+                let depth = self.wall_framing_thickness(wall);
+                let Some(interior_on_plus) = interior_sides.get(&wall.id) else {
+                    let half = depth.ticks();
+                    return half;
+                };
+                let total = self.wall_envelope_thickness(wall).ticks();
+                let offset = self
+                    .system_for(wall)
+                    .and_then(|system| {
+                        let mut offset = Length::ZERO;
+                        for layer in &system.layers {
+                            if layer.function == LayerFunction::Framing {
+                                return Some(offset);
+                            }
+                            offset += layer.thickness;
+                        }
+                        None
+                    })
+                    .unwrap_or(Length::ZERO)
+                    .ticks();
+                let sign = if *interior_on_plus { 1 } else { -1 };
+                let interior_face = sign * (total - 2 * offset);
+                let exterior_face = sign * (total - 2 * (offset + depth.ticks()));
+                (
+                    interior_face.min(exterior_face),
+                    interior_face.max(exterior_face),
+                )
+            }
+        };
+        let side = wall_side_axis(wall);
+        let projection_sign = side.0 * direction.0 + side.1 * direction.1;
+        if projection_sign == 0 {
+            // A malformed parallel `Corner` has no perpendicular face in the
+            // endpoint direction. Fall back to a symmetric half-depth.
+            return match band {
+                WallPhysicalBand::Envelope => self.wall_envelope_thickness(wall).ticks(),
+                WallPhysicalBand::Framing => self.wall_framing_thickness(wall).ticks(),
+            };
+        }
+        (side0 * projection_sign).max(side1 * projection_sign)
     }
 
     /// The visible/takeoff outline of a roof plane after applying its authored
@@ -1412,8 +1607,63 @@ fn next_reconciled_join_id(existing: &[WallJoin], staged: &[WallJoin]) -> String
     }
 }
 
-fn half_thickness_outward(thickness: Length) -> Length {
-    Length::from_ticks((thickness.ticks() + 1) / 2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CornerLapPass {
+    Primary,
+    Counter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallPhysicalBand {
+    Envelope,
+    Framing,
+}
+
+fn wall_along_axis(wall: &Wall) -> (i64, i64) {
+    (
+        (wall.end.x - wall.start.x).ticks().signum(),
+        (wall.end.y - wall.start.y).ticks().signum(),
+    )
+}
+
+fn wall_side_axis(wall: &Wall) -> (i64, i64) {
+    let along = wall_along_axis(wall);
+    (-along.1, along.0)
+}
+
+fn negate_axis((x, y): (i64, i64)) -> (i64, i64) {
+    (-x, -y)
+}
+
+fn update_max(slot: &mut Option<i64>, candidate: i64) {
+    *slot = Some(slot.map_or(candidate, |current| current.max(candidate)));
+}
+
+/// Whether the wall's counterclockwise boundary direction arrives at `point`.
+/// When the room lies on the authored plus/left side, authored start -> end is
+/// already counterclockwise; otherwise the boundary direction is reversed.
+fn wall_runs_into_ccw_corner(wall: &Wall, interior_on_plus_side: bool, point: Point2) -> bool {
+    if interior_on_plus_side {
+        wall.end == point
+    } else {
+        wall.start == point
+    }
+}
+
+fn half_ticks_to_inches(half_ticks: i64) -> f64 {
+    half_ticks as f64 / (Length::TICKS_PER_INCH * 2) as f64
+}
+
+fn half_tick_span_to_lengths((start, end): (i64, i64)) -> (Length, Length) {
+    // Framing members remain integer-tick data. Standard dimensional lumber
+    // depths are even tick counts. For a rare half-tick face, round the start
+    // inward (ceil) and the end inward (floor): members never overlap and the
+    // rule is invariant when authored wall direction swaps start/end.
+    let ceil_half_ticks = |value: i64| value.div_euclid(2) + i64::from(value.rem_euclid(2) != 0);
+    (
+        Length::from_ticks(ceil_half_ticks(start)),
+        Length::from_ticks(end.div_euclid(2)),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6603,7 +6853,7 @@ mod tests {
     }
 
     #[test]
-    fn wall_envelope_span_extends_corner_endpoints_by_joined_wall_half_thickness() {
+    fn wall_envelope_span_laps_open_corner_by_stable_wall_id() {
         let code = FramingDefaults::irc_2021_starter();
         let mut model = BuildingModel::new();
         model
@@ -6614,19 +6864,164 @@ mod tests {
             .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
         model.reconcile_joins();
 
-        let a_half =
-            half_thickness_outward(model.system_for(&model.walls[0]).unwrap().total_thickness());
-        let b_half =
-            half_thickness_outward(model.system_for(&model.walls[1]).unwrap().total_thickness());
+        let a_half = model
+            .system_for(&model.walls[0])
+            .unwrap()
+            .total_thickness()
+            .inches()
+            / 2.0;
+        let b_half = model
+            .system_for(&model.walls[1])
+            .unwrap()
+            .total_thickness()
+            .inches()
+            / 2.0;
 
         assert_eq!(
             model.wall_envelope_span(&model.walls[0]),
-            (Length::ZERO, Length::from_feet(10.0) + b_half)
+            (0.0, Length::from_feet(10.0).inches() + b_half)
         );
         assert_eq!(
             model.wall_envelope_span(&model.walls[1]),
-            (Length::ZERO - a_half, Length::from_feet(8.0))
+            (a_half, Length::from_feet(8.0).inches())
         );
+    }
+
+    #[test]
+    fn wall_corner_laps_follow_room_winding_and_counter_lap_upper_plate() {
+        let model = BuildingModel::demo_shell();
+        let front = model
+            .walls
+            .iter()
+            .find(|wall| wall.id.0 == "wall-front")
+            .unwrap();
+        let primary = model.wall_framing_span(front);
+        let counter = model.wall_counter_lap_framing_span(front);
+
+        assert!(
+            primary.0 > Length::ZERO && primary.1 > front.length,
+            "the outgoing start butts and the incoming end runs through"
+        );
+        assert!(
+            counter.0 < Length::ZERO && counter.1 < front.length,
+            "the upper plate reverses both corner seams"
+        );
+        assert_ne!(primary, counter);
+    }
+
+    #[test]
+    fn wall_corner_lap_world_geometry_ignores_authored_wall_direction() {
+        let model = BuildingModel::demo_shell();
+        let mut reversed = model.clone();
+        for wall in &mut reversed.walls {
+            std::mem::swap(&mut wall.start, &mut wall.end);
+        }
+
+        for wall in &model.walls {
+            let reversed_wall = reversed
+                .walls
+                .iter()
+                .find(|candidate| candidate.id == wall.id)
+                .unwrap();
+            let (start, end) = model.wall_framing_span(wall);
+            let (reversed_start, reversed_end) = reversed.wall_framing_span(reversed_wall);
+            let mut points = [wall.point_at_local_x(start), wall.point_at_local_x(end)];
+            let mut reversed_points = [
+                reversed_wall.point_at_local_x(reversed_start),
+                reversed_wall.point_at_local_x(reversed_end),
+            ];
+            points.sort_by_key(|point| (point.x, point.y));
+            reversed_points.sort_by_key(|point| (point.x, point.y));
+            assert_eq!(points, reversed_points, "{}", wall.id.0);
+        }
+    }
+
+    #[test]
+    fn wall_corner_lap_roles_ignore_vector_and_join_field_order() {
+        let model = BuildingModel::demo_shell();
+        let mut reordered = model.clone();
+        reordered.walls.reverse();
+        reordered.wall_joins.reverse();
+        for join in &mut reordered.wall_joins {
+            std::mem::swap(&mut join.first_wall, &mut join.second_wall);
+        }
+
+        for wall in &model.walls {
+            let reordered_wall = reordered
+                .walls
+                .iter()
+                .find(|candidate| candidate.id == wall.id)
+                .unwrap();
+            assert_eq!(
+                model.wall_envelope_span(wall),
+                reordered.wall_envelope_span(reordered_wall),
+                "{} envelope",
+                wall.id.0
+            );
+            assert_eq!(
+                model.wall_framing_span(wall),
+                reordered.wall_framing_span(reordered_wall),
+                "{} framing",
+                wall.id.0
+            );
+            assert_eq!(
+                model.wall_counter_lap_framing_span(wall),
+                reordered.wall_counter_lap_framing_span(reordered_wall),
+                "{} counter lap",
+                wall.id.0
+            );
+        }
+    }
+
+    #[test]
+    fn wall_corner_lap_uses_the_adjoining_wall_thickness() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("b", rp(10.0, 0.0), rp(10.0, 8.0), &code));
+        let mut thick = model.system_for(&model.walls[1]).unwrap().clone();
+        thick.id = ElementId::new("system-wall-thick");
+        thick.layers.last_mut().unwrap().thickness += Length::from_inches(2.0);
+        model.walls[1].system = thick.id.clone();
+        model.systems.push(thick);
+        model.reconcile_joins();
+
+        let a_half = model
+            .system_for(&model.walls[0])
+            .unwrap()
+            .total_thickness()
+            .inches()
+            / 2.0;
+        let b_half = model
+            .system_for(&model.walls[1])
+            .unwrap()
+            .total_thickness()
+            .inches()
+            / 2.0;
+        assert_eq!(
+            model.wall_envelope_span(&model.walls[0]),
+            (0.0, 120.0 + b_half)
+        );
+        assert_eq!(model.wall_envelope_span(&model.walls[1]), (a_half, 96.0));
+    }
+
+    #[test]
+    fn wall_corner_lap_clamps_an_inverted_short_span() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(placed_wall("a", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("z", rp(10.0, 0.0), rp(10.0, 1.0 / 12.0), &code));
+        model.reconcile_joins();
+
+        assert_eq!(model.wall_envelope_span(&model.walls[1]), (0.5, 0.5));
     }
 
     #[test]
@@ -6646,11 +7041,11 @@ mod tests {
 
         assert_eq!(
             model.wall_envelope_span(&model.walls[0]),
-            (Length::ZERO, Length::from_feet(20.0))
+            (0.0, Length::from_feet(20.0).inches())
         );
         assert_eq!(
             model.wall_envelope_span(&model.walls[1]),
-            (Length::ZERO, Length::from_feet(8.0))
+            (0.0, Length::from_feet(8.0).inches())
         );
     }
 

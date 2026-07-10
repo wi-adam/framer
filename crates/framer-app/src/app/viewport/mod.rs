@@ -1605,13 +1605,13 @@ mod tests {
             .find(|wall| wall.id.0 == "wall-front")
             .expect("demo shell has a front wall");
         let (_, front_x1) = model.wall_envelope_span(front_wall);
-        let front_right_x = front_x1.inches() as f32;
+        let front_right_x = front_x1 as f32;
         let front_outer_y = -total / 2.0;
         assert!(
             scene.points.iter().any(|point| {
                 (point.x - front_right_x).abs() < 1.0e-4 && (point.y - front_outer_y).abs() < 1.0e-4
             }),
-            "3D wall envelope should fill the outside quadrant at a joined corner"
+            "the primary through wall should reach the adjoining wall's outside face"
         );
     }
 

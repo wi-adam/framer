@@ -492,8 +492,13 @@ fn wall_layer_bom(
     wall: &Wall,
     system: &ConstructionSystem,
     materials: &[Material],
+    physical_length_inches: f64,
 ) -> Vec<LayerBomItem> {
-    layers_takeoff(system, net_face_area_sq_in(wall), materials)
+    layers_takeoff(
+        system,
+        net_face_area_sq_in(wall, physical_length_inches),
+        materials,
+    )
 }
 
 /// The per-layer material takeoff for one surface of `area_sq_in` square inches
@@ -572,8 +577,8 @@ fn layers_takeoff(
 
 /// The wall's clear face area in whole square inches: `length × height` minus the
 /// sum of opening areas, clamped to be non-negative.
-fn net_face_area_sq_in(wall: &Wall) -> i64 {
-    let gross = (wall.length.inches() * wall.height.inches()).round() as i64;
+fn net_face_area_sq_in(wall: &Wall, physical_length_inches: f64) -> i64 {
+    let gross = (physical_length_inches * wall.height.inches()).round() as i64;
     let openings: i64 = wall
         .openings
         .iter()
@@ -867,6 +872,45 @@ fn generate_wall_plan_with_site(
     standards_name: &str,
     site: &SiteContext,
 ) -> Result<WallFramePlan, SolverError> {
+    generate_wall_plan_with_site_and_spans(
+        wall,
+        system,
+        materials,
+        standards,
+        standards_name,
+        site,
+        WallGenerationSpans::authored(wall),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WallGenerationSpans {
+    primary: (Length, Length),
+    counter: (Length, Length),
+    envelope: (f64, f64),
+}
+
+impl WallGenerationSpans {
+    fn authored(wall: &Wall) -> Self {
+        let span = (Length::ZERO, wall.length);
+        Self {
+            primary: span,
+            counter: span,
+            envelope: (0.0, wall.length.inches()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_wall_plan_with_site_and_spans(
+    wall: &Wall,
+    system: &ConstructionSystem,
+    materials: &[Material],
+    standards: &ResolvedStandards,
+    standards_name: &str,
+    site: &SiteContext,
+    spans: WallGenerationSpans,
+) -> Result<WallFramePlan, SolverError> {
     wall.validate()?;
     let defaults = &standards.defaults;
 
@@ -898,8 +942,11 @@ fn generate_wall_plan_with_site(
         });
     }
 
+    let (primary_start, primary_end) = spans.primary;
+    let primary_length = primary_end - primary_start;
     for opening in &wall.openings {
-        if opening.left() < stud_thickness * 2 || opening.right() + stud_thickness * 2 > wall.length
+        if opening.left() - primary_start < stud_thickness * 2
+            || primary_end - opening.right() < stud_thickness * 2
         {
             return Err(SolverError::OpeningTooCloseToWallEnd {
                 wall: wall.id.clone(),
@@ -922,19 +969,26 @@ fn generate_wall_plan_with_site(
         wall_plate,
         FrameMemberPlacement::new(
             MemberOrientation::Horizontal,
+            primary_start,
             Length::ZERO,
-            Length::ZERO,
-            wall.length,
+            primary_length,
             plate_thickness,
         ),
         band,
         RuleProvenance::new(
-            "wall.plate.continuous",
-            "Bottom plate runs the authored wall length using the configured plate profile.",
+            "wall.plate.corner-lap",
+            "Bottom plate follows the derived primary through/butt corner span using the configured plate profile.",
         ),
     ));
 
     for index in 0..top_plate_count {
+        // Index zero is the physically uppermost plate. With a double top plate,
+        // counter-lap that member so its corner seam crosses the lower plate seam.
+        let (plate_start, plate_end) = if top_plate_count > 1 && index == 0 {
+            spans.counter
+        } else {
+            spans.primary
+        };
         members.push(frame_member(
             format!("top-plate-{}", index + 1),
             &wall.id,
@@ -942,25 +996,25 @@ fn generate_wall_plan_with_site(
             wall_plate,
             FrameMemberPlacement::new(
                 MemberOrientation::Horizontal,
-                Length::ZERO,
+                plate_start,
                 wall.height - plate_thickness * (index as i64 + 1),
-                wall.length,
+                plate_end - plate_start,
                 plate_thickness,
             ),
             band,
             RuleProvenance::new(
-                "wall.plate.double-top",
+                "wall.plate.corner-lap",
                 format!(
-                    "Top plate {} of {} uses the wall length and configured double-top-plate setting.",
-                    index + 1,
-                    top_plate_count
+                    "Top plate {} of {} follows the {} corner lap so double-plate seams are staggered.",
+                    index + 1, top_plate_count,
+                    if top_plate_count > 1 && index == 0 { "counter" } else { "primary" }
                 ),
             ),
         ));
     }
 
     let stud_base = plate_thickness;
-    for x in stud_positions(wall.length, stud_spacing, stud_thickness) {
+    for x in stud_positions_in_span(primary_start, primary_end, stud_spacing, stud_thickness) {
         if !is_inside_opening_framing_assembly(x, &wall.openings, stud_thickness) {
             members.push(frame_member(
                 format!("stud-{}", x.ticks()),
@@ -978,7 +1032,7 @@ fn generate_wall_plan_with_site(
                 RuleProvenance::new(
                     "wall.studs.on-center",
                     format!(
-                        "End studs align with wall faces, interior common studs are placed at {} layout marks, and authored opening framing assemblies are kept clear.",
+                        "End studs align with the derived primary corner-lap faces, interior common studs are placed at {} layout marks, and authored opening framing assemblies are kept clear.",
                         stud_spacing
                     ),
                 ),
@@ -1000,7 +1054,7 @@ fn generate_wall_plan_with_site(
         add_opening_members(&mut members, &mut diagnostics, wall, &opening, context);
     }
 
-    let layers = wall_layer_bom(wall, system, materials);
+    let layers = wall_layer_bom(wall, system, materials, spans.envelope.1 - spans.envelope.0);
 
     Ok(WallFramePlan {
         wall: wall.id.clone(),
@@ -2780,13 +2834,18 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
                 wall: wall.id.clone(),
                 system: wall.system.clone(),
             })?;
-        plan.wall_plans.push(generate_wall_plan_with_site(
+        plan.wall_plans.push(generate_wall_plan_with_site_and_spans(
             wall,
             system,
             &model.materials,
             &standards,
             standards_name,
             &model.site,
+            WallGenerationSpans {
+                primary: model.wall_framing_span(wall),
+                counter: model.wall_counter_lap_framing_span(wall),
+                envelope: model.wall_envelope_span(wall),
+            },
         )?);
     }
 
@@ -2923,24 +2982,38 @@ fn add_join_members(
             WallJoinKind::Corner | WallJoinKind::EndToEnd => {
                 for wall in [first, second] {
                     let (member, band) = wall_member(wall)?;
-                    push_join_stud(
+                    let provenance = RuleProvenance::new(
+                        "wall.join.corner-posts",
+                        format!(
+                            "The physical end stud on {} is the corner post at {}; it follows the derived wall lap rather than duplicating a coincident stud.",
+                            wall.name, join.name
+                        ),
+                    );
+                    if !reclassify_end_stud_as_join_member(
                         plan,
+                        model,
                         join,
                         wall,
                         member,
-                        band,
                         MemberKind::CornerPost,
                         "corner-post",
-                        plate_thickness,
-                        top_plate_count,
-                        RuleProvenance::new(
-                            "wall.join.corner-posts",
-                            format!(
-                                "A corner post is generated on {} with its faces inside the wall edge to make the authored {} join visible in the framing plan.",
-                                wall.name, join.name
-                            ),
-                        ),
-                    )?;
+                        provenance.clone(),
+                    )? {
+                        // Defensive fallback for degenerate walls whose one shared
+                        // stud was already claimed by another endpoint join.
+                        push_join_stud(
+                            plan,
+                            join,
+                            wall,
+                            member,
+                            band,
+                            MemberKind::CornerPost,
+                            "corner-post",
+                            plate_thickness,
+                            top_plate_count,
+                            provenance,
+                        )?;
+                    }
                 }
             }
             WallJoinKind::Tee => {
@@ -3029,6 +3102,77 @@ fn add_join_members(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reclassify_end_stud_as_join_member(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+    join: &WallJoin,
+    wall: &Wall,
+    wall_stud: BoardProfile,
+    kind: MemberKind,
+    member_suffix: &str,
+    provenance: RuleProvenance,
+) -> Result<bool, SolverError> {
+    let (span_start, span_end) = if join.kind == WallJoinKind::Corner {
+        model.wall_framing_span(wall)
+    } else {
+        (Length::ZERO, wall.length)
+    };
+    let half_stud = wall_stud.thickness() / 2;
+    let expected_x = if wall.start == join.point {
+        span_start + half_stud
+    } else {
+        span_end - half_stud
+    };
+    let wall_plan = plan
+        .wall_plan_mut(&wall.id)
+        .ok_or_else(|| SolverError::MissingWallPlan {
+            wall: wall.id.clone(),
+        })?;
+    let exact = wall_plan.members.iter().position(|member| {
+        member.kind == MemberKind::CommonStud
+            && member.orientation == MemberOrientation::Vertical
+            && member.x == expected_x
+    });
+    let nearest_end = || {
+        wall_plan
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| {
+                member.kind == MemberKind::CommonStud
+                    && member.orientation == MemberOrientation::Vertical
+            })
+            .min_by_key(|(_, member)| {
+                if wall.start == join.point {
+                    member.x
+                } else {
+                    Length::ZERO - member.x
+                }
+            })
+            .map(|(index, _)| index)
+    };
+    let Some(index) = exact.or_else(nearest_end) else {
+        // A degenerate wall may have one stud already representing both very
+        // close endpoints. Sharing it is preferable to adding a coincident post.
+        if wall_plan
+            .members
+            .iter()
+            .any(|member| member.kind == MemberKind::CornerPost)
+        {
+            return Ok(true);
+        }
+        return Ok(false);
+    };
+    let member = &mut wall_plan.members[index];
+
+    member.id = format!("{}-{}-{}", join.id.0, wall.id.0, member_suffix);
+    member.source = join.id.clone();
+    member.kind = kind;
+    member.provenance = provenance;
+    Ok(true)
 }
 
 /// Push one vertical join stud (corner post / partition end stud / backing stud)
@@ -3637,17 +3781,27 @@ fn starter_profile_diagnostics(wall: &Wall, standards_name: &str) -> Vec<PlanDia
 }
 
 fn stud_positions(length: Length, spacing: Length, stud_thickness: Length) -> Vec<Length> {
+    stud_positions_in_span(Length::ZERO, length, spacing, stud_thickness)
+}
+
+fn stud_positions_in_span(
+    start: Length,
+    end: Length,
+    spacing: Length,
+    stud_thickness: Length,
+) -> Vec<Length> {
+    let length = end - start;
     if length <= stud_thickness {
-        return vec![length / 2];
+        return vec![start + length / 2];
     }
 
     let mut positions = Vec::new();
-    let first_center = stud_thickness / 2;
-    let last_center = length - first_center;
+    let first_center = start + stud_thickness / 2;
+    let last_center = end - stud_thickness / 2;
 
     positions.push(first_center);
 
-    let mut x = spacing;
+    let mut x = start + spacing;
     while x < last_center {
         positions.push(x);
         x += spacing;
@@ -5526,20 +5680,101 @@ mod tests {
                     .iter()
                     .find(|candidate| candidate.id == *wall_id)
                     .unwrap();
-                let join_x = wall.local_x_for_point(join.point).unwrap();
-                let expected_x = face_aligned_center(
-                    join_x,
-                    wall.length,
-                    model.framing_defaults().stud_profile.thickness(),
-                );
+                let (span_start, span_end) = model.wall_framing_span(wall);
+                let expected_x = if wall.start == join.point {
+                    span_start + half_stud
+                } else {
+                    span_end - half_stud
+                };
                 let wall_plan = plan.wall_plan(&wall.id).unwrap();
                 let member_id = format!("{}-{}-corner-post", join.id.0, wall.id.0);
                 let member = find_member(wall_plan, &member_id);
 
                 assert_eq!(member.x, expected_x, "{member_id}");
-                assert!(member.x >= half_stud, "{member_id}");
-                assert!(member.x <= wall.length - half_stud, "{member_id}");
+                assert!(member.x >= span_start + half_stud, "{member_id}");
+                assert!(member.x <= span_end - half_stud, "{member_id}");
+                assert!(
+                    wall_plan.members.iter().all(|candidate| {
+                        candidate.id == member_id
+                            || candidate.kind != MemberKind::CommonStud
+                            || candidate.x != member.x
+                    }),
+                    "{member_id} must reuse, not overlap, the generated end stud"
+                );
             }
+        }
+    }
+
+    #[test]
+    fn double_top_plate_counter_laps_each_corner_seam() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+
+        for wall in &model.walls {
+            let wall_plan = plan.wall_plan(&wall.id).unwrap();
+            let primary = model.wall_framing_span(wall);
+            let counter = model.wall_counter_lap_framing_span(wall);
+            let bottom = find_member(wall_plan, "bottom-plate-1");
+            let upper = find_member(wall_plan, "top-plate-1");
+            let lower = find_member(wall_plan, "top-plate-2");
+
+            assert_eq!((bottom.x, bottom.x + bottom.cut_length), primary);
+            assert_eq!((lower.x, lower.x + lower.cut_length), primary);
+            assert_eq!((upper.x, upper.x + upper.cut_length), counter);
+            assert_ne!(
+                primary, counter,
+                "{} must stagger its plate seams",
+                wall.id.0
+            );
+        }
+
+        let corner_posts = plan
+            .wall_plans
+            .iter()
+            .flat_map(|wall_plan| &wall_plan.members)
+            .filter(|member| member.kind == MemberKind::CornerPost)
+            .count();
+        assert_eq!(corner_posts, model.wall_joins.len() * 2);
+    }
+
+    #[test]
+    fn wall_layer_takeoff_uses_lapped_physical_face_length() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls.push(placed(
+            "a",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed(
+            "b",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        let mut thick = model.system_for(&model.walls[1]).unwrap().clone();
+        thick.id = ElementId::new("system-wall-thick");
+        thick.layers.last_mut().unwrap().thickness += Length::from_inches(2.0);
+        model.walls[1].system = thick.id.clone();
+        model.systems.push(thick);
+        model.reconcile_joins();
+
+        let plan = generate_project_plan(&model).unwrap();
+        for wall in &model.walls {
+            let span = model.wall_envelope_span(wall);
+            let expected_area = ((span.1 - span.0) * wall.height.inches()).round() as i64;
+            let wall_plan = plan.wall_plan(&wall.id).unwrap();
+            assert!(wall_plan.layers.iter().any(|layer| layer.area_sq_in > 0));
+            assert!(
+                wall_plan
+                    .layers
+                    .iter()
+                    .filter(|layer| layer.area_sq_in > 0)
+                    .all(|layer| layer.area_sq_in == expected_area),
+                "{} layer takeoff must use its physical lapped face",
+                wall.id.0
+            );
         }
     }
 

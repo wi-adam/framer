@@ -60,14 +60,14 @@ enum SurfaceReverseFace {
 }
 
 struct WallSegmentSpan {
-    x0: Length,
-    x1: Length,
+    x0: f32,
+    x1: f32,
     z0: Length,
     z1: Length,
 }
 
 impl WallSegmentSpan {
-    fn new(x0: Length, x1: Length, z0: Length, z1: Length) -> Self {
+    fn new(x0: f32, x1: f32, z0: Length, z1: Length) -> Self {
         Self { x0, x1, z0, z1 }
     }
 }
@@ -358,8 +358,8 @@ impl SceneBuilder {
         let (visual_x0, visual_x1) = model.wall_envelope_span(wall);
         let envelope = WallCuboid::new(
             wall,
-            visual_x0.inches() as f32,
-            visual_x1.inches() as f32,
+            visual_x0 as f32,
+            visual_x1 as f32,
             env0,
             env1,
             base_elevation,
@@ -618,18 +618,23 @@ impl SceneBuilder {
         &mut self,
         wall: &Wall,
         band: LayerBand,
-        visual_x0: Length,
-        visual_x1: Length,
+        visual_x0: f64,
+        visual_x1: f64,
         base_elevation: f32,
     ) {
         let mut openings = wall.openings.iter().collect::<Vec<_>>();
         openings.sort_by_key(|opening| opening.left());
-        let mut cursor = visual_x0;
+        let mut cursor = visual_x0 as f32;
 
         for opening in openings {
             self.push_wall_segment(
                 wall,
-                WallSegmentSpan::new(cursor, opening.left(), Length::ZERO, wall.height),
+                WallSegmentSpan::new(
+                    cursor,
+                    opening.left().inches() as f32,
+                    Length::ZERO,
+                    wall.height,
+                ),
                 band,
                 base_elevation,
             );
@@ -637,8 +642,8 @@ impl SceneBuilder {
                 self.push_wall_segment(
                     wall,
                     WallSegmentSpan::new(
-                        opening.left(),
-                        opening.right(),
+                        opening.left().inches() as f32,
+                        opening.right().inches() as f32,
                         Length::ZERO,
                         opening.sill_height,
                     ),
@@ -650,8 +655,8 @@ impl SceneBuilder {
                 self.push_wall_segment(
                     wall,
                     WallSegmentSpan::new(
-                        opening.left(),
-                        opening.right(),
+                        opening.left().inches() as f32,
+                        opening.right().inches() as f32,
                         opening.top(),
                         wall.height,
                     ),
@@ -659,11 +664,11 @@ impl SceneBuilder {
                     base_elevation,
                 );
             }
-            cursor = opening.right();
+            cursor = opening.right().inches() as f32;
         }
         self.push_wall_segment(
             wall,
-            WallSegmentSpan::new(cursor, visual_x1, Length::ZERO, wall.height),
+            WallSegmentSpan::new(cursor, visual_x1 as f32, Length::ZERO, wall.height),
             band,
             base_elevation,
         );
@@ -681,8 +686,8 @@ impl SceneBuilder {
         }
         let solid = WallCuboid::new(
             wall,
-            span.x0.inches() as f32,
-            span.x1.inches() as f32,
+            span.x0,
+            span.x1,
             band.side0,
             band.side1,
             base_elevation + span.z0.inches() as f32,
@@ -1591,6 +1596,85 @@ mod surface_tests {
             Point2::new(Length::from_feet(12.0), Length::from_feet(8.0)),
             Point2::new(Length::ZERO, Length::from_feet(8.0)),
         ]
+    }
+
+    fn cuboid_xy_bounds(pick: &PickSolid) -> (f32, f32, f32, f32) {
+        let PickShape::Cuboid(corners) = &pick.shape else {
+            panic!("expected cuboid pick geometry");
+        };
+        corners.iter().fold(
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+            |(min_x, max_x, min_y, max_y), point| {
+                (
+                    min_x.min(point.x),
+                    max_x.max(point.x),
+                    min_y.min(point.y),
+                    max_y.max(point.y),
+                )
+            },
+        )
+    }
+
+    fn axis_overlap(first_min: f32, first_max: f32, second_min: f32, second_max: f32) -> f32 {
+        first_max.min(second_max) - first_min.max(second_min)
+    }
+
+    #[test]
+    fn lapped_corner_wall_and_post_solids_do_not_overlap() {
+        let model = BuildingModel::demo_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Full,
+        )
+        .unwrap();
+        let front_index = model
+            .walls
+            .iter()
+            .position(|wall| wall.id.0 == "wall-front")
+            .unwrap();
+        let right_index = model
+            .walls
+            .iter()
+            .position(|wall| wall.id.0 == "wall-right")
+            .unwrap();
+        let wall_pick = |index| {
+            scene
+                .picks
+                .iter()
+                .find(|pick| matches!(pick.click, ViewClick::Wall(found) if found == index))
+                .unwrap()
+        };
+        let front = cuboid_xy_bounds(wall_pick(front_index));
+        let right = cuboid_xy_bounds(wall_pick(right_index));
+        assert!(axis_overlap(front.0, front.1, right.0, right.1) > 0.0);
+        assert!(
+            axis_overlap(front.2, front.3, right.2, right.3).abs() < 1.0e-4,
+            "finished wall bodies must meet at one face without a gap or doubled volume"
+        );
+
+        let member_pick = |id: &str| {
+            scene
+                .picks
+                .iter()
+                .find(|pick| {
+                    matches!(
+                        &pick.click,
+                        ViewClick::Member { member_id, .. } if member_id == id
+                    )
+                })
+                .unwrap()
+        };
+        let front_post = cuboid_xy_bounds(member_pick("join-front-right-wall-front-corner-post"));
+        let right_post = cuboid_xy_bounds(member_pick("join-front-right-wall-right-corner-post"));
+        assert!(
+            axis_overlap(front_post.2, front_post.3, right_post.2, right_post.3) <= 1.0e-4,
+            "integer-tick corner posts may leave a sub-tick clearance but must never overlap"
+        );
     }
 
     fn finish_system(

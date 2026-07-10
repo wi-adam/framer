@@ -7,7 +7,8 @@ Depends on: `framer-core`. Consumed by: `framer-app`.
 
 ## Module
 
-One file, `src/lib.rs`. It generates wall, floor, ceiling, and roof framing; adds wall joins,
+One file, `src/lib.rs`. It generates wall, floor, ceiling, and roof framing; derives
+through/butt corner spans with counter-lapped double top plates; adds wall joins,
 roof intersections, and derived gable-end members; builds the room schedule, per-layer material
 takeoff, and fastening takeoff; and provides SVG/CSV exporters.
 

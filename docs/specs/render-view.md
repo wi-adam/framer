@@ -7,7 +7,7 @@
 > **Status:** Implemented; in-app render settings landed 2026-07-09 ·
 > **Linked goal:** — · **Plan:** [2026-06-15-render-view-mode](../plans/2026-06-15-render-view-mode.md),
 > [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
-> **Last reviewed:** 2026-07-09
+> **Last reviewed:** 2026-07-10
 
 ## Goal
 
@@ -95,9 +95,12 @@ voids subtracted by emitting wall segments around each opening (same approach as
 the app's `push_wall_envelope`), and a thin glass/door panel placed in each
 opening. The local span of each wall cuboid comes from the same derived
 `BuildingModel::wall_envelope_span` used by the app's 3D view: at a `Corner`
-join, the visual wall body extends beyond the authored centerline endpoint to
-the adjoining wall's outside face, while openings remain cut from their authored
-local offsets. Outward-facing normals drive exterior-vs-interior material choice.
+join, one visual wall body extends beyond the authored centerline endpoint to
+the adjoining wall's outside face while the other retracts to the through wall's
+inside face. The resulting butt/lap is closed and volume-disjoint; openings remain
+cut from their authored local offsets. See
+[wall-corner-laps.md](wall-corner-laps.md). Outward-facing normals drive
+exterior-vs-interior material choice.
 
 ### Camera from orbit state
 
@@ -163,7 +166,7 @@ continuity; PCG32 **canary** (first 8 outputs of `seed(42,54)` locked as
 constants, cross-checked vs reference).
 
 **Scene extraction:** wall → expected triangle count + outward normals; joined
-corner walls close the outside quadrant with no visual cavity; window → glass
+corner walls form one closed, volume-disjoint butt/lap; window → glass
 material; door → solid; ground plane present; bounds/center correct;
 `demo-shell.framer` extracts without panic and is non-empty.
 
