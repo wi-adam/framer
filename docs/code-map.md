@@ -351,7 +351,9 @@ selected-object lifecycle actions.
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
-| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` plus derived gable profiles, roofs use the shared overhang outline, and Plan-mode 3-D meshes selectable roof-plan members beneath one translucent weather face per field. Common `Rafter` members on `MemberFamily::Rafter` systems use a cut-profile prism with plumb ends and an exact-wall-bearing birdsmouth; truss-tagged and other member kinds keep the generic board prism. `pick()` uses the same rendered cut mesh and owning plan ids while `FrameMember::source` remains provenance. |
+| `scene_build/mod.rs` | **`Scene3d::from_project`** facade and `SceneBuilder` mesh sink. It owns the full emission recipe and the opaque/transparent index partition while delegating element-specific lowering to child modules. |
+| `scene_build/walls.rs`, `scene_build/members.rs`, `scene_build/surfaces.rs` | Interactive 3-D lowering by reason to change: derived wall envelopes/layers/openings; generated wall/roof members (including cut-profile common rafters); authored roof/ceiling/floor surfaces. New element families belong in the matching emitter rather than the facade. |
+| `scene_build/picking.rs`, `scene_build/style.rs`, `scene_build/tests.rs` | Pick shapes/depth; the emitters preserve wall/surface priority 1, opening 2, and member 3. Viewport color/material policy is shared with the view cube/elevation; focused scene fixtures and regressions live with the package. Cut rafters use the same profile mesh for rendering and picking. |
 | `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |
@@ -410,13 +412,13 @@ the real symbols:
 
 | Goal | Touch | Then |
 | --- | --- | --- |
-| **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render/3D handling in `framer-render/src/build.rs` + `viewport/scene_build.rs`; inspector in `framer-app` `panels.rs`. |
-| **New roof plane / ceiling / floor deck object** | the element collection (`roof_planes` / `ceilings` / `floor_decks`) + its struct in `framer-core/src/model.rs`, and a kind-matched `SystemKind` system | framing in `framer-solver/src/lib.rs` (`generate_roof_plan` / shared joisting generator); surface meshing in `framer-render/src/build.rs` + `viewport/scene_build.rs`; tools/tree/inspector in `framer-app` `panels.rs` + `viewport/plan.rs`; bump `PROJECT_SCHEMA_VERSION`; update [ceilings-and-roofs.md](specs/ceilings-and-roofs.md) + [project-files.md](project-files.md). |
+| **New opening kind** | `OpeningKind` in `framer-core/src/model.rs` | framing rules in `framer-solver` `generate_wall_plan`; render handling in `framer-render/src/build.rs`; interactive 3-D mesh/picking in `viewport/scene_build/walls.rs`; inspector in `framer-app` `panels.rs`. |
+| **New roof plane / ceiling / floor deck object** | the element collection (`roof_planes` / `ceilings` / `floor_decks`) + its struct in `framer-core/src/model.rs`, and a kind-matched `SystemKind` system | framing in `framer-solver/src/lib.rs` (`generate_roof_plan` / shared joisting generator); surface meshing in `framer-render/src/build.rs` + `viewport/scene_build/surfaces.rs`; generated-member presentation in `viewport/scene_build/members.rs`; tools/tree/inspector in `framer-app` `panels.rs` + `viewport/plan.rs`; bump `PROJECT_SCHEMA_VERSION`; update [ceilings-and-roofs.md](specs/ceilings-and-roofs.md) + [project-files.md](project-files.md). |
 | **New construction layer function / material** | `LayerFunction` / `Material` / `Appearance` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material lowering in `framer-render/src/build.rs`; asset bytes via `framer-library` package/store helpers. |
 | **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import/placement UI in `framer-app/src/app/panels.rs`; add drawing/picking in the relevant viewport; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
 | **New solver rule / member kind** | `MemberKind` + rule in `framer-solver/src/lib.rs`; the authoring-side family tag is `MemberFamily` on `FramingSpec` in `framer-core/src/model.rs` | the surface/wall generator passes the matching `MemberKind` explicitly (the solver does not dispatch on `member_family`); attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
 | **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
-| **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `scene_build.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
+| **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `viewport/scene_build/walls.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
 | **Schema change** | bump `PROJECT_SCHEMA_VERSION` in `project.rs`; add types in `model.rs` | update the three `examples/projects/*.framer` (round-trip tests are byte-exact); update [project-files.md](project-files.md); add a rejection/round-trip test. |
 | **New UI control / styling** | `framer-app/src/app/design/` | use semantic tokens; don't hard-code colors inline. |
 | **Render math change** | `framer-render` integrator/material/build scene (CPU = reference) | mirror it in `app/render/*.wgsl`; keep `tests/gpu_parity.rs` green. |
@@ -431,12 +433,14 @@ short version, run from the workspace root:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
 Notable test suites: schema round-trip + rejection (`framer-core/src/project.rs`), solver
 determinism + BOM (`framer-solver/src/lib.rs`), shared render fixtures
 (`framer-render/src/scenes.rs`, including the hip-roof scene), golden render
 (`framer-render/tests/golden.rs`, regen with `UPDATE_GOLDEN=1`), GPU↔CPU parity
-(`framer-app/tests/gpu_parity.rs`), headless UI (`framer-app/src/app/ui_harness_tests.rs`).
+(`framer-app/tests/gpu_parity.rs`), interactive 3-D scene lowering and picking
+(`framer-app/src/app/viewport/scene_build/tests.rs`), and headless UI
+(`framer-app/src/app/ui_harness_tests.rs`).

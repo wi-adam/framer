@@ -80,9 +80,9 @@ Plan/3D views, and path-traced render describe one physical corner.
   studs as `MemberKind::CornerPost`.
 - `framer-app/src/app/viewport/plan.rs`: Width and Full wall bodies use the derived envelope
   endpoints while authored centerlines remain the interaction surface.
-- `framer-app/src/app/viewport/scene_build.rs` and `framer-render/src/build.rs`: both already
-  consume `wall_envelope_span`, so the core contract keeps interactive and path-traced
-  geometry aligned.
+- `framer-app/src/app/viewport/scene_build/walls.rs` and
+  `framer-render/src/build.rs`: both already consume `wall_envelope_span`, so the
+  core contract keeps interactive and path-traced geometry aligned.
 
 ## Constraints & invariants
 

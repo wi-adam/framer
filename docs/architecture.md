@@ -104,11 +104,14 @@ B-rep CAD kernel. Wood framing work is dominated by planes, spans, levels,
 offsets, openings, and repeated members. That makes a semantic solver more
 valuable than early NURBS or freeform modeling.
 
-The 3D viewport is generated from the same derived framing model using `wgpu`
-inside the `eframe`/`egui` shell. The current renderer is intentionally small:
-it draws wall-envelope and generated-framing cuboids with depth testing while
-the native panels, inspectors, and drawing views remain ordinary `egui`
-surfaces.
+The interactive 3D viewport is generated from authored model surfaces plus the
+same derived framing plan using `wgpu` inside the `eframe`/`egui` shell. Its
+scene-building package lowers walls, roofs, ceilings, floors, and generated
+members into depth-tested meshes, translucent assembly context, outline overlays,
+and matching pick solids. The separate path-traced Render view consumes the same
+UI-free semantic derivations through `framer-render`; each presentation owns its
+own mesh representation while native panels, inspectors, and drawing views remain
+ordinary `egui` surfaces.
 
 Framer should not make arbitrary solid operations the primary modeling surface.
 The viewport should let users place, select, drag, snap, and parametrically edit
