@@ -423,8 +423,8 @@ fn push_wall(
     let base = level_elevation(model, wall);
     let height = wall.height.inches() as f32;
     let (visual_start, visual_end) = model.wall_envelope_span(wall);
-    let visual_start = visual_start.inches() as f32;
-    let visual_end = visual_end.inches() as f32;
+    let visual_start = visual_start as f32;
+    let visual_end = visual_end as f32;
     // Through-wall depth and exposure come from the wall's construction system.
     // Fall back to the code stud profile / Exterior when the system is missing
     // so scene building stays infallible.
@@ -1102,37 +1102,26 @@ mod tests {
     }
 
     #[test]
-    fn joined_corner_wall_envelopes_fill_the_outside_quadrant() {
+    fn joined_corner_wall_envelopes_form_one_volume_disjoint_butt_lap() {
         let model = corner_model();
-        let scene = scene_from_model(&model, &RenderOptions::default());
-        let (_, wall_a_end) = model.wall_envelope_span(&model.walls[0]);
-        let wall_a_half = model
-            .system_for(&model.walls[0])
-            .expect("wall resolves a system")
-            .total_thickness()
-            .inches() as f32
-            / 2.0;
-        let expected_x = wall_a_end.inches() as f32;
-        let expected_y = -wall_a_half;
+        let assets = RenderAssets::default();
+        let mut palette = PaletteBuilder::new(&model, &assets);
+        let wall_bounds = |wall: &Wall, palette: &mut PaletteBuilder<'_>| {
+            let mut triangles = Vec::new();
+            let mut bounds = Aabb::EMPTY;
+            push_wall(&mut triangles, &mut bounds, &model, wall, None, palette);
+            assert!(!triangles.is_empty());
+            bounds
+        };
+        let first = wall_bounds(&model.walls[0], &mut palette);
+        let second = wall_bounds(&model.walls[1], &mut palette);
+        let x_overlap = first.max.x.min(second.max.x) - first.min.x.max(second.min.x);
+        let y_overlap = first.max.y.min(second.max.y) - first.min.y.max(second.min.y);
 
-        let has_corner_vertex = scene
-            .triangles
-            .iter()
-            .filter(|triangle| triangle.material != MAT_GROUND)
-            .flat_map(|triangle| {
-                [
-                    triangle.v0,
-                    triangle.v0 + triangle.edge1,
-                    triangle.v0 + triangle.edge2,
-                ]
-            })
-            .any(|vertex| {
-                (vertex.x - expected_x).abs() < 1.0e-4 && (vertex.y - expected_y).abs() < 1.0e-4
-            });
-
+        assert!(x_overlap > 0.0, "the perpendicular wall bands must meet");
         assert!(
-            has_corner_vertex,
-            "corner wall envelope should include the quadrant beyond both centerline endpoints"
+            y_overlap.abs() < 1.0e-4,
+            "the through wall and butting wall must share one face without a gap or overlapping volume"
         );
     }
 

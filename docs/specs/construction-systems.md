@@ -5,7 +5,7 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented · **Linked goal:** G-008 (Code Profile Data) /
-> G-001 (Project Files) · **Last reviewed:** 2026-06-20
+> G-001 (Project Files) · **Last reviewed:** 2026-07-10
 
 > Authored retroactively from the shipped v7 implementation (PR #16) to capture the durable
 > intent of an already-built feature. It is the worked example for the spec template.
@@ -44,8 +44,12 @@ the layer stack is authored intent; the framing members and BOM are derived from
 - **Derived, not stored:** total through-wall thickness, exposure (exterior vs interior), and
   clear-wall R-value are computed from the layer stack; cavity insulation adds no extra depth.
 - **Solver output:** the framing plan uses the wall system's framing layer to size studs,
-  plates, and corner posts, and produces a **per-layer material takeoff** (area goods +
-  volumetric goods) aggregated across walls. See [code-map.md](../code-map.md#framer-solver--deterministic-framing--takeoffs).
+  plates, and corner posts. At a `Corner`, studs/bottom/lower plates follow the framing band's
+  primary through/butt span and the upper member of a double top plate counter-laps the seam;
+  the physical end studs are reclassified as corner posts rather than duplicated. The solver
+  also produces a **per-layer material takeoff** (area goods + volumetric goods) aggregated
+  across walls. See [wall-corner-laps.md](wall-corner-laps.md) and
+  [code-map.md](../code-map.md#framer-solver--deterministic-framing--takeoffs).
 - **Validation** fails closed: a wall referencing an unknown system, a layer referencing an
   unknown material, a framing/`function` mismatch, non-positive thickness/spacing, or the wrong
   framing-layer count are all `ModelError`s caught before save.
@@ -80,6 +84,9 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `Material { id, name, source: MaterialSource, appearance: Appearance, tags, properties }`;
   `PropertyValue`, `Appearance::{SolidColor, Textured, DepthMapped}`.
 - `Wall.system: ElementId`; `BuildingModel::system_for(wall)`, `material(&id)`.
+- Derived corner geometry: `BuildingModel::wall_envelope_span`, `wall_framing_span`, and
+  `wall_counter_lap_framing_span` keep finished assemblies, primary structural framing, and
+  upper-plate counter-laps separate without persisted join-detail state.
 - Serialization: schema **v13** in [`project.rs`](../../crates/framer-core/src/project.rs)
   (`systems`/`materials` are top-level authored keys; v13-only — older files are rejected). The
   shape is documented in [project-files.md](../project-files.md).

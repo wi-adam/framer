@@ -12,7 +12,7 @@ use eframe::egui::{
 use framer_core::{BuildingModel, ElementId, Length, Point2, QuarterTurn, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
-use super::geom::{ModelBounds, distance_to_segment, plan_inverse_point, plan_point};
+use super::geom::{ModelBounds, distance_to_segment, plan_inches, plan_inverse_point, plan_point};
 use super::view_common::{
     draw_dashed_line, draw_drafting_grid, draw_drafting_rulers, draw_plan_axis_indicator,
     draw_scale_bar, draw_view_background, draw_view_border, draw_view_empty, draw_view_title,
@@ -234,6 +234,10 @@ fn snapped_wall_endpoint(
 /// bands. The side axis is `(-along_y, along_x)` — the same convention the 3D
 /// renderer uses — so plan and 3D agree on which way "exterior" lies.
 struct PlanWallBasis {
+    origin_x: f64,
+    origin_y: f64,
+    along_x: f64,
+    along_y: f64,
     side_x: f64,
     side_y: f64,
 }
@@ -246,16 +250,22 @@ impl PlanWallBasis {
         let along_x = dx / length;
         let along_y = dy / length;
         Self {
+            origin_x: wall.start.x.inches(),
+            origin_y: wall.start.y.inches(),
+            along_x,
+            along_y,
             side_x: -along_y,
             side_y: along_x,
         }
     }
 
-    /// Offset a centerline model point perpendicular to the wall by `side` inches.
-    fn offset(&self, point: Point2, side: f64) -> Point2 {
-        Point2::new(
-            point.x + Length::from_inches(self.side_x * side),
-            point.y + Length::from_inches(self.side_y * side),
+    /// A derived physical point at wall-local `x` and perpendicular `side`, both
+    /// in inches. Keeping these transient values as floats preserves exact
+    /// half-tick envelope faces without changing authored integer-tick points.
+    fn point(&self, local_x: f64, side: f64) -> (f64, f64) {
+        (
+            self.origin_x + self.along_x * local_x + self.side_x * side,
+            self.origin_y + self.along_y * local_x + self.side_y * side,
         )
     }
 }
@@ -266,19 +276,23 @@ impl PlanWallBasis {
 #[allow(clippy::too_many_arguments)]
 fn band_quad(
     basis: &PlanWallBasis,
-    start: Point2,
-    end: Point2,
+    start_x: f64,
+    end_x: f64,
     side0: f64,
     side1: f64,
     bounds: ModelBounds,
     drawing: Rect,
     camera: &View2dState,
 ) -> [Pos2; 4] {
+    let project = |local_x, side| {
+        let (x, y) = basis.point(local_x, side);
+        plan_inches(x, y, bounds, drawing, camera)
+    };
     [
-        plan_point(basis.offset(start, side0), bounds, drawing, camera),
-        plan_point(basis.offset(end, side0), bounds, drawing, camera),
-        plan_point(basis.offset(end, side1), bounds, drawing, camera),
-        plan_point(basis.offset(start, side1), bounds, drawing, camera),
+        project(start_x, side0),
+        project(end_x, side0),
+        project(end_x, side1),
+        project(start_x, side1),
     ]
 }
 
@@ -334,6 +348,7 @@ fn draw_wall_layers(
     camera: &View2dState,
 ) {
     let basis = PlanWallBasis::new(wall);
+    let (visual_start, visual_end) = model.wall_envelope_span(wall);
     match model.system_for(wall) {
         Some(system) => {
             let total = system.total_thickness().inches();
@@ -344,7 +359,14 @@ fn draw_wall_layers(
                 off += thickness;
                 let color = plan_layer_color(model, &layer.material);
                 let quad = band_quad(
-                    &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
+                    &basis,
+                    visual_start,
+                    visual_end,
+                    side0,
+                    side1,
+                    bounds,
+                    drawing,
+                    camera,
                 );
                 painter.add(egui::Shape::convex_polygon(
                     quad.to_vec(),
@@ -363,7 +385,14 @@ fn draw_wall_layers(
                 .inches();
             let (side0, side1) = layer_band_span(interior_sign, total, 0.0, total);
             let quad = band_quad(
-                &basis, wall.start, wall.end, side0, side1, bounds, drawing, camera,
+                &basis,
+                visual_start,
+                visual_end,
+                side0,
+                side1,
+                bounds,
+                drawing,
+                camera,
             );
             painter.add(egui::Shape::convex_polygon(
                 quad.to_vec(),
@@ -391,10 +420,18 @@ fn draw_wall_width(
 ) {
     let half = wall_plan_thickness(model, wall) / 2.0;
     let basis = PlanWallBasis::new(wall);
+    let (visual_start, visual_end) = model.wall_envelope_span(wall);
     // band_quad winds [start@-half, end@-half, end@+half, start@+half], so the two
     // long faces are [0,1] (minus side) and [3,2] (plus side).
     let quad = band_quad(
-        &basis, wall.start, wall.end, -half, half, bounds, drawing, camera,
+        &basis,
+        visual_start,
+        visual_end,
+        -half,
+        half,
+        bounds,
+        drawing,
+        camera,
     );
     let stroke = Stroke::new(1.0, theme::framing_line());
     draw_dashed_line(painter, quad[0], quad[1], stroke);
@@ -417,6 +454,14 @@ fn draw_opening_gap(
     let total = wall_plan_thickness(model, wall);
     let basis = PlanWallBasis::new(wall);
     let half = total / 2.0;
+    let left = wall
+        .local_x_for_point(left)
+        .unwrap_or(Length::ZERO)
+        .inches();
+    let right = wall
+        .local_x_for_point(right)
+        .unwrap_or(wall.length)
+        .inches();
     let quad = band_quad(&basis, left, right, -half, half, bounds, drawing, camera);
     painter.add(egui::Shape::convex_polygon(
         quad.to_vec(),
@@ -1434,6 +1479,40 @@ mod tests {
 
         layers.joins = true;
         assert!(join_label_visible(layers, false, false));
+    }
+
+    #[test]
+    fn plan_wall_bands_use_volume_disjoint_lapped_spans() {
+        let model = BuildingModel::demo_shell();
+        let wall_bounds = |id: &str| {
+            let wall = model.walls.iter().find(|wall| wall.id.0 == id).unwrap();
+            let half = wall_plan_thickness(&model, wall) / 2.0;
+            let span = model.wall_envelope_span(wall);
+            let basis = PlanWallBasis::new(wall);
+            [
+                basis.point(span.0, -half),
+                basis.point(span.1, -half),
+                basis.point(span.1, half),
+                basis.point(span.0, half),
+            ]
+            .into_iter()
+            .fold(
+                (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+                |(min_x, max_x, min_y, max_y), (x, y)| {
+                    (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+                },
+            )
+        };
+        let front = wall_bounds("wall-front");
+        let right = wall_bounds("wall-right");
+        let x_overlap = front.1.min(right.1) - front.0.max(right.0);
+        let y_overlap = front.3.min(right.3) - front.2.max(right.2);
+
+        assert!(x_overlap > 0.0);
+        assert!(
+            y_overlap.abs() < 1.0e-9,
+            "Plan Full/Width bodies must share one face without overlap"
+        );
     }
 
     #[test]

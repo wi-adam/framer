@@ -13,6 +13,7 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | [Libraries (Reusable, Distributable Content)](libraries.md) | G-013 | Phase 5 implemented |
 | [Walls & Rooms (Floor-Plan Authoring)](walls-and-rooms.md) | G-007 | Implemented |
 | [Wall Editing & Snapping](wall-editing-and-snapping.md) | G-003 | Implemented |
+| [Wall Corner Laps](wall-corner-laps.md) | G-007 | Implemented |
 | [2D View Camera (Pan / Zoom)](2d-view-camera.md) | G-003 | Implemented |
 | [View Layers (Wall Display Modes & Visibility)](view-layers.md) | G-003 | Implemented |
 | [Render View Mode](render-view.md) | — | Implemented |

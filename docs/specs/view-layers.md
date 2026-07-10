@@ -11,7 +11,7 @@
 >
 > **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) ·
 > **Plan:** [2026-06-19-visual-layering.md](../plans/2026-06-19-visual-layering.md) ·
-> **Last reviewed:** 2026-07-09
+> **Last reviewed:** 2026-07-10
 
 ## Intent / Purpose
 
@@ -36,8 +36,10 @@ controllable presentation surfaces over the authored model.
   - **Full** — the true-thickness colored construction-layer bands (2D opaque; 3D
     translucent so framing members show through). Openings cut the bands.
 - In every 3D wall display mode, the wall envelope is the derived physical body,
-  not merely the authored centerline span: `Corner`-joined wall ends extend to the
-  adjoining wall's outside face so closed shell corners draw as closed boxes.
+  not merely the authored centerline span: each `Corner` derives one through wall
+  that reaches the adjoining outside face and one butting wall that stops at the
+  through wall's inside face. Closed shell corners therefore have neither a cavity
+  nor overlapping wall volumes. See [wall-corner-laps.md](wall-corner-laps.md).
 - **Per-layer visibility toggles** (independent on/off) for Plan-view annotations:
   **Grid**, **Rooms** (fills + labels), **Corners** (wall-join markers + labels),
   **Wall labels** (names). Grid, Rooms, and Wall labels default on; Corner labels
@@ -97,14 +99,15 @@ controllable presentation surfaces over the authored model.
 - **Plan rendering** (`framer-app/src/app/viewport/plan.rs`): the wall body is a
   `match layers.wall_display` — `Outline` draws nothing extra, `Width` calls
   `draw_wall_width` (two dashed faces via `band_quad` + `draw_dashed_line`), `Full`
-  calls the existing `draw_wall_layers`. The centerline, handles, and hit-test stay
+  calls the existing `draw_wall_layers`. Width and Full use the derived lapped
+  envelope span; the centerline, handles, and hit-test stay authored and
   unconditional. `draw_opening_gap` runs only in `Full`. Rooms and wall labels are
   gated by the matching `layers.*` flags. Wall joins are user-facing Corners:
   `layers.joins` reveals all labels, while hover/selection reveals one quiet corner
   marker and label even when the layer is off.
 - **3D rendering** (`framer-app/src/app/viewport/scene_build.rs`): `from_project`
-  takes a `WallDisplay`; `push_wall_envelope` resolves the wall's derived visual
-  span via `BuildingModel::wall_envelope_span`, then branches — `Full` keeps the
+  takes a `WallDisplay`; `push_wall_envelope` resolves the wall's derived physical
+  butt/lap span via `BuildingModel::wall_envelope_span`, then branches — `Full` keeps the
   per-layer bands, `Width` pushes one neutral full-thickness band, `Outline` pushes
   the envelope's 12 edges into `Scene3d.outline_edges` (and feeds the corners into
   `points` so the projector stays framed). The pick envelope is pushed in every

@@ -129,7 +129,9 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   `room_boundary_on_level(model, level, seed)` (`topology.rs`).
 - Mutation helpers on `BuildingModel`: `move_wall_endpoint`, `translate_wall`, `remove_wall`,
   `reconcile_joins` (re-derive joins after geometry edits), `system_for(wall)`,
-  `wall_envelope_span(wall)` (derived visual/render span that closes corner joins),
+  `wall_envelope_span(wall)` (half-tick visual/render through-butt span),
+  `wall_framing_span(wall)` / `wall_counter_lap_framing_span(wall)` (primary structural span
+  plus the upper-top-plate counter-lap),
   `material(&ElementId)`, `sort_deterministically` / `into_deterministic`.
 
 ### `.framer` serialization (`src/project.rs`)
@@ -239,7 +241,8 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
 
 - **`generate_project_plan(&BuildingModel) -> Result<ProjectFramePlan, SolverError>`** — the
   one entry the app calls. Validates, then per wall calls `generate_wall_plan`, adds join
-  members (corner posts / partition + backing studs), generates floor/ceiling/roof plans, adds
+  members (physical lapped corner end studs are reclassified as corner posts; partition +
+  backing studs are added), generates floor/ceiling/roof plans, adds
   hip or valley rafters from shared roof-plane edges, frames jack rafters where hip/valley-bounded
   planes shorten, appends buildable-clearance gable studs/rake plates to matched end-wall plans,
   and builds

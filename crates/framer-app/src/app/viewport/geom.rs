@@ -109,18 +109,26 @@ pub(super) fn plan_point(
     drawing: Rect,
     view: &View2dState,
 ) -> Pos2 {
+    plan_inches(point.x.inches(), point.y.inches(), bounds, drawing, view)
+}
+
+pub(super) fn plan_inches(
+    x: f64,
+    y: f64,
+    bounds: ModelBounds,
+    drawing: Rect,
+    view: &View2dState,
+) -> Pos2 {
     let width = (bounds.max_x - bounds.min_x).max(1.0);
     let depth = (bounds.max_y - bounds.min_y).max(1.0);
     let scale = (drawing.width() / width).min(drawing.height() / depth);
     let used_width = width * scale;
     let used_height = depth * scale;
     let base = Pos2::new(
-        drawing.left()
-            + (drawing.width() - used_width) / 2.0
-            + (point.x.inches() as f32 - bounds.min_x) * scale,
+        drawing.left() + (drawing.width() - used_width) / 2.0 + (x as f32 - bounds.min_x) * scale,
         drawing.bottom()
             - (drawing.height() - used_height) / 2.0
-            - (point.y.inches() as f32 - bounds.min_y) * scale,
+            - (y as f32 - bounds.min_y) * scale,
     );
     view.apply(base, drawing)
 }
