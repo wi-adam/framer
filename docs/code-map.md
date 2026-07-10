@@ -95,7 +95,14 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   lift — `surface_frame(outline, slope, low_edge, reference_elevation) -> RoofPlaneFrame`, reached via
   `RoofPlane::frame` / `Ceiling::frame` — so the solver and both meshers project identically. A sloped
   ceiling needs a `Polygon` region (validation enforces it); `slope == None` is flat. A region with no
-  `Ceiling` is a *cathedral* (`BuildingModel::roof_cathedral_flags`). See
+  `Ceiling` is a *cathedral* (`BuildingModel::roof_cathedral_flags`).
+  `BuildingModel::roof_surface_outline` derives the visible/takeoff polygon by offsetting the
+  authored bearing outline's eave and exposed rakes while keeping shared roof seams fixed;
+  `BuildingModel::connected_roof_plane_ids` defines the exact-edge component whose matching
+  overhang pair keeps those seam endpoints watertight, while roof validation rejects negative
+  overhangs and redundant duplicate/collinear boundary vertices;
+  `BuildingModel::gable_wall_profiles` derives simple triangular end-wall infill from the original
+  bearing edges. Neither helper adds persisted intent or changes the project schema. See
   [ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
 - **`StandardsPack`** / **`FramingDefaults`** (`src/standards.rs`) — project-embedded standards
   data, starter framing defaults, prescriptive tables, checks, overlays, and stack resolution.
@@ -217,10 +224,12 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
 - **`WallFramePlan`** — `wall: ElementId`, `members: Vec<FrameMember>`, diagnostics; its own
   `bom()` / `layer_bom()`.
 - **`FrameMember`** — one generated piece: `kind: MemberKind` (BottomPlate, TopPlate,
-  CommonStud, KingStud, JackStud, Header, RoughSill, CrippleStud, CornerPost, Rafter,
-  RidgeBoard, HipRafter, JackRafter, …),
-  `profile: BoardProfile`, `orientation`, position/length, and `provenance: RuleProvenance`
-  (rule id + human-readable why).
+  CommonStud, GableStud, RakePlate, KingStud, JackStud, Header, RoughSill, CrippleStud,
+  CornerPost, Rafter, RidgeBoard, HipRafter, JackRafter, …), `profile: BoardProfile`,
+  `orientation`, position/length, and `provenance: RuleProvenance` (rule id + human-readable why).
+  Sloped members carry exact plan `start`/`end` points and their building elevations in
+  `SlopedPlacement`, so common/ridge/hip/valley/rake members have one renderer-independent 3-D
+  placement.
 - **`LayerBomItem`** — per-layer material takeoff row (area goods / volumetric goods by
   material + function + thickness). **`BomItem`** — member cut-list row.
 - **`RoomSchedule`** — derived room takeoff (area, perimeter, enclosed?).
@@ -232,11 +241,14 @@ One file, `src/lib.rs` (~2.6k lines). Pure function of the model: same input →
   one entry the app calls. Validates, then per wall calls `generate_wall_plan`, adds join
   members (corner posts / partition + backing studs), generates floor/ceiling/roof plans, adds
   hip or valley rafters from shared roof-plane edges, frames jack rafters where hip/valley-bounded
-  planes shorten, and builds the room schedule, per-layer BOM, and fastening BOM from
-  construction systems and resolved standards.
+  planes shorten, appends buildable-clearance gable studs/rake plates to matched end-wall plans,
+  and builds
+  the room schedule, per-layer BOM, and fastening BOM from construction systems and resolved
+  standards. Roof layer takeoff uses the same overhung outline both meshers draw.
 - `generate_wall_plan(wall, code, system, materials)` — single-wall framing.
 - Exports: `export_bom_csv`, `export_layer_bom_csv`, `export_room_schedule_csv`,
-  `export_wall_elevation_svg`, `export_project_svg`.
+  `export_wall_elevation_svg`, `export_project_svg` (both wall-elevation paths include derived
+  gable height and sloped rake-plate polygons).
 
 ---
 
@@ -269,7 +281,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `src/lib.rs` | Public API: `accumulate`, `tonemap_accum`, `render`; re-exports `build::*`. |
-| `src/build.rs` | **Scene extraction from the model**: `scene_from_model`, `build_scene`, `RenderOptions`, `SceneFraming` (auto-derives cladding/drywall/glass/door/ground materials + sky + sun; wall solids use `BuildingModel::wall_envelope_span` so corner-joined walls close visually). |
+| `src/build.rs` | **Scene extraction from the model**: `scene_from_model`, `build_scene`, `RenderOptions`, `SceneFraming` (auto-derives cladding/drywall/glass/door/ground materials + sky + sun; wall solids use `BuildingModel::wall_envelope_span` plus derived gable profiles, and roof solids use the shared overhang outline). |
 | `src/scenes.rs` | Shared render-test fixtures: the synthetic reference scene plus model-derived gable, scissor-vault, and hip-roof scenes used by golden and parity tests. |
 | `src/scene.rs` | `Scene`, lighting (`DirectionalSun`, `Sky`). |
 | `src/bvh.rs`, `src/aabb.rs`, `src/geom.rs`, `src/ray.rs` | BVH acceleration + geometry/ray primitives. |
@@ -332,11 +344,11 @@ selected-object lifecycle actions.
 | File | Contains |
 | --- | --- |
 | `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, and the wall display mode (outline/width/full) + layer-visibility guards. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, the overhang-aware roof authoring overlay, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
-| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` so corner-joined walls close visually; `pick()` for selection. |
+| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` plus derived gable profiles, roofs use the shared overhang outline, and Plan-mode 3-D meshes selectable roof-plan members beneath one translucent weather face per field; `pick()` uses owning plan ids while `FrameMember::source` remains provenance. |
 | `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |

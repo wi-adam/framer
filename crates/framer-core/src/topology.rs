@@ -383,9 +383,30 @@ pub fn enclosed_room_count_on_level(model: &BuildingModel, level: &ElementId) ->
 /// rooms, or open/free walls) are ambiguous and OMITTED from the map.
 pub fn wall_interior_sides(model: &BuildingModel) -> BTreeMap<ElementId, bool> {
     let faces = bounded_faces(model);
+    wall_interior_sides_for(model.walls.iter(), &faces)
+}
+
+/// Level-scoped form of [`wall_interior_sides`]. Gable/profile derivation and
+/// other level-owned geometry must not let a closed loop on another storey make
+/// an otherwise free or interior wall look exterior.
+pub fn wall_interior_sides_on_level(
+    model: &BuildingModel,
+    level: &ElementId,
+) -> BTreeMap<ElementId, bool> {
+    let faces = bounded_faces_on_level(model, level);
+    wall_interior_sides_for(
+        model.walls.iter().filter(|wall| wall.level == *level),
+        &faces,
+    )
+}
+
+fn wall_interior_sides_for<'a>(
+    walls: impl IntoIterator<Item = &'a Wall>,
+    faces: &[Vec<Point2>],
+) -> BTreeMap<ElementId, bool> {
     let probe = Length::from_whole_inches(6).inches();
     let mut sides = BTreeMap::new();
-    for wall in &model.walls {
+    for wall in walls {
         if wall.start == wall.end {
             continue;
         }
@@ -962,6 +983,31 @@ mod tests {
                 .iter()
                 .any(|face| point_in_polygon(toward_interior, face))
         );
+    }
+
+    #[test]
+    fn wall_interior_sides_on_level_ignores_overlapping_other_storeys() {
+        let mut model = rect_model(10.0, 8.0);
+        let upper: Vec<Wall> = model
+            .walls
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, mut wall)| {
+                wall.id = ElementId::new(format!("upper-{index}"));
+                wall.level = ElementId::new("level-2");
+                wall
+            })
+            .collect();
+        model.walls.extend(upper);
+
+        let lower = wall_interior_sides_on_level(&model, &ElementId::new("level-1"));
+        assert_eq!(lower.len(), 4);
+        assert!(lower.keys().all(|id| !id.0.starts_with("upper-")));
+
+        let upper = wall_interior_sides_on_level(&model, &ElementId::new("level-2"));
+        assert_eq!(upper.len(), 4);
+        assert!(upper.keys().all(|id| id.0.starts_with("upper-")));
     }
 
     /// Every emitted triangle must lie inside the polygon (centroid test) and the

@@ -76,7 +76,11 @@ for the single-wall example.
   `member_family` (`Stud`, `Rafter`, `CeilingJoist`, `FloorJoist`, `Truss`) is
   omitted when it is the `Stud` default.
 - `roof_planes` are sloped/flat structural faces (outline, pitch `slope`, eave
-  edge, overhangs, and nested plane-local `openings`); `ceilings` and
+  edge, overhangs, and nested plane-local `openings`). A roof outline is an
+  implicit ring: do not repeat the first point or insert duplicate/collinear
+  boundary vertices. Overhangs are nonnegative, and same-level planes sharing an
+  exact edge use one matching eave/rake pair so their derived seams stay closed;
+  `ceilings` and
   `floor_decks` carry a `region` (an enclosed room id or an explicit polygon). A
   `ceiling` may carry an optional `slope` (`{ pitch, low_edge }` — a scissor/vault
   surface that springs from its polygon's `low_edge`); it is omitted for a flat
@@ -188,8 +192,9 @@ The v13 authored model holds:
 - `rooms`: deterministic list of authored rooms (spaces).
 - `furnishing_instances`: level-owned placed furnishing instances.
 - `mep_instances`: level-owned placed MEP object instances.
-- `roof_planes`: level-owned sloped/flat structural roof faces (outline, pitch
-  `slope`, eave edge, overhangs, nested plane-local `openings`).
+- `roof_planes`: level-owned sloped/flat structural roof faces (minimal implicit-ring outline,
+  pitch `slope`, eave edge, nonnegative overhangs, nested plane-local `openings`). Same-level
+  exact-edge-connected planes must share their eave/rake values.
 - `ceilings`: level-owned finished ceiling surfaces over a `region` (room or
   polygon) at an authored `height`, with an optional `slope`
   (`{ pitch, low_edge }`) for a scissor/vault surface (flat when omitted; a slope
@@ -654,12 +659,16 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
    references — every referenced `system`/`material`/`family`/standards pack must
    exist. Keep layer order interior → exterior and keep standards stack order
    semantic.
-8. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
-9. Do not present the starter IRC 2021 standards pack as complete code
+8. Keep roof outlines as minimal implicit rings (no repeated closing point,
+   consecutive duplicate, or redundant collinear vertex), keep overhangs
+   nonnegative, and use matching eave/rake values across every same-level
+   exact-edge-connected roof assembly.
+9. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
+10. Do not present the starter IRC 2021 standards pack as complete code
    compliance.
-10. Represent plan adjustments as authored design changes or explicit override
+11. Represent plan adjustments as authored design changes or explicit override
     records if the schema supports them; do not add generated members directly.
-11. Validate after edits.
+12. Validate after edits.
 
 Recommended validation:
 

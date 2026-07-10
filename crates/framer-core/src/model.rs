@@ -751,6 +751,22 @@ impl BuildingModel {
             }
             roof.validate_geometry(&mut ids)?;
         }
+        for (index, first) in self.roof_planes.iter().enumerate() {
+            for second in &self.roof_planes[index + 1..] {
+                let shares_edge = first.level == second.level
+                    && (0..first.outline.len())
+                        .any(|edge| roof_planes_share_edge(first, edge, second));
+                if shares_edge
+                    && (first.eave_overhang != second.eave_overhang
+                        || first.rake_overhang != second.rake_overhang)
+                {
+                    return Err(ModelError::RoofPlaneConnectedOverhangMismatch {
+                        first: first.id.clone(),
+                        second: second.id.clone(),
+                    });
+                }
+            }
+        }
 
         for ceiling in &self.ceilings {
             validate_element_id(&ceiling.id)?;
@@ -926,6 +942,116 @@ impl BuildingModel {
         self.system_for(wall)
             .map(ConstructionSystem::total_thickness)
             .unwrap_or_else(|| self.framing_defaults().stud_profile.nominal_depth())
+    }
+
+    /// The visible/takeoff outline of a roof plane after applying its authored
+    /// plan-projected eave and rake overhangs. The persisted [`RoofPlane::outline`]
+    /// remains the bearing/topology footprint: this derived polygon offsets only
+    /// the designated eave and exposed rake edges, while exact same-level shared
+    /// ridge/hip/valley edges stay fixed so adjacent planes cannot crack apart.
+    ///
+    /// The result keeps the authored vertex count/order and returns the authored
+    /// outline byte-for-byte when both overhangs are zero. Consumers must project
+    /// it through the plane's original [`RoofPlane::frame`], not build a new frame
+    /// from this expanded outline.
+    pub fn roof_surface_outline(&self, plane: &RoofPlane) -> Vec<Point2> {
+        if plane.eave_overhang == Length::ZERO && plane.rake_overhang == Length::ZERO {
+            return plane.outline.clone();
+        }
+        let Some(frame) = plane.frame() else {
+            return plane.outline.clone();
+        };
+        let Some(high_edge) = roof_high_edge_index(plane, &frame) else {
+            return plane.outline.clone();
+        };
+        let edge_count = plane.outline.len();
+        let offsets: Vec<Length> = (0..edge_count)
+            .map(|index| {
+                if index == plane.eave_edge as usize % edge_count {
+                    return plane.eave_overhang;
+                }
+                if index == high_edge
+                    || self.roof_planes.iter().any(|other| {
+                        other.id != plane.id
+                            && other.level == plane.level
+                            && roof_planes_share_edge(plane, index, other)
+                    })
+                {
+                    Length::ZERO
+                } else {
+                    plane.rake_overhang
+                }
+            })
+            .collect();
+        offset_polygon_edges(&plane.outline, &offsets).unwrap_or_else(|| plane.outline.clone())
+    }
+
+    /// Exact-edge connected component containing `roof_plane`. Connected fields
+    /// form one watertight roof assembly for overhang compatibility and UI edits.
+    pub fn connected_roof_plane_ids(&self, roof_plane: &ElementId) -> BTreeSet<ElementId> {
+        let Some(seed) = self
+            .roof_planes
+            .iter()
+            .find(|plane| plane.id == *roof_plane)
+        else {
+            return BTreeSet::new();
+        };
+        let mut connected = BTreeSet::from([seed.id.clone()]);
+        let mut frontier = vec![seed.id.clone()];
+        while let Some(current_id) = frontier.pop() {
+            let current = self
+                .roof_planes
+                .iter()
+                .find(|plane| plane.id == current_id)
+                .expect("frontier ids originate in roof_planes");
+            for candidate in self
+                .roof_planes
+                .iter()
+                .filter(|candidate| candidate.level == current.level)
+            {
+                if connected.contains(&candidate.id)
+                    || !(0..current.outline.len())
+                        .any(|edge| roof_planes_share_edge(current, edge, candidate))
+                {
+                    continue;
+                }
+                connected.insert(candidate.id.clone());
+                frontier.push(candidate.id.clone());
+            }
+        }
+        connected
+    }
+
+    /// Derive every simple matched gable profile once, keyed by the hosting wall.
+    /// Only level-scoped exterior walls participate; interior partitions and free
+    /// walls are omitted by [`crate::topology::wall_interior_sides_on_level`].
+    pub fn gable_wall_profiles(&self) -> BTreeMap<ElementId, GableWallProfile> {
+        let mut profiles = BTreeMap::new();
+        let levels: BTreeSet<ElementId> =
+            self.walls.iter().map(|wall| wall.level.clone()).collect();
+        for level in levels {
+            let exterior = crate::topology::wall_interior_sides_on_level(self, &level);
+            for wall in self
+                .walls
+                .iter()
+                .filter(|wall| wall.level == level && exterior.contains_key(&wall.id))
+            {
+                if let Some(profile) = derive_gable_wall_profile(self, wall) {
+                    profiles.insert(wall.id.clone(), profile);
+                }
+            }
+        }
+        profiles
+    }
+
+    /// Per-wall convenience form of [`Self::gable_wall_profiles`]. Hot render
+    /// paths should use the batched form so each level's wall graph is solved once.
+    pub fn gable_wall_profile(&self, wall: &Wall) -> Option<GableWallProfile> {
+        let exterior = crate::topology::wall_interior_sides_on_level(self, &wall.level);
+        exterior
+            .contains_key(&wall.id)
+            .then(|| derive_gable_wall_profile(self, wall))
+            .flatten()
     }
 
     /// Resolve a material by id from the project library.
@@ -2040,6 +2166,11 @@ impl RoofPlane {
                 roof_plane: self.id.clone(),
             });
         }
+        if polygon_has_redundant_vertices(&self.outline) {
+            return Err(ModelError::RoofPlaneOutlineHasRedundantVertices {
+                roof_plane: self.id.clone(),
+            });
+        }
         if polygon_self_intersects(&self.outline) {
             return Err(ModelError::RoofPlaneOutlineSelfIntersecting {
                 roof_plane: self.id.clone(),
@@ -2052,6 +2183,11 @@ impl RoofPlane {
         }
         if self.slope.run <= Length::ZERO {
             return Err(ModelError::RoofPlaneInvalidSlope {
+                roof_plane: self.id.clone(),
+            });
+        }
+        if self.eave_overhang < Length::ZERO || self.rake_overhang < Length::ZERO {
+            return Err(ModelError::RoofPlaneInvalidOverhang {
                 roof_plane: self.id.clone(),
             });
         }
@@ -2111,6 +2247,7 @@ pub fn surface_frame(
     };
     Some(RoofPlaneFrame {
         eave_origin: (ax, ay),
+        eave_axis: (ex / eave_length, ey / eave_length),
         up_slope: (nx, ny),
         eave_length,
         rise_over_run,
@@ -2127,16 +2264,300 @@ pub fn surface_frame(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoofPlaneFrame {
     eave_origin: (f64, f64),
+    eave_axis: (f64, f64),
     up_slope: (f64, f64),
     eave_length: f64,
     rise_over_run: f64,
     reference_elevation: f64,
 }
 
+/// A schema-neutral triangular extension from an authored exterior wall top to
+/// two matched roof rake edges. All elevations are absolute building elevations;
+/// `peak_x` is measured from the authored wall start in wall-local plan distance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GableWallProfile {
+    pub width: Length,
+    pub peak_x: Length,
+    pub base_elevation: Length,
+    pub peak_elevation: Length,
+    pub peak: Point2,
+}
+
+impl GableWallProfile {
+    pub fn peak_height(&self) -> Length {
+        self.peak_elevation - self.base_elevation
+    }
+
+    /// Triangular wall-local `(x, height-above-authored-wall-top)` outline, with
+    /// counter-clockwise winding for direct use by the shared ear-clipper.
+    pub fn outline(&self) -> Vec<Point2> {
+        vec![
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(self.width, Length::ZERO),
+            Point2::new(self.peak_x, self.peak_height()),
+        ]
+    }
+
+    /// Height above the authored wall top at `x`, linearly interpolated along the
+    /// two rake edges. Out-of-span values clamp to the wall ends.
+    pub fn height_at(&self, x: Length) -> Length {
+        let x = x.clamp(Length::ZERO, self.width);
+        let height = self.peak_height().inches();
+        if x <= self.peak_x {
+            let run = self.peak_x.inches();
+            return if run <= f64::EPSILON {
+                Length::ZERO
+            } else {
+                Length::from_inches(height * x.inches() / run)
+            };
+        }
+        let run = (self.width - self.peak_x).inches();
+        if run <= f64::EPSILON {
+            Length::ZERO
+        } else {
+            Length::from_inches(height * (self.width - x).inches() / run)
+        }
+    }
+}
+
+fn roof_high_edge_index(plane: &RoofPlane, frame: &RoofPlaneFrame) -> Option<usize> {
+    if plane.outline.len() < 3 {
+        return None;
+    }
+    let mut best_index = 0;
+    let mut best_distance = f64::NEG_INFINITY;
+    for index in 0..plane.outline.len() {
+        let a = plane.outline[index];
+        let b = plane.outline[(index + 1) % plane.outline.len()];
+        let distance = frame.up_slope_distance(
+            (a.x.inches() + b.x.inches()) / 2.0,
+            (a.y.inches() + b.y.inches()) / 2.0,
+        );
+        if distance > best_distance {
+            best_distance = distance;
+            best_index = index;
+        }
+    }
+    Some(best_index)
+}
+
+fn roof_planes_share_edge(plane: &RoofPlane, edge_index: usize, other: &RoofPlane) -> bool {
+    let edge = (
+        plane.outline[edge_index],
+        plane.outline[(edge_index + 1) % plane.outline.len()],
+    );
+    (0..other.outline.len()).any(|index| {
+        let candidate = (
+            other.outline[index],
+            other.outline[(index + 1) % other.outline.len()],
+        );
+        (edge.0 == candidate.0 && edge.1 == candidate.1)
+            || (edge.0 == candidate.1 && edge.1 == candidate.0)
+    })
+}
+
+/// Offset each polygon edge by its outward plan distance and intersect adjacent
+/// offset lines. Rounds only the final intersections back to integer ticks.
+fn offset_polygon_edges(points: &[Point2], offsets: &[Length]) -> Option<Vec<Point2>> {
+    if points.len() < 3 || points.len() != offsets.len() {
+        return None;
+    }
+    let signed_area2 = points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .map(|(a, b)| {
+            a.x.ticks() as i128 * b.y.ticks() as i128 - b.x.ticks() as i128 * a.y.ticks() as i128
+        })
+        .sum::<i128>();
+    if signed_area2 == 0 {
+        return None;
+    }
+    let ccw = signed_area2 > 0;
+    let mut lines = Vec::with_capacity(points.len());
+    for (index, (&a, &b)) in points.iter().zip(points.iter().cycle().skip(1)).enumerate() {
+        let (ax, ay) = (a.x.inches(), a.y.inches());
+        let (dx, dy) = (b.x.inches() - ax, b.y.inches() - ay);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length <= f64::EPSILON {
+            return None;
+        }
+        let (nx, ny) = if ccw {
+            (dy / length, -dx / length)
+        } else {
+            (-dy / length, dx / length)
+        };
+        let distance = offsets[index].inches();
+        lines.push(((ax + nx * distance, ay + ny * distance), (dx, dy)));
+    }
+
+    let mut outline = Vec::with_capacity(points.len());
+    for index in 0..points.len() {
+        let previous = lines[(index + points.len() - 1) % points.len()];
+        let current = lines[index];
+        let intersection = line_intersection(previous, current)?;
+        outline.push(Point2::new(
+            Length::from_inches(intersection.0),
+            Length::from_inches(intersection.1),
+        ));
+    }
+    Some(outline)
+}
+
+fn line_intersection(
+    first: ((f64, f64), (f64, f64)),
+    second: ((f64, f64), (f64, f64)),
+) -> Option<(f64, f64)> {
+    let denominator = first.1.0 * second.1.1 - first.1.1 * second.1.0;
+    if denominator.abs() <= 1.0e-9 {
+        return None;
+    }
+    let delta = (second.0.0 - first.0.0, second.0.1 - first.0.1);
+    let t = (delta.0 * second.1.1 - delta.1 * second.1.0) / denominator;
+    Some((first.0.0 + first.1.0 * t, first.0.1 + first.1.1 * t))
+}
+
+#[derive(Clone)]
+struct GableEdgeCandidate {
+    roof: ElementId,
+    start_x: Length,
+    end_x: Length,
+    start_elevation: Length,
+    end_elevation: Length,
+    start: Point2,
+    end: Point2,
+}
+
+fn derive_gable_wall_profile(model: &BuildingModel, wall: &Wall) -> Option<GableWallProfile> {
+    let level_elevation = model
+        .levels
+        .iter()
+        .find(|level| level.id == wall.level)
+        .map(|level| level.elevation)
+        .unwrap_or(Length::ZERO);
+    let base_elevation = level_elevation + wall.height;
+    let mut edges = Vec::new();
+
+    for plane in model
+        .roof_planes
+        .iter()
+        .filter(|plane| plane.level == wall.level)
+    {
+        // Rendering and other read-only consumers can inspect an unvalidated
+        // in-progress model. One unrelated degenerate plane must not suppress an
+        // otherwise complete gable derived from the remaining valid planes.
+        let Some(frame) = plane.frame() else {
+            continue;
+        };
+        for index in 0..plane.outline.len() {
+            if index == plane.eave_edge as usize % plane.outline.len() {
+                continue;
+            }
+            let a = plane.outline[index];
+            let b = plane.outline[(index + 1) % plane.outline.len()];
+            let Some(mut ax) = wall_local_x(wall, a) else {
+                continue;
+            };
+            let Some(mut bx) = wall_local_x(wall, b) else {
+                continue;
+            };
+            if ax > bx {
+                std::mem::swap(&mut ax, &mut bx);
+                let (a_elevation, b_elevation) = (
+                    Length::from_inches(frame.elevation_at(b.x.inches(), b.y.inches())),
+                    Length::from_inches(frame.elevation_at(a.x.inches(), a.y.inches())),
+                );
+                edges.push(GableEdgeCandidate {
+                    roof: plane.id.clone(),
+                    start_x: ax,
+                    end_x: bx,
+                    start_elevation: a_elevation,
+                    end_elevation: b_elevation,
+                    start: b,
+                    end: a,
+                });
+            } else {
+                edges.push(GableEdgeCandidate {
+                    roof: plane.id.clone(),
+                    start_x: ax,
+                    end_x: bx,
+                    start_elevation: Length::from_inches(
+                        frame.elevation_at(a.x.inches(), a.y.inches()),
+                    ),
+                    end_elevation: Length::from_inches(
+                        frame.elevation_at(b.x.inches(), b.y.inches()),
+                    ),
+                    start: a,
+                    end: b,
+                });
+            }
+        }
+    }
+
+    if edges.len() != 2 || edges[0].roof == edges[1].roof {
+        return None;
+    }
+    edges.sort_by_key(|edge| (edge.start_x, edge.end_x, edge.roof.clone()));
+    let left = &edges[0];
+    let right = &edges[1];
+    let tolerance = Length::from_ticks(1);
+    let near = |a: Length, b: Length| (a - b).abs() <= tolerance;
+    if !near(left.start_x, Length::ZERO)
+        || !near(right.end_x, wall.length)
+        || !near(left.end_x, right.start_x)
+        || left.end != right.start
+        || !near(left.start_elevation, base_elevation)
+        || !near(right.end_elevation, base_elevation)
+        || !near(left.end_elevation, right.start_elevation)
+        || left.end_elevation <= base_elevation + tolerance
+    {
+        return None;
+    }
+
+    Some(GableWallProfile {
+        width: wall.length,
+        peak_x: left.end_x,
+        base_elevation,
+        peak_elevation: left.end_elevation,
+        peak: left.end,
+    })
+}
+
+/// Project a point on the wall centerline into authored wall-local x. Exact
+/// tick-valued collinearity prevents a nearby parallel roof edge from being
+/// mistaken for a wall rake; one tick of endpoint tolerance absorbs derived
+/// length rounding for non-axis-aligned walls.
+fn wall_local_x(wall: &Wall, point: Point2) -> Option<Length> {
+    let (dx, dy) = (
+        wall.end.x.ticks() as i128 - wall.start.x.ticks() as i128,
+        wall.end.y.ticks() as i128 - wall.start.y.ticks() as i128,
+    );
+    let (px, py) = (
+        point.x.ticks() as i128 - wall.start.x.ticks() as i128,
+        point.y.ticks() as i128 - wall.start.y.ticks() as i128,
+    );
+    if dx * py - dy * px != 0 {
+        return None;
+    }
+    let denominator = (dx * dx + dy * dy) as f64;
+    if denominator <= f64::EPSILON {
+        return None;
+    }
+    let t = (px * dx + py * dy) as f64 / denominator;
+    let x = Length::from_inches(wall.length.inches() * t);
+    let tolerance = Length::from_ticks(1);
+    (x >= Length::ZERO - tolerance && x <= wall.length + tolerance)
+        .then_some(x.clamp(Length::ZERO, wall.length))
+}
+
 impl RoofPlaneFrame {
     /// The eave edge's first endpoint (the up-slope distance origin), inches.
     pub fn eave_origin(&self) -> (f64, f64) {
         self.eave_origin
+    }
+
+    /// Unit direction from the authored eave edge's first endpoint to its second.
+    pub fn eave_axis(&self) -> (f64, f64) {
+        self.eave_axis
     }
 
     /// Up-slope direction in plan (toward the outline centroid): a dimensionless
@@ -2170,6 +2591,22 @@ impl RoofPlaneFrame {
     /// springing raised by the up-slope distance times the pitch.
     pub fn elevation_at(&self, x: f64, y: f64) -> f64 {
         self.reference_elevation + self.up_slope_distance(x, y) * self.rise_over_run
+    }
+
+    /// Convert surface-local `(along-eave, up-slope)` plan distances back to an
+    /// exact tick-rounded world-plan point. Derived framing uses this to carry
+    /// unambiguous endpoints instead of asking each renderer to reconstruct them.
+    pub fn plan_point_at(&self, along_eave: Length, up_slope: Length) -> Point2 {
+        let along = along_eave.inches();
+        let up = up_slope.inches();
+        Point2::new(
+            Length::from_inches(
+                self.eave_origin.0 + self.eave_axis.0 * along + self.up_slope.0 * up,
+            ),
+            Length::from_inches(
+                self.eave_origin.1 + self.eave_axis.1 * along + self.up_slope.1 * up,
+            ),
+        )
     }
 }
 
@@ -2330,6 +2767,28 @@ fn polygon_self_intersects(points: &[Point2]) -> bool {
         }
     }
     false
+}
+
+/// Roof outlines are stored as implicit rings. Consecutive duplicate points,
+/// an explicit closing point, or a middle point on a straight run make offset
+/// line intersections ambiguous and are therefore rejected at validation.
+fn polygon_has_redundant_vertices(points: &[Point2]) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+    (0..points.len()).any(|index| {
+        let previous = points[(index + points.len() - 1) % points.len()];
+        let current = points[index];
+        let next = points[(index + 1) % points.len()];
+        if previous == current || current == next {
+            return true;
+        }
+        let ax = current.x.ticks() as i128 - previous.x.ticks() as i128;
+        let ay = current.y.ticks() as i128 - previous.y.ticks() as i128;
+        let bx = next.x.ticks() as i128 - current.x.ticks() as i128;
+        let by = next.y.ticks() as i128 - current.y.ticks() as i128;
+        ax * by - ay * bx == 0
+    })
 }
 
 /// Whether closed segments `p1p2` and `p3p4` intersect (proper crossing or
@@ -4080,10 +4539,20 @@ pub enum ModelError {
     RoofPlaneOutlineTooFewPoints { roof_plane: ElementId },
     #[error("roof plane {roof_plane:?} outline must not be self-intersecting")]
     RoofPlaneOutlineSelfIntersecting { roof_plane: ElementId },
+    #[error(
+        "roof plane {roof_plane:?} outline must be an implicit ring without duplicate or collinear vertices"
+    )]
+    RoofPlaneOutlineHasRedundantVertices { roof_plane: ElementId },
     #[error("roof plane {roof_plane:?} eave-edge index is out of range for its outline")]
     RoofPlaneEaveEdgeOutOfRange { roof_plane: ElementId },
     #[error("roof plane {roof_plane:?} slope must have a positive run")]
     RoofPlaneInvalidSlope { roof_plane: ElementId },
+    #[error("roof plane {roof_plane:?} eave and rake overhangs must be non-negative")]
+    RoofPlaneInvalidOverhang { roof_plane: ElementId },
+    #[error(
+        "connected roof planes {first:?} and {second:?} must use matching eave and rake overhangs"
+    )]
+    RoofPlaneConnectedOverhangMismatch { first: ElementId, second: ElementId },
     #[error("ceiling {ceiling:?} references unknown level {level:?}")]
     CeilingReferencesUnknownLevel {
         ceiling: ElementId,
@@ -4439,6 +4908,366 @@ mod tests {
         assert!(
             (frame.elevation_at(120.0, 144.0) - 144.0).abs() < 1.0e-9,
             "ridge at 144\""
+        );
+        assert_eq!(
+            frame.plan_point_at(
+                Length::from_whole_inches(120),
+                Length::from_whole_inches(144)
+            ),
+            Point2::new(
+                Length::from_whole_inches(120),
+                Length::from_whole_inches(144)
+            )
+        );
+    }
+
+    #[test]
+    fn roof_surface_outline_applies_eave_and_exposed_rake_overhangs() {
+        let mut model = BuildingModel::new();
+        let plane = RoofPlane::new(
+            "roof",
+            "Roof",
+            "level-1",
+            "system-roof-1",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(12.0), Length::ZERO),
+                Point2::new(Length::from_feet(12.0), Length::from_feet(8.0)),
+                Point2::new(Length::ZERO, Length::from_feet(8.0)),
+            ],
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_whole_inches(12))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        model.roof_planes.push(plane.clone());
+
+        assert_eq!(
+            model.roof_surface_outline(&plane),
+            vec![
+                Point2::new(
+                    Length::from_whole_inches(-8),
+                    Length::from_whole_inches(-12)
+                ),
+                Point2::new(
+                    Length::from_whole_inches(152),
+                    Length::from_whole_inches(-12)
+                ),
+                Point2::new(
+                    Length::from_whole_inches(152),
+                    Length::from_whole_inches(96)
+                ),
+                Point2::new(Length::from_whole_inches(-8), Length::from_whole_inches(96)),
+            ]
+        );
+
+        let mut zero = plane;
+        zero.eave_overhang = Length::ZERO;
+        zero.rake_overhang = Length::ZERO;
+        assert_eq!(model.roof_surface_outline(&zero), zero.outline);
+    }
+
+    #[test]
+    fn roof_surface_outline_is_winding_independent() {
+        let mut model = BuildingModel::new();
+        let plane = RoofPlane::new(
+            "roof-reversed",
+            "Roof reversed",
+            "level-1",
+            "system-roof-1",
+            vec![
+                Point2::new(Length::ZERO, Length::from_feet(8.0)),
+                Point2::new(Length::from_feet(12.0), Length::from_feet(8.0)),
+                Point2::new(Length::from_feet(12.0), Length::ZERO),
+                Point2::new(Length::ZERO, Length::ZERO),
+            ],
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            2,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_whole_inches(12))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        model.roof_planes.push(plane.clone());
+        let outline = model.roof_surface_outline(&plane);
+        let mut xs: Vec<Length> = outline.iter().map(|point| point.x).collect();
+        let mut ys: Vec<Length> = outline.iter().map(|point| point.y).collect();
+        xs.sort_unstable();
+        ys.sort_unstable();
+        assert_eq!(xs[0], Length::from_whole_inches(-8));
+        assert_eq!(xs[3], Length::from_whole_inches(152));
+        assert_eq!(ys[0], Length::from_whole_inches(-12));
+        assert_eq!(ys[3], Length::from_whole_inches(96));
+    }
+
+    #[test]
+    fn roof_surface_outline_keeps_hip_seams_coincident() {
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        let south = RoofPlane::new(
+            "roof-south",
+            "South",
+            "level-1",
+            "system-roof-1",
+            vec![p(0.0, 0.0), p(12.0, 0.0), p(8.0, 4.0), p(4.0, 4.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        let east = RoofPlane::new(
+            "roof-east",
+            "East",
+            "level-1",
+            "system-roof-1",
+            vec![p(12.0, 0.0), p(12.0, 8.0), p(8.0, 4.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        let north = RoofPlane::new(
+            "roof-north",
+            "North",
+            "level-1",
+            "system-roof-1",
+            vec![p(12.0, 8.0), p(0.0, 8.0), p(4.0, 4.0), p(8.0, 4.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0));
+        let west = RoofPlane::new(
+            "roof-west",
+            "West",
+            "level-1",
+            "system-roof-1",
+            vec![p(0.0, 8.0), p(0.0, 0.0), p(4.0, 4.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0));
+        let mut model = BuildingModel::new();
+        model.roof_planes = vec![south.clone(), east.clone(), north, west];
+
+        let south_outline = model.roof_surface_outline(&south);
+        let east_outline = model.roof_surface_outline(&east);
+        assert_eq!(south_outline[1], east_outline[0]);
+        assert_eq!(south_outline[2], east_outline[2]);
+    }
+
+    #[test]
+    fn roof_surface_outline_keeps_valley_seams_coincident() {
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        let south = RoofPlane::new(
+            "roof-south",
+            "South valley field",
+            "level-1",
+            "system-roof-1",
+            vec![p(0.0, 0.0), p(24.0, 0.0), p(24.0, 12.0), p(12.0, 12.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        let west = RoofPlane::new(
+            "roof-west",
+            "West valley field",
+            "level-1",
+            "system-roof-1",
+            vec![p(0.0, 0.0), p(0.0, 24.0), p(12.0, 24.0), p(12.0, 12.0)],
+            slope,
+            0,
+            Length::from_feet(8.0),
+        )
+        .with_eave_overhang(Length::from_feet(1.0))
+        .with_rake_overhang(Length::from_whole_inches(8));
+        let mut model = BuildingModel::new();
+        model.roof_planes = vec![south.clone(), west.clone()];
+
+        let south_outline = model.roof_surface_outline(&south);
+        let west_outline = model.roof_surface_outline(&west);
+        assert_eq!(south_outline[0], west_outline[0]);
+        assert_eq!(south_outline[3], west_outline[3]);
+    }
+
+    fn simple_gable_model() -> BuildingModel {
+        let mut model = BuildingModel::new();
+        let defaults = model.framing_defaults();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let wall = |id: &str, start, end| {
+            let mut wall = Wall::new(id, id, Length::from_feet(1.0), &defaults)
+                .with_placement("level-1", start, end);
+            wall.height = Length::from_feet(8.0);
+            wall
+        };
+        model.walls = vec![
+            wall("wall-south", p(0.0, 0.0), p(12.0, 0.0)),
+            wall("wall-east", p(12.0, 0.0), p(12.0, 8.0)),
+            wall("wall-north", p(12.0, 8.0), p(0.0, 8.0)),
+            wall("wall-west", p(0.0, 8.0), p(0.0, 0.0)),
+        ];
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        model.roof_planes = vec![
+            RoofPlane::new(
+                "roof-south",
+                "South",
+                "level-1",
+                "system-roof-1",
+                vec![p(0.0, 0.0), p(12.0, 0.0), p(12.0, 4.0), p(0.0, 4.0)],
+                slope,
+                0,
+                Length::from_feet(8.0),
+            ),
+            RoofPlane::new(
+                "roof-north",
+                "North",
+                "level-1",
+                "system-roof-1",
+                vec![p(0.0, 4.0), p(12.0, 4.0), p(12.0, 8.0), p(0.0, 8.0)],
+                slope,
+                2,
+                Length::from_feet(8.0),
+            ),
+        ];
+        model
+    }
+
+    #[test]
+    fn gable_wall_profiles_derive_only_the_two_exterior_end_walls() {
+        let model = simple_gable_model();
+        let profiles = model.gable_wall_profiles();
+        assert_eq!(profiles.len(), 2);
+        for id in ["wall-east", "wall-west"] {
+            let profile = profiles.get(&ElementId::new(id)).unwrap();
+            assert_eq!(profile.width, Length::from_feet(8.0));
+            assert_eq!(profile.peak_x, Length::from_feet(4.0));
+            assert_eq!(profile.peak_height(), Length::from_feet(2.0));
+            assert_eq!(
+                profile.height_at(Length::from_feet(2.0)),
+                Length::from_feet(1.0)
+            );
+        }
+        assert!(!profiles.contains_key(&ElementId::new("wall-south")));
+        assert!(!profiles.contains_key(&ElementId::new("wall-north")));
+    }
+
+    #[test]
+    fn gable_profile_uses_bearing_outline_not_rake_overhang() {
+        let mut model = simple_gable_model();
+        for plane in &mut model.roof_planes {
+            plane.eave_overhang = Length::from_feet(1.0);
+            plane.rake_overhang = Length::from_feet(2.0);
+        }
+        let profile = model
+            .gable_wall_profiles()
+            .remove(&ElementId::new("wall-east"))
+            .unwrap();
+        assert_eq!(profile.width, Length::from_feet(8.0));
+        assert_eq!(profile.peak_height(), Length::from_feet(2.0));
+    }
+
+    #[test]
+    fn connected_roof_fields_require_one_coherent_overhang_pair() {
+        let mut model = simple_gable_model();
+        assert_eq!(
+            model.connected_roof_plane_ids(&ElementId::new("roof-south")),
+            BTreeSet::from([ElementId::new("roof-north"), ElementId::new("roof-south")])
+        );
+        model.roof_planes[0].eave_overhang = Length::from_feet(1.0);
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::RoofPlaneConnectedOverhangMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn incomplete_or_mismatched_roof_fields_do_not_derive_gables() {
+        let mut shed = simple_gable_model();
+        shed.roof_planes.pop();
+        assert!(shed.gable_wall_profiles().is_empty());
+
+        let mut mismatched = simple_gable_model();
+        mismatched.roof_planes[1].reference_elevation += Length::from_whole_inches(1);
+        assert!(mismatched.gable_wall_profiles().is_empty());
+    }
+
+    #[test]
+    fn unrelated_degenerate_plane_does_not_suppress_a_valid_gable() {
+        let mut model = simple_gable_model();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-degenerate",
+            "In-progress unrelated field",
+            "level-1",
+            "system-roof-1",
+            vec![p(20.0, 20.0), p(20.0, 20.0), p(22.0, 22.0)],
+            Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(8.0),
+        ));
+        assert_eq!(model.gable_wall_profiles().len(), 2);
+    }
+
+    #[test]
+    fn hip_roof_does_not_derive_gable_wall_profiles() {
+        let mut model = simple_gable_model();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        let roof = |id: &str, outline| {
+            RoofPlane::new(
+                id,
+                id,
+                "level-1",
+                "system-roof-1",
+                outline,
+                slope,
+                0,
+                Length::from_feet(8.0),
+            )
+        };
+        model.roof_planes = vec![
+            roof(
+                "roof-south",
+                vec![p(0.0, 0.0), p(12.0, 0.0), p(8.0, 4.0), p(4.0, 4.0)],
+            ),
+            roof("roof-east", vec![p(12.0, 0.0), p(12.0, 8.0), p(8.0, 4.0)]),
+            roof(
+                "roof-north",
+                vec![p(12.0, 8.0), p(0.0, 8.0), p(4.0, 4.0), p(8.0, 4.0)],
+            ),
+            roof("roof-west", vec![p(0.0, 8.0), p(0.0, 0.0), p(4.0, 4.0)]),
+        ];
+
+        assert!(model.gable_wall_profiles().is_empty());
+    }
+
+    #[test]
+    fn ridge_partition_is_not_derived_as_a_gable_wall() {
+        let mut model = simple_gable_model();
+        let defaults = model.framing_defaults();
+        model.walls.push(
+            Wall::new(
+                "wall-ridge",
+                "Ridge partition",
+                Length::from_feet(12.0),
+                &defaults,
+            )
+            .with_placement(
+                "level-1",
+                Point2::new(Length::ZERO, Length::from_feet(4.0)),
+                Point2::new(Length::from_feet(12.0), Length::from_feet(4.0)),
+            ),
+        );
+        assert!(
+            !model
+                .gable_wall_profiles()
+                .contains_key(&ElementId::new("wall-ridge"))
         );
     }
 
@@ -4868,6 +5697,36 @@ mod tests {
     }
 
     #[test]
+    fn roof_plane_rejects_explicitly_closed_or_collinear_outline_vertices() {
+        for outline in [
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::ZERO),
+            ],
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(10.0), Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+        ] {
+            let mut model = surface_systems_model();
+            let mut roof = sample_roof_plane();
+            roof.outline = outline;
+            model.roof_planes.push(roof);
+
+            assert!(matches!(
+                model.validate(),
+                Err(ModelError::RoofPlaneOutlineHasRedundantVertices { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn roof_plane_rejects_eave_edge_out_of_range() {
         let mut model = surface_systems_model();
         let mut roof = sample_roof_plane();
@@ -4891,6 +5750,25 @@ mod tests {
             model.validate(),
             Err(ModelError::RoofPlaneInvalidSlope { .. })
         ));
+    }
+
+    #[test]
+    fn roof_plane_rejects_negative_eave_or_rake_overhang() {
+        for (eave_overhang, rake_overhang) in [
+            (Length::from_ticks(-1), Length::ZERO),
+            (Length::ZERO, Length::from_ticks(-1)),
+        ] {
+            let mut model = surface_systems_model();
+            let mut roof = sample_roof_plane();
+            roof.eave_overhang = eave_overhang;
+            roof.rake_overhang = rake_overhang;
+            model.roof_planes.push(roof);
+
+            assert!(matches!(
+                model.validate(),
+                Err(ModelError::RoofPlaneInvalidOverhang { .. })
+            ));
+        }
     }
 
     /// A ceiling over the standard 20×12 ft polygon with a slope (`low_edge` + run).

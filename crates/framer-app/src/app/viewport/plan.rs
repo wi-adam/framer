@@ -482,7 +482,7 @@ pub(super) fn draw_project_plan(
     }
     draw_view_border(&painter, drawing);
 
-    let bounds = match ModelBounds::from_model(model) {
+    let bounds = match plan_model_bounds(model, roof_plan_mode) {
         Some(bounds) => bounds,
         // An empty model has no bounds. When the draw-wall tool is active, fall
         // back to a default region around the origin so the user can still place
@@ -901,11 +901,11 @@ pub(super) fn draw_project_plan(
     // normal plan stays uncluttered (roofs always render in 3D regardless).
     if roof_plan_mode {
         for plane in &model.roof_planes {
-            if plane.outline.len() < 3 {
+            let outline = model.roof_surface_outline(plane);
+            if outline.len() < 3 {
                 continue;
             }
-            let screen: Vec<Pos2> = plane
-                .outline
+            let screen: Vec<Pos2> = outline
                 .iter()
                 .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
                 .collect();
@@ -1034,6 +1034,40 @@ pub(super) fn draw_project_plan(
     } else {
         None
     }
+}
+
+/// Model bounds for plan drawing. Ordinary plan mode retains the authored wall /
+/// object footprint. Roof-plan mode additionally fits the shared derived roof
+/// surface outline so eave/rake overhangs are not drawn outside the viewport; it
+/// also permits a valid roof-only model to remain visible.
+fn plan_model_bounds(model: &BuildingModel, include_roofs: bool) -> Option<ModelBounds> {
+    let mut bounds = ModelBounds::from_model(model);
+    if !include_roofs {
+        return bounds;
+    }
+    for point in model
+        .roof_planes
+        .iter()
+        .flat_map(|plane| model.roof_surface_outline(plane))
+    {
+        let x = point.x.inches() as f32;
+        let y = point.y.inches() as f32;
+        bounds = Some(match bounds {
+            Some(current) => ModelBounds {
+                min_x: current.min_x.min(x),
+                min_y: current.min_y.min(y),
+                max_x: current.max_x.max(x),
+                max_y: current.max_y.max(y),
+            },
+            None => ModelBounds {
+                min_x: x,
+                min_y: y,
+                max_x: x,
+                max_y: y,
+            },
+        });
+    }
+    bounds
 }
 
 /// The average of `vertices` (a screen-space polygon's label anchor). `None` for
@@ -1362,7 +1396,7 @@ fn room_boundaries_by_level(model: &BuildingModel) -> Vec<Option<framer_core::Ro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framer_core::{FramingDefaults, Level, Room, RoomUsage};
+    use framer_core::{FramingDefaults, Level, RoofPlane, Room, RoomUsage, Slope};
 
     fn p(x_ft: f64, y_ft: f64) -> Point2 {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
@@ -1454,6 +1488,36 @@ mod tests {
                 "{label}",
             );
         }
+    }
+
+    #[test]
+    fn roof_plan_bounds_include_derived_eave_and_rake_overhangs() {
+        let mut model = BuildingModel::new();
+        model.walls.clear();
+        model.roof_planes.push(
+            RoofPlane::new(
+                "roof-1",
+                "Roof",
+                "level-1",
+                "system-roof",
+                vec![p(0.0, 0.0), p(12.0, 0.0), p(12.0, 8.0), p(0.0, 8.0)],
+                Slope::new(Length::from_whole_inches(4), Length::from_whole_inches(12)),
+                0,
+                Length::from_feet(8.0),
+            )
+            .with_eave_overhang(Length::from_whole_inches(12))
+            .with_rake_overhang(Length::from_whole_inches(8)),
+        );
+
+        assert!(
+            plan_model_bounds(&model, false).is_none(),
+            "ordinary plan bounds remain driven by authored walls/objects"
+        );
+        let bounds = plan_model_bounds(&model, true).expect("roof-only bounds");
+        assert!((bounds.min_x + 8.0).abs() < 1.0e-4);
+        assert!((bounds.max_x - 152.0).abs() < 1.0e-4);
+        assert!((bounds.min_y + 12.0).abs() < 1.0e-4);
+        assert!((bounds.max_y - 96.0).abs() < 1.0e-4);
     }
 
     #[test]

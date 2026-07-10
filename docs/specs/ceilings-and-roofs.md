@@ -15,12 +15,17 @@
 > a shortened hip ridge, jack rafters dying into hips, and equal-pitch L-footprint
 > valley rafters with jack rafters dying into the valley; unequal-pitch valleys
 > are diagnosed as unsupported; and B4 render/example polish adds hip-roof
-> render coverage plus a hip-roofed `demo-shell` example ·
+> render coverage plus a hip-roofed `demo-shell` example · **v3 Implemented** —
+> eave/rake overhangs drive one shared derived roof outline in plan, 3-D, Render,
+> picking, and takeoff; generated roof members carry explicit plan endpoints and
+> appear in Plan-mode 3-D; and simple matched gables derive their wall infill,
+> studs, and rake plates from the authored walls plus roof planes ·
 > **Linked milestone:** M3 (Floors And Roofs) ·
 > **Goal:** G-014 (Ceilings & Roofs) ·
 > **Plans:** [2026-06-20 — v1](../plans/2026-06-20-ceilings-and-roofs.md) ·
 > [2026-06-23 — v2](../plans/2026-06-23-ceilings-and-roofs-v2.md) ·
-> **Last reviewed:** 2026-07-03
+> [2026-07-09 — v3](../plans/2026-07-09-roof-overhangs-framing-gable-walls.md) ·
+> **Last reviewed:** 2026-07-09
 
 ## Intent / Purpose
 
@@ -178,6 +183,39 @@ The first non-opposing-plane roof geometry, built on Phase A. Tracked in the sam
   `RoofPlaneFrame` path used by gables. The render suite carries a hip-roof golden scene, and
   `demo-shell.framer` is the checked-in hip-roof example.
 
+### v3 — Overhangs, visible roof framing & gable walls (Implemented)
+
+Closes the fidelity gaps exposed once finished roof assemblies became visible. Implemented by
+[the 2026-07-09 plan](../plans/2026-07-09-roof-overhangs-framing-gable-walls.md) without changing
+persisted intent or the `.framer` schema.
+
+- **Overhangs are real derived geometry.** The stored `RoofPlane.outline` remains the bearing and
+  topology footprint. A shared core derivation offsets the designated eave outward by
+  `eave_overhang`, offsets only exposed rake edges by `rake_overhang`, and leaves shared
+  ridge/hip/valley edges fixed. The roof-plan overlay, 3-D viewport, CPU/GPU Render extraction,
+  scene bounds, picking, and roof layer takeoff all consume that one derived outline. Vertices
+  outside the bearing footprint are still lifted through the original `RoofPlaneFrame`, so an
+  eave tail drops by the authored pitch. Exact-edge-connected planes form one roof assembly:
+  their eave/rake values must match (the inspector propagates edits across that component), so
+  multi-plane seam endpoints stay coincident. Roof validation also rejects negative overhangs and
+  redundant duplicate/collinear outline vertices rather than silently dropping an offset.
+- **Derived roof framing is spatially complete and visible in Plan mode.** A sloped member carries
+  exact integer-tick plan endpoints in addition to its endpoint elevations; common, jack, ridge,
+  hip, valley, and blocking members therefore have one unambiguous 3-D placement. Plan-mode 3-D
+  meshes every `RoofFramePlan` member and shows one translucent weather face per roof field for
+  inspection, avoiding double-composited skin opacity. The
+  Generated tree counts and selects wall and roof members. Design mode and the finished Render
+  workspace continue to show authored assemblies rather than an exposed framing cutaway.
+- **Simple gable walls are derived, never authored twice.** When exactly two same-level,
+  non-eave roof edges cover an exterior wall from end to end, meet at one interior peak, agree on
+  peak elevation, and spring from the authored wall top, core derives a triangular
+  `GableWallProfile` from the unexpanded bearing outlines. Both meshers fill that profile with the
+  authored wall system. The solver appends `GableStud` and `RakePlate` members plus the triangular
+  layer takeoff to the existing `WallFramePlan`; studs stop beneath the rake-plate depth, and
+  non-buildable end slivers/overlapping near-apex marks are omitted. Wall and project elevation
+  SVGs include the full gable height and draw rake plates as slopes. Hip ends, sheds, interior
+  walls, incomplete or mismatched roof edges, and overhang-only geometry do not synthesize a gable.
+
 ## Decisions (locked)
 
 1. **Ceiling↔roof relationship is the primitive.** Model roof and ceiling as two independent
@@ -299,10 +337,10 @@ non-axis-aligned framing member**.
   (`MemberKind::label()`, `member_svg_color()`, and the app's `member_color()`) must be updated
   or the build breaks — the intended safety.
 - **The sloped member.** `FrameMember` is 2-D-per-host (`x`, `elevation`, orientation
-  `Horizontal|Vertical`). Extend it with an optional integer-tick **sloped placement** (a
-  start/end elevation pair plus an in-plane axis in a roof-plane-local basis) so a rafter is "a
-  member whose `z` varies linearly across the plane." Keep one `FrameMember` type (uniform BOM /
-  provenance / diagnostics); do **not** fork a parallel `RoofMember`.
+  `Horizontal|Vertical`). Its optional integer-tick **sloped placement** carries exact plan
+  start/end points plus their building elevations, so a rafter or rake plate is "a member whose
+  `z` varies linearly between two unambiguous world-plan points." Keep one `FrameMember` type
+  (uniform BOM / provenance / diagnostics); do **not** fork a parallel `RoofMember`.
 - **Bearing & span** reuse level-scoped `topology::room_boundaries` + `wall_interior_sides`
   to get the enclosed outline and bearing edges. Flat ceilings/floor decks are nearly fully automatic
   (default span = shorter direction; explicit override on the element).
@@ -358,8 +396,8 @@ non-axis-aligned framing member**.
   collections are canonicalized.
 - **Closed enums for things the app reasons about** (`SystemKind`, `LayerFunction`,
   `MemberKind`, `MemberFamily`, `OpeningKind`); open data only for material substance.
-- **`.framer` is single-version (v12 after v2 Slice A2; v11 in v1); no migration** — older files
-  are rejected, not upgraded (current policy). New persisted structs use
+- **`.framer` is single-version (currently v13; v2 Slice A2 introduced v12 and v1 used v11); no
+  migration** — older files are rejected, not upgraded (current policy). New persisted structs use
   `#[serde(deny_unknown_fields)]` + serde defaults so empty projects/fixtures stay byte-stable
   (flat ceilings omit `slope`, so the v1 examples are byte-identical under v12).
 - **CPU render is the reference; GPU mirrors it.** v1 adds only opaque-diffuse geometry through
@@ -385,8 +423,9 @@ non-axis-aligned framing member**.
 - **Varying plate heights / split levels under one roof; multi-level floor-of-N+1 = ceiling-of-N
   stacking** — v1 assumes one plate height per roof; the solver doesn't read `Level.elevation`
   for cross-level bearing yet.
-- **Gable-end stud triangulation and rake cuts on the wall top** — v1 leaves walls rectangular
-  and lets the roof/overhang sit above (flagged as a fidelity gap).
+- **Gable openings, lookout/outrigger design, dropped or unequal bearing, and trussed gable-end
+  engineering.** v3 closes and stick-frames a simple matched gable, but does not size gable
+  headers, design rake-overhang lookout load paths, or infer complex/mismatched end-wall profiles.
 - **A roof framing-plan / building-section SVG export** — BOM/CSV fall out of the member list in
   v1; the projected drawing view is later.
 

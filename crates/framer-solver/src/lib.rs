@@ -3,8 +3,8 @@ use std::fmt::Write;
 
 use framer_core::{
     BoardProfile, BuildingModel, Ceiling, CeilingSlope, ConnectionKind, ConstructionSystem,
-    ElementId, FastenerSchedule, FloorDeck, FramingDefaults, FramingSpec, HeaderRow,
-    HeaderSpanTable, LayerFunction, Length, Material, ModelError, Opening, Point2,
+    ElementId, FastenerSchedule, FloorDeck, FramingDefaults, FramingSpec, GableWallProfile,
+    HeaderRow, HeaderSpanTable, LayerFunction, Length, Material, ModelError, Opening, Point2,
     ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, SiteContext, Slope, SpanDirection,
     SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind, concave_polygon_corners,
     level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
@@ -423,6 +423,7 @@ fn is_wall_stud(member: &FrameMember) -> bool {
                 | MemberKind::KingStud
                 | MemberKind::JackStud
                 | MemberKind::CrippleStud
+                | MemberKind::GableStud
         )
 }
 
@@ -606,25 +607,28 @@ pub struct FrameMember {
     /// (== `member.nominal_depth()`). The member occupies `[side_offset,
     /// side_offset + side_depth]` across the wall section.
     pub side_depth: Length,
-    /// Sloped placement for roof-plane members whose true building elevation
+    /// Spatial placement for surface members whose true building elevation
     /// varies along their in-plane run (a rafter rises from eave to ridge).
     /// `None` for plain 2-D members (walls, flat floors/ceilings), which sit at a
     /// single host elevation applied at render. When `Some`, `cut_length` is the
-    /// true sloped length of the board; the in-plane plan run is recovered as
-    /// `sqrt(cut_length² − (high − low)²)`.
+    /// true sloped length of the board; `start` / `end` make its plan direction
+    /// unambiguous for diagonal hip and valley members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sloped: Option<SlopedPlacement>,
     pub provenance: RuleProvenance,
 }
 
-/// The vertical placement of a sloped roof-plane member: the true building
-/// elevation at each end of its in-plane run. A rafter's `low` is its eave (or
-/// overhang-tail) end and `high` is its ridge end; level roof members (a ridge
-/// board, eave blocking) carry `low == high`. Integer-tick and `Eq` so the
-/// derived plan stays deterministic; true (f64) geometry is computed transiently
-/// in the solver and rounded to ticks here, never stored as a float.
+/// Exact world-plan endpoints and building elevations of a sloped surface member.
+/// A rafter's `start` / `low` is its eave (or overhang-tail) end and its `end` /
+/// `high` is its ridge end. Level members (ridge boards, eave blocking, and rim
+/// joists) carry equal elevations. Integer-tick and `Eq` keep the derived plan
+/// deterministic; transient geometry is rounded to ticks at this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlopedPlacement {
+    /// World-plan point at the member's low/start end.
+    pub start: Point2,
+    /// World-plan point at the member's high/end end.
+    pub end: Point2,
     /// True building elevation at the member's low (eave/tail) end.
     pub low_elevation: Length,
     /// True building elevation at the member's high (ridge) end.
@@ -659,6 +663,10 @@ pub enum MemberKind {
     Header,
     RoughSill,
     CrippleStud,
+    /// A vertical stud filling the triangular wall extension beneath a gable.
+    GableStud,
+    /// A sloped plate following one rake edge of a simple gable wall.
+    RakePlate,
     /// A floor-deck joist (the horizontal span member of a floor).
     FloorJoist,
     /// A flat-ceiling joist (a floor joist viewed from below).
@@ -697,6 +705,8 @@ impl MemberKind {
             Self::Header => "header",
             Self::RoughSill => "rough sill",
             Self::CrippleStud => "cripple stud",
+            Self::GableStud => "gable stud",
+            Self::RakePlate => "rake plate",
             Self::FloorJoist => "floor joist",
             Self::CeilingJoist => "ceiling joist",
             Self::RimJoist => "rim joist",
@@ -1337,10 +1347,6 @@ fn generate_sloped_ceiling_plan(
     let high_elevation = reference_elevation + Length::from_inches(run_extent.inches() * ratio);
     // Each joist's true sloped cut and its low/high building elevations.
     let cut_length = Length::from_inches(run_extent.inches() * factor);
-    let joist_slope = SlopedPlacement {
-        low_elevation: reference_elevation,
-        high_elevation,
-    };
 
     let mut members = Vec::new();
 
@@ -1360,7 +1366,12 @@ fn generate_sloped_ceiling_plan(
                 cut_length,
                 joist_thickness,
             )
-            .with_slope(joist_slope),
+            .with_slope(SlopedPlacement {
+                start: frame.plan_point_at(*mark, Length::ZERO),
+                end: frame.plan_point_at(*mark, run_extent),
+                low_elevation: reference_elevation,
+                high_elevation,
+            }),
             band,
             RuleProvenance::new(
                 "ceiling.joists.on-slope",
@@ -1374,9 +1385,23 @@ fn generate_sloped_ceiling_plan(
 
     // Band joists close the joist ends at the low and high edges, running the full
     // eave length perpendicular to the joists; each is level at its edge's elevation.
-    for (index, v, at_elevation) in [
-        (1usize, Length::ZERO, reference_elevation),
-        (2, run_extent, high_elevation),
+    for (index, v, at_elevation, rim_length, start, end) in [
+        (
+            1usize,
+            Length::ZERO,
+            reference_elevation,
+            geometry.eave_length,
+            frame.plan_point_at(Length::ZERO, Length::ZERO),
+            frame.plan_point_at(geometry.eave_length, Length::ZERO),
+        ),
+        (
+            2,
+            run_extent,
+            high_elevation,
+            geometry.high_edge_length,
+            geometry.high_edge.0,
+            geometry.high_edge.1,
+        ),
     ] {
         members.push(frame_member(
             format!("ceiling-rim-{index}"),
@@ -1387,10 +1412,12 @@ fn generate_sloped_ceiling_plan(
                 MemberOrientation::Horizontal,
                 Length::ZERO,
                 v,
-                geometry.eave_length,
+                rim_length,
                 joist_thickness,
             )
             .with_slope(SlopedPlacement {
+                start,
+                end,
                 low_elevation: at_elevation,
                 high_elevation: at_elevation,
             }),
@@ -1406,10 +1433,6 @@ fn generate_sloped_ceiling_plan(
     // adjacent joists, on the sloped surface (a starter rule).
     let mid_v = (run_extent / 2).max(Length::ZERO);
     let mid_elevation = reference_elevation + Length::from_inches(mid_v.inches() * ratio);
-    let mid_slope = SlopedPlacement {
-        low_elevation: mid_elevation,
-        high_elevation: mid_elevation,
-    };
     for pair in positions.windows(2) {
         let start = pair[0] + joist_thickness / 2;
         let gap = pair[1] - pair[0] - joist_thickness;
@@ -1428,7 +1451,12 @@ fn generate_sloped_ceiling_plan(
                 gap,
                 joist_thickness,
             )
-            .with_slope(mid_slope),
+            .with_slope(SlopedPlacement {
+                start: frame.plan_point_at(start, mid_v),
+                end: frame.plan_point_at(start + gap, mid_v),
+                low_elevation: mid_elevation,
+                high_elevation: mid_elevation,
+            }),
             band,
             RuleProvenance::new(
                 "ceiling.blocking.mid-slope",
@@ -1667,6 +1695,26 @@ pub fn generate_roof_plan(
     carries_ridge: bool,
     ridge_tie: RidgeTie,
 ) -> Result<RoofFramePlan, SolverError> {
+    generate_roof_plan_with_takeoff_outline(
+        plane,
+        system,
+        materials,
+        carries_ridge,
+        ridge_tie,
+        &plane.outline,
+    )
+}
+
+/// Internal model-aware roof generator. Framing stays on the authored bearing
+/// outline; only layer takeoff consumes the shared derived overhang outline.
+fn generate_roof_plan_with_takeoff_outline(
+    plane: &RoofPlane,
+    system: &ConstructionSystem,
+    materials: &[Material],
+    carries_ridge: bool,
+    ridge_tie: RidgeTie,
+    takeoff_outline: &[Point2],
+) -> Result<RoofFramePlan, SolverError> {
     let framing = system_framing(system)?;
     let band = FramingBand::for_system(system)?;
     let rafter = framing.member;
@@ -1756,6 +1804,8 @@ pub fn generate_roof_plan(
                 rafter_thickness,
             )
             .with_slope(SlopedPlacement {
+                start: frame.plan_point_at(*mark, tail_v),
+                end: frame.plan_point_at(*mark, local_run),
                 low_elevation: tail_elevation,
                 high_elevation,
             }),
@@ -1766,10 +1816,6 @@ pub fn generate_roof_plan(
 
     // Plate blocking: one level piece in each clear gap between adjacent rafters
     // at the eave bearing line (a starter rule).
-    let eave_slope = SlopedPlacement {
-        low_elevation: plane.reference_elevation,
-        high_elevation: plane.reference_elevation,
-    };
     for pair in positions.windows(2) {
         let start = pair[0] + rafter_thickness / 2;
         let gap = pair[1] - pair[0] - rafter_thickness;
@@ -1788,7 +1834,12 @@ pub fn generate_roof_plan(
                 gap,
                 rafter_thickness,
             )
-            .with_slope(eave_slope),
+            .with_slope(SlopedPlacement {
+                start: frame.plan_point_at(start, Length::ZERO),
+                end: frame.plan_point_at(start + gap, Length::ZERO),
+                low_elevation: plane.reference_elevation,
+                high_elevation: plane.reference_elevation,
+            }),
             band,
             RuleProvenance::new(
                 "roof.blocking.eave",
@@ -1814,6 +1865,8 @@ pub fn generate_roof_plan(
                 rafter_thickness,
             )
             .with_slope(SlopedPlacement {
+                start: geometry.high_edge.0,
+                end: geometry.high_edge.1,
                 low_elevation: ridge_elevation,
                 high_elevation: ridge_elevation,
             }),
@@ -1851,11 +1904,11 @@ pub fn generate_roof_plan(
         ),
     ));
 
-    // The roof's per-layer takeoff uses the plan footprint area (v1 does not yet
-    // scale roofing goods by the slope to true surface area).
+    // The roof's per-layer takeoff uses the shared derived overhang footprint
+    // (still plan-projected area; slope scaling remains outside this starter rule).
     let layers = layers_takeoff(
         system,
-        polygon_area_square_inches(&plane.outline).round() as i64,
+        polygon_area_square_inches(takeoff_outline).round() as i64,
         materials,
     );
 
@@ -2087,11 +2140,12 @@ fn add_roof_intersection_members(
                 let framing = system_framing(system)?;
                 let band = FramingBand::for_system(system)?;
                 let frame = owner.frame();
-                let (low_point, low_elevation, high_elevation) = if a_elevation <= b_elevation {
-                    (edge.0, a_elevation, b_elevation)
-                } else {
-                    (edge.1, b_elevation, a_elevation)
-                };
+                let (low_point, high_point, low_elevation, high_elevation) =
+                    if a_elevation <= b_elevation {
+                        (edge.0, edge.1, a_elevation, b_elevation)
+                    } else {
+                        (edge.1, edge.0, b_elevation, a_elevation)
+                    };
                 let rise = high_elevation - low_elevation;
                 let plan_length = edge_length(edge);
                 let cut_length = Length::from_inches(
@@ -2126,6 +2180,8 @@ fn add_roof_intersection_members(
                         framing.member.thickness(),
                     )
                     .with_slope(SlopedPlacement {
+                        start: low_point,
+                        end: high_point,
                         low_elevation,
                         high_elevation,
                     }),
@@ -2327,8 +2383,15 @@ fn generate_roof_plans(
         } else {
             RidgeTie::Untied
         };
-        let mut roof_plan =
-            generate_roof_plan(plane, system, &model.materials, carries_ridge, ridge_tie)?;
+        let takeoff_outline = model.roof_surface_outline(plane);
+        let mut roof_plan = generate_roof_plan_with_takeoff_outline(
+            plane,
+            system,
+            &model.materials,
+            carries_ridge,
+            ridge_tie,
+            &takeoff_outline,
+        )?;
         if condition == RidgeCondition::Mismatched {
             roof_plan.diagnostics.push(PlanDiagnostic::new(
                 DiagnosticSeverity::Unsupported,
@@ -2380,6 +2443,177 @@ fn generate_roof_plans(
     }
     add_roof_intersection_members(plan, model, &geometries)?;
     Ok(())
+}
+
+/// Append the stick framing and layered triangular takeoff for every simple
+/// matched gable derived by core. Gables extend an existing authored exterior
+/// wall, so their members and layers live on that wall's existing plan rather
+/// than in a second persisted or derived host object.
+fn add_gable_wall_framing(
+    plan: &mut ProjectFramePlan,
+    model: &BuildingModel,
+) -> Result<(), SolverError> {
+    let profiles = model.gable_wall_profiles();
+    for wall in &model.walls {
+        let Some(profile) = profiles.get(&wall.id).copied() else {
+            continue;
+        };
+        let system = model
+            .system_for(wall)
+            .ok_or_else(|| SolverError::MissingSystem {
+                wall: wall.id.clone(),
+                system: wall.system.clone(),
+            })?;
+        let framing = WallFraming::for_system(system)?;
+        let stud = framing.member;
+        let stud_thickness = stud.thickness();
+        let wall_plan = plan
+            .wall_plan_mut(&wall.id)
+            .expect("every authored wall receives a wall frame plan before gable framing");
+
+        // Preserve the wall system's on-center layout, then force the exact apex
+        // mark when it does not naturally land on that spacing. Sorting after the
+        // insertion makes ids/member order deterministic and `dedup` guarantees
+        // that an on-layout apex is emitted exactly once.
+        for (x, cut_length) in gable_stud_positions(&profile, framing.spacing, stud_thickness) {
+            wall_plan.members.push(frame_member(
+                format!("gable-stud-{}", x.ticks()),
+                &wall.id,
+                MemberKind::GableStud,
+                stud,
+                FrameMemberPlacement::new(
+                    MemberOrientation::Vertical,
+                    x,
+                    wall.height,
+                    cut_length,
+                    stud_thickness,
+                ),
+                framing.band,
+                RuleProvenance::new(
+                    "wall.gable.studs.on-center",
+                    format!(
+                        "Gable studs extend {} above the authored wall top to the underside of the rake plate at the wall-system {} layout; the ridge apex is always framed when there is buildable clearance.",
+                        cut_length, framing.spacing
+                    ),
+                ),
+            ));
+        }
+
+        // One rake plate follows each roof-bearing edge. Both placements run from
+        // their low wall endpoint toward the shared high apex, so start/end agree
+        // with low/high elevation for every consumer.
+        for (side, x, start) in [
+            ("left", Length::ZERO, wall.start),
+            ("right", profile.peak_x, wall.end),
+        ] {
+            let cut_length = spatial_segment_length(
+                start,
+                profile.base_elevation,
+                profile.peak,
+                profile.peak_elevation,
+            );
+            wall_plan.members.push(frame_member(
+                format!("gable-rake-plate-{side}"),
+                &wall.id,
+                MemberKind::RakePlate,
+                stud,
+                FrameMemberPlacement::new(
+                    MemberOrientation::Horizontal,
+                    x,
+                    wall.height,
+                    cut_length,
+                    stud_thickness,
+                )
+                .with_slope(SlopedPlacement {
+                    start,
+                    end: profile.peak,
+                    low_elevation: profile.base_elevation,
+                    high_elevation: profile.peak_elevation,
+                }),
+                framing.band,
+                RuleProvenance::new(
+                    "wall.gable.rake-plates",
+                    format!(
+                        "The {side} rake plate follows the matched roof bearing edge from the authored wall top to the gable apex."
+                    ),
+                ),
+            ));
+        }
+
+        let triangular_area =
+            (profile.width.inches() * profile.peak_height().inches() / 2.0).round() as i64;
+        wall_plan
+            .layers
+            .extend(layers_takeoff(system, triangular_area, &model.materials));
+    }
+    Ok(())
+}
+
+/// Vertical clear height from the authored wall top to the underside of the
+/// sloped rake plate at the stud's downhill face. The plate depth is normal to
+/// the rake, so its offset-line vertical intercept plus the slope across half the
+/// stud width both reduce a square-cut stud.
+fn gable_stud_clear_height(
+    profile: &GableWallProfile,
+    x: Length,
+    rake_depth: Length,
+    stud_width: Length,
+) -> Length {
+    let rise = profile.peak_height().inches();
+    let clear_at = |sample_x: Length, run: Length| {
+        let run = run.inches();
+        if run <= f64::EPSILON {
+            return Length::ZERO;
+        }
+        // A plate band offset `d` normal to z=m*x has a vertical-intercept
+        // separation d/cos(theta), not d*cos(theta).
+        let vertical_intercept = rake_depth.inches() * run.hypot(rise) / run;
+        (profile.height_at(sample_x) - Length::from_inches(vertical_intercept)).max(Length::ZERO)
+    };
+    let half_width = stud_width / 2;
+    let downhill_left = (x - half_width).max(Length::ZERO);
+    let downhill_right = (x + half_width).min(profile.width);
+    if downhill_right <= profile.peak_x {
+        clear_at(downhill_left, profile.peak_x)
+    } else if downhill_left >= profile.peak_x {
+        clear_at(downhill_right, profile.width - profile.peak_x)
+    } else {
+        clear_at(downhill_left, profile.peak_x)
+            .min(clear_at(downhill_right, profile.width - profile.peak_x))
+    }
+}
+
+/// Buildable gable-stud marks: ordinary on-center layout plus one forced apex,
+/// with overlapping near-apex marks suppressed and tiny end slivers omitted.
+fn gable_stud_positions(
+    profile: &GableWallProfile,
+    spacing: Length,
+    stud_thickness: Length,
+) -> Vec<(Length, Length)> {
+    let mut positions = stud_positions(profile.width, spacing, stud_thickness);
+    positions.retain(|x| *x == profile.peak_x || (*x - profile.peak_x).abs() >= stud_thickness);
+    positions.push(profile.peak_x);
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+        .into_iter()
+        .filter_map(|x| {
+            let cut = gable_stud_clear_height(profile, x, stud_thickness, stud_thickness);
+            (cut >= stud_thickness).then_some((x, cut))
+        })
+        .collect()
+}
+
+fn spatial_segment_length(
+    start: Point2,
+    start_elevation: Length,
+    end: Point2,
+    end_elevation: Length,
+) -> Length {
+    let dx = end.x.inches() - start.x.inches();
+    let dy = end.y.inches() - start.y.inches();
+    let dz = end_elevation.inches() - start_elevation.inches();
+    Length::from_inches((dx * dx + dy * dy + dz * dz).sqrt())
 }
 
 /// Resolve every surface region to its closed plan outline in one pass per level's
@@ -2559,6 +2793,7 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
     add_join_members(&mut plan, model, &standards)?;
     generate_surface_plans(&mut plan, model)?;
     generate_roof_plans(&mut plan, model)?;
+    add_gable_wall_framing(&mut plan, model)?;
     plan.rooms = room_schedule(model, &mut plan.diagnostics);
     plan.layers = layer_bom_from(
         plan.wall_plans
@@ -2634,7 +2869,7 @@ fn project_diagnostics(model: &BuildingModel) -> Vec<PlanDiagnostic> {
             "solver.scope.multi-wall-shell-alpha",
             None,
             format!(
-                "Project framing is generated across {} connected wall segments and {} authored wall joins; floor, roof, shear, and engineered load-path design remain future work.",
+                "Project framing is generated across {} connected wall segments and {} authored wall joins, plus supported floor, ceiling, roof, and gable assemblies; shear design, engineered load paths, member span sizing, and detailed connections remain future work.",
                 model.walls.len(),
                 model.wall_joins.len()
             ),
@@ -3379,7 +3614,7 @@ fn starter_profile_diagnostics(wall: &Wall, standards_name: &str) -> Vec<PlanDia
         "solver.scope.wall-segment-alpha",
         Some(wall.id.clone()),
         format!(
-            "This wall segment is framed with deterministic {} rules. Project generation aggregates connected wall segments and authored joins; engineered load paths, hold-downs, floors, and roofs remain future work.",
+            "This wall segment is framed with deterministic {} rules. Project generation aggregates connected wall segments, authored joins, and supported floor, ceiling, roof, and gable assemblies; shear design, engineered load paths, member span sizing, hold-downs, and detailed connections remain future work.",
             standards_name
         ),
     )];
@@ -3577,9 +3812,98 @@ fn connection_kind_label(connection: ConnectionKind) -> &'static str {
     }
 }
 
+/// Height of the complete wall-owned framing elevation, including any derived
+/// gable studs/rake plates above the authored rectangular wall.
+fn wall_elevation_height(wall: &Wall, plan: &WallFramePlan) -> f64 {
+    plan.members
+        .iter()
+        .map(|member| {
+            if let Some(sloped) = member.sloped {
+                return member.elevation.inches()
+                    + (sloped.high_elevation - sloped.low_elevation)
+                        .inches()
+                        .max(0.0);
+            }
+            match member.orientation {
+                MemberOrientation::Horizontal => {
+                    (member.elevation + member.cross_section_depth).inches()
+                }
+                MemberOrientation::Vertical => (member.elevation + member.cut_length).inches(),
+            }
+        })
+        .fold(wall.height.inches().max(1.0), f64::max)
+}
+
+/// Four wall-elevation `(x, z)` corners for a spatial member. Rake plates are
+/// emitted below their roof-bearing line, matching the app's wall-basis prism;
+/// ordinary members keep using compact axis-aligned SVG rectangles.
+fn sloped_wall_member_segment(wall: &Wall, member: &FrameMember) -> Option<[(f64, f64); 2]> {
+    let sloped = member.sloped?;
+    let wall_dx = (wall.end.x - wall.start.x).inches();
+    let wall_dy = (wall.end.y - wall.start.y).inches();
+    let wall_length = wall_dx.hypot(wall_dy);
+    if wall_length <= f64::EPSILON {
+        return None;
+    }
+    let local_x = |point: Point2| {
+        ((point.x - wall.start.x).inches() * wall_dx + (point.y - wall.start.y).inches() * wall_dy)
+            / wall_length
+    };
+    let x0 = local_x(sloped.start);
+    let x1 = local_x(sloped.end);
+    let z0 = member.elevation.inches();
+    let z1 = z0 + (sloped.high_elevation - sloped.low_elevation).inches();
+    Some([(x0, z0), (x1, z1)])
+}
+
+fn sloped_wall_member_polygon(wall: &Wall, member: &FrameMember) -> Option<[(f64, f64); 4]> {
+    let [(x0, z0), (x1, z1)] = sloped_wall_member_segment(wall, member)?;
+    let (dx, dz) = (x1 - x0, z1 - z0);
+    let length = dx.hypot(dz);
+    if length <= f64::EPSILON {
+        return None;
+    }
+    let (mut normal_x, mut normal_z) = (-dz / length, dx / length);
+    if normal_z > 0.0 {
+        normal_x = -normal_x;
+        normal_z = -normal_z;
+    }
+    let depth = member.cross_section_depth.inches();
+    Some([
+        (x0, z0),
+        (x1, z1),
+        (x1 + normal_x * depth, z1 + normal_z * depth),
+        (x0 + normal_x * depth, z0 + normal_z * depth),
+    ])
+}
+
+fn gable_elevation_peak(wall: &Wall, plan: &WallFramePlan) -> Option<(f64, f64)> {
+    plan.members
+        .iter()
+        .filter(|member| member.kind == MemberKind::RakePlate)
+        .filter_map(|member| sloped_wall_member_segment(wall, member))
+        .flatten()
+        .filter(|(_, z)| *z > wall.height.inches())
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+fn svg_polygon_points<const N: usize>(points: [(f64, f64); N], height: f64, scale: f64) -> String {
+    points
+        .into_iter()
+        .map(|(x, z)| {
+            format!(
+                "{},{}",
+                svg_number(x * scale),
+                svg_number((height - z) * scale)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     let width = wall.length.inches().max(1.0);
-    let height = wall.height.inches().max(1.0);
+    let height = wall_elevation_height(wall, plan);
     let margin = 12.0;
     let mut svg = String::new();
 
@@ -3608,10 +3932,29 @@ pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     .unwrap();
     writeln!(
         svg,
-        r##"  <rect x="0" y="0" width="{:.4}" height="{:.4}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
-        width, height
+        r##"  <rect x="0" y="{}" width="{:.4}" height="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+        svg_number(height - wall.height.inches()),
+        width,
+        svg_number(wall.height.inches())
     )
     .unwrap();
+    if let Some((peak_x, peak_z)) = gable_elevation_peak(wall, plan) {
+        writeln!(
+            svg,
+            r##"  <polygon data-gable-envelope="{}" points="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+            escape_xml(&wall.id.0),
+            svg_polygon_points(
+                [
+                    (0.0, wall.height.inches()),
+                    (wall.length.inches(), wall.height.inches()),
+                    (peak_x, peak_z),
+                ],
+                height,
+                1.0,
+            )
+        )
+        .unwrap();
+    }
 
     for opening in &wall.openings {
         writeln!(
@@ -3635,6 +3978,32 @@ pub fn export_wall_elevation_svg(wall: &Wall, plan: &WallFramePlan) -> String {
     }
 
     for member in &plan.members {
+        if let Some(points) = sloped_wall_member_polygon(wall, member) {
+            writeln!(
+                svg,
+                r##"  <polygon id="{}" points="{}" fill="{}" stroke="#574634" stroke-width="0.18">"##,
+                escape_xml(&member.id),
+                svg_polygon_points(points, height, 1.0),
+                member_svg_color(member.kind)
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                "    <title>{}: {} {}</title>",
+                escape_xml(&member.id),
+                escape_xml(member.profile.label()),
+                escape_xml(member.kind.label())
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                "    <desc>{}</desc>",
+                escape_xml(&member.provenance.summary)
+            )
+            .unwrap();
+            writeln!(svg, "  </polygon>").unwrap();
+            continue;
+        }
         let (x, y, member_width, member_height) = match member.orientation {
             MemberOrientation::Horizontal => (
                 member.x.inches(),
@@ -3697,7 +4066,12 @@ pub fn export_project_svg(model: &BuildingModel, plan: &ProjectFramePlan) -> Str
     let max_wall_height = model
         .walls
         .iter()
-        .map(|wall| wall.height.inches())
+        .map(|wall| {
+            plan.wall_plan(&wall.id).map_or_else(
+                || wall.height.inches(),
+                |host| wall_elevation_height(wall, host),
+            )
+        })
         .fold(96.0, f64::max);
     let margin = 18.0;
     let plan_height = depth + margin * 2.0;
@@ -3851,16 +4225,46 @@ fn write_wall_elevation_contents(
     indent: &str,
 ) {
     let width = wall.length.inches().max(1.0) * scale;
-    let height = wall.height.inches().max(1.0) * scale;
+    let unscaled_height = wall_elevation_height(wall, plan);
+    let height = unscaled_height * scale;
     writeln!(
         svg,
-        r##"{indent}<rect x="0" y="0" width="{}" height="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+        r##"{indent}<rect x="0" y="{}" width="{}" height="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+        svg_number((unscaled_height - wall.height.inches()) * scale),
         svg_number(width),
-        svg_number(height)
+        svg_number(wall.height.inches() * scale)
     )
     .unwrap();
+    if let Some((peak_x, peak_z)) = gable_elevation_peak(wall, plan) {
+        writeln!(
+            svg,
+            r##"{indent}<polygon data-gable-envelope="{}" points="{}" fill="#faf8f2" stroke="#bdb7aa" stroke-width="0.25"/>"##,
+            escape_xml(&wall.id.0),
+            svg_polygon_points(
+                [
+                    (0.0, wall.height.inches()),
+                    (wall.length.inches(), wall.height.inches()),
+                    (peak_x, peak_z),
+                ],
+                unscaled_height,
+                scale,
+            )
+        )
+        .unwrap();
+    }
 
     for member in &plan.members {
+        if let Some(points) = sloped_wall_member_polygon(wall, member) {
+            writeln!(
+                svg,
+                r##"{indent}<polygon data-member="{}" points="{}" fill="{}" stroke="#574634" stroke-width="0.16"/>"##,
+                escape_xml(&member.id),
+                svg_polygon_points(points, unscaled_height, scale),
+                member_svg_color(member.kind)
+            )
+            .unwrap();
+            continue;
+        }
         let (x, y, member_width, member_height) = match member.orientation {
             MemberOrientation::Horizontal => (
                 member.x.inches() * scale,
@@ -3902,7 +4306,8 @@ fn member_svg_color(kind: MemberKind) -> &'static str {
         MemberKind::JackStud => "#d3a85f",
         MemberKind::Header => "#738263",
         MemberKind::RoughSill => "#5c7990",
-        MemberKind::CrippleStud => "#dabe8b",
+        MemberKind::CrippleStud | MemberKind::GableStud => "#dabe8b",
+        MemberKind::RakePlate => "#635543",
         MemberKind::FloorJoist => "#9c7b4f",
         MemberKind::CeilingJoist => "#7f9c8f",
         MemberKind::RimJoist => "#6f5535",
@@ -6057,6 +6462,16 @@ mod tests {
             let sloped = joist
                 .sloped
                 .expect("a sloped ceiling joist carries a sloped placement");
+            assert_eq!(
+                sloped.start,
+                Point2::new(joist.x, Length::ZERO),
+                "a ceiling joist starts at its exact low-edge layout mark"
+            );
+            assert_eq!(
+                sloped.end,
+                Point2::new(joist.x, Length::from_feet(12.0)),
+                "a ceiling joist ends at its exact high-edge plan point"
+            );
             assert_eq!(sloped.low_elevation, Length::from_feet(8.0));
             assert_eq!(sloped.high_elevation, Length::from_inches(204.0));
         }
@@ -6074,6 +6489,48 @@ mod tests {
                 .iter()
                 .any(|member| member.kind == MemberKind::Blocking)
         );
+        assert_eq!(
+            plan.members
+                .iter()
+                .find(|member| member.id == "ceiling-rim-1")
+                .and_then(|member| member.sloped),
+            Some(SlopedPlacement {
+                start: Point2::new(Length::ZERO, Length::ZERO),
+                end: Point2::new(Length::from_feet(20.0), Length::ZERO),
+                low_elevation: Length::from_feet(8.0),
+                high_elevation: Length::from_feet(8.0),
+            }),
+            "the low rim carries its exact world-plan direction"
+        );
+        assert_eq!(
+            plan.members
+                .iter()
+                .find(|member| member.id == "ceiling-rim-2")
+                .and_then(|member| member.sloped),
+            Some(SlopedPlacement {
+                start: Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+                end: Point2::new(Length::ZERO, Length::from_feet(12.0)),
+                low_elevation: Length::from_inches(204.0),
+                high_elevation: Length::from_inches(204.0),
+            }),
+            "the high rim follows the authored high edge exactly"
+        );
+        for blocking in plan
+            .members
+            .iter()
+            .filter(|member| member.kind == MemberKind::Blocking)
+        {
+            assert_eq!(
+                blocking.sloped,
+                Some(SlopedPlacement {
+                    start: Point2::new(blocking.x, Length::from_feet(6.0)),
+                    end: Point2::new(blocking.x + blocking.cut_length, Length::from_feet(6.0),),
+                    low_elevation: Length::from_inches(150.0),
+                    high_elevation: Length::from_inches(150.0),
+                }),
+                "mid-slope blocking carries exact endpoints along the eave axis"
+            );
+        }
         // The per-layer takeoff uses the plan footprint area (20ft × 12ft), not the
         // larger true sloped surface area.
         let finish_area: i64 = plan
@@ -6663,6 +7120,16 @@ mod tests {
         // (8ft + 108in rise = 17ft), and recovers the 12ft plan run by Pythagoras.
         let rafter = rafters[0];
         let slope = rafter.sloped.expect("a rafter carries a sloped placement");
+        assert_eq!(
+            slope.start,
+            Point2::new(rafter.x, Length::ZERO),
+            "the rafter starts at its exact eave layout mark"
+        );
+        assert_eq!(
+            slope.end,
+            Point2::new(rafter.x, Length::from_feet(12.0)),
+            "the rafter ends at its exact high-edge plan point"
+        );
         assert_eq!(slope.low_elevation, Length::from_feet(8.0));
         assert_eq!(slope.high_elevation, Length::from_whole_inches(96 + 108));
         assert_eq!(
@@ -6748,6 +7215,16 @@ mod tests {
             Length::ZERO - Length::from_whole_inches(12)
         );
         let slope = rafter.sloped.expect("a sloped placement");
+        assert_eq!(
+            slope.start,
+            Point2::new(rafter.x, Length::from_feet(-1.0)),
+            "the rafter starts at the eave-overhang tail"
+        );
+        assert_eq!(
+            slope.end,
+            Point2::new(rafter.x, Length::from_feet(12.0)),
+            "the eave overhang does not move the bearing outline's high edge"
+        );
         // The tail drops a 12in run × 0.75 = 9in below the 8ft springing.
         assert_eq!(slope.low_elevation, Length::from_whole_inches(96 - 9));
         assert_eq!(slope.high_elevation, Length::from_whole_inches(96 + 108));
@@ -6793,6 +7270,43 @@ mod tests {
             0,
             Length::from_feet(8.0),
         ));
+        model
+    }
+
+    /// Add a counter-clockwise exterior wall loop whose authored wall tops land
+    /// at the 8ft roof springing used by the roof fixtures in this module.
+    fn add_rectangular_wall_loop(model: &mut BuildingModel, width: Length, depth: Length) {
+        let defaults = FramingDefaults::irc_2021_starter();
+        let zero = Length::ZERO;
+        let points = [
+            Point2::new(zero, zero),
+            Point2::new(width, zero),
+            Point2::new(width, depth),
+            Point2::new(zero, depth),
+            Point2::new(zero, zero),
+        ];
+        for (index, pair) in points.windows(2).enumerate() {
+            model.walls.push(
+                Wall::new(
+                    format!("wall-{index}"),
+                    format!("Exterior wall {index}"),
+                    Length::from_feet(1.0),
+                    &defaults,
+                )
+                .with_placement("level-1", pair[0], pair[1]),
+            );
+        }
+    }
+
+    fn framed_gable_model() -> BuildingModel {
+        let mut model = gable_model();
+        add_rectangular_wall_loop(&mut model, Length::from_feet(24.0), Length::from_feet(24.0));
+        model
+    }
+
+    fn framed_rectangular_hip_model() -> BuildingModel {
+        let mut model = rectangular_hip_model();
+        add_rectangular_wall_loop(&mut model, Length::from_feet(24.0), Length::from_feet(12.0));
         model
     }
 
@@ -7055,6 +7569,239 @@ mod tests {
     }
 
     #[test]
+    fn simple_gable_appends_studs_rake_plates_bom_and_triangular_layers() {
+        let model = framed_gable_model();
+        let profiles = model.gable_wall_profiles();
+        assert_eq!(profiles.len(), 2, "the closed shell has two gable ends");
+
+        let plan = generate_project_plan(&model).unwrap();
+        for (wall_id, profile) in &profiles {
+            let wall = model
+                .walls
+                .iter()
+                .find(|wall| wall.id == *wall_id)
+                .expect("the profile's authored host wall");
+            let wall_plan = plan.wall_plan(wall_id).expect("the host wall plan");
+            let studs: Vec<_> = wall_plan
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::GableStud)
+                .collect();
+            assert!(!studs.is_empty(), "a gable emits vertical infill studs");
+            let apex: Vec<_> = studs
+                .iter()
+                .copied()
+                .filter(|member| member.x == profile.peak_x)
+                .collect();
+            assert_eq!(apex.len(), 1, "the mandatory apex stud is not duplicated");
+            assert_eq!(
+                apex[0].cut_length,
+                gable_stud_clear_height(
+                    profile,
+                    profile.peak_x,
+                    apex[0].cross_section_depth,
+                    apex[0].cross_section_depth,
+                ),
+                "the apex stud stops below the rake-plate depth"
+            );
+            assert_eq!(
+                apex[0].cut_length,
+                Length::from_inches(105.5625),
+                "9:12 rake geometry: 108in rise minus 9/16in to the downhill stud face and 1 7/8in normal-offset intercept"
+            );
+            assert_eq!(apex[0].elevation, wall.height);
+            assert_eq!(
+                apex[0].id,
+                format!("gable-stud-{}", profile.peak_x.ticks()),
+                "gable member ids are stable wall-local tick marks"
+            );
+            assert!(studs.iter().all(|member| {
+                member.source == *wall_id
+                    && member.orientation == MemberOrientation::Vertical
+                    && member.provenance.rule_id == "wall.gable.studs.on-center"
+                    && member.cut_length >= member.cross_section_depth
+                    && is_wall_stud(member)
+            }));
+            assert!(
+                studs
+                    .windows(2)
+                    .all(|pair| { (pair[1].x - pair[0].x).abs() >= pair[0].cross_section_depth })
+            );
+
+            let rakes: Vec<_> = wall_plan
+                .members
+                .iter()
+                .filter(|member| member.kind == MemberKind::RakePlate)
+                .collect();
+            assert_eq!(rakes.len(), 2, "one rake plate follows each gable slope");
+            assert!(rakes.iter().all(|member| {
+                member.cut_length == Length::from_feet(15.0)
+                    && member.source == *wall_id
+                    && member.provenance.rule_id == "wall.gable.rake-plates"
+                    && member.sloped.is_some_and(|placement| {
+                        (placement.start == wall.start || placement.start == wall.end)
+                            && placement.end == profile.peak
+                            && placement.low_elevation == profile.base_elevation
+                            && placement.high_elevation == profile.peak_elevation
+                    })
+            }));
+
+            // The existing 24ft x 8ft wall face and the 24ft x 9ft / 2 gable
+            // triangle contribute to the same wall system's cladding takeoff.
+            let rectangular_area = (wall.length.inches() * wall.height.inches()).round() as i64;
+            let triangular_area =
+                (profile.width.inches() * profile.peak_height().inches() / 2.0).round() as i64;
+            let cladding_area: i64 = wall_plan
+                .layers
+                .iter()
+                .filter(|layer| layer.function == LayerFunction::Cladding)
+                .map(|layer| layer.area_sq_in)
+                .sum();
+            assert_eq!(cladding_area, rectangular_area + triangular_area);
+        }
+
+        let bom = plan.bom();
+        assert!(bom.iter().any(|row| row.kind == MemberKind::GableStud));
+        assert!(bom.iter().any(|row| row.kind == MemberKind::RakePlate));
+    }
+
+    #[test]
+    fn gable_stud_layout_suppresses_near_apex_overlap_and_shallow_slivers() {
+        let profile = GableWallProfile {
+            width: Length::from_whole_inches(240),
+            peak_x: Length::from_inches(128.5),
+            base_elevation: Length::from_feet(8.0),
+            peak_elevation: Length::from_feet(13.0),
+            peak: Point2::new(Length::ZERO, Length::ZERO),
+        };
+        let thickness = BoardProfile::TwoByFour.thickness();
+        let positions = gable_stud_positions(&profile, Length::from_whole_inches(16), thickness);
+        assert!(positions.iter().any(|(x, _)| *x == profile.peak_x));
+        assert!(
+            positions
+                .iter()
+                .all(|(x, cut)| *x != Length::from_whole_inches(128) && *cut >= thickness),
+            "the regular mark overlapping the forced apex and tiny end cuts are omitted"
+        );
+        assert!(
+            positions
+                .windows(2)
+                .all(|pair| pair[1].0 - pair[0].0 >= thickness)
+        );
+
+        let shallow = GableWallProfile {
+            peak_elevation: Length::from_inches(97.0),
+            ..profile
+        };
+        assert!(
+            gable_stud_positions(&shallow, Length::from_whole_inches(16), thickness).is_empty(),
+            "a gable with less than one stud width of clear height emits no stud slivers"
+        );
+    }
+
+    #[test]
+    fn gable_members_export_inside_the_elevation_and_rakes_remain_sloped() {
+        let model = framed_gable_model();
+        let plan = generate_project_plan(&model).unwrap();
+        let wall = model
+            .walls
+            .iter()
+            .find(|wall| model.gable_wall_profile(wall).is_some())
+            .unwrap();
+        let wall_plan = plan.wall_plan(&wall.id).unwrap();
+
+        let wall_svg = export_wall_elevation_svg(wall, wall_plan);
+        assert!(wall_svg.contains(r#"<polygon id="gable-rake-plate-left""#));
+        assert!(wall_svg.contains(r#"data-gable-envelope="wall-1" points="0,108 288,108 144,0""#));
+        let apex = wall_plan
+            .members
+            .iter()
+            .find(|member| {
+                member.kind == MemberKind::GableStud && member.x == Length::from_feet(12.0)
+            })
+            .unwrap();
+        let apex_line = wall_svg
+            .lines()
+            .find(|line| line.contains(&format!(r#"id="{}""#, apex.id)))
+            .unwrap();
+        assert!(!apex_line.contains(r#"y="-"#), "{apex_line}");
+
+        let project_svg = export_project_svg(&model, &plan);
+        assert!(project_svg.contains(r#"<polygon data-member="gable-rake-plate-left""#));
+        assert!(project_svg.contains(r#"data-gable-envelope="wall-1""#));
+    }
+
+    #[test]
+    fn hip_roof_does_not_append_gable_wall_members() {
+        let model = framed_rectangular_hip_model();
+        assert!(
+            model.gable_wall_profiles().is_empty(),
+            "a hip shell has no derived gable profile"
+        );
+        let plan = generate_project_plan(&model).unwrap();
+        assert!(plan.wall_plans.iter().all(|wall| {
+            wall.members
+                .iter()
+                .all(|member| !matches!(member.kind, MemberKind::GableStud | MemberKind::RakePlate))
+        }));
+    }
+
+    #[test]
+    fn roof_takeoff_uses_overhang_outline_without_arraying_rake_rafters() {
+        let base_model = gable_model();
+        let base_plan = generate_project_plan(&base_model).unwrap();
+
+        let mut overhung_model = gable_model();
+        for plane in &mut overhung_model.roof_planes {
+            plane.eave_overhang = Length::from_whole_inches(12);
+            plane.rake_overhang = Length::from_whole_inches(8);
+        }
+        let overhung_plan = generate_project_plan(&overhung_model).unwrap();
+
+        let rafter_layout = |plan: &ProjectFramePlan| {
+            plan.roof_plans
+                .iter()
+                .flat_map(|roof| {
+                    roof.members.iter().filter_map(move |member| {
+                        matches!(member.kind, MemberKind::Rafter | MemberKind::JackRafter)
+                            .then_some((roof.roof.clone(), member.id.clone(), member.x))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rafter_layout(&overhung_plan),
+            rafter_layout(&base_plan),
+            "eave/rake overhangs do not create rafter layout marks outside the bearing outline"
+        );
+
+        let authored_area: i64 = overhung_model
+            .roof_planes
+            .iter()
+            .map(|plane| polygon_area_square_inches(&plane.outline).round() as i64)
+            .sum();
+        let derived_area: i64 = overhung_model
+            .roof_planes
+            .iter()
+            .map(|plane| {
+                polygon_area_square_inches(&overhung_model.roof_surface_outline(plane)).round()
+                    as i64
+            })
+            .sum();
+        assert!(
+            derived_area > authored_area,
+            "the derived roof finish includes eave and rake extensions"
+        );
+        let roofing_area: i64 = overhung_plan
+            .layers
+            .iter()
+            .filter(|layer| layer.function == LayerFunction::Roofing)
+            .map(|layer| layer.area_sq_in)
+            .sum();
+        assert_eq!(roofing_area, derived_area);
+    }
+
+    #[test]
     fn rectangular_hip_roof_frames_hips_and_a_shortened_ridge() {
         let plan = generate_project_plan(&rectangular_hip_model()).unwrap();
         assert_eq!(plan.roof_plans.len(), 4);
@@ -7073,14 +7820,39 @@ mod tests {
         );
         assert!(
             hips.iter().all(|member| {
-                member.sloped
-                    == Some(SlopedPlacement {
-                        low_elevation: Length::from_feet(8.0),
-                        high_elevation: Length::from_feet(11.0),
-                    })
+                member.sloped.is_some_and(|placement| {
+                    placement.low_elevation == Length::from_feet(8.0)
+                        && placement.high_elevation == Length::from_feet(11.0)
+                })
             }),
             "hips run from the plate corner to the ridge end"
         );
+        let expected_hips = [
+            (
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+            ),
+            (
+                Point2::new(Length::from_feet(24.0), Length::ZERO),
+                Point2::new(Length::from_feet(18.0), Length::from_feet(6.0)),
+            ),
+            (
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+                Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+            ),
+            (
+                Point2::new(Length::from_feet(24.0), Length::from_feet(12.0)),
+                Point2::new(Length::from_feet(18.0), Length::from_feet(6.0)),
+            ),
+        ];
+        for (start, end) in expected_hips {
+            assert!(
+                hips.iter().any(|member| member
+                    .sloped
+                    .is_some_and(|placement| placement.start == start && placement.end == end)),
+                "each hip stores its exact low-corner to high-ridge endpoint pair"
+            );
+        }
 
         let ridges: Vec<_> = plan
             .roof_plans
@@ -7101,6 +7873,8 @@ mod tests {
         assert_eq!(
             ridges[0].sloped,
             Some(SlopedPlacement {
+                start: Point2::new(Length::from_feet(6.0), Length::from_feet(6.0)),
+                end: Point2::new(Length::from_feet(18.0), Length::from_feet(6.0)),
                 low_elevation: Length::from_feet(11.0),
                 high_elevation: Length::from_feet(11.0),
             })
@@ -7213,11 +7987,10 @@ mod tests {
         );
         assert!(
             hips.iter().all(|member| {
-                member.sloped
-                    == Some(SlopedPlacement {
-                        low_elevation: Length::from_feet(8.0),
-                        high_elevation: Length::from_feet(13.0),
-                    })
+                member.sloped.is_some_and(|placement| {
+                    placement.low_elevation == Length::from_feet(8.0)
+                        && placement.high_elevation == Length::from_feet(13.0)
+                })
             }),
             "hips run from the plate corner to the shared peak"
         );
@@ -7294,6 +8067,8 @@ mod tests {
         assert_eq!(
             valleys[0].sloped,
             Some(SlopedPlacement {
+                start: Point2::new(Length::ZERO, Length::ZERO),
+                end: Point2::new(Length::from_feet(12.0), Length::from_feet(12.0)),
                 low_elevation: Length::from_feet(8.0),
                 high_elevation: Length::from_feet(14.0),
             })

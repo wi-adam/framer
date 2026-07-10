@@ -152,7 +152,7 @@ enum Selection {
     Join(String),
     Room(String),
     Member {
-        wall_id: String,
+        source_id: String,
         member_id: String,
     },
     RoofPlane(String),
@@ -488,7 +488,7 @@ enum ViewClick {
         instance_id: String,
     },
     Member {
-        wall_id: String,
+        source_id: String,
         member_id: String,
     },
     /// Select an authored roof plane (its surface solid in the 3D view).
@@ -2052,16 +2052,39 @@ impl FramerApp {
     }
 
     fn select_authored_for_design_mode(&mut self) {
-        if let Selection::Member { wall_id, .. } = &self.selected {
+        if let Selection::Member { source_id, .. } = &self.selected {
             if let Some(index) = self
                 .model
                 .walls
                 .iter()
-                .position(|wall| wall.id.0 == *wall_id)
+                .position(|wall| wall.id.0 == *source_id)
             {
                 self.selected_wall = index;
+                self.selected = Selection::Wall;
+            } else if self
+                .model
+                .roof_planes
+                .iter()
+                .any(|plane| plane.id.0 == *source_id)
+            {
+                self.selected = Selection::RoofPlane(source_id.clone());
+            } else if self
+                .model
+                .ceilings
+                .iter()
+                .any(|ceiling| ceiling.id.0 == *source_id)
+            {
+                self.selected = Selection::Ceiling(source_id.clone());
+            } else if self
+                .model
+                .floor_decks
+                .iter()
+                .any(|deck| deck.id.0 == *source_id)
+            {
+                self.selected = Selection::FloorDeck(source_id.clone());
+            } else {
+                self.selected = Selection::None;
             }
-            self.selected = Selection::Wall;
         }
     }
 
@@ -3458,13 +3481,30 @@ impl FramerApp {
         });
     }
 
-    fn selected_member(&self, wall_id: &str, member_id: &str) -> Option<&FrameMember> {
-        self.project_plan
-            .as_ref()?
-            .wall_plans
+    fn selected_member(&self, source_id: &str, member_id: &str) -> Option<&FrameMember> {
+        let plan = self.project_plan.as_ref()?;
+        plan.wall_plans
             .iter()
-            .find(|wall_plan| wall_plan.wall.0 == wall_id)?
-            .members
+            .find(|host| host.wall.0 == source_id)
+            .map(|host| host.members.as_slice())
+            .or_else(|| {
+                plan.floor_plans
+                    .iter()
+                    .find(|host| host.floor.0 == source_id)
+                    .map(|host| host.members.as_slice())
+            })
+            .or_else(|| {
+                plan.ceiling_plans
+                    .iter()
+                    .find(|host| host.ceiling.0 == source_id)
+                    .map(|host| host.members.as_slice())
+            })
+            .or_else(|| {
+                plan.roof_plans
+                    .iter()
+                    .find(|host| host.roof.0 == source_id)
+                    .map(|host| host.members.as_slice())
+            })?
             .iter()
             .find(|member| member.id == member_id)
     }
@@ -3533,17 +3573,23 @@ impl FramerApp {
             ViewClick::MepInstance { instance_id } => {
                 self.selected = Selection::MepInstance(instance_id);
             }
-            ViewClick::Member { wall_id, member_id } => {
+            ViewClick::Member {
+                source_id,
+                member_id,
+            } => {
                 if self.workspace_mode.shows_generated_plan() {
                     if let Some(index) = self
                         .model
                         .walls
                         .iter()
-                        .position(|wall| wall.id.0 == wall_id)
+                        .position(|wall| wall.id.0 == source_id)
                     {
                         self.selected_wall = index;
                     }
-                    self.selected = Selection::Member { wall_id, member_id };
+                    self.selected = Selection::Member {
+                        source_id,
+                        member_id,
+                    };
                 }
             }
             ViewClick::RoofPlane { id } => {
@@ -4557,12 +4603,34 @@ mod tests {
         let member_id = app.project_plan.as_ref().unwrap().wall_plans[0].members[0]
             .id
             .clone();
-        app.selected = Selection::Member { wall_id, member_id };
+        app.selected = Selection::Member {
+            source_id: wall_id,
+            member_id,
+        };
 
         app.set_workspace_mode(WorkspaceMode::Design);
 
         assert_eq!(app.workspace_mode, WorkspaceMode::Design);
         assert_eq!(app.selected, Selection::Wall);
+    }
+
+    #[test]
+    fn roof_member_selection_resolves_and_returns_to_its_authored_plane() {
+        let mut app = FramerApp::default();
+        app.add_roof(RoofForm::Gable);
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        let roof_plan = &app.project_plan.as_ref().unwrap().roof_plans[0];
+        let source_id = roof_plan.roof.0.clone();
+        let member_id = roof_plan.members[0].id.clone();
+        assert!(app.selected_member(&source_id, &member_id).is_some());
+        app.selected = Selection::Member {
+            source_id: source_id.clone(),
+            member_id,
+        };
+
+        app.set_workspace_mode(WorkspaceMode::Design);
+
+        assert_eq!(app.selected, Selection::RoofPlane(source_id));
     }
 
     #[test]

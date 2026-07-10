@@ -210,6 +210,14 @@ fn capture_ui_shot_deck() {
     harness.state_mut().add_roof(RoofForm::Gable);
     harness.state_mut().viewport_mode = ViewportMode::Axonometric;
     shot(&mut harness, &dir, &mut index, "roofed-3d-view");
+    select_tab(&mut harness, actions::WorkflowTab::Plan);
+    harness.state_mut().viewport_mode = ViewportMode::Axonometric;
+    // The Plan cutaway introduces translucent geometry. Force one full repaint
+    // before rasterizing so the off-screen target does not retain dirty-region
+    // holes from the preceding Design frame.
+    harness.ctx.request_repaint();
+    harness.run_steps(2);
+    shot(&mut harness, &dir, &mut index, "roofed-plan-3d-view");
     select_tab(&mut harness, actions::WorkflowTab::Render);
     warm_render(&mut harness);
     shot(&mut harness, &dir, &mut index, "roofed-render-view");

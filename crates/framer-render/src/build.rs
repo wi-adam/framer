@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use framer_core::{
     Appearance, AssemblyFace, BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck,
-    LayerFunction, Length, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame, SurfaceRegion,
-    Wall, WallExposure, room_boundary_on_level, triangulate_simple_polygon,
+    GableWallProfile, LayerFunction, Length, Level, OpeningKind, Point2, RoofPlane, RoofPlaneFrame,
+    SurfaceRegion, Wall, WallExposure, room_boundary_on_level, triangulate_simple_polygon,
 };
 
 use crate::aabb::Aabb;
@@ -254,8 +254,19 @@ fn geometry_from_model(
     let mut bounds = Aabb::EMPTY;
     let mut palette = PaletteBuilder::new(model, assets);
 
+    // Gable profiles are derived from the level-scoped exterior wall graph and
+    // stored roof bearing outlines. Compute them once for every wall rather than
+    // rebuilding topology in each wall emission.
+    let gable_profiles = model.gable_wall_profiles();
     for wall in &model.walls {
-        push_wall(&mut tris, &mut bounds, model, wall, &mut palette);
+        push_wall(
+            &mut tris,
+            &mut bounds,
+            model,
+            wall,
+            gable_profiles.get(&wall.id),
+            &mut palette,
+        );
     }
     // Horizontal decks/ceilings, then sloped roof planes: each authored surface
     // becomes opaque-diffuse geometry through the same `Triangle` path as walls.
@@ -406,6 +417,7 @@ fn push_wall(
     bounds: &mut Aabb,
     model: &BuildingModel,
     wall: &Wall,
+    gable: Option<&GableWallProfile>,
     palette: &mut PaletteBuilder<'_>,
 ) {
     let base = level_elevation(model, wall);
@@ -503,6 +515,31 @@ fn push_wall(
         base + height,
         wall_mat,
     );
+
+    // The authored wall remains the rectangular plate-height solid above. A
+    // matched gable is derived from that wall plus the roof bearing outlines and
+    // occupies only the triangular extension between the wall top and roof
+    // underside. It reuses the wall assembly thickness and exterior material;
+    // openings remain constrained to the authored rectangle.
+    if let Some(profile) = gable {
+        push_gable_prism(tris, bounds, &basis, profile, half, wall_mat);
+        for opening in wall
+            .openings
+            .iter()
+            .filter(|opening| opening.top() == wall.height)
+        {
+            push_gable_base_cap(
+                tris,
+                &basis,
+                opening.left().inches() as f32,
+                opening.right().inches() as f32,
+                -half,
+                half,
+                profile.base_elevation.inches() as f32,
+                wall_mat,
+            );
+        }
+    }
 }
 
 fn wall_surface_material(
@@ -574,6 +611,96 @@ fn push_box(
         tris.push(Triangle::new(c[f[0]], c[f[1]], c[f[2]], material));
         tris.push(Triangle::new(c[f[0]], c[f[2]], c[f[3]], material));
     }
+}
+
+/// Extrude one derived gable profile across the hosting wall's assembly
+/// thickness. The two triangular wall faces and two sloped rake faces close the
+/// extension; the existing rectangular wall's top face closes the shared base,
+/// avoiding a coincident internal face at the authored wall height.
+fn push_gable_prism(
+    tris: &mut Vec<Triangle>,
+    bounds: &mut Aabb,
+    basis: &WallBasis,
+    profile: &GableWallProfile,
+    half: f32,
+    material: u32,
+) {
+    let outline = profile.outline();
+    let triangles = triangulate_simple_polygon(&outline);
+    if triangles.is_empty() {
+        return;
+    }
+
+    let base = profile.base_elevation.inches() as f32;
+    let face = |side: f32| {
+        outline
+            .iter()
+            .map(|point| {
+                basis.point(
+                    point.x.inches() as f32,
+                    side,
+                    base + point.y.inches() as f32,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let interior = face(-half);
+    let exterior = face(half);
+    push_polygon(tris, bounds, &interior, &triangles, material);
+    push_polygon(tris, bounds, &exterior, &triangles, material);
+
+    for index in 0..outline.len() {
+        let next = (index + 1) % outline.len();
+        // The horizontal base is already closed by the rectangular wall's top
+        // face. Emitting it again would create coincident triangles.
+        if outline[index].y == Length::ZERO && outline[next].y == Length::ZERO {
+            continue;
+        }
+        let corners = [
+            interior[index],
+            interior[next],
+            exterior[next],
+            exterior[index],
+        ];
+        let area_a = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .length();
+        let area_b = (corners[2] - corners[0])
+            .cross(corners[3] - corners[0])
+            .length();
+        if area_a > SURFACE_AREA_EPS {
+            tris.push(Triangle::new(corners[0], corners[1], corners[2], material));
+        }
+        if area_b > SURFACE_AREA_EPS {
+            tris.push(Triangle::new(corners[0], corners[2], corners[3], material));
+        }
+    }
+}
+
+/// Close only the part of a gable base not already capped by the rectangular
+/// wall below: a valid opening may reach exactly to the authored wall height.
+#[allow(clippy::too_many_arguments)]
+fn push_gable_base_cap(
+    tris: &mut Vec<Triangle>,
+    basis: &WallBasis,
+    x0: f32,
+    x1: f32,
+    side0: f32,
+    side1: f32,
+    z: f32,
+    material: u32,
+) {
+    if x1 - x0 <= 1.0e-4 || (side1 - side0).abs() <= 1.0e-4 {
+        return;
+    }
+    let corners = [
+        basis.point(x0, side0, z),
+        basis.point(x1, side0, z),
+        basis.point(x1, side1, z),
+        basis.point(x0, side1, z),
+    ];
+    tris.push(Triangle::new(corners[0], corners[3], corners[2], material));
+    tris.push(Triangle::new(corners[0], corners[2], corners[1], material));
 }
 
 /// Below this triangle cross-product magnitude (≈ 2× area in in²) a fan triangle
@@ -711,8 +838,11 @@ fn push_roof_plane(
     };
     let system = system_by_id(model, &plane.system);
     let material = surface_material(model, system, SurfaceFace::Roof, palette);
-    let underside_verts: Vec<Vec3> = plane
-        .outline
+    // The authored outline remains the bearing/topology footprint. Render the
+    // shared derived eave/rake-overhang outline through the *original* affine
+    // frame so tails extend down-slope while ridges/hips/valleys stay fixed.
+    let surface_outline = model.roof_surface_outline(plane);
+    let underside_verts: Vec<Vec3> = surface_outline
         .iter()
         .map(|&p| project_onto_plane(&frame, p))
         .collect();
@@ -721,7 +851,7 @@ fn push_roof_plane(
         .iter()
         .map(|v| Vec3::new(v.x, v.y, v.z + lift))
         .collect();
-    let triangles = triangulate_simple_polygon(&plane.outline);
+    let triangles = triangulate_simple_polygon(&surface_outline);
     push_polygon(tris, bounds, &verts, &triangles, material);
 
     let underside_material = if is_cathedral {
@@ -1359,6 +1489,46 @@ mod tests {
         model
     }
 
+    /// The demo shell capped by two opposing 6:12 planes. The planes' original
+    /// rake edges lie on the left/right exterior walls, so core derives one gable
+    /// profile per end with an 8ft base and 13ft apex.
+    fn gable_wall_model() -> BuildingModel {
+        let ft = Length::from_feet;
+        let mut model = BuildingModel::demo_shell();
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-south",
+            "South roof",
+            "level-1",
+            "system-roof-1",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(ft(28.0), Length::ZERO),
+                Point2::new(ft(28.0), ft(10.0)),
+                Point2::new(Length::ZERO, ft(10.0)),
+            ],
+            slope,
+            0,
+            ft(8.0),
+        ));
+        model.roof_planes.push(RoofPlane::new(
+            "roof-north",
+            "North roof",
+            "level-1",
+            "system-roof-1",
+            vec![
+                Point2::new(Length::ZERO, ft(20.0)),
+                Point2::new(ft(28.0), ft(20.0)),
+                Point2::new(ft(28.0), ft(10.0)),
+                Point2::new(Length::ZERO, ft(10.0)),
+            ],
+            slope,
+            0,
+            ft(8.0),
+        ));
+        model
+    }
+
     #[test]
     fn roof_plane_emits_sloped_surface_at_true_elevations() {
         let scene = scene_from_model(&roofed_model(), &RenderOptions::default());
@@ -1381,6 +1551,183 @@ mod tests {
         // Bearing underside eave sits at 96"; weather ridge sits at 128" + 7".
         assert!((lo - 96.0).abs() < 0.5, "eave elevation {lo}, want ~96");
         assert!((hi - 135.0).abs() < 0.5, "ridge elevation {hi}, want ~135");
+    }
+
+    #[test]
+    fn roof_overhang_expands_surface_bounds_and_lowers_the_eave() {
+        let mut model = roofed_model();
+        model.roof_planes[0].eave_overhang = Length::from_whole_inches(12);
+        model.roof_planes[0].rake_overhang = Length::from_whole_inches(6);
+
+        let (scene, framing) = build_scene(&model, &RenderOptions::default());
+        let roof_vertices: Vec<Vec3> = scene
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                let nz = triangle.geom_normal.z.abs();
+                nz > 0.1 && nz < 0.99
+            })
+            .flat_map(|triangle| {
+                [
+                    triangle.v0,
+                    triangle.v0 + triangle.edge1,
+                    triangle.v0 + triangle.edge2,
+                ]
+            })
+            .collect();
+        assert!(!roof_vertices.is_empty(), "no overhung roof geometry");
+
+        let min = |axis: fn(Vec3) -> f32| {
+            roof_vertices
+                .iter()
+                .copied()
+                .map(axis)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let max = |axis: fn(Vec3) -> f32| {
+            roof_vertices
+                .iter()
+                .copied()
+                .map(axis)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let x = |point: Vec3| point.x;
+        let y = |point: Vec3| point.y;
+        let z = |point: Vec3| point.z;
+
+        // The original 12ft x 8ft outline becomes [-6in, 150in] across the
+        // rakes and extends 12in down-slope from y=0. Projecting that eave through
+        // the original 4:12 frame drops its underside from 96in to 92in.
+        assert!((min(x) + 6.0).abs() < 0.05, "min x = {}", min(x));
+        assert!((max(x) - 150.0).abs() < 0.05, "max x = {}", max(x));
+        assert!((min(y) + 12.0).abs() < 0.05, "min y = {}", min(y));
+        assert!((max(y) - 96.0).abs() < 0.05, "max y = {}", max(y));
+        assert!((min(z) - 92.0).abs() < 0.05, "min z = {}", min(z));
+        assert!((max(z) - 135.0).abs() < 0.05, "max z = {}", max(z));
+
+        // Scene framing consumes the expanded bounds too: y spans -12..96, so
+        // the geometry-only orbit center is 42in rather than the authored 48in.
+        assert!((framing.center.y - 42.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn gable_profiles_close_wall_envelopes_to_the_roof_apex() {
+        let model = gable_wall_model();
+        let profiles = model.gable_wall_profiles();
+        assert_eq!(profiles.len(), 2);
+        assert!(profiles.contains_key(&ElementId::new("wall-left")));
+        assert!(profiles.contains_key(&ElementId::new("wall-right")));
+        assert!(
+            profiles
+                .values()
+                .all(|profile| profile.base_elevation == Length::from_feet(8.0)
+                    && profile.peak_elevation == Length::from_feet(13.0))
+        );
+
+        let scene = scene_from_model(&model, &RenderOptions::default());
+        let elevated_vertical_vertices: Vec<Vec3> = scene
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                if triangle.geom_normal.z.abs() > 1.0e-4 {
+                    return false;
+                }
+                let vertices = [
+                    triangle.v0,
+                    triangle.v0 + triangle.edge1,
+                    triangle.v0 + triangle.edge2,
+                ];
+                vertices.iter().any(|vertex| vertex.z > 96.5)
+            })
+            .flat_map(|triangle| {
+                [
+                    triangle.v0,
+                    triangle.v0 + triangle.edge1,
+                    triangle.v0 + triangle.edge2,
+                ]
+            })
+            .collect();
+        assert!(
+            !elevated_vertical_vertices.is_empty(),
+            "no vertical gable wall faces above the authored wall top"
+        );
+        let apex_vertices: Vec<Vec3> = elevated_vertical_vertices
+            .iter()
+            .copied()
+            .filter(|vertex| (vertex.z - 156.0).abs() < 0.05)
+            .collect();
+        assert!(
+            apex_vertices
+                .iter()
+                .any(|vertex| vertex.x.abs() < 12.0 && (vertex.y - 120.0).abs() < 0.05),
+            "left gable does not reach the 13ft apex: {apex_vertices:?}"
+        );
+        assert!(
+            apex_vertices.iter().any(|vertex| {
+                (vertex.x - 336.0).abs() < 12.0 && (vertex.y - 120.0).abs() < 0.05
+            }),
+            "right gable does not reach the 13ft apex: {apex_vertices:?}"
+        );
+
+        // Without matching roof planes there is no derived profile and the same
+        // shell remains rectangular at the authored 8ft wall height.
+        let mut bare = model;
+        bare.roof_planes.clear();
+        assert!(bare.gable_wall_profiles().is_empty());
+        let bare_scene = scene_from_model(&bare, &RenderOptions::default());
+        assert!(bare_scene.triangles.iter().all(|triangle| {
+            if triangle.geom_normal.z.abs() > 1.0e-4 {
+                return true;
+            }
+            [
+                triangle.v0,
+                triangle.v0 + triangle.edge1,
+                triangle.v0 + triangle.edge2,
+            ]
+            .iter()
+            .all(|vertex| vertex.z <= 96.5)
+        }));
+    }
+
+    #[test]
+    fn full_height_opening_under_gable_gets_a_base_cap() {
+        let mut model = gable_wall_model();
+        let wall_index = model
+            .walls
+            .iter()
+            .position(|wall| wall.id.0 == "wall-left")
+            .unwrap();
+        let height = model.walls[wall_index].height;
+        model.walls[wall_index].openings[0].height = height;
+        model.walls[wall_index].openings[0].kind = OpeningKind::Stair;
+        let wall = &model.walls[wall_index];
+        let opening = &wall.openings[0];
+        let basis = WallBasis::new(wall);
+        let scene = scene_from_model(&model, &RenderOptions::default());
+
+        let cap_triangles = scene
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                let vertices = [
+                    triangle.v0,
+                    triangle.v0 + triangle.edge1,
+                    triangle.v0 + triangle.edge2,
+                ];
+                vertices.iter().all(|vertex| {
+                    let dx = vertex.x - basis.ox;
+                    let dy = vertex.y - basis.oy;
+                    let x = dx * basis.ax + dy * basis.ay;
+                    (vertex.z - height.inches() as f32).abs() < 0.01
+                        && x >= opening.left().inches() as f32 - 0.01
+                        && x <= opening.right().inches() as f32 + 0.01
+                })
+            })
+            .count();
+        assert!(
+            cap_triangles >= 2,
+            "the gable base must close across an opening that reaches the wall top"
+        );
     }
 
     #[test]

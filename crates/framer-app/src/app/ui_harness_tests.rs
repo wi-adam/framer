@@ -18,7 +18,9 @@ use egui_kittest::kittest::Queryable;
 use framer_core::{DimensionAxis, DimensionKind, Length, OpeningKind, Point2};
 
 use super::actions::{self, ActionId};
-use super::{FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels};
+use super::{
+    FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels,
+};
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
 ///
@@ -480,6 +482,66 @@ fn render_workflow_exposes_session_render_settings() {
     assert!((opts.sun.dir.y - 1.0).abs() < 1.0e-5);
     assert!((opts.sun.dir.z - 0.0).abs() < 1.0e-5);
     assert_eq!(opts.exposure.to_bits(), 1.75_f32.to_bits());
+}
+
+#[test]
+fn generated_roof_tree_row_selects_the_member_by_owning_plan() {
+    let mut harness = demo_harness();
+    harness.run();
+    harness.state_mut().add_roof(RoofForm::Gable);
+
+    let (source_id, group_label, member_id, member_label) = {
+        let app = harness.state();
+        let roof_plan = app
+            .project_plan
+            .as_ref()
+            .and_then(|plan| plan.roof_plans.first())
+            .expect("demo shell roof framing");
+        let roof_name = app
+            .model
+            .roof_planes
+            .iter()
+            .find(|plane| plane.id == roof_plan.roof)
+            .map(|plane| plane.name.as_str())
+            .unwrap_or(roof_plan.roof.0.as_str());
+        let member = roof_plan.members.first().expect("generated roof member");
+        (
+            roof_plan.roof.0.clone(),
+            format!(
+                "Roof framing: {roof_name} ({} members)",
+                roof_plan.members.len()
+            ),
+            member.id.clone(),
+            format!("{}: {}", member.kind.label(), member.id),
+        )
+    };
+
+    // Selecting the host before Plan first renders opens that generated group;
+    // then replace the selection without another frame so clicking the visible
+    // row must perform the actual dispatch under test.
+    harness.state_mut().selected = Selection::Member {
+        source_id: source_id.clone(),
+        member_id: member_id.clone(),
+    };
+    harness.get_by_label("Plan").click();
+    harness.run();
+    assert!(harness.query_all_by_label(&group_label).next().is_some());
+    harness.state_mut().selected = Selection::RoofPlane(source_id.clone());
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &member_label)
+        .scroll_to_me();
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &member_label)
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().selected,
+        Selection::Member {
+            source_id,
+            member_id,
+        }
+    );
 }
 
 /// The command metadata seam and rendered command strip should stay in lockstep:
