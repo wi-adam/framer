@@ -351,7 +351,7 @@ selected-object lifecycle actions.
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
-| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` plus derived gable profiles, roofs use the shared overhang outline, and Plan-mode 3-D meshes selectable roof-plan members beneath one translucent weather face per field; `pick()` uses owning plan ids while `FrameMember::source` remains provenance. |
+| `scene_build.rs` | **`Scene3d::from_project`** — builds the 3D mesh + pick volumes from model + plan; wall envelopes use `BuildingModel::wall_envelope_span` plus derived gable profiles, roofs use the shared overhang outline, and Plan-mode 3-D meshes selectable roof-plan members beneath one translucent weather face per field. Common `Rafter` members on `MemberFamily::Rafter` systems use a cut-profile prism with plumb ends and an exact-wall-bearing birdsmouth; truss-tagged and other member kinds keep the generic board prism. `pick()` uses the same rendered cut mesh and owning plan ids while `FrameMember::source` remains provenance. |
 | `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |
