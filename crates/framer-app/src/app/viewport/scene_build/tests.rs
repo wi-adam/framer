@@ -1063,6 +1063,52 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
 }
 
 #[test]
+fn ridge_face_setback_rejects_unrelated_ridge_boards() {
+    let model = elevated_gable_model();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let rafter = plan
+        .roof_plans
+        .iter()
+        .find(|roof_plan| roof_plan.roof.0 == "roof-south")
+        .unwrap()
+        .members
+        .iter()
+        .find(|member| member.kind == MemberKind::Rafter)
+        .unwrap();
+    let ridge = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof_plan| &roof_plan.members)
+        .find(|member| member.kind == MemberKind::RidgeBoard)
+        .unwrap();
+
+    let mut wrong_elevation = ridge.clone();
+    let placement = wrong_elevation.sloped.as_mut().unwrap();
+    placement.low_elevation += Length::from_whole_inches(1);
+    placement.high_elevation += Length::from_whole_inches(1);
+    assert_eq!(
+        ridge_face_setback(rafter, &[&wrong_elevation]),
+        None,
+        "a ridge at another elevation cannot shorten this rafter"
+    );
+
+    let mut off_span = ridge.clone();
+    let placement = off_span.sloped.as_mut().unwrap();
+    placement.start.y += Length::from_whole_inches(1);
+    placement.end.y += Length::from_whole_inches(1);
+    assert_eq!(
+        ridge_face_setback(rafter, &[&off_span]),
+        None,
+        "a nearby ridge whose span misses the endpoint cannot shorten this rafter"
+    );
+    assert_eq!(
+        ridge_face_setback(rafter, &[&wrong_elevation, &off_span, ridge]),
+        Some(0.75),
+        "decoy ridges are skipped before the actual bearing ridge is selected"
+    );
+}
+
+#[test]
 fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
     let mut model = surface_model();
     let plan = framer_solver::generate_project_plan(&model).unwrap();
