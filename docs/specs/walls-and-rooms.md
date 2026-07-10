@@ -42,10 +42,12 @@ vision/scope (`docs/vision.md`), so this introduces a new authored primitive.
 7. **Wall intent vs. wall envelope:** authored walls remain centerline segments:
    `start`, `end`, `length`, opening offsets, and solver member positions are the
    source of truth. The physical wall body used by 3D/render presentation is a
-   **derived envelope**. At a `Corner` join, each joined wall's visual envelope
-   extends to the adjoining wall's outside face so closed shells do not leave a
-   corner cavity. This derived envelope is never serialized and never mutates
-   authored dimensions.
+   **derived envelope**. At a `Corner` join, one wall runs through to the
+   adjoining wall's outside face while the other butts at the through wall's
+   inside face, producing one closed, volume-disjoint corner. The structural
+   framing follows the same rule at its own layer faces, with a counter-lapped
+   upper double top plate. This derived treatment is never serialized and never
+   mutates authored dimensions. See [Wall corner laps](wall-corner-laps.md).
 
 ## Out of scope for v1 (kept architecturally open)
 

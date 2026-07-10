@@ -6,8 +6,8 @@ use framer_core::{
     ElementId, FastenerSchedule, FloorDeck, FramingDefaults, FramingSpec, GableWallProfile,
     HeaderRow, HeaderSpanTable, LayerFunction, Length, Material, ModelError, Opening, Point2,
     ResolvedStandards, RoofPlane, RoofPlaneFrame, Room, SiteContext, Slope, SpanDirection,
-    SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind, concave_polygon_corners,
-    level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
+    SurfaceRegion, Wall, WallExposure, WallJoin, WallJoinKind, WallPhysicalSpans,
+    concave_polygon_corners, level_wall_loop_outline, point_in_polygon, polygon_area_square_inches,
     room_boundaries_for_rooms,
 };
 use serde::{Deserialize, Serialize};
@@ -897,6 +897,16 @@ impl WallGenerationSpans {
             primary: span,
             counter: span,
             envelope: (0.0, wall.length.inches()),
+        }
+    }
+}
+
+impl From<WallPhysicalSpans> for WallGenerationSpans {
+    fn from(spans: WallPhysicalSpans) -> Self {
+        Self {
+            primary: spans.primary_framing,
+            counter: spans.counter_lap_framing,
+            envelope: spans.envelope,
         }
     }
 }
@@ -2827,6 +2837,15 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
         fasteners: Vec::new(),
     };
 
+    // Corner span derivation depends on the level's complete wall topology.
+    // Batch it once per level and reuse it for wall generation and join-member
+    // reclassification; project-plan regeneration runs after every model edit.
+    let wall_spans: BTreeMap<ElementId, WallPhysicalSpans> = model
+        .levels
+        .iter()
+        .flat_map(|level| model.wall_physical_spans_on_level(&level.id))
+        .collect();
+
     for wall in &model.walls {
         let system = model
             .system_for(wall)
@@ -2841,15 +2860,14 @@ pub fn generate_project_plan(model: &BuildingModel) -> Result<ProjectFramePlan, 
             &standards,
             standards_name,
             &model.site,
-            WallGenerationSpans {
-                primary: model.wall_framing_span(wall),
-                counter: model.wall_counter_lap_framing_span(wall),
-                envelope: model.wall_envelope_span(wall),
-            },
+            (*wall_spans
+                .get(&wall.id)
+                .expect("validated wall levels have batched physical spans"))
+            .into(),
         )?);
     }
 
-    add_join_members(&mut plan, model, &standards)?;
+    add_join_members(&mut plan, model, &standards, &wall_spans)?;
     generate_surface_plans(&mut plan, model)?;
     generate_roof_plans(&mut plan, model)?;
     add_gable_wall_framing(&mut plan, model)?;
@@ -2942,6 +2960,7 @@ fn add_join_members(
     plan: &mut ProjectFramePlan,
     model: &BuildingModel,
     standards: &ResolvedStandards,
+    wall_spans: &BTreeMap<ElementId, WallPhysicalSpans>,
 ) -> Result<(), SolverError> {
     let plate_thickness = standards.defaults.plate_profile.thickness();
     let top_plate_count = if standards.defaults.double_top_plate {
@@ -2982,6 +3001,14 @@ fn add_join_members(
             WallJoinKind::Corner | WallJoinKind::EndToEnd => {
                 for wall in [first, second] {
                     let (member, band) = wall_member(wall)?;
+                    let framing_span = if join.kind == WallJoinKind::Corner {
+                        wall_spans
+                            .get(&wall.id)
+                            .expect("validated joined walls have batched physical spans")
+                            .primary_framing
+                    } else {
+                        (Length::ZERO, wall.length)
+                    };
                     let provenance = RuleProvenance::new(
                         "wall.join.corner-posts",
                         format!(
@@ -2991,9 +3018,9 @@ fn add_join_members(
                     );
                     if !reclassify_end_stud_as_join_member(
                         plan,
-                        model,
                         join,
                         wall,
+                        framing_span,
                         member,
                         MemberKind::CornerPost,
                         "corner-post",
@@ -3107,19 +3134,15 @@ fn add_join_members(
 #[allow(clippy::too_many_arguments)]
 fn reclassify_end_stud_as_join_member(
     plan: &mut ProjectFramePlan,
-    model: &BuildingModel,
     join: &WallJoin,
     wall: &Wall,
+    framing_span: (Length, Length),
     wall_stud: BoardProfile,
     kind: MemberKind,
     member_suffix: &str,
     provenance: RuleProvenance,
 ) -> Result<bool, SolverError> {
-    let (span_start, span_end) = if join.kind == WallJoinKind::Corner {
-        model.wall_framing_span(wall)
-    } else {
-        (Length::ZERO, wall.length)
-    };
+    let (span_start, span_end) = framing_span;
     let half_stud = wall_stud.thickness() / 2;
     let expected_x = if wall.start == join.point {
         span_start + half_stud
@@ -5665,6 +5688,63 @@ mod tests {
         assert!(plan.bom().iter().any(|item| {
             item.kind == MemberKind::CornerPost && item.quantity >= model.wall_joins.len() as u32
         }));
+    }
+
+    #[test]
+    fn corner_lapped_spans_control_opening_end_clearance() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls.push(placed(
+            "a-through",
+            Point2::new(Length::ZERO, Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            &code,
+        ));
+        model.walls.push(placed(
+            "b-butt",
+            Point2::new(Length::from_feet(10.0), Length::ZERO),
+            Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+            &code,
+        ));
+        model.reconcile_joins();
+
+        let required_clearance = code.stud_profile.thickness() * 2;
+        let butt_opening = Opening::window(
+            "opening-butt",
+            "Butt-side window",
+            Length::from_inches(16.0),
+            Length::from_inches(24.0),
+            Length::from_inches(24.0),
+            Length::from_inches(24.0),
+        );
+        let butt_start = model.wall_framing_span(&model.walls[1]).0;
+        assert!(butt_opening.left() >= required_clearance);
+        assert!(butt_opening.left() - butt_start < required_clearance);
+        model.walls[1].openings.push(butt_opening);
+
+        let error = generate_project_plan(&model).unwrap_err();
+        assert!(matches!(
+            error,
+            SolverError::OpeningTooCloseToWallEnd { wall, opening }
+                if wall == ElementId::new("b-butt")
+                    && opening == ElementId::new("opening-butt")
+        ));
+
+        model.walls[1].openings.clear();
+        let through_opening = Opening::window(
+            "opening-through",
+            "Through-side window",
+            Length::from_inches(106.5),
+            Length::from_inches(24.0),
+            Length::from_inches(24.0),
+            Length::from_inches(24.0),
+        );
+        let through_end = model.wall_framing_span(&model.walls[0]).1;
+        assert!(model.walls[0].length - through_opening.right() < required_clearance);
+        assert!(through_end - through_opening.right() >= required_clearance);
+        model.walls[0].openings.push(through_opening);
+
+        generate_project_plan(&model).expect("through-side opening uses the extended lapped span");
     }
 
     #[test]

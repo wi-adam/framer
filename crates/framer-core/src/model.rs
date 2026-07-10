@@ -87,6 +87,16 @@ pub struct BuildingModel {
     pub braced_wall_lines: Vec<BracedWallLine>,
 }
 
+/// Derived local-x spans for one wall's physical corner laps. These values are
+/// disposable solver/presentation facts: authored wall endpoints and opening
+/// offsets remain centerline-based and are never mutated by corner treatment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WallPhysicalSpans {
+    pub primary_framing: (Length, Length),
+    pub counter_lap_framing: (Length, Length),
+    pub envelope: (f64, f64),
+}
+
 impl Default for BuildingModel {
     fn default() -> Self {
         Self::new()
@@ -905,36 +915,80 @@ impl BuildingModel {
     /// through wall's inside face, producing one closed butt/lap with no doubled
     /// volume. Half-tick values are retained exactly in this derived visual path.
     pub fn wall_envelope_span(&self, wall: &Wall) -> (f64, f64) {
-        let span = self.wall_corner_span_half_ticks(
-            wall,
-            CornerLapPass::Primary,
-            WallPhysicalBand::Envelope,
-        );
-        (half_ticks_to_inches(span.0), half_ticks_to_inches(span.1))
+        self.wall_physical_spans(wall).envelope
     }
 
     /// The primary local-x span for generated studs, bottom plates, and lower
     /// top plates. Structural joins meet at framing-layer faces rather than at
     /// the finished wall envelope's faces.
     pub fn wall_framing_span(&self, wall: &Wall) -> (Length, Length) {
-        let span = self.wall_corner_span_half_ticks(
-            wall,
-            CornerLapPass::Primary,
-            WallPhysicalBand::Framing,
-        );
-        half_tick_span_to_lengths(span)
+        self.wall_physical_spans(wall).primary_framing
     }
 
     /// The opposite structural corner lap used by the upper member of a double
     /// top plate. Reversing the through/butt roles staggers its corner seam over
     /// the primary plate seam and ties the intersecting walls together.
     pub fn wall_counter_lap_framing_span(&self, wall: &Wall) -> (Length, Length) {
-        let span = self.wall_corner_span_half_ticks(
+        self.wall_physical_spans(wall).counter_lap_framing
+    }
+
+    /// Derive all physical spans for one wall. Consumers processing many walls
+    /// should use [`Self::wall_physical_spans_on_level`] so the level topology is
+    /// solved once rather than once per wall and span kind.
+    pub fn wall_physical_spans(&self, wall: &Wall) -> WallPhysicalSpans {
+        let interior_sides = crate::topology::wall_interior_sides_on_level(self, &wall.level);
+        self.wall_physical_spans_with_interior_sides(wall, &interior_sides)
+    }
+
+    /// Batched level-scoped form of [`Self::wall_physical_spans`].
+    pub fn wall_physical_spans_on_level(
+        &self,
+        level: &ElementId,
+    ) -> BTreeMap<ElementId, WallPhysicalSpans> {
+        let interior_sides = crate::topology::wall_interior_sides_on_level(self, level);
+        self.walls
+            .iter()
+            .filter(|wall| wall.level == *level)
+            .map(|wall| {
+                (
+                    wall.id.clone(),
+                    self.wall_physical_spans_with_interior_sides(wall, &interior_sides),
+                )
+            })
+            .collect()
+    }
+
+    fn wall_physical_spans_with_interior_sides(
+        &self,
+        wall: &Wall,
+        interior_sides: &BTreeMap<ElementId, bool>,
+    ) -> WallPhysicalSpans {
+        let primary_framing = self.wall_corner_span_half_ticks(
+            wall,
+            CornerLapPass::Primary,
+            WallPhysicalBand::Framing,
+            interior_sides,
+        );
+        let counter_lap_framing = self.wall_corner_span_half_ticks(
             wall,
             CornerLapPass::Counter,
             WallPhysicalBand::Framing,
+            interior_sides,
         );
-        half_tick_span_to_lengths(span)
+        let envelope = self.wall_corner_span_half_ticks(
+            wall,
+            CornerLapPass::Primary,
+            WallPhysicalBand::Envelope,
+            interior_sides,
+        );
+        WallPhysicalSpans {
+            primary_framing: half_tick_span_to_lengths(primary_framing),
+            counter_lap_framing: half_tick_span_to_lengths(counter_lap_framing),
+            envelope: (
+                half_ticks_to_inches(envelope.0),
+                half_ticks_to_inches(envelope.1),
+            ),
+        }
     }
 
     fn wall_corner_span_half_ticks(
@@ -942,8 +996,8 @@ impl BuildingModel {
         wall: &Wall,
         pass: CornerLapPass,
         band: WallPhysicalBand,
+        interior_sides: &BTreeMap<ElementId, bool>,
     ) -> (i64, i64) {
-        let interior_sides = crate::topology::wall_interior_sides_on_level(self, &wall.level);
         let mut start_extension = None;
         let mut start_retraction = None;
         let mut end_extension = None;
@@ -970,7 +1024,7 @@ impl BuildingModel {
             else {
                 continue;
             };
-            let Some(primary_through) = self.primary_corner_through_wall(join, &interior_sides)
+            let Some(primary_through) = self.primary_corner_through_wall(join, interior_sides)
             else {
                 continue;
             };
@@ -1001,7 +1055,7 @@ impl BuildingModel {
                 }
             };
             let adjustment =
-                self.wall_band_max_projection_half_ticks(other, direction, band, &interior_sides);
+                self.wall_band_max_projection_half_ticks(other, direction, band, interior_sides);
 
             if wall.start == join.point {
                 if is_through {
