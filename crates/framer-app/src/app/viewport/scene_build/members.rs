@@ -20,6 +20,7 @@ impl SceneBuilder {
         plane: Option<&RoofPlane>,
         host_id: &ElementId,
         member: &FrameMember,
+        ridge_boards: &[&FrameMember],
         color: Color32,
     ) {
         let is_common_stick_rafter = member.kind == MemberKind::Rafter
@@ -33,6 +34,7 @@ impl SceneBuilder {
                 plane,
                 member,
                 matched_bearing_depth(model, plane),
+                ridge_face_setback(member, ridge_boards),
                 color,
             )
         {
@@ -137,6 +139,7 @@ impl SceneBuilder {
         plane: &RoofPlane,
         member: &FrameMember,
         bearing_depth: Option<Length>,
+        ridge_face_setback: Option<f32>,
         color: Color32,
     ) -> bool {
         let Some(sloped) = member.sloped else {
@@ -160,6 +163,7 @@ impl SceneBuilder {
             (member.side_offset + member.side_depth).inches() as f32,
             plane,
             bearing_depth.map(|depth| depth.inches() as f32),
+            ridge_face_setback,
         ) else {
             return false;
         };
@@ -334,6 +338,7 @@ impl RafterPrism {
         section1: f32,
         plane: &RoofPlane,
         bearing_depth: Option<f32>,
+        ridge_face_setback: Option<f32>,
     ) -> Option<Self> {
         if board_thickness <= f32::EPSILON || section1 - section0 <= f32::EPSILON {
             return None;
@@ -342,6 +347,10 @@ impl RafterPrism {
         let plan_dy = end.y - start.y;
         let plan_run = (plan_dx * plan_dx + plan_dy * plan_dy).sqrt();
         if plan_run <= f32::EPSILON {
+            return None;
+        }
+        let profile_run = plan_run - ridge_face_setback.unwrap_or(0.0);
+        if profile_run <= f32::EPSILON {
             return None;
         }
         let run = Point3::vector(plan_dx / plan_run, plan_dy / plan_run, 0.0);
@@ -361,7 +370,7 @@ impl RafterPrism {
                 (section1 - section0) / slope_cosine * Self::MAX_NOTCH_DEPTH_FRACTION;
             let seat_run = bearing_depth.min(max_notch_depth / rise_over_run);
             let heel_run = (bearing_run - seat_run).max(0.0);
-            let toe_run = bearing_run.min(plan_run);
+            let toe_run = bearing_run.min(profile_run);
             let seat_z = lower_z(toe_run);
             if toe_run - heel_run > 1.0e-3 && seat_z - lower_z(heel_run) > 1.0e-3 {
                 profile.extend([
@@ -372,8 +381,8 @@ impl RafterPrism {
             }
         }
         profile.extend([
-            [plan_run, lower_z(plan_run)],
-            [plan_run, upper_z(plan_run)],
+            [profile_run, lower_z(profile_run)],
+            [profile_run, upper_z(profile_run)],
             [0.0, upper_z(0.0)],
         ]);
 
@@ -436,6 +445,70 @@ impl RafterPrism {
             triangles,
         })
     }
+}
+
+/// Set back a common rafter's presentation mesh from its solver endpoint to the
+/// near face of the ridge board it bears against. Solver endpoints intentionally
+/// remain on the ridge centerline for deterministic framing and BOM semantics.
+///
+/// The scan is project-wide because only one of two matched gable planes owns the
+/// shared ridge member. Elevation and point-on-span checks keep unrelated or
+/// vertically mismatched ridge boards from shortening a rafter.
+pub(super) fn ridge_face_setback(
+    member: &FrameMember,
+    ridge_boards: &[&FrameMember],
+) -> Option<f32> {
+    let rafter = member.sloped?;
+    let rafter_dx = (rafter.end.x - rafter.start.x).inches() as f32;
+    let rafter_dy = (rafter.end.y - rafter.start.y).inches() as f32;
+    let rafter_run = (rafter_dx * rafter_dx + rafter_dy * rafter_dy).sqrt();
+    if rafter_run <= f32::EPSILON {
+        return None;
+    }
+    let rafter_unit = (rafter_dx / rafter_run, rafter_dy / rafter_run);
+    let one_tick = Length::from_ticks(1);
+
+    ridge_boards.iter().find_map(|ridge| {
+        let ridge = *ridge;
+        let placement = ridge.sloped?;
+        if (placement.low_elevation - rafter.high_elevation).abs() > one_tick
+            || !point_on_plan_segment(rafter.end, placement.start, placement.end, one_tick)
+        {
+            return None;
+        }
+        let ridge_dx = (placement.end.x - placement.start.x).inches() as f32;
+        let ridge_dy = (placement.end.y - placement.start.y).inches() as f32;
+        let ridge_length = (ridge_dx * ridge_dx + ridge_dy * ridge_dy).sqrt();
+        if ridge_length <= f32::EPSILON {
+            return None;
+        }
+        let ridge_across = (-ridge_dy / ridge_length, ridge_dx / ridge_length);
+        let approach = (rafter_unit.0 * ridge_across.0 + rafter_unit.1 * ridge_across.1).abs();
+        if approach <= f32::EPSILON {
+            return None;
+        }
+        let setback = ridge.cross_section_depth.inches() as f32 * 0.5 / approach;
+        (setback < rafter_run).then_some(setback)
+    })
+}
+
+fn point_on_plan_segment(point: Point2, start: Point2, end: Point2, tolerance: Length) -> bool {
+    let px = point.x.inches();
+    let py = point.y.inches();
+    let ax = start.x.inches();
+    let ay = start.y.inches();
+    let dx = (end.x - start.x).inches();
+    let dy = (end.y - start.y).inches();
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= f64::EPSILON {
+        return false;
+    }
+    let distance = ((px - ax) * dy - (py - ay) * dx).abs() / length_squared.sqrt();
+    let projection = (px - ax) * dx + (py - ay) * dy;
+    let along_tolerance = tolerance.inches() * length_squared.sqrt();
+    distance <= tolerance.inches()
+        && projection >= -along_tolerance
+        && projection <= length_squared + along_tolerance
 }
 
 /// The triangular solid between one authored wall top and its matched roof rakes,

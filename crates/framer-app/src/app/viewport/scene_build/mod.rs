@@ -33,7 +33,7 @@ use framer_core::{
 #[cfg(test)]
 use framer_solver::MemberKind;
 #[cfg(test)]
-use members::{RafterPrism, matched_bearing_depth};
+use members::{RafterPrism, matched_bearing_depth, ridge_face_setback};
 #[cfg(test)]
 use picking::PickShape;
 #[cfg(test)]
@@ -131,6 +131,12 @@ impl Scene3d {
             // every solver member carries exact plan endpoints plus absolute endpoint
             // elevations, so arbitrary ridge/hip/valley directions share one
             // spatial board-prism path while common stick rafters add their cut profile.
+            let ridge_boards: Vec<_> = plan
+                .roof_plans
+                .iter()
+                .flat_map(|roof_plan| &roof_plan.members)
+                .filter(|member| member.kind == framer_solver::MemberKind::RidgeBoard)
+                .collect();
             for roof_plan in &plan.roof_plans {
                 let roof_plane = model
                     .roof_planes
@@ -146,7 +152,14 @@ impl Scene3d {
                     );
                     let color =
                         highlighted_member_color(member.kind, source_selected, member_selected);
-                    builder.push_roof_member(model, roof_plane, &roof_plan.roof, member, color);
+                    builder.push_roof_member(
+                        model,
+                        roof_plane,
+                        &roof_plan.roof,
+                        member,
+                        &ridge_boards,
+                        color,
+                    );
                 }
             }
         }

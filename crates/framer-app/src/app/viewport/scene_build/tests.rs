@@ -888,6 +888,13 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         .find(|plane| plane.id == roof_plan.roof)
         .unwrap();
     let sloped = member.sloped.unwrap();
+    let ridge_boards: Vec<_> = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof_plan| &roof_plan.members)
+        .filter(|member| member.kind == MemberKind::RidgeBoard)
+        .collect();
+    let south_ridge_setback = ridge_face_setback(member, &ridge_boards).unwrap();
     let prism = RafterPrism::new(
         Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
         Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
@@ -896,6 +903,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         (member.side_offset + member.side_depth).inches() as f32,
         plane,
         matched_bearing_depth(&model, plane).map(|depth| depth.inches() as f32),
+        Some(south_ridge_setback),
     )
     .unwrap();
 
@@ -906,6 +914,12 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
     );
     assert!((prism.profile[0][0] - prism.profile[6][0]).abs() < 1.0e-3);
     assert!((prism.profile[4][0] - prism.profile[5][0]).abs() < 1.0e-3);
+    assert!((south_ridge_setback - 0.75).abs() < 1.0e-3);
+    let south_plan_run = (sloped.end.y - sloped.start.y).abs().inches() as f32;
+    assert!(
+        (prism.profile[4][0] - (south_plan_run - south_ridge_setback)).abs() < 1.0e-3,
+        "the ridge plumb cut terminates at the near ridge-board face"
+    );
     assert!(
         (prism.profile[1][0] - prism.profile[2][0]).abs() < 1.0e-3,
         "heel cut must be vertical"
@@ -932,6 +946,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         .find(|plane| plane.id == north_plan.roof)
         .unwrap();
     let north_sloped = north_member.sloped.unwrap();
+    let north_ridge_setback = ridge_face_setback(north_member, &ridge_boards).unwrap();
     assert!(
         north_sloped.end.y < north_sloped.start.y,
         "north field runs toward -y"
@@ -952,6 +967,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         (north_member.side_offset + north_member.side_depth).inches() as f32,
         north_plane,
         matched_bearing_depth(&model, north_plane).map(|depth| depth.inches() as f32),
+        Some(north_ridge_setback),
     )
     .unwrap();
     assert_eq!(
@@ -960,6 +976,12 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         "reverse field keeps the cut profile"
     );
     assert!((north_prism.profile[2][1] - north_prism.profile[3][1]).abs() < 1.0e-3);
+    assert!((north_ridge_setback - 0.75).abs() < 1.0e-3);
+    let north_plan_run = (north_sloped.end.y - north_sloped.start.y).abs().inches() as f32;
+    assert!(
+        (north_prism.profile[4][0] - (north_plan_run - north_ridge_setback)).abs() < 1.0e-3,
+        "the reverse field also stops at its near ridge-board face"
+    );
 
     let scene = Scene3d::from_project(
         &model,
@@ -1041,6 +1063,52 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
 }
 
 #[test]
+fn ridge_face_setback_rejects_unrelated_ridge_boards() {
+    let model = elevated_gable_model();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let rafter = plan
+        .roof_plans
+        .iter()
+        .find(|roof_plan| roof_plan.roof.0 == "roof-south")
+        .unwrap()
+        .members
+        .iter()
+        .find(|member| member.kind == MemberKind::Rafter)
+        .unwrap();
+    let ridge = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof_plan| &roof_plan.members)
+        .find(|member| member.kind == MemberKind::RidgeBoard)
+        .unwrap();
+
+    let mut wrong_elevation = ridge.clone();
+    let placement = wrong_elevation.sloped.as_mut().unwrap();
+    placement.low_elevation += Length::from_whole_inches(1);
+    placement.high_elevation += Length::from_whole_inches(1);
+    assert_eq!(
+        ridge_face_setback(rafter, &[&wrong_elevation]),
+        None,
+        "a ridge at another elevation cannot shorten this rafter"
+    );
+
+    let mut off_span = ridge.clone();
+    let placement = off_span.sloped.as_mut().unwrap();
+    placement.start.y += Length::from_whole_inches(1);
+    placement.end.y += Length::from_whole_inches(1);
+    assert_eq!(
+        ridge_face_setback(rafter, &[&off_span]),
+        None,
+        "a nearby ridge whose span misses the endpoint cannot shorten this rafter"
+    );
+    assert_eq!(
+        ridge_face_setback(rafter, &[&wrong_elevation, &off_span, ridge]),
+        Some(0.75),
+        "decoy ridges are skipped before the actual bearing ridge is selected"
+    );
+}
+
+#[test]
 fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
     let mut model = surface_model();
     let plan = framer_solver::generate_project_plan(&model).unwrap();
@@ -1052,6 +1120,14 @@ fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
         .clone();
     let plane = model.roof_planes[0].clone();
     let sloped = member.sloped.unwrap();
+    let ridge_boards: Vec<_> = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof_plan| &roof_plan.members)
+        .filter(|member| member.kind == MemberKind::RidgeBoard)
+        .collect();
+    let ridge_setback = ridge_face_setback(&member, &ridge_boards);
+    assert_eq!(ridge_setback, None, "a shed roof has no ridge-board face");
     let prism = RafterPrism::new(
         Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
         Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
@@ -1060,6 +1136,7 @@ fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
         (member.side_offset + member.side_depth).inches() as f32,
         &plane,
         matched_bearing_depth(&model, &plane).map(|depth| depth.inches() as f32),
+        ridge_setback,
     )
     .unwrap();
     assert_eq!(

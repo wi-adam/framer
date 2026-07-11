@@ -219,10 +219,11 @@ persisted intent or the `.framer` schema.
   walls, incomplete or mismatched roof edges, and overhang-only geometry do not synthesize a gable.
 - **Common stick rafters show their construction cuts in the generated 3-D plan.** A
   `MemberKind::Rafter` belonging to a roof system whose framing family is `Rafter` is meshed with
-  vertical (plumb) tail and ridge faces instead of square crosscuts. When the authored eave exactly
-  matches a wall bearing line and the rafter has enough tail stock, it also receives a horizontal
-  birdsmouth seat sized from the matched wall framing member's nominal depth; the notch is
-  geometrically capped so it cannot consume the rafter section. A manually floating or unmatched
+  vertical (plumb) tail and ridge faces instead of square crosscuts; at a framed ridge, each
+  rafter terminates at the near face of the ridge board rather than its centerline. When the authored
+  eave exactly matches a wall bearing line and the rafter has enough tail stock, it also receives a
+  horizontal birdsmouth seat sized from the matched wall framing member's nominal depth; the notch
+  is geometrically capped so it cannot consume the rafter section. A manually floating or unmatched
   roof keeps the plumb cuts but omits the birdsmouth rather than inventing a bearing. Ridge boards,
   blocking, hip/valley/jack members,
   rake plates, and roof systems tagged `Truss` keep their existing member geometry. This is derived
