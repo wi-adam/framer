@@ -25,7 +25,7 @@ fn push_body_result(
     result: Result<PhysicalSolid, String>,
 ) {
     match result {
-        Ok(solid) => scene.bodies.push(PhysicalBody::new(body_ref, solid)),
+        Ok(solid) => scene.push_body(PhysicalBody::new(body_ref, solid)),
         Err(message) => scene
             .diagnostics
             .push(GeometryBuildDiagnostic::unbuildable(body_ref, message)),
@@ -186,9 +186,9 @@ mod tests {
         }
         assert_eq!(
             scene
-                .bodies
+                .bodies()
                 .iter()
-                .filter(|body| body.body_ref.member_id.is_some())
+                .filter(|body| body.body_ref.member_id().is_some())
                 .count(),
             members.len()
         );

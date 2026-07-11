@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use framer_core::ElementId;
 use framer_solver::MemberKind;
 
@@ -132,18 +134,16 @@ pub enum BodyKind {
 
 /// Stable semantic identity for a physical body. Internal convex pieces never
 /// appear in diagnostics; all reports point back to this canonical reference.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BodyRef {
-    pub domain: CollisionDomain,
-    pub owner: ElementId,
-    pub kind: BodyKind,
-    pub member_id: Option<String>,
+    owner: ElementId,
+    kind: BodyKind,
+    member_id: Option<String>,
 }
 
 impl BodyRef {
     pub fn member(owner: ElementId, kind: MemberKind, member_id: impl Into<String>) -> Self {
         Self {
-            domain: CollisionDomain::StructuralFraming,
             owner,
             kind: BodyKind::FrameMember(kind),
             member_id: Some(member_id.into()),
@@ -152,11 +152,45 @@ impl BodyRef {
 
     pub fn assembly(owner: ElementId, kind: AssemblyKind) -> Self {
         Self {
-            domain: CollisionDomain::FinishedAssembly,
             owner,
             kind: BodyKind::Assembly(kind),
             member_id: None,
         }
+    }
+
+    pub const fn domain(&self) -> CollisionDomain {
+        match self.kind {
+            BodyKind::FrameMember(_) => CollisionDomain::StructuralFraming,
+            BodyKind::Assembly(_) => CollisionDomain::FinishedAssembly,
+        }
+    }
+
+    pub fn owner(&self) -> &ElementId {
+        &self.owner
+    }
+
+    pub const fn kind(&self) -> BodyKind {
+        self.kind
+    }
+
+    pub fn member_id(&self) -> Option<&str> {
+        self.member_id.as_deref()
+    }
+}
+
+impl Ord for BodyRef {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.domain()
+            .cmp(&other.domain())
+            .then_with(|| self.owner.cmp(&other.owner))
+            .then_with(|| self.kind.cmp(&other.kind))
+            .then_with(|| self.member_id.cmp(&other.member_id))
+    }
+}
+
+impl PartialOrd for BodyRef {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -200,11 +234,15 @@ impl GeometryBuildDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PhysicalScene {
-    pub bodies: Vec<PhysicalBody>,
+    bodies: Vec<PhysicalBody>,
     pub diagnostics: Vec<GeometryBuildDiagnostic>,
 }
 
 impl PhysicalScene {
+    pub fn bodies(&self) -> &[PhysicalBody] {
+        &self.bodies
+    }
+
     pub fn body(&self, body_ref: &BodyRef) -> Option<&PhysicalBody> {
         self.bodies
             .binary_search_by(|body| body.body_ref.cmp(body_ref))
@@ -212,9 +250,14 @@ impl PhysicalScene {
             .map(|index| &self.bodies[index])
     }
 
+    pub(crate) fn push_body(&mut self, body: PhysicalBody) {
+        let index = self
+            .bodies
+            .partition_point(|existing| existing.body_ref < body.body_ref);
+        self.bodies.insert(index, body);
+    }
+
     pub(crate) fn finish(mut self) -> Self {
-        self.bodies
-            .sort_by(|left, right| left.body_ref.cmp(&right.body_ref));
         self.diagnostics.sort();
         self
     }
@@ -235,7 +278,49 @@ mod tests {
     }
 
     #[test]
+    fn body_ref_constructors_derive_consistent_identity_parts() {
+        let member = BodyRef::member(ElementId::new("wall-a"), MemberKind::CommonStud, "stud-1");
+        assert_eq!(member.domain(), CollisionDomain::StructuralFraming);
+        assert_eq!(member.owner(), &ElementId::new("wall-a"));
+        assert_eq!(member.kind(), BodyKind::FrameMember(MemberKind::CommonStud));
+        assert_eq!(member.member_id(), Some("stud-1"));
+
+        let assembly = BodyRef::assembly(ElementId::new("wall-a"), AssemblyKind::Wall);
+        assert_eq!(assembly.domain(), CollisionDomain::FinishedAssembly);
+        assert_eq!(assembly.owner(), &ElementId::new("wall-a"));
+        assert_eq!(assembly.kind(), BodyKind::Assembly(AssemblyKind::Wall));
+        assert_eq!(assembly.member_id(), None);
+    }
+
+    #[test]
     fn empty_scene_is_a_successful_stable_scene() {
         assert_eq!(PhysicalScene::default().finish(), PhysicalScene::default());
+    }
+
+    #[test]
+    fn body_insertion_preserves_the_lookup_ordering_invariant() {
+        let make_body = |body_ref| {
+            let surface = TriMesh {
+                points: vec![
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(1.0, 0.0, 0.0),
+                    Point3::new(0.0, 1.0, 0.0),
+                    Point3::new(0.0, 0.0, 1.0),
+                ],
+                triangles: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+            };
+            let piece = ConvexPiece::new(surface.clone()).unwrap();
+            PhysicalBody::new(body_ref, PhysicalSolid::new(surface, vec![piece]).unwrap())
+        };
+        let early = BodyRef::member(ElementId::new("wall-a"), MemberKind::CommonStud, "stud-1");
+        let late = BodyRef::assembly(ElementId::new("wall-z"), AssemblyKind::Wall);
+        let mut scene = PhysicalScene::default();
+        scene.push_body(make_body(late.clone()));
+        scene.push_body(make_body(early.clone()));
+
+        assert_eq!(scene.bodies()[0].body_ref, early);
+        assert_eq!(scene.bodies()[1].body_ref, late);
+        assert!(scene.body(&early).is_some());
+        assert!(scene.body(&late).is_some());
     }
 }

@@ -643,6 +643,60 @@ fn surfaces_emit_geometry_and_pick_volumes() {
 }
 
 #[test]
+fn generated_floor_and_ceiling_members_emit_plan_meshes_and_picks() {
+    let model = surface_model();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    assert!(plan.floor_plans.iter().any(|plan| !plan.members.is_empty()));
+    assert!(
+        plan.ceiling_plans
+            .iter()
+            .any(|plan| !plan.members.is_empty())
+    );
+
+    let scene = Scene3d::from_project(
+        &model,
+        &plan,
+        0,
+        &Selection::Wall,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+
+    for source_id in ["deck-1", "ceiling-1"] {
+        let pick = scene
+            .picks
+            .iter()
+            .find(|pick| {
+                matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id: source, .. } if source == source_id
+                )
+            })
+            .unwrap_or_else(|| panic!("no generated member pick for {source_id}"));
+        let PickShape::Mesh { points, triangles } = &pick.shape else {
+            panic!("generated {source_id} member must use its shared indexed mesh");
+        };
+        assert!(!points.is_empty());
+        assert!(!triangles.is_empty());
+        assert!(
+            points
+                .iter()
+                .all(|point| scene.points.iter().any(|scene_point| {
+                    scene_point.x == point.x && scene_point.y == point.y && scene_point.z == point.z
+                }))
+        );
+        let rendered = points[triangles[0][0]];
+        assert!(
+            scene
+                .vertices
+                .iter()
+                .any(|vertex| { vertex.position == [rendered.x, rendered.y, rendered.z] })
+        );
+    }
+}
+
+#[test]
 fn roof_surface_is_sloped_and_decks_sit_at_their_elevations() {
     let scene = build(&surface_model(), &Selection::Wall);
     let zs: Vec<f32> = scene.vertices.iter().map(|v| v.position[2]).collect();
@@ -741,6 +795,44 @@ fn roof_opening_is_absent_from_render_and_pick_triangles() {
             "a pick/render triangle filled the modeled skylight cavity"
         );
     }
+}
+
+#[test]
+fn invalid_roof_cavities_keep_a_holeless_render_and_pick_fallback() {
+    let mut model = surface_model();
+    for (id, x) in [("skylight-a", 6.0), ("skylight-b", 6.5)] {
+        model.roof_planes[0].openings.push(RoofOpening::new(
+            id,
+            framer_core::OpeningKind::Skylight,
+            Point2::new(Length::from_feet(x), Length::from_feet(4.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+    }
+    assert!(
+        model
+            .roof_surface_triangulation(&model.roof_planes[0])
+            .is_none(),
+        "overlapping cavity rings must fail closed in physical geometry"
+    );
+
+    let scene = build(&model, &Selection::Wall);
+    let roof_pick = scene
+        .picks
+        .iter()
+        .find(|pick| matches!(&pick.click, ViewClick::RoofPlane { id } if id == "roof-1"))
+        .expect("invalid cavities must not hide the host roof");
+    let PickShape::Mesh { points, triangles } = &roof_pick.shape else {
+        panic!("the fallback roof must retain an indexed pick mesh");
+    };
+    assert_eq!(points.len(), 4);
+    assert_eq!(triangles.len(), 2);
+    assert!(
+        triangles
+            .iter()
+            .flatten()
+            .all(|index| *index < points.len())
+    );
 }
 
 #[test]

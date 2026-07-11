@@ -841,11 +841,20 @@ fn push_roof_plane(
     // The authored outline remains the bearing/topology footprint. Render the
     // shared derived eave/rake-overhang outline through the *original* affine
     // frame so tails extend down-slope while ridges/hips/valleys stay fixed.
-    let Some(triangulation) = model.roof_surface_triangulation(plane) else {
-        return;
+    let (surface_points, triangles) = match model.roof_surface_triangulation(plane) {
+        Some(triangulation) => (triangulation.points, triangulation.triangles),
+        None => {
+            // Keep the host roof visible when an invalid cavity fails closed in
+            // physical geometry; the presentation fallback omits only the holes.
+            let points = model.roof_surface_outline(plane);
+            let triangles = framer_core::triangulate_simple_polygon(&points);
+            if triangles.is_empty() {
+                return;
+            }
+            (points, triangles)
+        }
     };
-    let underside_verts: Vec<Vec3> = triangulation
-        .points
+    let underside_verts: Vec<Vec3> = surface_points
         .iter()
         .map(|&p| project_onto_plane(&frame, p))
         .collect();
@@ -854,7 +863,6 @@ fn push_roof_plane(
         .iter()
         .map(|v| Vec3::new(v.x, v.y, v.z + lift))
         .collect();
-    let triangles = triangulation.triangles;
     push_polygon(tris, bounds, &verts, &triangles, material);
 
     let underside_material = if is_cathedral {
@@ -1638,6 +1646,45 @@ mod tests {
                 "a render triangle filled the modeled skylight cavity"
             );
         }
+    }
+
+    #[test]
+    fn invalid_roof_cavities_keep_a_holeless_render_fallback() {
+        let mut model = roofed_model();
+        for (id, x) in [("skylight-a", 6.0), ("skylight-b", 6.5)] {
+            model.roof_planes[0].openings.push(RoofOpening::new(
+                id,
+                OpeningKind::Skylight,
+                Point2::new(Length::from_feet(x), Length::from_feet(4.0)),
+                Length::from_feet(2.0),
+                Length::from_feet(2.0),
+            ));
+        }
+        assert!(
+            model
+                .roof_surface_triangulation(&model.roof_planes[0])
+                .is_none(),
+            "overlapping cavity rings must fail closed in physical geometry"
+        );
+
+        let scene = scene_from_model(&model, &RenderOptions::default());
+        let roof_material = scene
+            .materials
+            .iter()
+            .position(|material| {
+                matches!(material, Material::Diffuse { albedo }
+                    if (*albedo - color_to_linear([40, 40, 45])).length() < 1.0e-5)
+            })
+            .unwrap() as u32;
+        assert_eq!(
+            scene
+                .triangles
+                .iter()
+                .filter(|triangle| triangle.material == roof_material)
+                .count(),
+            4,
+            "the two-sided rectangular roof fallback must remain visible"
+        );
     }
 
     #[test]

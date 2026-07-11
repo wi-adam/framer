@@ -151,13 +151,23 @@ pub(super) fn push_roof_surfaces(
     // ceiling again per plane.
     let cathedral = model.roof_cathedral_flags();
     for (index, plane) in model.roof_planes.iter().enumerate() {
-        let Some(triangulation) = model.roof_surface_triangulation(plane) else {
+        let (surface_points, triangles) = match model.roof_surface_triangulation(plane) {
+            Some(triangulation) => (triangulation.points, triangulation.triangles),
+            None => {
+                // Physical geometry fails closed when an opening cavity cannot be
+                // represented. Presentation must still show the host roof while
+                // that diagnostic is addressed, so omit only the invalid holes.
+                let points = model.roof_surface_outline(plane);
+                let triangles = framer_core::triangulate_simple_polygon(&points);
+                if triangles.is_empty() {
+                    continue;
+                }
+                (points, triangles)
+            }
+        };
+        let Some(bearing_verts) = roof_plane_outline_world(plane, &surface_points) else {
             continue;
         };
-        let Some(bearing_verts) = roof_plane_outline_world(plane, &triangulation.points) else {
-            continue;
-        };
-        let triangles = triangulation.triangles;
         let apply_alpha = |color| {
             if transparent {
                 theme::with_alpha(color, PLAN_ROOF_ALPHA)
