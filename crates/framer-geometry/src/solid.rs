@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt;
 
 use framer_core::ElementId;
 use framer_solver::MemberKind;
@@ -191,6 +192,62 @@ impl Ord for BodyRef {
 impl PartialOrd for BodyRef {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for BodyRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            BodyKind::FrameMember(kind) => write!(
+                formatter,
+                "structural-framing/{}/{}/{}",
+                self.owner.0,
+                member_kind_key(kind),
+                self.member_id.as_deref().unwrap_or("missing-member-id")
+            ),
+            BodyKind::Assembly(kind) => write!(
+                formatter,
+                "finished-assembly/{}/{}",
+                self.owner.0,
+                assembly_kind_key(kind)
+            ),
+        }
+    }
+}
+
+const fn assembly_kind_key(kind: AssemblyKind) -> &'static str {
+    match kind {
+        AssemblyKind::Wall => "wall",
+        AssemblyKind::FloorDeck => "floor-deck",
+        AssemblyKind::Ceiling => "ceiling",
+        AssemblyKind::RoofPlane => "roof-plane",
+    }
+}
+
+const fn member_kind_key(kind: MemberKind) -> &'static str {
+    match kind {
+        MemberKind::BottomPlate => "bottom-plate",
+        MemberKind::TopPlate => "top-plate",
+        MemberKind::CornerPost => "corner-post",
+        MemberKind::PartitionStud => "partition-stud",
+        MemberKind::BackingStud => "backing-stud",
+        MemberKind::CommonStud => "common-stud",
+        MemberKind::KingStud => "king-stud",
+        MemberKind::JackStud => "jack-stud",
+        MemberKind::Header => "header",
+        MemberKind::RoughSill => "rough-sill",
+        MemberKind::CrippleStud => "cripple-stud",
+        MemberKind::GableStud => "gable-stud",
+        MemberKind::RakePlate => "rake-plate",
+        MemberKind::FloorJoist => "floor-joist",
+        MemberKind::CeilingJoist => "ceiling-joist",
+        MemberKind::RimJoist => "rim-joist",
+        MemberKind::Blocking => "blocking",
+        MemberKind::Rafter => "rafter",
+        MemberKind::RidgeBoard => "ridge-board",
+        MemberKind::HipRafter => "hip-rafter",
+        MemberKind::ValleyRafter => "valley-rafter",
+        MemberKind::JackRafter => "jack-rafter",
     }
 }
 

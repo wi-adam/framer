@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt;
 
 use crate::{BodyRef, GeometryBuildDiagnostic, Point3};
 
@@ -81,6 +82,37 @@ impl GeometryViolation {
             Self::BodyUnbuildable(_) => None,
             Self::QueryUnsupported(diagnostic) => Some(&diagnostic.body_b),
             Self::Overlap(diagnostic) => Some(&diagnostic.body_b),
+        }
+    }
+}
+
+impl fmt::Display for GeometryViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BodyUnbuildable(diagnostic) => write!(
+                formatter,
+                "{} body={} message={}",
+                diagnostic.code, diagnostic.body_ref, diagnostic.message
+            ),
+            Self::QueryUnsupported(diagnostic) => write!(
+                formatter,
+                "{} body_a={} body_b={} message={}",
+                GeometryQueryViolation::CODE,
+                diagnostic.body_a,
+                diagnostic.body_b,
+                diagnostic.message
+            ),
+            Self::Overlap(diagnostic) => write!(
+                formatter,
+                "{} body_a={} body_b={} depth={:.6}in witness=({:.6},{:.6},{:.6})in",
+                GeometryOverlapViolation::CODE,
+                diagnostic.body_a,
+                diagnostic.body_b,
+                diagnostic.penetration_depth,
+                diagnostic.witness.x,
+                diagnostic.witness.y,
+                diagnostic.witness.z
+            ),
         }
     }
 }
