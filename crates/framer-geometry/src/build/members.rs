@@ -453,12 +453,16 @@ fn horizontal_surface_member_solid(
     let half = member.cross_section_depth.inches() / 2.0;
     let (u0, u1, v0, v1) = match member.orientation {
         MemberOrientation::Vertical => (
-            member.elevation.inches() + half,
-            (member.elevation + member.cut_length).inches()
-                - member.cross_section_depth.inches()
-                - half,
+            (member.elevation + member.cross_section_depth).inches(),
+            (member.elevation + member.cut_length - member.cross_section_depth).inches(),
             member.x.inches() - half,
             member.x.inches() + half,
+        ),
+        MemberOrientation::Horizontal if member.kind == MemberKind::RimJoist => (
+            member.elevation.inches(),
+            (member.elevation + member.cross_section_depth).inches(),
+            member.x.inches(),
+            (member.x + member.cut_length).inches(),
         ),
         MemberOrientation::Horizontal => (
             member.elevation.inches() - half,

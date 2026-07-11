@@ -592,7 +592,7 @@
           "ticks": 5376
         },
         "height": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "system": "system-wall-exterior-1",
         "openings": [
@@ -656,7 +656,7 @@
           "ticks": 5376
         },
         "height": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "system": "system-wall-exterior-1",
         "openings": [
@@ -720,7 +720,7 @@
           "ticks": 3840
         },
         "height": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "system": "system-wall-exterior-1",
         "openings": [
@@ -767,7 +767,7 @@
           "ticks": 3840
         },
         "height": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "system": "system-wall-exterior-1",
         "openings": [
@@ -1081,23 +1081,23 @@
           "Polygon": [
             {
               "x": {
-                "ticks": 0
+                "ticks": 66
               },
               "y": {
-                "ticks": 0
+                "ticks": 66
               }
             },
             {
               "x": {
-                "ticks": 5376
+                "ticks": 5310
               },
               "y": {
-                "ticks": 0
+                "ticks": 66
               }
             },
             {
               "x": {
-                "ticks": 5376
+                "ticks": 5310
               },
               "y": {
                 "ticks": 1920
@@ -1105,7 +1105,7 @@
             },
             {
               "x": {
-                "ticks": 0
+                "ticks": 66
               },
               "y": {
                 "ticks": 1920
@@ -1126,23 +1126,23 @@
           "Polygon": [
             {
               "x": {
-                "ticks": 0
+                "ticks": 66
               },
               "y": {
-                "ticks": 3840
+                "ticks": 3774
               }
             },
             {
               "x": {
-                "ticks": 5376
+                "ticks": 5310
               },
               "y": {
-                "ticks": 3840
+                "ticks": 3774
               }
             },
             {
               "x": {
-                "ticks": 5376
+                "ticks": 5310
               },
               "y": {
                 "ticks": 1920
@@ -1150,7 +1150,7 @@
             },
             {
               "x": {
-                "ticks": 0
+                "ticks": 66
               },
               "y": {
                 "ticks": 1920
