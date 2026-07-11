@@ -27,6 +27,9 @@ small buildings, garages, decks, and wood framed BBQ islands.
   `.framerlib` content.
 - `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
   and BOM generation.
+- `crates/framer-geometry`: UI-free physical-solid derivation over authored
+  assemblies and generated framing, with stable semantic body identity and
+  convex-piece lowering for collision queries.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and viewport.
@@ -105,13 +108,15 @@ offsets, openings, and repeated members. That makes a semantic solver more
 valuable than early NURBS or freeform modeling.
 
 The interactive 3D viewport is generated from authored model surfaces plus the
-same derived framing plan using `wgpu` inside the `eframe`/`egui` shell. Its
-scene-building package lowers walls, roofs, ceilings, floors, and generated
-members into depth-tested meshes, translucent assembly context, outline overlays,
-and matching pick solids. The separate path-traced Render view consumes the same
-UI-free semantic derivations through `framer-render`; each presentation owns its
-own mesh representation while native panels, inspectors, and drawing views remain
-ordinary `egui` surfaces.
+same derived framing plan using `wgpu` inside the `eframe`/`egui` shell.
+`framer-geometry` first derives identity-bearing physical solids for every
+generated member and finished assembly envelope. The viewport lowers member
+surface meshes into depth-tested vertices and uses the same indexed triangles for
+picking, while retaining presentation-only material, translucency, and outline
+policy. The separate path-traced Render view consumes the same UI-free core
+assembly derivations through `framer-render`; each presentation owns its vertex
+and material representation while native panels, inspectors, and drawing views
+remain ordinary `egui` surfaces.
 
 Framer should not make arbitrary solid operations the primary modeling surface.
 The viewport should let users place, select, drag, snap, and parametrically edit

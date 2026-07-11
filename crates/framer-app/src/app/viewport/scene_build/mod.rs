@@ -9,9 +9,10 @@ mod surfaces;
 mod tests;
 mod walls;
 
-use eframe::egui::Pos2;
+use eframe::egui::{Color32, Pos2};
 use framer_core::BuildingModel;
-use framer_solver::ProjectFramePlan;
+use framer_geometry::{BodyRef, PhysicalScene};
+use framer_solver::{FrameMember, ProjectFramePlan};
 
 use super::geom::{OrbitProjector, Point3};
 use super::gpu::GpuVertex;
@@ -25,15 +26,13 @@ use picking::PickSolid;
 pub(super) use style::{brighten, color_to_rgba, member_color};
 
 #[cfg(test)]
-use eframe::egui::Color32;
-#[cfg(test)]
 use framer_core::{
-    ConstructionSystem, ElementId, Length, Material, RoofPlane, SurfaceRegion, Wall,
+    ConstructionSystem, ElementId, Length, Material, RoofOpening, RoofPlane, SurfaceRegion, Wall,
 };
 #[cfg(test)]
-use framer_solver::MemberKind;
+use framer_geometry::{build_common_rafter_solid, matched_bearing_depth, ridge_face_setback};
 #[cfg(test)]
-use members::{RafterPrism, matched_bearing_depth, ridge_face_setback};
+use framer_solver::MemberKind;
 #[cfg(test)]
 use picking::PickShape;
 #[cfg(test)]
@@ -102,12 +101,9 @@ impl Scene3d {
         let gable_profiles = model.gable_wall_profiles();
         let mut builder = SceneBuilder::default();
         let shows_generated_plan = workspace_mode.shows_generated_plan();
-
         if shows_generated_plan {
+            let physical_scene = framer_geometry::build_physical_scene(model, plan);
             for (wall_index, wall) in model.walls.iter().enumerate() {
-                let total = wall_total_thickness(model, wall, fallback_depth);
-                let sign = interior_sign(&interior_sides, &wall.id);
-                let base_elevation = level_elevation(model, &wall.level);
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
                     // `selected_wall` remains the active editing context when a
                     // roof/ceiling/floor member is selected. Do not let that stale
@@ -122,26 +118,50 @@ impl Scene3d {
                         );
                         let color =
                             highlighted_member_color(member.kind, wall_selected, member_selected);
-                        builder.push_member(wall, member, total, sign, base_elevation, color);
+                        builder.push_shared_member(&physical_scene, &wall.id, member, color);
                     }
                 }
             }
 
-            // Roof members are no longer reconstructed from wall-local x/run data:
-            // every solver member carries exact plan endpoints plus absolute endpoint
-            // elevations, so arbitrary ridge/hip/valley directions share one
-            // spatial board-prism path while common stick rafters add their cut profile.
-            let ridge_boards: Vec<_> = plan
-                .roof_plans
-                .iter()
-                .flat_map(|roof_plan| &roof_plan.members)
-                .filter(|member| member.kind == framer_solver::MemberKind::RidgeBoard)
-                .collect();
+            for floor_plan in &plan.floor_plans {
+                for member in &floor_plan.members {
+                    let source_selected = matches!(
+                        selection,
+                        Selection::FloorDeck(id) if id == &floor_plan.floor.0
+                    );
+                    let member_selected = matches!(
+                        selection,
+                        Selection::Member { source_id, member_id }
+                            if source_id == &floor_plan.floor.0 && member_id == &member.id
+                    );
+                    builder.push_shared_member(
+                        &physical_scene,
+                        &floor_plan.floor,
+                        member,
+                        highlighted_member_color(member.kind, source_selected, member_selected),
+                    );
+                }
+            }
+            for ceiling_plan in &plan.ceiling_plans {
+                for member in &ceiling_plan.members {
+                    let source_selected = matches!(
+                        selection,
+                        Selection::Ceiling(id) if id == &ceiling_plan.ceiling.0
+                    );
+                    let member_selected = matches!(
+                        selection,
+                        Selection::Member { source_id, member_id }
+                            if source_id == &ceiling_plan.ceiling.0 && member_id == &member.id
+                    );
+                    builder.push_shared_member(
+                        &physical_scene,
+                        &ceiling_plan.ceiling,
+                        member,
+                        highlighted_member_color(member.kind, source_selected, member_selected),
+                    );
+                }
+            }
             for roof_plan in &plan.roof_plans {
-                let roof_plane = model
-                    .roof_planes
-                    .iter()
-                    .find(|plane| plane.id == roof_plan.roof);
                 for member in &roof_plan.members {
                     let source_selected =
                         matches!(selection, Selection::RoofPlane(id) if id == &roof_plan.roof.0);
@@ -152,14 +172,7 @@ impl Scene3d {
                     );
                     let color =
                         highlighted_member_color(member.kind, source_selected, member_selected);
-                    builder.push_roof_member(
-                        model,
-                        roof_plane,
-                        &roof_plan.roof,
-                        member,
-                        &ridge_boards,
-                        color,
-                    );
+                    builder.push_shared_member(&physical_scene, &roof_plan.roof, member, color);
                 }
             }
         }
@@ -230,6 +243,27 @@ impl Scene3d {
 }
 
 impl SceneBuilder {
+    fn push_shared_member(
+        &mut self,
+        physical_scene: &PhysicalScene,
+        owner: &framer_core::ElementId,
+        member: &FrameMember,
+        color: Color32,
+    ) {
+        let body_ref = BodyRef::member(owner.clone(), member.kind, member.id.clone());
+        let Some(body) = physical_scene.body(&body_ref) else {
+            return;
+        };
+        self.push_member_body(
+            body,
+            ViewClick::Member {
+                source_id: owner.0.clone(),
+                member_id: member.id.clone(),
+            },
+            color,
+        );
+    }
+
     fn push_triangle(&mut self, points: [Point3; 3], color: [f32; 4]) {
         let normal = face_normal(points[0], points[1], points[2]);
         let base = self.vertices.len() as u32;
@@ -304,14 +338,6 @@ const GABLE_QUAD_FACES: [[usize; 4]; 3] = [[0, 1, 4, 3], [0, 3, 5, 2], [1, 2, 5,
 
 fn vector_between(start: Point3, end: Point3) -> Point3 {
     Point3::vector(end.x - start.x, end.y - start.y, end.z - start.z)
-}
-
-fn offset(point: Point3, axis: Point3, amount: f32) -> Point3 {
-    Point3::vector(
-        point.x + axis.x * amount,
-        point.y + axis.y * amount,
-        point.z + axis.z * amount,
-    )
 }
 
 fn cross(a: Point3, b: Point3) -> Point3 {

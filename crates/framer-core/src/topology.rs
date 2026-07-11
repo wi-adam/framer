@@ -540,6 +540,54 @@ pub fn triangulate_simple_polygon(points: &[Point2]) -> Vec<[usize; 3]> {
     triangles
 }
 
+/// A deterministic indexed triangulation of one outer polygon and zero or more
+/// cavity rings. `points` stores the outer ring followed by each hole in the
+/// order supplied; `triangles` index that flattened list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolygonTriangulation {
+    pub points: Vec<Point2>,
+    pub triangles: Vec<[usize; 3]>,
+}
+
+/// Triangulate a polygon with holes using the maintained Mapbox earcut port.
+/// Framer retains responsibility for semantic cavity derivation and stable ring
+/// order; the general hole-aware triangulation kernel stays library-owned.
+pub fn triangulate_polygon_with_holes(
+    outline: &[Point2],
+    holes: &[Vec<Point2>],
+) -> Option<PolygonTriangulation> {
+    if outline.len() < 3 || holes.iter().any(|hole| hole.len() < 3) {
+        return None;
+    }
+    if holes.is_empty() {
+        return Some(PolygonTriangulation {
+            points: outline.to_vec(),
+            triangles: triangulate_simple_polygon(outline),
+        });
+    }
+    let mut points = outline.to_vec();
+    let mut hole_indices = Vec::with_capacity(holes.len());
+    for hole in holes {
+        hole_indices.push(points.len());
+        points.extend_from_slice(hole);
+    }
+    let mut flat = Vec::with_capacity(points.len() * 2);
+    for point in &points {
+        flat.extend([point.x.inches(), point.y.inches()]);
+    }
+    let raw = earcutr::earcut(&flat, &hole_indices, 2).ok()?;
+    if raw.is_empty() || raw.len() % 3 != 0 {
+        return None;
+    }
+    Some(PolygonTriangulation {
+        points,
+        triangles: raw
+            .chunks_exact(3)
+            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+            .collect(),
+    })
+}
+
 /// Twice the shoelace signed area in ticks² (counterclockwise positive). `i128`
 /// keeps the products exact for any reachable tick coordinate.
 fn polygon_signed_area2(points: &[Point2]) -> i128 {
@@ -1040,6 +1088,24 @@ mod tests {
         let tris = triangulate_simple_polygon(&rect);
         assert_eq!(tris.len(), 2);
         assert_triangulation_tiles(&rect, &tris);
+    }
+
+    #[test]
+    fn triangulates_polygon_with_a_cavity_without_filling_the_hole() {
+        let outer = vec![p(0.0, 0.0), p(40.0, 0.0), p(40.0, 30.0), p(0.0, 30.0)];
+        let hole = vec![p(10.0, 10.0), p(20.0, 10.0), p(20.0, 20.0), p(10.0, 20.0)];
+        let result = triangulate_polygon_with_holes(&outer, std::slice::from_ref(&hole)).unwrap();
+        let mut area = 0.0;
+        for [a, b, c] in &result.triangles {
+            let triangle = [result.points[*a], result.points[*b], result.points[*c]];
+            area += polygon_area_square_inches(&triangle);
+            let centroid = p(
+                triangle.iter().map(|point| point.x.inches()).sum::<f64>() / 3.0,
+                triangle.iter().map(|point| point.y.inches()).sum::<f64>() / 3.0,
+            );
+            assert!(!point_in_polygon(centroid, &hole));
+        }
+        assert!((area - 1_100.0).abs() < 1.0e-6);
     }
 
     #[test]

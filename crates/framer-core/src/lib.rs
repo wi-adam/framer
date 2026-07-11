@@ -36,9 +36,11 @@ pub use standards::{
     resolve_standards,
 };
 pub use topology::{
-    RoomBoundary, concave_polygon_corners, enclosed_room_count, enclosed_room_count_on_level,
-    level_wall_loop_outline, point_in_polygon, polygon_area_square_inches, room_boundaries,
-    room_boundaries_for_rooms, room_boundaries_on_level, room_boundary, room_boundary_on_level,
-    triangulate_simple_polygon, wall_interior_sides, wall_interior_sides_on_level,
+    PolygonTriangulation, RoomBoundary, concave_polygon_corners, enclosed_room_count,
+    enclosed_room_count_on_level, level_wall_loop_outline, point_in_polygon,
+    polygon_area_square_inches, room_boundaries, room_boundaries_for_rooms,
+    room_boundaries_on_level, room_boundary, room_boundary_on_level,
+    triangulate_polygon_with_holes, triangulate_simple_polygon, wall_interior_sides,
+    wall_interior_sides_on_level,
 };
 pub use units::{Length, Point2};
