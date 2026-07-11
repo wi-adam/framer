@@ -29,6 +29,7 @@ use framer_core::{
     concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
     save_project as save_project_document,
 };
+use framer_geometry::{GeometryAudit, PhysicalScene, audit_physical_scene, build_physical_scene};
 use framer_render::math::Vec3;
 use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
@@ -54,6 +55,8 @@ pub(crate) struct FramerApp {
     selected_wall: usize,
     selected: Selection,
     project_plan: Option<ProjectFramePlan>,
+    physical_scene: Option<PhysicalScene>,
+    geometry_audit: GeometryAudit,
     compliance_report: Option<ComplianceReport>,
     library_issues: Vec<framer_library::LibraryIssue>,
     library_issue_error: Option<String>,
@@ -651,6 +654,8 @@ impl Default for FramerApp {
             selected_wall: 0,
             selected: Selection::Wall,
             project_plan: None,
+            physical_scene: None,
+            geometry_audit: GeometryAudit::default(),
             compliance_report: None,
             library_issues: Vec::new(),
             library_issue_error: None,
@@ -764,6 +769,8 @@ impl FramerApp {
 
         match generate_project_plan(&self.model) {
             Ok(mut plan) => {
+                let physical_scene = build_physical_scene(&self.model, &plan);
+                let geometry_audit = audit_physical_scene(&physical_scene);
                 let resolved_standards = self.model.resolved_standards();
                 let report = framer_standards::evaluate(&self.model, &resolved_standards, &plan);
                 plan.diagnostics
@@ -774,11 +781,15 @@ impl FramerApp {
                     self.library_issue_error.as_deref(),
                 );
                 self.compliance_report = Some(report);
+                self.physical_scene = Some(physical_scene);
+                self.geometry_audit = geometry_audit;
                 self.project_plan = Some(plan);
                 self.error = None;
             }
             Err(error) => {
                 self.project_plan = None;
+                self.physical_scene = None;
+                self.geometry_audit = GeometryAudit::default();
                 self.compliance_report = None;
                 self.error = Some(error.to_string());
             }
@@ -3840,6 +3851,48 @@ mod tests {
 
     fn pt_ft(x_ft: f64, y_ft: f64) -> Point2 {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
+    }
+
+    fn add_overlapping_wall(app: &mut FramerApp) {
+        let mut wall = app.model.walls[0].clone();
+        wall.id = ElementId::new("geometry-overlap-wall");
+        wall.name = "Geometry overlap wall".to_owned();
+        wall.start.x += Length::from_whole_inches(12);
+        wall.end.x += Length::from_whole_inches(12);
+        wall.openings.clear();
+        wall.dimensions.clear();
+        app.model.walls.push(wall);
+    }
+
+    #[test]
+    fn rebuild_caches_geometry_and_tracks_clean_violation_clean_history() {
+        let mut app = FramerApp::default();
+        assert!(app.physical_scene.is_some());
+        assert!(app.geometry_audit.is_clean());
+
+        app.edit("Add overlapping wall", add_overlapping_wall);
+        assert!(app.physical_scene.is_some());
+        assert!(!app.geometry_audit.is_clean());
+
+        app.undo();
+        assert!(app.physical_scene.is_some());
+        assert!(app.geometry_audit.is_clean());
+
+        app.redo();
+        assert!(app.physical_scene.is_some());
+        assert!(!app.geometry_audit.is_clean());
+    }
+
+    #[test]
+    fn invalid_regeneration_clears_geometry_cache_with_plan() {
+        let mut app = FramerApp::default();
+        app.model.walls[0].end = app.model.walls[0].start;
+
+        app.rebuild();
+
+        assert!(app.project_plan.is_none());
+        assert!(app.physical_scene.is_none());
+        assert!(app.geometry_audit.is_clean());
     }
 
     #[test]
