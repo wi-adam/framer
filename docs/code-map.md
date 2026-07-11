@@ -9,13 +9,13 @@ actual files, types, and functions. When the two disagree, the code wins — fix
 
 ## Workspace at a glance
 
-Six crates in a strict dependency order (UI depends on logic, never the reverse):
+Seven crates in a strict dependency order (UI depends on logic, never the reverse):
 
 ```
-framer-core   ─┬─→ framer-solver ─┬─→ framer-app
+framer-core   ─┬─→ framer-solver ─┬─→ framer-geometry ─→ framer-app
                │                  └─→ framer-standards
-               ├─→ framer-render ─┤
-               └─→ framer-library ─┘
+               ├─→ framer-render ───────────────────────→┤
+               └─→ framer-library ──────────────────────→┘
 ```
 
 | Crate | Responsibility | Depends on | UI? |
@@ -24,13 +24,34 @@ framer-core   ─┬─→ framer-solver ─┬─→ framer-app
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-standards`](../crates/framer-standards) | UI-free standards evaluator: compliance facts, Kleene logic, deterministic reports, CSV export, and diagnostics lowering. | core, solver | No |
+| [`framer-geometry`](../crates/framer-geometry) | UI-free physical scene: stable body identity, exact generated-member solids, finished assembly envelopes, and convex-piece lowering. | core, solver | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
-| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | core, library, solver, render | Yes |
+| [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | core, geometry, library, solver, render | Yes |
 
-**The load-bearing invariant:** `framer-core`, `framer-solver`, and `framer-render` carry
+**The load-bearing invariant:** `framer-core`, `framer-solver`, `framer-geometry`, and `framer-render` carry
 **no UI dependency**. They must stay testable, scriptable, and exportable without the app.
 See [architecture.md](architecture.md#workspace) and
 [vision.md](vision.md#product-principles).
+
+---
+
+## framer-geometry — shared physical solids
+
+UI-free floating-point geometry derived from `BuildingModel` plus
+`ProjectFramePlan`. It does not alter semantic solver endpoints or persist any
+state.
+
+| File | Contains |
+| --- | --- |
+| `src/solid.rs` | `PhysicalScene`, `PhysicalBody`, canonical `BodyRef`, collision domains/body kinds, indexed surface meshes, convex pieces, AABBs, and fail-closed build diagnostics. |
+| `src/build/members.rs` | Wall-local cuboids, arbitrary spatial boards, rake plates, floor/ceiling members, and exact common-rafter profiles including birdsmouths and ridge-face setbacks. |
+| `src/build/assemblies.rs` | Lapped/cavity-cut wall envelopes plus floor, ceiling, and overhung roof assembly bodies, including roof-opening cavities. |
+| `src/build/mod.rs` | `build_physical_scene(model, plan)`, deterministic orchestration, shared math, and whole-scene inventory coverage. |
+
+The app consumes each generated member body's indexed surface for both triangles
+and picking. Assembly presentations continue using their existing core-derived
+layer/material paths; parity tests keep those occupied boundaries aligned with
+the geometry bodies.
 
 ---
 
@@ -98,6 +119,8 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   `Ceiling` is a *cathedral* (`BuildingModel::roof_cathedral_flags`).
   `BuildingModel::roof_surface_outline` derives the visible/takeoff polygon by offsetting the
   authored bearing outline's eave and exposed rakes while keeping shared roof seams fixed;
+  `BuildingModel::roof_surface_triangulation` adds stable hole-aware triangles for modeled roof
+  openings so the geometry audit, 3-D viewport/picking, and path tracer share the same cavities;
   `BuildingModel::connected_roof_plane_ids` defines the exact-edge component whose matching
   overhang pair keeps those seam endpoints watertight, while roof validation rejects negative
   overhangs and redundant duplicate/collinear boundary vertices;
@@ -352,8 +375,8 @@ selected-object lifecycle actions.
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
 | `scene_build/mod.rs` | **`Scene3d::from_project`** facade and `SceneBuilder` mesh sink. It owns the full emission recipe and the opaque/transparent index partition while delegating element-specific lowering to child modules. |
-| `scene_build/walls.rs`, `scene_build/members.rs`, `scene_build/surfaces.rs` | Interactive 3-D lowering by reason to change: derived wall envelopes/layers/openings; generated wall/roof members (including cut-profile common rafters); authored roof/ceiling/floor surfaces. New element families belong in the matching emitter rather than the facade. |
-| `scene_build/picking.rs`, `scene_build/style.rs`, `scene_build/tests.rs` | Pick shapes/depth; the emitters preserve wall/surface priority 1, opening 2, and member 3. Viewport color/material policy is shared with the view cube/elevation; focused scene fixtures and regressions live with the package. Cut rafters use the same profile mesh for rendering and picking. |
+| `scene_build/walls.rs`, `scene_build/members.rs`, `scene_build/surfaces.rs` | Interactive 3-D lowering by reason to change: derived wall envelopes/layers/openings; geometry-owned generated-member surfaces; authored roof/ceiling/floor surfaces. New element families belong in the matching emitter rather than the facade. |
+| `scene_build/picking.rs`, `scene_build/style.rs`, `scene_build/tests.rs` | Pick shapes/depth; the emitters preserve wall/surface priority 1, opening 2, and member 3. Viewport color/material policy is shared with the view cube/elevation; focused scene fixtures and regressions live with the package. Every generated member uses the same `framer-geometry` indexed surface for rendering and picking. |
 | `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |
@@ -391,8 +414,10 @@ the real symbols:
    │   FrameMember[] · LayerBomItem[] · RoomSchedule[]     │
    └───────────┬───────────────────────────┬──────────────┘
                │                           │
-   scene_build::Scene3d::from_project   framer_render::scene_from_model + accumulate
-   (3D mesh + pick volumes)             (path-traced Render view; GPU mirror in app/render)
+   framer_geometry::build_physical_scene   framer_render::scene_from_model + accumulate
+               │                           │
+   scene_build::Scene3d::from_project      (path-traced Render view; GPU mirror in app/render)
+   (shared member mesh + pick triangles)   │
                │                           │
    ┌───────────▼───────────────────────────▼──────────────┐
    │ PRESENTATION  viewports, drawings, SVG/CSV exports     │  ← disposable artifacts

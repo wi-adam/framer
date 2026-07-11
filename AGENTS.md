@@ -10,7 +10,7 @@ path-traced rendering. Product source of truth: [docs/vision.md](docs/vision.md)
 
 ## Repo map
 
-Rust workspace, six crates (strict dependency order — UI depends on logic, never
+Rust workspace, seven crates (strict dependency order — UI depends on logic, never
 the reverse):
 
 | Crate | Responsibility |
@@ -19,6 +19,7 @@ the reverse):
 | [`crates/framer-library`](crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap for reusable `.framerlib` content. **No UI.** |
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
 | [`crates/framer-standards`](crates/framer-standards) | UI-free compliance facts, evaluator, report CSV, and diagnostics lowering over resolved standards + solver output. **No UI.** |
+| [`crates/framer-geometry`](crates/framer-geometry) | UI-free physical solids for authored assemblies and generated members; stable body identity and convex-piece lowering. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
 | [`crates/framer-app`](crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`). |
 
@@ -34,7 +35,7 @@ Docs index:
 
 ## Architecture invariants (do not break)
 
-1. **`framer-core`, `framer-solver`, and `framer-render` carry no UI dependency.**
+1. **`framer-core`, `framer-solver`, `framer-geometry`, and `framer-render` carry no UI dependency.**
    They stay testable, scriptable, and exportable without the app.
 2. **Three layers, one source of truth:** authored *intent* (`BuildingModel`) →
    derived *framing* (`ProjectFramePlan`, regenerated) → *presentation* (viewports,

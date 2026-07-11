@@ -841,8 +841,11 @@ fn push_roof_plane(
     // The authored outline remains the bearing/topology footprint. Render the
     // shared derived eave/rake-overhang outline through the *original* affine
     // frame so tails extend down-slope while ridges/hips/valleys stay fixed.
-    let surface_outline = model.roof_surface_outline(plane);
-    let underside_verts: Vec<Vec3> = surface_outline
+    let Some(triangulation) = model.roof_surface_triangulation(plane) else {
+        return;
+    };
+    let underside_verts: Vec<Vec3> = triangulation
+        .points
         .iter()
         .map(|&p| project_onto_plane(&frame, p))
         .collect();
@@ -851,7 +854,7 @@ fn push_roof_plane(
         .iter()
         .map(|v| Vec3::new(v.x, v.y, v.z + lift))
         .collect();
-    let triangles = triangulate_simple_polygon(&surface_outline);
+    let triangles = triangulation.triangles;
     push_polygon(tris, bounds, &verts, &triangles, material);
 
     let underside_material = if is_cathedral {
@@ -987,7 +990,9 @@ fn push_ground(tris: &mut Vec<Triangle>, center: Vec3, radius: f32, z: f32) {
 mod tests {
     use super::*;
     use crate::geom::Hit;
-    use framer_core::{AssetRef, FramingDefaults, Length, Opening, Point2, TextureRole, WallJoin};
+    use framer_core::{
+        AssetRef, FramingDefaults, Length, Opening, Point2, RoofOpening, TextureRole, WallJoin,
+    };
 
     fn material_histogram(scene: &Scene) -> std::collections::HashMap<u32, usize> {
         let mut h = std::collections::HashMap::new();
@@ -1597,6 +1602,42 @@ mod tests {
         // Scene framing consumes the expanded bounds too: y spans -12..96, so
         // the geometry-only orbit center is 42in rather than the authored 48in.
         assert!((framing.center.y - 42.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn roof_opening_is_absent_from_path_traced_surface_triangles() {
+        let mut model = roofed_model();
+        model.roof_planes[0].openings.push(RoofOpening::new(
+            "skylight-test",
+            OpeningKind::Skylight,
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+        ));
+        let scene = scene_from_model(&model, &RenderOptions::default());
+        let roof_material = scene
+            .materials
+            .iter()
+            .position(|material| {
+                matches!(material, Material::Diffuse { albedo }
+                    if (*albedo - color_to_linear([40, 40, 45])).length() < 1.0e-5)
+            })
+            .unwrap() as u32;
+        for triangle in scene
+            .triangles
+            .iter()
+            .filter(|triangle| triangle.material == roof_material)
+        {
+            let a = triangle.v0;
+            let b = triangle.v0 + triangle.edge1;
+            let c = triangle.v0 + triangle.edge2;
+            let centroid_x = (a.x + b.x + c.x) / 3.0;
+            let centroid_y = (a.y + b.y + c.y) / 3.0;
+            assert!(
+                (centroid_x - 72.0).abs() >= 12.0 || (centroid_y - 48.0).abs() >= 12.0,
+                "a render triangle filled the modeled skylight cavity"
+            );
+        }
     }
 
     #[test]

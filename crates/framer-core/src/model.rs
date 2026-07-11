@@ -9,6 +9,7 @@ use crate::standards::{
 };
 use crate::{
     ConstraintSystem, ConstraintVariable, Length, LinearConstraint, LinearExpression, Point2,
+    PolygonTriangulation, triangulate_polygon_with_holes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1233,6 +1234,59 @@ impl BuildingModel {
             })
             .collect();
         offset_polygon_edges(&plane.outline, &offsets).unwrap_or_else(|| plane.outline.clone())
+    }
+
+    /// Hole-aware triangulation of the occupied roof assembly surface. The outer
+    /// ring uses [`Self::roof_surface_outline`] so overhangs stay shared across
+    /// all consumers; each modeled roof opening becomes a plane-local rectangle
+    /// transformed through the original bearing frame.
+    pub fn roof_surface_triangulation(&self, plane: &RoofPlane) -> Option<PolygonTriangulation> {
+        let frame = plane.frame()?;
+        let (origin_x, origin_y) = frame.eave_origin();
+        let (along_x, along_y) = frame.eave_axis();
+        let (up_x, up_y) = frame.up_slope();
+        let point = |along: f64, up: f64| {
+            Point2::new(
+                Length::from_inches(origin_x + along_x * along + up_x * up),
+                Length::from_inches(origin_y + along_y * along + up_y * up),
+            )
+        };
+        let mut openings: Vec<_> = plane.openings.iter().collect();
+        openings.sort_by(|left, right| left.id.cmp(&right.id));
+        let holes: Vec<Vec<Point2>> = openings
+            .iter()
+            .map(|opening| {
+                let cx = opening.center.x.inches();
+                let cy = opening.center.y.inches();
+                let half_width = opening.width.inches() / 2.0;
+                let half_height = opening.height.inches() / 2.0;
+                vec![
+                    point(cx - half_width, cy - half_height),
+                    point(cx + half_width, cy - half_height),
+                    point(cx + half_width, cy + half_height),
+                    point(cx - half_width, cy + half_height),
+                ]
+            })
+            .collect();
+        if holes
+            .iter()
+            .flatten()
+            .any(|point| !crate::topology::point_in_polygon(*point, &plane.outline))
+        {
+            return None;
+        }
+        for (index, opening) in openings.iter().enumerate() {
+            for other in &openings[index + 1..] {
+                let overlaps_along =
+                    (opening.center.x - other.center.x).abs() * 2 < opening.width + other.width;
+                let overlaps_up =
+                    (opening.center.y - other.center.y).abs() * 2 < opening.height + other.height;
+                if overlaps_along && overlaps_up {
+                    return None;
+                }
+            }
+        }
+        triangulate_polygon_with_holes(&self.roof_surface_outline(plane), &holes)
     }
 
     /// Exact-edge connected component containing `roof_plane`. Connected fields

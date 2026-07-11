@@ -12,6 +12,7 @@ config.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
 env_logger.workspace = true
 framer-core.workspace = true
+framer-geometry.workspace = true
 framer-library.workspace = true
 framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true

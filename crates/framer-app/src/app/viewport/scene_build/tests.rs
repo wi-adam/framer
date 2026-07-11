@@ -273,10 +273,7 @@ fn rect() -> Vec<Point2> {
 }
 
 fn cuboid_xy_bounds(pick: &PickSolid) -> (f32, f32, f32, f32) {
-    let PickShape::Cuboid(corners) = &pick.shape else {
-        panic!("expected cuboid pick geometry");
-    };
-    corners.iter().fold(
+    pick_points(pick).iter().fold(
         (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
         |(min_x, max_x, min_y, max_y), point| {
             (
@@ -287,6 +284,14 @@ fn cuboid_xy_bounds(pick: &PickSolid) -> (f32, f32, f32, f32) {
             )
         },
     )
+}
+
+fn pick_points(pick: &PickSolid) -> &[Point3] {
+    match &pick.shape {
+        PickShape::Cuboid(corners) => corners,
+        PickShape::Mesh { points, .. } => points,
+        _ => panic!("expected indexed solid pick geometry"),
+    }
 }
 
 fn axis_overlap(first_min: f32, first_max: f32, second_min: f32, second_max: f32) -> f32 {
@@ -681,8 +686,11 @@ fn roof_surface_overhang_expands_bounds_lowers_tail_and_is_pickable() {
         .iter()
         .find(|pick| matches!(&pick.click, ViewClick::RoofPlane { id } if id == "roof-1"))
         .expect("roof pick surface");
-    let PickShape::Surface(outline) = &roof_pick.shape else {
-        panic!("a roof must pick from its derived surface outline");
+    let PickShape::Mesh {
+        points: outline, ..
+    } = &roof_pick.shape
+    else {
+        panic!("a roof must pick from its derived surface mesh");
     };
     let min = |axis: fn(&Point3) -> f32| outline.iter().map(axis).fold(f32::INFINITY, f32::min);
     let max = |axis: fn(&Point3) -> f32| outline.iter().map(axis).fold(f32::NEG_INFINITY, f32::max);
@@ -701,6 +709,37 @@ fn roof_surface_overhang_expands_bounds_lowers_tail_and_is_pickable() {
     match scene.pick(projector.project_point(overhang_only).pos, &projector) {
         Some(ViewClick::RoofPlane { id }) => assert_eq!(id, "roof-1"),
         _ => panic!("expected to pick the roof in its overhang-only region"),
+    }
+}
+
+#[test]
+fn roof_opening_is_absent_from_render_and_pick_triangles() {
+    let mut model = surface_model();
+    let hole_center = Point2::new(Length::from_feet(6.0), Length::from_feet(4.0));
+    model.roof_planes[0].openings.push(RoofOpening::new(
+        "skylight-test",
+        framer_core::OpeningKind::Skylight,
+        hole_center,
+        Length::from_feet(2.0),
+        Length::from_feet(2.0),
+    ));
+    let scene = build(&model, &Selection::Wall);
+    let roof_pick = scene
+        .picks
+        .iter()
+        .find(|pick| matches!(&pick.click, ViewClick::RoofPlane { id } if id == "roof-1"))
+        .expect("roof pick mesh");
+    let PickShape::Mesh { points, triangles } = &roof_pick.shape else {
+        panic!("roof cavities require indexed pick triangles");
+    };
+    let center = (hole_center.x.inches() as f32, hole_center.y.inches() as f32);
+    for triangle in triangles {
+        let centroid_x = triangle.iter().map(|index| points[*index].x).sum::<f32>() / 3.0;
+        let centroid_y = triangle.iter().map(|index| points[*index].y).sum::<f32>() / 3.0;
+        assert!(
+            (centroid_x - center.0).abs() >= 12.0 || (centroid_y - center.1).abs() >= 12.0,
+            "a pick/render triangle filled the modeled skylight cavity"
+        );
     }
 }
 
@@ -895,14 +934,10 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         .filter(|member| member.kind == MemberKind::RidgeBoard)
         .collect();
     let south_ridge_setback = ridge_face_setback(member, &ridge_boards).unwrap();
-    let prism = RafterPrism::new(
-        Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
-        Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
-        member.cross_section_depth.inches() as f32,
-        member.side_offset.inches() as f32,
-        (member.side_offset + member.side_depth).inches() as f32,
+    let prism = build_common_rafter_solid(
+        member,
         plane,
-        matched_bearing_depth(&model, plane).map(|depth| depth.inches() as f32),
+        matched_bearing_depth(&model, plane).map(|depth| depth.inches()),
         Some(south_ridge_setback),
     )
     .unwrap();
@@ -915,7 +950,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
     assert!((prism.profile[0][0] - prism.profile[6][0]).abs() < 1.0e-3);
     assert!((prism.profile[4][0] - prism.profile[5][0]).abs() < 1.0e-3);
     assert!((south_ridge_setback - 0.75).abs() < 1.0e-3);
-    let south_plan_run = (sloped.end.y - sloped.start.y).abs().inches() as f32;
+    let south_plan_run = (sloped.end.y - sloped.start.y).abs().inches();
     assert!(
         (prism.profile[4][0] - (south_plan_run - south_ridge_setback)).abs() < 1.0e-3,
         "the ridge plumb cut terminates at the near ridge-board face"
@@ -951,22 +986,10 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
         north_sloped.end.y < north_sloped.start.y,
         "north field runs toward -y"
     );
-    let north_prism = RafterPrism::new(
-        Point3::new(
-            north_sloped.start.x,
-            north_sloped.start.y,
-            north_sloped.low_elevation,
-        ),
-        Point3::new(
-            north_sloped.end.x,
-            north_sloped.end.y,
-            north_sloped.high_elevation,
-        ),
-        north_member.cross_section_depth.inches() as f32,
-        north_member.side_offset.inches() as f32,
-        (north_member.side_offset + north_member.side_depth).inches() as f32,
+    let north_prism = build_common_rafter_solid(
+        north_member,
         north_plane,
-        matched_bearing_depth(&model, north_plane).map(|depth| depth.inches() as f32),
+        matched_bearing_depth(&model, north_plane).map(|depth| depth.inches()),
         Some(north_ridge_setback),
     )
     .unwrap();
@@ -977,7 +1000,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
     );
     assert!((north_prism.profile[2][1] - north_prism.profile[3][1]).abs() < 1.0e-3);
     assert!((north_ridge_setback - 0.75).abs() < 1.0e-3);
-    let north_plan_run = (north_sloped.end.y - north_sloped.start.y).abs().inches() as f32;
+    let north_plan_run = (north_sloped.end.y - north_sloped.start.y).abs().inches();
     assert!(
         (north_prism.profile[4][0] - (north_plan_run - north_ridge_setback)).abs() < 1.0e-3,
         "the reverse field also stops at its near ridge-board face"
@@ -1008,6 +1031,11 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
     };
     assert_eq!(points.len(), prism.points.len());
     assert_eq!(triangles, &prism.triangles);
+    for (pick_point, shared_point) in points.iter().zip(&prism.points) {
+        assert!((pick_point.x as f64 - shared_point.x).abs() < 1.0e-4);
+        assert!((pick_point.y as f64 - shared_point.y).abs() < 1.0e-4);
+        assert!((pick_point.z as f64 - shared_point.z).abs() < 1.0e-4);
+    }
     let triangle = triangles[0].map(|index| points[index]);
     let centroid = Point3::vector(
         triangle.iter().map(|point| point.x).sum::<f32>() / 3.0,
@@ -1040,7 +1068,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
             )
         })
         .unwrap();
-    assert!(matches!(ridge_pick.shape, PickShape::Cuboid(_)));
+    assert!(matches!(ridge_pick.shape, PickShape::Mesh { .. }));
 
     let (blocking_host, blocking) = plan
         .roof_plans
@@ -1059,7 +1087,7 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
             )
         })
         .unwrap();
-    assert!(matches!(blocking_pick.shape, PickShape::Cuboid(_)));
+    assert!(matches!(blocking_pick.shape, PickShape::Mesh { .. }));
 }
 
 #[test]
@@ -1119,7 +1147,6 @@ fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
         .unwrap()
         .clone();
     let plane = model.roof_planes[0].clone();
-    let sloped = member.sloped.unwrap();
     let ridge_boards: Vec<_> = plan
         .roof_plans
         .iter()
@@ -1128,14 +1155,10 @@ fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
         .collect();
     let ridge_setback = ridge_face_setback(&member, &ridge_boards);
     assert_eq!(ridge_setback, None, "a shed roof has no ridge-board face");
-    let prism = RafterPrism::new(
-        Point3::new(sloped.start.x, sloped.start.y, sloped.low_elevation),
-        Point3::new(sloped.end.x, sloped.end.y, sloped.high_elevation),
-        member.cross_section_depth.inches() as f32,
-        member.side_offset.inches() as f32,
-        (member.side_offset + member.side_depth).inches() as f32,
+    let prism = build_common_rafter_solid(
+        &member,
         &plane,
-        matched_bearing_depth(&model, &plane).map(|depth| depth.inches() as f32),
+        matched_bearing_depth(&model, &plane).map(|depth| depth.inches()),
         ridge_setback,
     )
     .unwrap();
@@ -1173,7 +1196,7 @@ fn unmatched_or_truss_roofs_do_not_receive_a_birdsmouth_profile() {
             matches!(&pick.click, ViewClick::Member { member_id, .. } if member_id == &member.id)
         })
         .unwrap();
-    assert!(matches!(pick.shape, PickShape::Cuboid(_)));
+    assert!(matches!(pick.shape, PickShape::Mesh { .. }));
 }
 
 #[test]
@@ -1298,9 +1321,7 @@ fn gable_rake_plates_use_spatial_member_prisms_and_source_picks() {
                 )
             })
             .expect("rake plate source pick");
-        let PickShape::Cuboid(corners) = &pick.shape else {
-            panic!("a rake plate must pick as a board prism");
-        };
+        let corners = pick_points(pick);
         let wall = model
             .walls
             .iter()
@@ -1398,9 +1419,7 @@ fn diagonal_hip_member_uses_exact_plan_endpoints_and_host_pick() {
             )
         })
         .expect("diagonal hip member has an owning roof-plan pick");
-    let PickShape::Cuboid(corners) = &pick.shape else {
-        panic!("hip pick must use the shared board prism")
-    };
+    let corners = pick_points(pick);
     for point in [sloped.start, sloped.end] {
         assert!(corners.iter().any(|corner| {
             (corner.x - point.x.inches() as f32).abs() < hip.cross_section_depth.inches() as f32
@@ -1763,8 +1782,11 @@ fn room_region_surface_resolves_concave_loop_and_tiles_it() {
         .iter()
         .find(|p| matches!(&p.click, ViewClick::FloorDeck { id } if id == "deck-1"))
         .expect("a floor-deck pick volume");
-    let PickShape::Surface(outline) = &deck.shape else {
-        panic!("a floor deck must pick as a surface polygon, not a cuboid");
+    let PickShape::Mesh {
+        points: outline, ..
+    } = &deck.shape
+    else {
+        panic!("a floor deck must pick as a surface mesh, not a cuboid");
     };
     assert_eq!(outline.len(), 6, "the concave L room loop has six vertices");
 

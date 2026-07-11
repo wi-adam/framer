@@ -12,13 +12,11 @@ pub(super) struct PickSolid {
     pub(super) shape: PickShape,
 }
 
-/// The hit-test geometry of a pickable solid. Walls/members/openings are boxes
-/// (hit face-by-face); roof/ceiling/floor surfaces are thin slabs hit-tested
-/// against their projected outline polygon (which need not be a quad).
+/// The hit-test geometry of a pickable solid. Walls/openings retain specialized
+/// primitives; surfaces and generated members use their shared indexed meshes.
 pub(super) enum PickShape {
     Cuboid([Point3; 8]),
     GablePrism([Point3; 6]),
-    Surface(Vec<Point3>),
     Mesh {
         points: Vec<Point3>,
         triangles: Vec<[usize; 3]>,
@@ -31,14 +29,6 @@ impl PickSolid {
             click,
             priority,
             shape: PickShape::Cuboid(corners),
-        }
-    }
-
-    pub(super) fn surface(click: ViewClick, priority: u8, outline: Vec<Point3>) -> Self {
-        Self {
-            click,
-            priority,
-            shape: PickShape::Surface(outline),
         }
     }
 
@@ -96,21 +86,6 @@ impl PickSolid {
                     }
                 }
                 best_depth
-            }
-            PickShape::Surface(outline) => {
-                let projected: Vec<_> = outline
-                    .iter()
-                    .map(|point| projector.project_point(*point))
-                    .collect();
-                let positions: Vec<Pos2> = projected.iter().map(|point| point.pos).collect();
-                if positions.len() >= 3 && point_in_polygon(pointer, &positions) {
-                    Some(
-                        projected.iter().map(|point| point.depth).sum::<f32>()
-                            / projected.len() as f32,
-                    )
-                } else {
-                    None
-                }
             }
             PickShape::Mesh { points, triangles } => {
                 let mut best_depth = None::<f32>;

@@ -33,7 +33,7 @@ impl SceneBuilder {
         let shade = |c: Color32| color_to_rgba(if selected { brighten(c, 30) } else { c });
         // Both faces share the same triangulation; the normal (uniform per face)
         // decides which way each lights, so winding need not be reversed.
-        let up = polygon_normal(outline);
+        let up = surface_normal(outline, triangles);
         self.push_face(outline, triangles, up, shade(color));
         match reverse_face {
             SurfaceReverseFace::Omit => {}
@@ -52,10 +52,11 @@ impl SceneBuilder {
             }
         }
         self.points.extend_from_slice(outline);
-        self.picks.push(PickSolid::surface(
+        self.picks.push(PickSolid::mesh(
             click,
             SURFACE_PICK_PRIORITY,
             outline.to_vec(),
+            triangles.to_vec(),
         ));
     }
 }
@@ -150,11 +151,13 @@ pub(super) fn push_roof_surfaces(
     // ceiling again per plane.
     let cathedral = model.roof_cathedral_flags();
     for (index, plane) in model.roof_planes.iter().enumerate() {
-        let surface_outline = model.roof_surface_outline(plane);
-        let Some(bearing_verts) = roof_plane_outline_world(plane, &surface_outline) else {
+        let Some(triangulation) = model.roof_surface_triangulation(plane) else {
             continue;
         };
-        let triangles = framer_core::triangulate_simple_polygon(&surface_outline);
+        let Some(bearing_verts) = roof_plane_outline_world(plane, &triangulation.points) else {
+            continue;
+        };
+        let triangles = triangulation.triangles;
         let apply_alpha = |color| {
             if transparent {
                 theme::with_alpha(color, PLAN_ROOF_ALPHA)
@@ -273,22 +276,31 @@ fn roof_plane_outline_world(plane: &RoofPlane, outline: &[Point2]) -> Option<Vec
     )
 }
 
-/// The unit normal of a planar polygon (Newell's method), oriented upward (+z) so
-/// a surface's top face faces the sky. Falls back to +Z for a degenerate polygon.
-fn polygon_normal(verts: &[Point3]) -> Point3 {
-    let n = verts.len();
-    let (mut nx, mut ny, mut nz) = (0.0_f32, 0.0_f32, 0.0_f32);
-    for i in 0..n {
-        let a = verts[i];
-        let b = verts[(i + 1) % n];
-        nx += (a.y - b.y) * (a.z + b.z);
-        ny += (a.z - b.z) * (a.x + b.x);
-        nz += (a.x - b.x) * (a.y + b.y);
+/// Unit normal of the first nondegenerate indexed triangle, oriented upward.
+/// Using indexed geometry rather than walking every point is important when the
+/// flattened point list also contains cavity rings.
+fn surface_normal(verts: &[Point3], triangles: &[[usize; 3]]) -> Point3 {
+    for &[a, b, c] in triangles {
+        let ab = Point3::vector(
+            verts[b].x - verts[a].x,
+            verts[b].y - verts[a].y,
+            verts[b].z - verts[a].z,
+        );
+        let ac = Point3::vector(
+            verts[c].x - verts[a].x,
+            verts[c].y - verts[a].y,
+            verts[c].z - verts[a].z,
+        );
+        let normal = super::cross(ab, ac);
+        let length = (normal.x * normal.x + normal.y * normal.y + normal.z * normal.z).sqrt();
+        if length > f32::EPSILON {
+            let sign = if normal.z < 0.0 { -1.0 } else { 1.0 };
+            return Point3::vector(
+                normal.x * sign / length,
+                normal.y * sign / length,
+                normal.z * sign / length,
+            );
+        }
     }
-    let length = (nx * nx + ny * ny + nz * nz).sqrt();
-    if length <= f32::EPSILON {
-        return Point3::Z;
-    }
-    let sign = if nz < 0.0 { -1.0 } else { 1.0 };
-    Point3::vector(sign * nx / length, sign * ny / length, sign * nz / length)
+    Point3::Z
 }
