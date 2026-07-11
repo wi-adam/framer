@@ -89,4 +89,6 @@ Bug fixes and no-behavior refactors don't need a spec. Full detail:
 A change is done when the behavior is implemented in the right layer with focused
 tests, output stays deterministic, persisted/`.framer` changes are review-friendly,
 user-facing limitations are visible, docs are updated, and the full gate passes. The
-authoritative list is in [docs/vision.md](docs/vision.md#definition-of-done).
+authoritative list is in [docs/vision.md](docs/vision.md#definition-of-done). Changes to physical
+members or assembly envelopes also require a clean headless geometry audit and relevant overlap,
+contact, and unsupported/fallback coverage.

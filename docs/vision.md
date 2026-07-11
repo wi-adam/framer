@@ -332,6 +332,7 @@ A Framer goal is done when:
   persisted design data.
 - User-facing assumptions and limitations are visible.
 - Documentation is updated when the product surface or architecture changes.
+- Physical member and assembly changes pass the deterministic geometry overlap audit.
 - `cargo fmt --all -- --check` and `cargo test --workspace` pass.
 
 ## `/goal` Operating Rules

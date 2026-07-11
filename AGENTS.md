@@ -90,6 +90,8 @@ Feature-specific checks when relevant:
 - Editing example `.framer` files still requires `cargo test --workspace` (round-trip fixtures).
 - Editing docs/markdown: `python3 scripts/check-markdown-links.py` (relative-link check; CI's
   `docs` job runs it on every PR).
+- Physical member/assembly or joint changes: run the headless `geometry-audit` command on the
+  checked examples and add contact/overlap coverage for the affected body family.
 
 Definition of Done: [docs/vision.md](docs/vision.md#definition-of-done).
 

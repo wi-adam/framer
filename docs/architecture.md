@@ -29,7 +29,8 @@ small buildings, garages, decks, and wood framed BBQ islands.
   and BOM generation.
 - `crates/framer-geometry`: UI-free physical-solid derivation over authored
   assemblies and generated framing, with stable semantic body identity and
-  convex-piece lowering for collision queries.
+  convex-piece lowering, spatial broad phase, and deterministic contact/overlap
+  auditing.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and viewport.
@@ -117,6 +118,13 @@ policy. The separate path-traced Render view consumes the same UI-free core
 assembly derivations through `framer-render`; each presentation owns its vertex
 and material representation while native panels, inspectors, and drawing views
 remain ordinary `egui` surfaces.
+
+Each successful framing regeneration also caches the identity-bearing physical
+scene and its overlap audit beside the `ProjectFramePlan`. Geometry violations
+remain structured through diagnostics presentation so Plan 3-D can frame and
+danger-highlight both bodies and draw the reported witness without changing
+authored intent or ordinary selection. Scene, audit, and focus state are all
+disposable and clear or reconcile on regeneration.
 
 Framer should not make arbitrary solid operations the primary modeling surface.
 The viewport should let users place, select, drag, snap, and parametrically edit

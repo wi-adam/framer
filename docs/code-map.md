@@ -47,6 +47,8 @@ state.
 | `src/build/members.rs` | Wall-local cuboids, arbitrary spatial boards, rake plates, floor/ceiling members, and exact common-rafter profiles including birdsmouths and ridge-face setbacks. |
 | `src/build/assemblies.rs` | Lapped/cavity-cut wall envelopes plus floor, ceiling, and overhung roof assembly bodies, including roof-opening cavities. |
 | `src/build/mod.rs` | `build_physical_scene(model, plan)`, deterministic orchestration, shared math, and whole-scene inventory coverage. |
+| `src/spatial.rs`, `src/query.rs`, `src/audit.rs`, `src/diagnostic.rs` | R-tree candidate enumeration, Parry convex contact queries, scale-aware penetration classification, canonical structured violations, and stable ordering. |
+| `src/bin/geometry-audit.rs` | Headless `.framer` audit command with stable output and clean/violation/input-error exit codes. |
 
 The app consumes each generated member body's indexed surface for both triangles
 and picking. Assembly presentations continue using their existing core-derived
@@ -374,10 +376,10 @@ selected-object lifecycle actions.
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
-| `scene_build/mod.rs` | **`Scene3d::from_project`** facade and `SceneBuilder` mesh sink. It owns the full emission recipe and the opaque/transparent index partition while delegating element-specific lowering to child modules. |
+| `scene_build/mod.rs` | **`Scene3d::from_project_with_geometry`** runtime facade and `SceneBuilder` mesh sink. It consumes the app's cached physical scene, owns the full emission recipe and opaque/transparent index partition, and delegates element-specific lowering to child modules. The test-only `from_project` convenience builds its own scene. |
 | `scene_build/walls.rs`, `scene_build/members.rs`, `scene_build/surfaces.rs` | Interactive 3-D lowering by reason to change: derived wall envelopes/layers/openings; geometry-owned generated-member surfaces; authored roof/ceiling/floor surfaces. New element families belong in the matching emitter rather than the facade. |
 | `scene_build/picking.rs`, `scene_build/style.rs`, `scene_build/tests.rs` | Pick shapes/depth; the emitters preserve wall/surface priority 1, opening 2, and member 3. Viewport color/material policy is shared with the view cube/elevation; focused scene fixtures and regressions live with the package. Every generated member uses the same `framer-geometry` indexed surface for rendering and picking. |
-| `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
+| `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; overlap witness overlay and pair framing; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
 | `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
 | `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |
 
@@ -416,7 +418,9 @@ the real symbols:
                │                           │
    framer_geometry::build_physical_scene   framer_render::scene_from_model + accumulate
                │                           │
-   scene_build::Scene3d::from_project      (path-traced Render view; GPU mirror in app/render)
+   build cache + audit_physical_scene      (path-traced Render view; GPU mirror in app/render)
+               │                           │
+   scene_build::from_project_with_geometry + diagnostics/focus
    (shared member mesh + pick triangles)   │
                │                           │
    ┌───────────▼───────────────────────────▼──────────────┐
@@ -426,7 +430,9 @@ the real symbols:
 
 - **Authoring** edits `FramerApp.model` only; geometry edits call `reconcile_joins`; edits are
   snapshotted into `History` on interaction end.
-- **Solving** runs `generate_project_plan` and caches the `ProjectFramePlan` on the app.
+- **Solving** runs `generate_project_plan`, builds and audits its `PhysicalScene`, and caches all
+  three disposable results on the app. Active geometry focus is retained only while its structured
+  violation remains current.
 - **Presentation** never becomes the source of truth. A change to derived/presented state must
   flow back into authored intent (or a future explicit override record), per the
   [Mode Contract](architecture.md#mode-contract).
