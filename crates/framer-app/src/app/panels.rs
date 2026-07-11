@@ -7533,7 +7533,7 @@ mod tests {
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
-    use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic};
+    use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic, GeometryQueryViolation};
 
     #[test]
     fn geometry_diagnostic_text_retains_pair_depth_and_witness() {
@@ -7580,6 +7580,26 @@ mod tests {
         );
         assert!(geometry_diagnostic_row_action_label(&violation).contains(&body.to_string()));
         assert!(geometry_body_label(&body).contains("Wall assembly"));
+    }
+
+    #[test]
+    fn unsupported_query_diagnostic_retains_both_bodies_and_message() {
+        let body_a = BodyRef::assembly(ElementId::new("wall-a"), AssemblyKind::Wall);
+        let body_b = BodyRef::assembly(ElementId::new("wall-b"), AssemblyKind::Wall);
+        let violation = GeometryViolation::QueryUnsupported(GeometryQueryViolation {
+            body_a: body_a.clone(),
+            body_b: body_b.clone(),
+            message: "shape pair is not supported".to_owned(),
+        });
+
+        assert_eq!(violation.code(), "geometry.query.unsupported");
+        assert_eq!(
+            geometry_violation_message(&violation),
+            "shape pair is not supported"
+        );
+        let label = geometry_diagnostic_row_action_label(&violation);
+        assert!(label.contains(&body_a.to_string()));
+        assert!(label.contains(&body_b.to_string()));
     }
 
     #[test]
