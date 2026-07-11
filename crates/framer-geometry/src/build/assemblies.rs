@@ -372,4 +372,39 @@ mod tests {
             reversed_scene.body(&body_ref).unwrap().solid
         );
     }
+
+    #[test]
+    fn concave_assembly_triangulation_keeps_the_reentrant_notch_empty() {
+        let p = |x, y| Point2::new(Length::from_inches(x), Length::from_inches(y));
+        let solid = extrude_plan_polygon(
+            &[
+                p(0.0, 0.0),
+                p(4.0, 0.0),
+                p(4.0, 1.0),
+                p(1.0, 1.0),
+                p(1.0, 4.0),
+                p(0.0, 4.0),
+            ],
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(solid.convex_pieces.len(), 4);
+        let notch_probe = cuboid_solid([
+            Point3::new(1.5, 1.5, 0.25),
+            Point3::new(2.5, 1.5, 0.25),
+            Point3::new(2.5, 2.5, 0.25),
+            Point3::new(1.5, 2.5, 0.25),
+            Point3::new(1.5, 1.5, 0.75),
+            Point3::new(2.5, 1.5, 0.75),
+            Point3::new(2.5, 2.5, 0.75),
+            Point3::new(1.5, 2.5, 0.75),
+        ])
+        .unwrap();
+        assert!(
+            crate::query::solid_contact(&solid, &notch_probe)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

@@ -47,6 +47,64 @@ fn collision_domains_skip_cross_detail_but_compare_each_domain_internally() {
 }
 
 #[test]
+fn historical_wall_lap_and_duplicate_corner_posts_are_rejected() {
+    let through = assembly_body("wall-through", Point3::new(0.0, 0.0, 0.0), [2.0, 1.0, 4.0]);
+    let pre_lap_butt = assembly_body("wall-butt", Point3::new(3.5, 0.0, 0.0), [2.0, 1.0, 4.0]);
+    assert!(
+        (only_overlap(&audit(&[through.clone(), pre_lap_butt])).penetration_depth - 0.5).abs()
+            < 1.0e-9
+    );
+    let lapped_butt = assembly_body("wall-butt", Point3::new(4.0, 0.0, 0.0), [2.0, 1.0, 4.0]);
+    assert!(audit(&[through, lapped_butt]).is_clean());
+
+    let first = member_body_kind(
+        "wall-a",
+        MemberKind::CornerPost,
+        "corner-a",
+        Point3::new(0.0, 0.0, 4.0),
+        [0.75, 1.75, 4.0],
+    );
+    let duplicate = member_body_kind(
+        "wall-b",
+        MemberKind::CornerPost,
+        "corner-b",
+        Point3::new(0.0, 0.0, 4.0),
+        [0.75, 1.75, 4.0],
+    );
+    assert!(only_overlap(&audit(&[first, duplicate])).penetration_depth > 0.0);
+}
+
+#[test]
+fn historical_rafter_ridge_penetration_fails_while_face_contact_is_clean() {
+    let rafter = member_body_kind(
+        "roof-a",
+        MemberKind::Rafter,
+        "rafter-1",
+        Point3::new(0.0, 0.0, 0.0),
+        [1.0, 0.75, 3.5],
+    );
+    let pre_setback_ridge = member_body_kind(
+        "roof-a",
+        MemberKind::RidgeBoard,
+        "ridge",
+        Point3::new(1.25, 0.0, 0.0),
+        [1.0, 0.75, 3.5],
+    );
+    let result = audit(&[rafter.clone(), pre_setback_ridge]);
+    let overlap = only_overlap(&result);
+    assert!((overlap.penetration_depth - 0.75).abs() < 1.0e-9);
+
+    let cut_to_face = member_body_kind(
+        "roof-a",
+        MemberKind::RidgeBoard,
+        "ridge",
+        Point3::new(2.0, 0.0, 0.0),
+        [1.0, 0.75, 3.5],
+    );
+    assert!(audit(&[rafter, cut_to_face]).is_clean());
+}
+
+#[test]
 fn shuffled_input_and_duplicate_self_pairs_have_stable_results() {
     let first = member_body("wall-a", "stud-a", Point3::new(0.0, 0.0, 0.0), [1.0; 3]);
     let second = member_body("wall-b", "stud-b", Point3::new(1.5, 0.0, 0.0), [1.0; 3]);
@@ -156,8 +214,18 @@ fn assembly_body(owner: &str, center: Point3, half: [f64; 3]) -> PhysicalBody {
 }
 
 fn member_body(owner: &str, member_id: &str, center: Point3, half: [f64; 3]) -> PhysicalBody {
+    member_body_kind(owner, MemberKind::CommonStud, member_id, center, half)
+}
+
+fn member_body_kind(
+    owner: &str,
+    kind: MemberKind,
+    member_id: &str,
+    center: Point3,
+    half: [f64; 3],
+) -> PhysicalBody {
     body(
-        BodyRef::member(ElementId::new(owner), MemberKind::CommonStud, member_id),
+        BodyRef::member(ElementId::new(owner), kind, member_id),
         center,
         half,
     )
