@@ -788,12 +788,13 @@ impl FramerApp {
                 self.compliance_report = Some(report);
                 self.physical_scene = Some(physical_scene);
                 self.geometry_audit = geometry_audit;
-                if self
-                    .active_geometry_violation
-                    .as_ref()
-                    .is_some_and(|active| !self.geometry_audit.violations.contains(active))
-                {
-                    self.active_geometry_violation = None;
+                if let Some(active) = self.active_geometry_violation.take() {
+                    self.active_geometry_violation = self
+                        .geometry_audit
+                        .violations
+                        .iter()
+                        .find(|current| same_geometry_violation_identity(&active, current))
+                        .cloned();
                 }
                 self.project_plan = Some(plan);
                 self.error = None;
@@ -1102,14 +1103,20 @@ impl FramerApp {
             panels::DiagnosticAction::Source(source) => self.focus_compliance_source(source),
             panels::DiagnosticAction::Geometry(violation) => {
                 let code = violation.code();
-                if self.geometry_audit.violations.contains(&violation) {
-                    self.active_geometry_violation = Some(violation.clone());
+                let current = self
+                    .geometry_audit
+                    .violations
+                    .iter()
+                    .find(|current| same_geometry_violation_identity(&violation, current))
+                    .cloned();
+                if let Some(current) = current {
+                    self.active_geometry_violation = Some(current.clone());
                     self.set_workspace_mode(WorkspaceMode::Plan);
                     self.viewport_mode = ViewportMode::Axonometric;
                     if let Some((scene_bounds, focus_bounds)) = self
                         .physical_scene
                         .as_ref()
-                        .and_then(|scene| geometry_focus_bounds(scene, &violation))
+                        .and_then(|scene| geometry_focus_bounds(scene, &current))
                     {
                         self.view_3d.frame_bounds(scene_bounds, focus_bounds);
                         self.file_status = Some(format!("Focused geometry violation {code}"));
@@ -3892,6 +3899,12 @@ fn geometry_focus_bounds(
     Some((scene_bounds, focus_bounds))
 }
 
+fn same_geometry_violation_identity(left: &GeometryViolation, right: &GeometryViolation) -> bool {
+    left.code() == right.code()
+        && left.body_a() == right.body_a()
+        && left.body_b() == right.body_b()
+}
+
 fn union_aabb(left: Aabb, right: Aabb) -> Aabb {
     Aabb {
         min: PhysicalPoint3::new(
@@ -3983,6 +3996,21 @@ mod tests {
         assert_eq!(app.workspace_mode, WorkspaceMode::Plan);
         assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
         assert_eq!(app.selected, ordinary_selection);
+
+        let measured_before = app.active_geometry_violation.clone().unwrap();
+        let moved = app.model.walls.last_mut().unwrap();
+        moved.start.y += Length::from_inches(0.25);
+        moved.end.y += Length::from_inches(0.25);
+        app.rebuild();
+        let measured_after = app.active_geometry_violation.clone().unwrap();
+        assert!(same_geometry_violation_identity(
+            &measured_before,
+            &measured_after
+        ));
+        assert_ne!(
+            measured_before, measured_after,
+            "active focus should adopt the updated depth or witness"
+        );
 
         app.set_workspace_mode(WorkspaceMode::Design);
         assert!(app.active_geometry_violation.is_none());
