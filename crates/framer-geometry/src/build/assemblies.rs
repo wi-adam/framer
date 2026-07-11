@@ -348,14 +348,14 @@ mod tests {
             RoofOpening::new(
                 "skylight-b",
                 OpeningKind::Skylight,
-                Point2::new(Length::from_feet(10.0), Length::from_feet(3.0)),
+                Point2::new(Length::from_feet(13.0), Length::from_feet(2.0)),
                 Length::from_feet(2.0),
                 Length::from_feet(2.0),
             ),
             RoofOpening::new(
                 "skylight-a",
                 OpeningKind::Skylight,
-                Point2::new(Length::from_feet(4.0), Length::from_feet(3.0)),
+                Point2::new(Length::from_feet(7.0), Length::from_feet(2.0)),
                 Length::from_feet(2.0),
                 Length::from_feet(2.0),
             ),
