@@ -1477,7 +1477,7 @@ fn gable_rake_plates_use_spatial_member_prisms_and_source_picks() {
 }
 
 #[test]
-fn diagonal_hip_member_uses_exact_plan_endpoints_and_host_pick() {
+fn diagonal_hip_member_face_cuts_the_physical_body_and_keeps_the_host_pick() {
     let model = hip_surface_model();
     let plan = framer_solver::generate_project_plan(&model).unwrap();
     let (host, hip) = plan
@@ -1512,13 +1512,25 @@ fn diagonal_hip_member_uses_exact_plan_endpoints_and_host_pick() {
         })
         .expect("diagonal hip member has an owning roof-plan pick");
     let corners = pick_points(pick);
-    for point in [sloped.start, sloped.end] {
-        assert!(corners.iter().any(|corner| {
-            (corner.x - point.x.inches() as f32).abs() < hip.cross_section_depth.inches() as f32
-                && (corner.y - point.y.inches() as f32).abs()
-                    < hip.cross_section_depth.inches() as f32
-        }));
-    }
+    let dx = (sloped.end.x - sloped.start.x).inches() as f32;
+    let dy = (sloped.end.y - sloped.start.y).inches() as f32;
+    let semantic_length = dx.hypot(dy);
+    let (unit_x, unit_y) = (dx / semantic_length, dy / semantic_length);
+    let projections: Vec<_> = corners
+        .iter()
+        .map(|corner| {
+            (corner.x - sloped.start.x.inches() as f32) * unit_x
+                + (corner.y - sloped.start.y.inches() as f32) * unit_y
+        })
+        .collect();
+    let physical_start = projections.iter().copied().fold(f32::INFINITY, f32::min);
+    let physical_end = projections
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(physical_start <= hip.cross_section_depth.inches() as f32);
+    assert!(physical_end < semantic_length - 0.01);
+    assert!(physical_end > semantic_length - 12.0);
 }
 
 #[test]

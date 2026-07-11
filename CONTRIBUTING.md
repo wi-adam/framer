@@ -54,6 +54,7 @@ Feature-specific checks:
 | --- | --- |
 | GPU shader / renderer math | `cargo test -p framer-app --test gpu_parity -- --nocapture` (skips without a GPU adapter; CI runs it on macOS Metal + Linux lavapipe) |
 | Renderer output intentionally | `UPDATE_GOLDEN=1 cargo test -p framer-render --test golden` (commits the new reference) |
+| Physical member or assembly geometry | `cargo run -p framer-geometry --bin geometry-audit -- examples/projects/demo-shell.framer` (must report `clean`) |
 | The `.framer` schema | bump `PROJECT_SCHEMA_VERSION`, update the three `examples/projects/*.framer`, add/adjust round-trip tests, update [docs/project-files.md](docs/project-files.md) |
 | An example `.framer` file | `cargo test --workspace` (fixtures are byte-checked against canonical serialization) |
 | Any markdown / docs | `python3 scripts/check-markdown-links.py` (relative-link check; CI runs it too) |

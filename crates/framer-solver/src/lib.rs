@@ -1826,6 +1826,9 @@ fn generate_roof_plan_with_takeoff_outline(
     for mark in &positions {
         let local_run = rafter_run_at_mark(plane, &frame, &geometry, *mark);
         let is_jack = run_extent - local_run > Length::from_ticks(1);
+        if is_jack && local_run <= rafter_thickness {
+            continue;
+        }
         let total_plan_run = local_run + overhang;
         let cut_length = Length::from_inches(total_plan_run.inches() * factor);
         let high_elevation =
@@ -3055,43 +3058,76 @@ fn add_join_members(
                     (second, first)
                 };
                 let (partition_member, partition_band) = wall_member(partition)?;
-                push_join_stud(
+                let partition_provenance = RuleProvenance::new(
+                    "wall.join.tee-partition-stud",
+                    format!(
+                        "A partition end stud terminates {} where it meets {} at the {} tee join.",
+                        partition.name, through.name, join.name
+                    ),
+                );
+                let partition_span = wall_spans
+                    .get(&partition.id)
+                    .expect("validated joined walls have batched physical spans")
+                    .primary_framing;
+                if !reclassify_end_stud_as_join_member(
                     plan,
                     join,
                     partition,
+                    partition_span,
                     partition_member,
-                    partition_band,
                     MemberKind::PartitionStud,
                     "partition-stud",
-                    plate_thickness,
-                    top_plate_count,
-                    RuleProvenance::new(
-                        "wall.join.tee-partition-stud",
-                        format!(
-                            "A partition end stud terminates {} where it meets {} at the {} tee join.",
-                            partition.name, through.name, join.name
-                        ),
-                    ),
-                )?;
+                    partition_provenance.clone(),
+                )? {
+                    push_join_stud(
+                        plan,
+                        join,
+                        partition,
+                        partition_member,
+                        partition_band,
+                        MemberKind::PartitionStud,
+                        "partition-stud",
+                        plate_thickness,
+                        top_plate_count,
+                        partition_provenance,
+                    )?;
+                }
                 let (through_member, through_band) = wall_member(through)?;
-                push_join_stud(
+                let backing_provenance = RuleProvenance::new(
+                    "wall.join.tee-backing",
+                    format!(
+                        "A backing stud is added in {} to receive the {} partition and drywall at the {} tee join.",
+                        through.name, partition.name, join.name
+                    ),
+                );
+                let join_x = through.local_x_for_point(join.point).ok_or_else(|| {
+                    SolverError::JoinPointOutsideWall {
+                        join: join.id.clone(),
+                        wall: through.id.clone(),
+                    }
+                })?;
+                if !reclassify_common_stud_at_x(
                     plan,
                     join,
                     through,
-                    through_member,
-                    through_band,
+                    join_x,
                     MemberKind::BackingStud,
                     "backing-stud",
-                    plate_thickness,
-                    top_plate_count,
-                    RuleProvenance::new(
-                        "wall.join.tee-backing",
-                        format!(
-                            "A backing stud is added in {} to receive the {} partition and drywall at the {} tee join.",
-                            through.name, partition.name, join.name
-                        ),
-                    ),
-                )?;
+                    backing_provenance.clone(),
+                )? {
+                    push_join_stud(
+                        plan,
+                        join,
+                        through,
+                        through_member,
+                        through_band,
+                        MemberKind::BackingStud,
+                        "backing-stud",
+                        plate_thickness,
+                        top_plate_count,
+                        backing_provenance,
+                    )?;
+                }
             }
             WallJoinKind::Cross => {
                 for wall in [first, second] {
@@ -3191,6 +3227,35 @@ fn reclassify_end_stud_as_join_member(
     };
     let member = &mut wall_plan.members[index];
 
+    member.id = format!("{}-{}-{}", join.id.0, wall.id.0, member_suffix);
+    member.source = join.id.clone();
+    member.kind = kind;
+    member.provenance = provenance;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reclassify_common_stud_at_x(
+    plan: &mut ProjectFramePlan,
+    join: &WallJoin,
+    wall: &Wall,
+    expected_x: Length,
+    kind: MemberKind,
+    member_suffix: &str,
+    provenance: RuleProvenance,
+) -> Result<bool, SolverError> {
+    let wall_plan = plan
+        .wall_plan_mut(&wall.id)
+        .ok_or_else(|| SolverError::MissingWallPlan {
+            wall: wall.id.clone(),
+        })?;
+    let Some(member) = wall_plan.members.iter_mut().find(|member| {
+        member.kind == MemberKind::CommonStud
+            && member.orientation == MemberOrientation::Vertical
+            && member.x == expected_x
+    }) else {
+        return Ok(false);
+    };
     member.id = format!("{}-{}-{}", join.id.0, wall.id.0, member_suffix);
     member.source = join.id.clone();
     member.kind = kind;
@@ -3541,8 +3606,10 @@ fn add_opening_members(
         }
     }
 
+    let header_pack_depth = header_spec.profile.thickness() * i64::from(header_spec.plies);
+    let header_pack_offset = band.offset + (band.depth - header_pack_depth).max(Length::ZERO) / 2;
     for ply_index in 0..header_spec.plies {
-        members.push(frame_member(
+        let mut header = frame_member(
             header_member_id(opening, ply_index),
             &opening.id,
             MemberKind::Header,
@@ -3556,7 +3623,11 @@ fn add_opening_members(
             ),
             band,
             RuleProvenance::new(header_spec.rule_id.clone(), header_spec.summary.clone()),
-        ));
+        );
+        header.side_offset =
+            header_pack_offset + header_spec.profile.thickness() * i64::from(ply_index);
+        header.side_depth = header_spec.profile.thickness();
+        members.push(header);
     }
 
     if opening.has_sill() {
@@ -5401,8 +5472,15 @@ mod tests {
                 .iter()
                 .any(|member| member.id == "opening-garage-1-header-2")
         );
+        let mut header_bands: Vec<_> = garage_headers
+            .iter()
+            .map(|member| (member.side_offset, member.side_offset + member.side_depth))
+            .collect();
+        header_bands.sort_unstable();
+        assert_eq!(header_bands[0].1, header_bands[1].0);
         for header in garage_headers {
             assert_eq!(header.profile, BoardProfile::TwoByTwelve);
+            assert_eq!(header.side_depth, BoardProfile::TwoByTwelve.thickness());
             assert_eq!(header.provenance.rule_id, "irc2021.r602.7-1.headers");
             assert!(header.provenance.summary.contains("2-ply 2x12"));
             assert!(
@@ -5468,6 +5546,16 @@ mod tests {
         .unwrap();
         assert!(!plan.members.is_empty());
         for member in &plan.members {
+            if member.kind == MemberKind::Header {
+                assert_eq!(member.side_depth, member.profile.thickness());
+                assert!(member.side_offset >= expected_offset);
+                assert!(
+                    member.side_offset + member.side_depth <= expected_offset + expected_depth,
+                    "{} should stay inside the framing-layer depth",
+                    member.id
+                );
+                continue;
+            }
             assert_eq!(
                 member.side_offset, expected_offset,
                 "{} should sit at the framing-layer offset",
@@ -7121,11 +7209,11 @@ mod tests {
         }));
     }
 
-    /// The shipped `demo-shell` example (capped with a hip roof, a scissor-vault
-    /// ceiling, and a floor deck) frames end-to-end: all four roof planes rafter,
-    /// the hip post-pass adds hips/jacks and the shortened ridge, the two sloped
-    /// vault halves joist, the deck joists, and every new member family folds
-    /// into the project BOM.
+    /// The shipped `demo-shell` example (capped with a hip roof, two flat ceiling
+    /// regions, and a floor deck) frames end-to-end: all four roof planes rafter,
+    /// the hip post-pass adds hips/jacks and the shortened ridge, both ceiling
+    /// regions joist, the deck joists, and every new member family folds into the
+    /// project BOM.
     #[test]
     fn roofed_demo_shell_example_frames_every_surface() {
         let example = include_str!("../../../examples/projects/demo-shell.framer");
@@ -7133,7 +7221,6 @@ mod tests {
         let plan = generate_project_plan(&model).unwrap();
 
         assert_eq!(plan.roof_plans.len(), 4);
-        // A scissor vault is two opposing sloped ceilings.
         assert_eq!(plan.ceiling_plans.len(), 2);
         assert_eq!(plan.floor_plans.len(), 1);
 
@@ -7170,11 +7257,10 @@ mod tests {
             .count();
         assert!(jacks > 0, "hip-bounded rafters clip into jacks");
 
-        // The scissor vault is sloped, so it is NOT a flat rafter tie at the plate:
-        // the hip roof's shortened ridge still needs structural-ridge judgment.
-        // Pins the product-visible tie fork through the real load_project +
-        // region-resolution + elevation path (the synthetic tests hand-set those
-        // inputs).
+        // The flat ceiling is dropped a foot below the bearing line, outside the
+        // six-inch plate slack, so it is not a rafter-thrust tie. This pins the
+        // product-visible tie fork through the real load_project +
+        // region-resolution + elevation path.
         let roof_diagnostics = || {
             plan.roof_plans
                 .iter()
@@ -7183,14 +7269,14 @@ mod tests {
         assert!(
             roof_diagnostics().any(|diagnostic| diagnostic.code == "roof.ridge.beam-required"
                 && diagnostic.severity == DiagnosticSeverity::Unsupported),
-            "a vaulted shell has no flat tie, so the ridge needs a beam"
+            "the dropped ceiling does not tie the shell at the plate"
         );
         assert!(
             roof_diagnostics().all(|diagnostic| diagnostic.code != "roof.ridge.tied"),
-            "a vaulted shell's ridge is not reported as tied"
+            "the dropped ceiling is not reported as a plate-line tie"
         );
 
-        // Each vault half frames sloped ceiling joists and carries the scissor note.
+        // Each flat region frames ordinary ceiling joists.
         for id in ["ceiling-1", "ceiling-2"] {
             let ceiling = plan.ceiling_plan(&ElementId::new(id)).unwrap();
             assert!(
@@ -7205,15 +7291,15 @@ mod tests {
                     .members
                     .iter()
                     .filter(|member| member.kind == MemberKind::CeilingJoist)
-                    .all(|member| member.sloped.is_some()),
-                "{id} is a sloped (vault) ceiling"
+                    .all(|member| member.sloped.is_none()),
+                "{id} is a flat ceiling"
             );
             assert!(
                 ceiling
                     .diagnostics
                     .iter()
-                    .any(|d| d.code == "ceiling.slope.scissor"),
-                "{id} reports the scissor condition"
+                    .all(|diagnostic| diagnostic.code != "ceiling.slope.scissor"),
+                "{id} does not report a scissor condition"
             );
         }
         assert!(

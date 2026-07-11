@@ -140,6 +140,9 @@ fn normalized(vector: Point3) -> Option<Point3> {
 mod tests {
     use super::*;
     use crate::{AssemblyKind, BodyRef};
+    use framer_core::{
+        CeilingSlope, FramingDefaults, LayerFunction, MemberFamily, Point2, RoofPlane, Slope, Wall,
+    };
 
     fn example_shell() -> BuildingModel {
         framer_core::load_project(include_str!(
@@ -243,5 +246,184 @@ mod tests {
         assert!(scene.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == GeometryBuildDiagnostic::CODE && diagnostic.body_ref == expected
         }));
+    }
+
+    #[test]
+    fn opposing_sloped_ceilings_butt_at_rims_without_member_overlaps() {
+        let mut model = example_shell();
+        model.roof_planes.clear();
+        let pitch = Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12));
+        for ceiling in &mut model.ceilings {
+            ceiling.slope = Some(CeilingSlope::new(pitch, 0));
+        }
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let audit = crate::audit_project(&model, &plan);
+        assert!(audit.is_clean(), "{:#?}", audit.violations);
+    }
+
+    #[test]
+    fn gable_and_truss_shed_roof_fields_audit_clean() {
+        for (width, depth) in [(24.0, 16.0), (16.0, 24.0)] {
+            let mut model = roof_test_model();
+            let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+            let ridge_y = depth / 2.0;
+            let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+            model.roof_planes = vec![
+                RoofPlane::new(
+                    "roof-south",
+                    "South gable field",
+                    "level-1",
+                    "system-roof-1",
+                    vec![
+                        p(0.0, 0.0),
+                        p(width, 0.0),
+                        p(width, ridge_y),
+                        p(0.0, ridge_y),
+                    ],
+                    slope,
+                    0,
+                    Length::from_feet(9.0),
+                ),
+                RoofPlane::new(
+                    "roof-north",
+                    "North gable field",
+                    "level-1",
+                    "system-roof-1",
+                    vec![
+                        p(width, depth),
+                        p(0.0, depth),
+                        p(0.0, ridge_y),
+                        p(width, ridge_y),
+                    ],
+                    slope,
+                    0,
+                    Length::from_feet(9.0),
+                ),
+            ];
+            let plan = framer_solver::generate_project_plan(&model).unwrap();
+            let audit = crate::audit_project(&model, &plan);
+            assert!(audit.is_clean(), "{width}x{depth}: {:#?}", audit.violations);
+        }
+
+        let mut shed = roof_test_model();
+        let roof_system = shed
+            .systems
+            .iter_mut()
+            .find(|system| system.id.0 == "system-roof-1")
+            .unwrap();
+        roof_system
+            .layers
+            .iter_mut()
+            .find(|layer| layer.function == LayerFunction::Framing)
+            .unwrap()
+            .framing
+            .as_mut()
+            .unwrap()
+            .member_family = MemberFamily::Truss;
+        shed.roof_planes.push(RoofPlane::new(
+            "roof-shed",
+            "Truss shed",
+            "level-1",
+            "system-roof-1",
+            vec![
+                Point2::new(Length::ZERO, Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::ZERO),
+                Point2::new(Length::from_feet(20.0), Length::from_feet(12.0)),
+                Point2::new(Length::ZERO, Length::from_feet(12.0)),
+            ],
+            Slope::new(Length::from_whole_inches(3), Length::from_whole_inches(12)),
+            0,
+            Length::from_feet(9.0),
+        ));
+        let plan = framer_solver::generate_project_plan(&shed).unwrap();
+        let audit = crate::audit_project(&shed, &plan);
+        assert!(audit.is_clean(), "{:#?}", audit.violations);
+    }
+
+    #[test]
+    fn equal_pitch_valley_and_mirrored_l_audit_clean() {
+        let model = valley_test_model();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let audit = crate::audit_project(&model, &plan);
+        assert!(audit.is_clean(), "{:#?}", audit.violations);
+
+        let mut mirrored = model;
+        for wall in &mut mirrored.walls {
+            wall.start.x = Length::ZERO - wall.start.x;
+            wall.end.x = Length::ZERO - wall.end.x;
+        }
+        for join in &mut mirrored.wall_joins {
+            join.point.x = Length::ZERO - join.point.x;
+        }
+        for plane in &mut mirrored.roof_planes {
+            for point in &mut plane.outline {
+                point.x = Length::ZERO - point.x;
+            }
+        }
+        let plan = framer_solver::generate_project_plan(&mirrored).unwrap();
+        let audit = crate::audit_project(&mirrored, &plan);
+        assert!(audit.is_clean(), "mirrored: {:#?}", audit.violations);
+    }
+
+    fn roof_test_model() -> BuildingModel {
+        let mut model = example_shell();
+        model.walls.clear();
+        model.wall_joins.clear();
+        model.rooms.clear();
+        model.ceilings.clear();
+        model.floor_decks.clear();
+        model.roof_planes.clear();
+        model
+    }
+
+    fn valley_test_model() -> BuildingModel {
+        let mut model = roof_test_model();
+        let defaults = FramingDefaults::irc_2021_starter();
+        let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
+        let footprint = [
+            p(0.0, 0.0),
+            p(24.0, 0.0),
+            p(24.0, 12.0),
+            p(12.0, 12.0),
+            p(12.0, 24.0),
+            p(0.0, 24.0),
+            p(0.0, 0.0),
+        ];
+        for (index, pair) in footprint.windows(2).enumerate() {
+            model.walls.push(
+                Wall::new(
+                    format!("wall-l-{index}"),
+                    format!("L footprint wall {index}"),
+                    Length::from_feet(1.0),
+                    &defaults,
+                )
+                .with_placement("level-1", pair[0], pair[1]),
+            );
+        }
+        model.reconcile_joins();
+        let slope = Slope::new(Length::from_whole_inches(6), Length::from_whole_inches(12));
+        model.roof_planes = vec![
+            RoofPlane::new(
+                "roof-a",
+                "Lower L-wing valley slope",
+                "level-1",
+                "system-roof-1",
+                vec![p(0.0, 0.0), p(24.0, 0.0), p(24.0, 12.0), p(12.0, 12.0)],
+                slope,
+                0,
+                Length::from_feet(9.0),
+            ),
+            RoofPlane::new(
+                "roof-b",
+                "Upper L-wing valley slope",
+                "level-1",
+                "system-roof-1",
+                vec![p(0.0, 0.0), p(0.0, 24.0), p(12.0, 24.0), p(12.0, 12.0)],
+                slope,
+                0,
+                Length::from_feet(9.0),
+            ),
+        ];
+        model
     }
 }
