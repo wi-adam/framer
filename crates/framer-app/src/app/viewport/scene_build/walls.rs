@@ -6,6 +6,7 @@ use eframe::egui::Color32;
 use framer_core::{BuildingModel, ConstructionSystem, ElementId, GableWallProfile, Length, Wall};
 
 use super::super::gpu::GpuVertex;
+use super::super::theme;
 use super::style::{layer_band_color, material_color, neutral_band_color};
 use super::{
     GABLE_RENDER_QUAD_FACES, GABLE_TRIANGLE_FACES, OutlineEdge, PickSolid, Point3, SceneBuilder,
@@ -46,6 +47,14 @@ impl LayerBand {
     }
 }
 
+fn wall_color(base: Color32, selected: bool, danger: bool) -> Color32 {
+    if danger {
+        theme::danger()
+    } else {
+        layer_band_color(base, selected)
+    }
+}
+
 impl SceneBuilder {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_wall_envelope(
@@ -58,6 +67,7 @@ impl SceneBuilder {
         base_elevation: f32,
         gable: Option<&GableWallProfile>,
         selected: bool,
+        danger: bool,
         wall_display: WallDisplay,
     ) {
         // The full-thickness span and envelope box, shared by Outline (its edges)
@@ -87,7 +97,7 @@ impl SceneBuilder {
                             layer_band_span(interior_sign, total, off, layer.thickness);
                         off += layer.thickness;
                         let base = material_color(model, &layer.material);
-                        let color = layer_band_color(base, selected);
+                        let color = wall_color(base, selected, danger);
                         self.push_wall_layer(
                             wall,
                             LayerBand::new(side0, side1, color),
@@ -103,7 +113,7 @@ impl SceneBuilder {
                 // Degenerate model with no resolvable system: draw a single band
                 // over the full thickness so the wall is still visible.
                 None => {
-                    let color = layer_band_color(neutral_band_color(), selected);
+                    let color = wall_color(neutral_band_color(), selected, danger);
                     self.push_wall_layer(
                         wall,
                         LayerBand::new(env0, env1, color),
@@ -120,7 +130,7 @@ impl SceneBuilder {
             // without the per-layer colors. Openings still cut it (push_wall_layer
             // does the 4-segment decomposition).
             WallDisplay::Width => {
-                let color = layer_band_color(neutral_band_color(), selected);
+                let color = wall_color(neutral_band_color(), selected, danger);
                 self.push_wall_layer(
                     wall,
                     LayerBand::new(env0, env1, color),
@@ -136,9 +146,9 @@ impl SceneBuilder {
             // overlay (and feed its corners into `points` so the projector still
             // frames the scene when nothing fills it).
             WallDisplay::Outline => {
-                self.push_wall_outline(&envelope, selected);
+                self.push_wall_outline(&envelope, selected, danger);
                 if let Some(gable) = gable {
-                    self.push_gable_outline(wall, gable, env0, env1, selected);
+                    self.push_gable_outline(wall, gable, env0, env1, selected, danger);
                 }
             }
         }
@@ -163,7 +173,7 @@ impl SceneBuilder {
     /// Collect the 12 edges of the wall's full-thickness envelope for the
     /// [`WallDisplay::Outline`] painter overlay. Produces no fill geometry, so the
     /// corners are also fed into `points` to keep the orbit projector framed.
-    fn push_wall_outline(&mut self, envelope: &WallCuboid, selected: bool) {
+    fn push_wall_outline(&mut self, envelope: &WallCuboid, selected: bool, danger: bool) {
         if envelope.is_degenerate() {
             return;
         }
@@ -173,6 +183,7 @@ impl SceneBuilder {
                 a: envelope.corners[a],
                 b: envelope.corners[b],
                 selected,
+                danger,
             });
         }
     }
@@ -187,6 +198,7 @@ impl SceneBuilder {
         side0: f32,
         side1: f32,
         selected: bool,
+        danger: bool,
     ) {
         let prism = GablePrism::new(wall, profile, side0, side1);
         self.points.extend(prism.corners);
@@ -195,6 +207,7 @@ impl SceneBuilder {
                 a: prism.corners[a],
                 b: prism.corners[b],
                 selected,
+                danger,
             });
         }
     }

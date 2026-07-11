@@ -5,6 +5,7 @@
 use eframe::egui::{self, Sense, Stroke, Ui};
 use eframe::{egui_wgpu, wgpu};
 use framer_core::BuildingModel;
+use framer_geometry::{GeometryViolation, PhysicalScene};
 use framer_solver::ProjectFramePlan;
 
 use super::camera_3d::View3dState;
@@ -23,6 +24,8 @@ use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
 pub(super) struct AxonometricView<'a> {
     pub(super) model: &'a BuildingModel,
     pub(super) plan: &'a ProjectFramePlan,
+    pub(super) physical_scene: &'a PhysicalScene,
+    pub(super) active_geometry_violation: Option<&'a GeometryViolation>,
     pub(super) selected_wall: usize,
     pub(super) selection: &'a Selection,
     pub(super) workspace_mode: WorkspaceMode,
@@ -39,6 +42,8 @@ pub(super) fn draw_project_axonometric(
     let AxonometricView {
         model,
         plan,
+        physical_scene,
+        active_geometry_violation,
         selected_wall,
         selection,
         workspace_mode,
@@ -85,9 +90,11 @@ pub(super) fn draw_project_axonometric(
         }
     }
 
-    let Some(scene) = Scene3d::from_project(
+    let Some(scene) = Scene3d::from_project_with_geometry(
         model,
         plan,
+        physical_scene,
+        active_geometry_violation,
         selected_wall,
         selection,
         workspace_mode,
@@ -140,7 +147,9 @@ pub(super) fn draw_project_axonometric(
     // Wall outline overlay (Outline mode only; empty otherwise). Drawn after the
     // GPU callback so it composites over the scene, exactly like the view cube.
     for edge in &scene.outline_edges {
-        let color = if edge.selected {
+        let color = if edge.danger {
+            theme::danger()
+        } else if edge.selected {
             theme::active_blue()
         } else {
             theme::framing_line_dark()
@@ -149,6 +158,32 @@ pub(super) fn draw_project_axonometric(
             [
                 projector.project_point(edge.a).pos,
                 projector.project_point(edge.b).pos,
+            ],
+            Stroke::new(1.0, color),
+        );
+    }
+
+    if let Some(GeometryViolation::Overlap(overlap)) = active_geometry_violation {
+        let witness = super::geom::Point3::vector(
+            overlap.witness.x as f32,
+            overlap.witness.y as f32,
+            overlap.witness.z as f32,
+        );
+        let center = projector.project_point(witness).pos;
+        let color = theme::danger();
+        painter.circle_filled(center, 3.5, color);
+        painter.circle_stroke(center, 8.0, Stroke::new(1.5, color));
+        painter.line_segment(
+            [
+                center + egui::vec2(-6.0, 0.0),
+                center + egui::vec2(6.0, 0.0),
+            ],
+            Stroke::new(1.0, color),
+        );
+        painter.line_segment(
+            [
+                center + egui::vec2(0.0, -6.0),
+                center + egui::vec2(0.0, 6.0),
             ],
             Stroke::new(1.0, color),
         );

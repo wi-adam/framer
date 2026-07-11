@@ -7,6 +7,7 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use eframe::egui::Vec2;
+use framer_geometry::Aabb;
 use framer_render::math::Vec3;
 
 use super::geom::Point3;
@@ -163,6 +164,29 @@ impl View3dState {
         }
     }
 
+    pub(in crate::app) fn frame_bounds(&mut self, scene: Aabb, focus: Aabb) {
+        let center = |bounds: Aabb| {
+            Vec3::new(
+                ((bounds.min.x + bounds.max.x) * 0.5) as f32,
+                ((bounds.min.y + bounds.max.y) * 0.5) as f32,
+                ((bounds.min.z + bounds.max.z) * 0.5) as f32,
+            )
+        };
+        let radius = |bounds: Aabb| {
+            let dx = (bounds.max.x - bounds.min.x) as f32;
+            let dy = (bounds.max.y - bounds.min.y) as f32;
+            let dz = (bounds.max.z - bounds.min.z) as f32;
+            (dx * dx + dy * dy + dz * dz).sqrt() * 0.5
+        };
+        let scene_radius = radius(scene).max(1.0);
+        let focus_radius = radius(focus).max(1.0);
+        let scene_center = center(scene);
+        let focus_center = center(focus);
+        self.pan = (focus_center - scene_center) * (1.0 / scene_radius);
+        self.zoom = (scene_radius / focus_radius * 0.72).clamp(0.35, 3.0);
+        self.dolly = 1.0;
+    }
+
     /// The camera's world-space screen basis (`right`, `up`) for the current yaw
     /// and pitch — the exact vectors `framer_render::camera::Camera::orbit` uses,
     /// so panning slides the pivot along the same axes the Render view shows.
@@ -222,5 +246,33 @@ impl View3dState {
                 self.dolly = 1.0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use framer_geometry::Point3 as PhysicalPoint3;
+
+    use super::*;
+
+    #[test]
+    fn frame_bounds_centers_and_enlarges_the_focused_pair() {
+        let scene = Aabb {
+            min: PhysicalPoint3::new(0.0, 0.0, 0.0),
+            max: PhysicalPoint3::new(200.0, 100.0, 100.0),
+        };
+        let focus = Aabb {
+            min: PhysicalPoint3::new(140.0, 40.0, 40.0),
+            max: PhysicalPoint3::new(160.0, 60.0, 60.0),
+        };
+        let mut view = View3dState::default();
+
+        view.frame_bounds(scene, focus);
+
+        assert!(view.pan.x > 0.3, "focus center should pan toward +X");
+        assert!(view.pan.y.abs() < 1.0e-6);
+        assert!(view.pan.z.abs() < 1.0e-6);
+        assert!(view.zoom > 1.0);
+        assert_eq!(view.dolly, 1.0);
     }
 }

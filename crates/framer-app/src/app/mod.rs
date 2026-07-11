@@ -30,7 +30,8 @@ use framer_core::{
     save_project as save_project_document,
 };
 use framer_geometry::{
-    GeometryAudit, GeometryViolation, PhysicalScene, audit_physical_scene, build_physical_scene,
+    Aabb, GeometryAudit, GeometryViolation, PhysicalScene, Point3 as PhysicalPoint3,
+    audit_physical_scene, build_physical_scene,
 };
 use framer_render::math::Vec3;
 use framer_solver::{
@@ -1087,6 +1088,7 @@ impl FramerApp {
     }
 
     fn focus_compliance_source(&mut self, id: ElementId) {
+        self.active_geometry_violation = None;
         self.file_status = Some(if self.select_model_element(&id) {
             format!("Selected compliance source {}", id.0)
         } else {
@@ -1100,8 +1102,21 @@ impl FramerApp {
             panels::DiagnosticAction::Geometry(violation) => {
                 let code = violation.code();
                 if self.geometry_audit.violations.contains(&violation) {
-                    self.active_geometry_violation = Some(violation);
-                    self.file_status = Some(format!("Focused geometry violation {code}"));
+                    self.active_geometry_violation = Some(violation.clone());
+                    self.set_workspace_mode(WorkspaceMode::Plan);
+                    self.viewport_mode = ViewportMode::Axonometric;
+                    if let Some((scene_bounds, focus_bounds)) = self
+                        .physical_scene
+                        .as_ref()
+                        .and_then(|scene| geometry_focus_bounds(scene, &violation))
+                    {
+                        self.view_3d.frame_bounds(scene_bounds, focus_bounds);
+                        self.file_status = Some(format!("Focused geometry violation {code}"));
+                    } else {
+                        self.file_status = Some(format!(
+                            "Geometry violation {code} has no current bodies to frame"
+                        ));
+                    }
                 } else {
                     self.active_geometry_violation = None;
                     self.file_status =
@@ -3551,6 +3566,7 @@ impl FramerApp {
 
     fn handle_view_click(&mut self, click: ViewClick) {
         self.opening_drag = None;
+        self.active_geometry_violation = None;
         match click {
             ViewClick::Wall(index) => {
                 self.selected_wall = index;
@@ -3852,6 +3868,51 @@ impl FramerApp {
     }
 }
 
+fn geometry_focus_bounds(
+    scene: &PhysicalScene,
+    violation: &GeometryViolation,
+) -> Option<(Aabb, Aabb)> {
+    let mut bodies = scene.bodies().iter();
+    let mut scene_bounds = bodies.next()?.aabb;
+    for body in bodies {
+        scene_bounds = union_aabb(scene_bounds, body.aabb);
+    }
+
+    let mut focus_bounds = scene.body(violation.body_a())?.aabb;
+    if let Some(body_b) = violation.body_b() {
+        focus_bounds = union_aabb(focus_bounds, scene.body(body_b)?.aabb);
+    }
+    if let GeometryViolation::Overlap(overlap) = violation {
+        focus_bounds = include_physical_point(focus_bounds, overlap.witness);
+    }
+    Some((scene_bounds, focus_bounds))
+}
+
+fn union_aabb(left: Aabb, right: Aabb) -> Aabb {
+    Aabb {
+        min: PhysicalPoint3::new(
+            left.min.x.min(right.min.x),
+            left.min.y.min(right.min.y),
+            left.min.z.min(right.min.z),
+        ),
+        max: PhysicalPoint3::new(
+            left.max.x.max(right.max.x),
+            left.max.y.max(right.max.y),
+            left.max.z.max(right.max.z),
+        ),
+    }
+}
+
+fn include_physical_point(bounds: Aabb, point: PhysicalPoint3) -> Aabb {
+    union_aabb(
+        bounds,
+        Aabb {
+            min: point,
+            max: point,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, process};
@@ -3912,12 +3973,17 @@ mod tests {
         assert!(!app.geometry_audit.is_clean());
 
         let active = app.geometry_audit.violations[0].clone();
+        let ordinary_selection = app.selected.clone();
         app.focus_diagnostic(panels::DiagnosticAction::Geometry(active.clone()));
         assert_eq!(app.active_geometry_violation, Some(active));
+        assert_eq!(app.workspace_mode, WorkspaceMode::Plan);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(app.selected, ordinary_selection);
 
         app.undo();
         assert!(app.geometry_audit.is_clean());
         assert!(app.active_geometry_violation.is_none());
+        assert_eq!(app.selected, ordinary_selection);
     }
 
     #[test]

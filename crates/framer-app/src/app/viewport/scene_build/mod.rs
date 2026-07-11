@@ -11,7 +11,7 @@ mod walls;
 
 use eframe::egui::{Color32, Pos2};
 use framer_core::BuildingModel;
-use framer_geometry::{BodyRef, PhysicalScene};
+use framer_geometry::{AssemblyKind, BodyRef, GeometryViolation, PhysicalScene};
 use framer_solver::{FrameMember, ProjectFramePlan};
 
 use super::geom::{OrbitProjector, Point3};
@@ -60,6 +60,7 @@ pub(super) struct OutlineEdge {
     pub(super) a: Point3,
     pub(super) b: Point3,
     pub(super) selected: bool,
+    pub(super) danger: bool,
 }
 
 #[derive(Default)]
@@ -72,10 +73,54 @@ struct SceneBuilder {
     opaque_index_count: u32,
 }
 
+fn body_is_danger_highlighted(active: Option<&GeometryViolation>, body_ref: &BodyRef) -> bool {
+    active.is_some_and(|violation| {
+        violation.body_a() == body_ref || violation.body_b() == Some(body_ref)
+    })
+}
+
+fn geometry_member_color(
+    kind: framer_solver::MemberKind,
+    source_selected: bool,
+    member_selected: bool,
+    danger: bool,
+) -> Color32 {
+    if danger {
+        super::theme::danger()
+    } else {
+        highlighted_member_color(kind, source_selected, member_selected)
+    }
+}
+
 impl Scene3d {
+    #[cfg(test)]
     pub(super) fn from_project(
         model: &BuildingModel,
         plan: &ProjectFramePlan,
+        selected_wall: usize,
+        selection: &Selection,
+        workspace_mode: WorkspaceMode,
+        wall_display: WallDisplay,
+    ) -> Option<Self> {
+        let physical_scene = framer_geometry::build_physical_scene(model, plan);
+        Self::from_project_with_geometry(
+            model,
+            plan,
+            &physical_scene,
+            None,
+            selected_wall,
+            selection,
+            workspace_mode,
+            wall_display,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_project_with_geometry(
+        model: &BuildingModel,
+        plan: &ProjectFramePlan,
+        physical_scene: &PhysicalScene,
+        active_geometry_violation: Option<&GeometryViolation>,
         selected_wall: usize,
         selection: &Selection,
         workspace_mode: WorkspaceMode,
@@ -102,7 +147,6 @@ impl Scene3d {
         let mut builder = SceneBuilder::default();
         let shows_generated_plan = workspace_mode.shows_generated_plan();
         if shows_generated_plan {
-            let physical_scene = framer_geometry::build_physical_scene(model, plan);
             for (wall_index, wall) in model.walls.iter().enumerate() {
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
                     // `selected_wall` remains the active editing context when a
@@ -116,9 +160,15 @@ impl Scene3d {
                             Selection::Member { source_id, member_id }
                                 if source_id == &wall.id.0 && member_id == &member.id
                         );
-                        let color =
-                            highlighted_member_color(member.kind, wall_selected, member_selected);
-                        builder.push_shared_member(&physical_scene, &wall.id, member, color);
+                        let body_ref =
+                            BodyRef::member(wall.id.clone(), member.kind, member.id.clone());
+                        let color = geometry_member_color(
+                            member.kind,
+                            wall_selected,
+                            member_selected,
+                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                        );
+                        builder.push_shared_member(physical_scene, &wall.id, member, color);
                     }
                 }
             }
@@ -134,11 +184,18 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &floor_plan.floor.0 && member_id == &member.id
                     );
+                    let body_ref =
+                        BodyRef::member(floor_plan.floor.clone(), member.kind, member.id.clone());
                     builder.push_shared_member(
-                        &physical_scene,
+                        physical_scene,
                         &floor_plan.floor,
                         member,
-                        highlighted_member_color(member.kind, source_selected, member_selected),
+                        geometry_member_color(
+                            member.kind,
+                            source_selected,
+                            member_selected,
+                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                        ),
                     );
                 }
             }
@@ -153,11 +210,21 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &ceiling_plan.ceiling.0 && member_id == &member.id
                     );
+                    let body_ref = BodyRef::member(
+                        ceiling_plan.ceiling.clone(),
+                        member.kind,
+                        member.id.clone(),
+                    );
                     builder.push_shared_member(
-                        &physical_scene,
+                        physical_scene,
                         &ceiling_plan.ceiling,
                         member,
-                        highlighted_member_color(member.kind, source_selected, member_selected),
+                        geometry_member_color(
+                            member.kind,
+                            source_selected,
+                            member_selected,
+                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                        ),
                     );
                 }
             }
@@ -170,9 +237,15 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &roof_plan.roof.0 && member_id == &member.id
                     );
-                    let color =
-                        highlighted_member_color(member.kind, source_selected, member_selected);
-                    builder.push_shared_member(&physical_scene, &roof_plan.roof, member, color);
+                    let body_ref =
+                        BodyRef::member(roof_plan.roof.clone(), member.kind, member.id.clone());
+                    let color = geometry_member_color(
+                        member.kind,
+                        source_selected,
+                        member_selected,
+                        body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                    );
+                    builder.push_shared_member(physical_scene, &roof_plan.roof, member, color);
                 }
             }
         }
@@ -181,17 +254,29 @@ impl Scene3d {
         // In Plan, defer them until after the opaque member pass and draw them with
         // alpha so the spatial roof framing remains legible through the skin.
         if !shows_generated_plan {
-            push_roof_surfaces(&mut builder, model, selection, false);
+            push_roof_surfaces(
+                &mut builder,
+                model,
+                selection,
+                active_geometry_violation,
+                false,
+            );
         }
 
         // Ceilings and floor decks remain opaque authored surfaces in every mode.
-        push_ceiling_surfaces(&mut builder, model, selection);
-        push_floor_surfaces(&mut builder, model, selection);
+        push_ceiling_surfaces(&mut builder, model, selection, active_geometry_violation);
+        push_floor_surfaces(&mut builder, model, selection, active_geometry_violation);
 
         builder.finish_opaque();
 
         if shows_generated_plan {
-            push_roof_surfaces(&mut builder, model, selection, true);
+            push_roof_surfaces(
+                &mut builder,
+                model,
+                selection,
+                active_geometry_violation,
+                true,
+            );
         }
 
         for (wall_index, wall) in model.walls.iter().enumerate() {
@@ -199,6 +284,7 @@ impl Scene3d {
             let sign = interior_sign(&interior_sides, &wall.id);
             let base_elevation = level_elevation(model, &wall.level);
             let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
+            let body_ref = BodyRef::assembly(wall.id.clone(), AssemblyKind::Wall);
             builder.push_wall_envelope(
                 model,
                 wall,
@@ -208,6 +294,7 @@ impl Scene3d {
                 base_elevation,
                 gable_profiles.get(&wall.id),
                 wall_selected,
+                body_is_danger_highlighted(active_geometry_violation, &body_ref),
                 wall_display,
             );
             for opening in &wall.openings {
