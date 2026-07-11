@@ -8,13 +8,19 @@
 
 #![forbid(unsafe_code)]
 
+mod audit;
 mod build;
+mod diagnostic;
+mod query;
 mod solid;
+mod spatial;
 
+pub use audit::{GeometryAudit, audit_physical_scene, audit_project};
 pub use build::{
     RafterPrism, build_common_rafter_solid, build_physical_scene, matched_bearing_depth,
     ridge_face_setback,
 };
+pub use diagnostic::{GeometryOverlapViolation, GeometryQueryViolation, GeometryViolation};
 pub use solid::{
     Aabb, AssemblyKind, BodyKind, BodyRef, CollisionDomain, ConvexPiece, GeometryBuildDiagnostic,
     PhysicalBody, PhysicalScene, PhysicalSolid, Point3, TriMesh,
