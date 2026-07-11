@@ -6,7 +6,7 @@
 >
 > **Status:** Implemented · **Linked goals:** G-002 (Solver Correctness) / G-014 (Ceilings & Roofs) ·
 > **Plan:** [2026-07-10-geometry-overlap-audit.md](../plans/2026-07-10-geometry-overlap-audit.md) ·
-> **Last reviewed:** 2026-07-10
+> **Last reviewed:** 2026-07-11
 
 ## Intent / Purpose
 

@@ -3211,14 +3211,12 @@ impl FramerApp {
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
         let t = design::active();
         let diagnostics = self.plan_diagnostics();
-        let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
         let error = self.error.clone();
-        let diagnostic_counts = DiagnosticCounts {
-            errors: usize::from(error.is_some()) + self.geometry_audit.violations.len(),
-            unsupported,
-            warnings,
-            info,
-        };
+        let diagnostic_counts = diagnostic_counts(
+            error.as_deref(),
+            &diagnostics,
+            self.geometry_audit.violations.len(),
+        );
         let zoom_percent = self.status_zoom_percent();
 
         ui.horizontal(|ui| {
@@ -4793,6 +4791,31 @@ fn count_diagnostics(diagnostics: &[PlanDiagnostic]) -> (usize, usize, usize) {
     )
 }
 
+fn diagnostic_counts(
+    error: Option<&str>,
+    diagnostics: &[PlanDiagnostic],
+    geometry_violations: usize,
+) -> DiagnosticCounts {
+    let (unsupported, warnings, info) = count_diagnostics(diagnostics);
+    DiagnosticCounts {
+        errors: usize::from(error.is_some()) + geometry_violations,
+        unsupported,
+        warnings,
+        info,
+    }
+}
+
+fn diagnostic_row_budget(
+    geometry_violations: usize,
+    plan_diagnostics: usize,
+    limit: usize,
+) -> (usize, usize, usize) {
+    let shown_geometry = geometry_violations.min(limit);
+    let shown_plan = plan_diagnostics.min(limit.saturating_sub(shown_geometry));
+    let hidden = geometry_violations + plan_diagnostics - shown_geometry - shown_plan;
+    (shown_geometry, shown_plan, hidden)
+}
+
 fn diagnostics_status_label(counts: DiagnosticCounts) -> String {
     format!(
         "{} errors   {} warnings   {} unsupported   {} info",
@@ -6130,31 +6153,30 @@ fn diagnostics_panel(
             ui.label(format!("{info} info"));
         });
 
-        for violation in geometry_audit.violations.iter().take(5) {
+        let (shown_geometry, shown_plan, hidden) =
+            diagnostic_row_budget(geometry_audit.violations.len(), diagnostics.len(), 5);
+        for violation in geometry_audit.violations.iter().take(shown_geometry) {
             if let Some(action) = geometry_diagnostic_row(ui, violation) {
                 focused = Some(action);
             }
         }
 
-        let remaining_rows = 5usize.saturating_sub(geometry_audit.violations.len());
-        for diagnostic in diagnostics.iter().take(remaining_rows) {
+        for diagnostic in diagnostics.iter().take(shown_plan) {
             if let Some(source) = diagnostic_row(ui, model, diagnostic) {
                 focused = Some(DiagnosticAction::Source(source));
             }
         }
 
-        let shown = geometry_audit.violations.len().min(5) + diagnostics.len().min(remaining_rows);
-        let total = geometry_audit.violations.len() + diagnostics.len();
-        if total > shown {
-            egui::CollapsingHeader::new(format!("{} more diagnostics", total - shown))
+        if hidden > 0 {
+            egui::CollapsingHeader::new(format!("{hidden} more diagnostics"))
                 .default_open(false)
                 .show(ui, |ui| {
-                    for violation in geometry_audit.violations.iter().skip(5) {
+                    for violation in geometry_audit.violations.iter().skip(shown_geometry) {
                         if let Some(action) = geometry_diagnostic_row(ui, violation) {
                             focused = Some(action);
                         }
                     }
-                    for diagnostic in diagnostics.iter().skip(remaining_rows) {
+                    for diagnostic in diagnostics.iter().skip(shown_plan) {
                         if let Some(source) = diagnostic_row(ui, model, diagnostic) {
                             focused = Some(DiagnosticAction::Source(source));
                         }
@@ -7534,6 +7556,24 @@ mod tests {
         DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
     use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic, GeometryQueryViolation};
+
+    #[test]
+    fn geometry_violations_contribute_to_status_error_count() {
+        let counts = diagnostic_counts(None, &[], 3);
+
+        assert_eq!(counts.errors, 3);
+        assert_eq!(
+            diagnostics_status_label(counts),
+            "3 errors   0 warnings   0 unsupported   0 info"
+        );
+    }
+
+    #[test]
+    fn diagnostic_row_budget_covers_mixed_and_overflowing_geometry_rows() {
+        assert_eq!(diagnostic_row_budget(2, 6, 5), (2, 3, 3));
+        assert_eq!(diagnostic_row_budget(7, 2, 5), (5, 0, 4));
+        assert_eq!(diagnostic_row_budget(0, 0, 5), (0, 0, 0));
+    }
 
     #[test]
     fn geometry_diagnostic_text_retains_pair_depth_and_witness() {

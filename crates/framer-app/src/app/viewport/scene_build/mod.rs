@@ -79,6 +79,17 @@ fn body_is_danger_highlighted(active: Option<&GeometryViolation>, body_ref: &Bod
     })
 }
 
+fn member_is_danger_highlighted(
+    active: Option<&GeometryViolation>,
+    owner: &framer_core::ElementId,
+    member: &FrameMember,
+) -> bool {
+    active.is_some_and(|violation| {
+        let body_ref = BodyRef::member(owner.clone(), member.kind, member.id.clone());
+        violation.body_a() == &body_ref || violation.body_b() == Some(&body_ref)
+    })
+}
+
 fn geometry_member_color(
     kind: framer_solver::MemberKind,
     source_selected: bool,
@@ -160,13 +171,15 @@ impl Scene3d {
                             Selection::Member { source_id, member_id }
                                 if source_id == &wall.id.0 && member_id == &member.id
                         );
-                        let body_ref =
-                            BodyRef::member(wall.id.clone(), member.kind, member.id.clone());
                         let color = geometry_member_color(
                             member.kind,
                             wall_selected,
                             member_selected,
-                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                            member_is_danger_highlighted(
+                                active_geometry_violation,
+                                &wall.id,
+                                member,
+                            ),
                         );
                         builder.push_shared_member(physical_scene, &wall.id, member, color);
                     }
@@ -184,8 +197,6 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &floor_plan.floor.0 && member_id == &member.id
                     );
-                    let body_ref =
-                        BodyRef::member(floor_plan.floor.clone(), member.kind, member.id.clone());
                     builder.push_shared_member(
                         physical_scene,
                         &floor_plan.floor,
@@ -194,7 +205,11 @@ impl Scene3d {
                             member.kind,
                             source_selected,
                             member_selected,
-                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                            member_is_danger_highlighted(
+                                active_geometry_violation,
+                                &floor_plan.floor,
+                                member,
+                            ),
                         ),
                     );
                 }
@@ -210,11 +225,6 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &ceiling_plan.ceiling.0 && member_id == &member.id
                     );
-                    let body_ref = BodyRef::member(
-                        ceiling_plan.ceiling.clone(),
-                        member.kind,
-                        member.id.clone(),
-                    );
                     builder.push_shared_member(
                         physical_scene,
                         &ceiling_plan.ceiling,
@@ -223,7 +233,11 @@ impl Scene3d {
                             member.kind,
                             source_selected,
                             member_selected,
-                            body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                            member_is_danger_highlighted(
+                                active_geometry_violation,
+                                &ceiling_plan.ceiling,
+                                member,
+                            ),
                         ),
                     );
                 }
@@ -237,13 +251,15 @@ impl Scene3d {
                         Selection::Member { source_id, member_id }
                             if source_id == &roof_plan.roof.0 && member_id == &member.id
                     );
-                    let body_ref =
-                        BodyRef::member(roof_plan.roof.clone(), member.kind, member.id.clone());
                     let color = geometry_member_color(
                         member.kind,
                         source_selected,
                         member_selected,
-                        body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                        member_is_danger_highlighted(
+                            active_geometry_violation,
+                            &roof_plan.roof,
+                            member,
+                        ),
                     );
                     builder.push_shared_member(physical_scene, &roof_plan.roof, member, color);
                 }
