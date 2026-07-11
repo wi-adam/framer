@@ -1029,9 +1029,9 @@ fn common_stick_rafter_has_plumb_ends_and_a_matched_wall_birdsmouth() {
     let PickShape::Mesh { points, triangles } = &pick.shape else {
         panic!("a cut common rafter must pick from its rendered profile mesh");
     };
-    assert_eq!(points.len(), prism.points.len());
-    assert_eq!(triangles, &prism.triangles);
-    for (pick_point, shared_point) in points.iter().zip(&prism.points) {
+    assert_eq!(points.len(), prism.solid.surface.points.len());
+    assert_eq!(triangles, &prism.solid.surface.triangles);
+    for (pick_point, shared_point) in points.iter().zip(&prism.solid.surface.points) {
         assert!((pick_point.x as f64 - shared_point.x).abs() < 1.0e-4);
         assert!((pick_point.y as f64 - shared_point.y).abs() < 1.0e-4);
         assert!((pick_point.z as f64 - shared_point.z).abs() < 1.0e-4);

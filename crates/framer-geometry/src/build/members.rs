@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use framer_core::{
-    BuildingModel, Ceiling, ConstructionSystem, ElementId, FloorDeck, Length, MemberFamily, Point2,
+    BuildingModel, ConstructionSystem, ElementId, FloorDeck, Length, MemberFamily, Point2,
     RoofPlane, SpanDirection, Wall,
 };
 use framer_solver::{FrameMember, MemberKind, MemberOrientation, ProjectFramePlan};
@@ -52,12 +52,14 @@ pub(super) fn build_members(
             push_missing_host_members(scene, &floor_plan.floor, &floor_plan.members, "floor deck");
             continue;
         };
+        let outline = region_outline(model, &deck.region);
+        let surface_z = level_elevation(model, &deck.level);
         for member in &floor_plan.members {
             let body_ref = member_ref(&deck.id, member);
             push_body_result(
                 scene,
                 body_ref,
-                flat_floor_member_solid(model, deck, member),
+                flat_floor_member_solid(deck, member, outline.as_deref(), surface_z),
             );
         }
     }
@@ -76,12 +78,14 @@ pub(super) fn build_members(
             );
             continue;
         };
+        let outline = region_outline(model, &ceiling.region);
+        let reference = (level_top(model, &ceiling.level) - ceiling.height).inches();
         for member in &ceiling_plan.members {
             let body_ref = member_ref(&ceiling.id, member);
             push_body_result(
                 scene,
                 body_ref,
-                ceiling_member_solid(model, ceiling, member),
+                ceiling_member_solid(member, outline.as_deref(), reference),
             );
         }
     }
@@ -183,33 +187,25 @@ fn roof_member_solid(
 }
 
 fn flat_floor_member_solid(
-    model: &BuildingModel,
     deck: &FloorDeck,
     member: &FrameMember,
+    outline: Option<&[Point2]>,
+    surface_z: f64,
 ) -> Result<PhysicalSolid, String> {
-    let outline = region_outline(model, &deck.region)
-        .ok_or_else(|| "floor member region cannot be resolved".to_string())?;
-    horizontal_surface_member_solid(
-        &outline,
-        deck.span,
-        member,
-        level_elevation(model, &deck.level),
-        -1.0,
-    )
+    let outline = outline.ok_or_else(|| "floor member region cannot be resolved".to_string())?;
+    horizontal_surface_member_solid(outline, deck.span, member, surface_z, -1.0)
 }
 
 fn ceiling_member_solid(
-    model: &BuildingModel,
-    ceiling: &Ceiling,
     member: &FrameMember,
+    outline: Option<&[Point2]>,
+    reference: f64,
 ) -> Result<PhysicalSolid, String> {
     if member.sloped.is_some() {
         return spatial_board_solid(member);
     }
-    let outline = region_outline(model, &ceiling.region)
-        .ok_or_else(|| "ceiling member region cannot be resolved".to_string())?;
-    let reference = (level_top(model, &ceiling.level) - ceiling.height).inches();
-    horizontal_surface_member_solid(&outline, SpanDirection::Shorter, member, reference, 1.0)
+    let outline = outline.ok_or_else(|| "ceiling member region cannot be resolved".to_string())?;
+    horizontal_surface_member_solid(outline, SpanDirection::Shorter, member, reference, 1.0)
 }
 
 fn horizontal_surface_member_solid(
@@ -363,8 +359,6 @@ fn board_prism(
 pub struct RafterPrism {
     pub solid: PhysicalSolid,
     pub profile: Vec<[f64; 2]>,
-    pub points: Vec<Point3>,
-    pub triangles: Vec<[usize; 3]>,
 }
 
 pub fn build_common_rafter_solid(
@@ -491,12 +485,7 @@ pub fn build_common_rafter_solid(
     }
     let solid = PhysicalSolid::new(surface, pieces)
         .ok_or_else(|| "common rafter has no physical solid".to_string())?;
-    Ok(RafterPrism {
-        points: solid.surface.points.clone(),
-        triangles: solid.surface.triangles.clone(),
-        solid,
-        profile,
-    })
+    Ok(RafterPrism { solid, profile })
 }
 
 fn triangular_prism(
