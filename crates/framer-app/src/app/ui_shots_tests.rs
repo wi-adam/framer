@@ -29,9 +29,11 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use framer_core::{ElementId, Length};
+use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
-use super::{FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, actions, design};
+use super::{FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, actions, design, panels};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -111,6 +113,35 @@ fn warm_render(harness: &mut Harness<'_, FramerApp>) {
 /// "Design" also appears as a panel badge and in the status bar.
 fn select_tab(harness: &mut Harness<'_, FramerApp>, tab: actions::WorkflowTab) {
     harness.state_mut().select_workflow_tab(tab);
+}
+
+fn prepare_geometry_overlap(harness: &mut Harness<'_, FramerApp>) {
+    let mut wall = harness.state().model.walls[0].clone();
+    wall.id = ElementId::new("ui-shot-overlap-wall");
+    wall.name = "Overlap wall".to_owned();
+    wall.start.x += Length::from_whole_inches(12);
+    wall.end.x += Length::from_whole_inches(12);
+    wall.openings.clear();
+    wall.dimensions.clear();
+    harness.state_mut().model.walls.push(wall);
+    harness.state_mut().rebuild();
+    let violation = harness
+        .state()
+        .geometry_audit
+        .violations
+        .iter()
+        .find(|violation| {
+            matches!(violation, GeometryViolation::Overlap(_))
+                && matches!(violation.body_a().kind(), BodyKind::Assembly(_))
+        })
+        .expect("overlap shot fixture should produce an assembly overlap")
+        .clone();
+    harness
+        .state_mut()
+        .focus_diagnostic(panels::DiagnosticAction::Geometry(violation));
+    harness.state_mut().layers.wall_display = WallDisplay::Full;
+    harness.ctx.request_repaint();
+    harness.run_steps(2);
 }
 
 #[test]
@@ -300,6 +331,26 @@ fn capture_ui_shot_deck() {
     shot(&mut harness, &dir, &mut index, "project-menu");
     drop(harness);
 
+    let mut overlap_light = shots_harness(design::studio_light());
+    overlap_light.run_ok();
+    prepare_geometry_overlap(&mut overlap_light);
+    shot(
+        &mut overlap_light,
+        &dir,
+        &mut index,
+        "geometry-overlap-focused-light",
+    );
+    overlap_light
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Diagnostics")
+        .click();
+    shot(
+        &mut overlap_light,
+        &dir,
+        &mut index,
+        "geometry-overlap-diagnostics-light",
+    );
+    drop(overlap_light);
+
     // Dark palette spot-checks: default state + an inspector-heavy state.
     let mut dark = shots_harness(design::studio_dark());
     dark.run_ok();
@@ -314,6 +365,19 @@ fn capture_ui_shot_deck() {
     dark.state_mut().selected_wall = dark_back_wall_index;
     dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
+    prepare_geometry_overlap(&mut dark);
+    shot(&mut dark, &dir, &mut index, "geometry-overlap-focused-dark");
+    dark.get_by_role_and_label(egui::accesskit::Role::Button, "Diagnostics")
+        .click();
+    shot(
+        &mut dark,
+        &dir,
+        &mut index,
+        "geometry-overlap-diagnostics-dark",
+    );
+    dark.get_by_role_and_label(egui::accesskit::Role::Button, "Diagnostics")
+        .click();
+    dark.run_ok();
     select_tab(&mut dark, actions::WorkflowTab::Render);
     warm_render(&mut dark);
     shot(&mut dark, &dir, &mut index, "dark-render-view");

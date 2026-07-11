@@ -29,6 +29,10 @@ use framer_core::{
     concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
     save_project as save_project_document,
 };
+use framer_geometry::{
+    Aabb, GeometryAudit, GeometryViolation, PhysicalScene, Point3 as PhysicalPoint3,
+    audit_physical_scene, build_physical_scene,
+};
 use framer_render::math::Vec3;
 use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
@@ -54,6 +58,9 @@ pub(crate) struct FramerApp {
     selected_wall: usize,
     selected: Selection,
     project_plan: Option<ProjectFramePlan>,
+    physical_scene: Option<PhysicalScene>,
+    geometry_audit: GeometryAudit,
+    active_geometry_violation: Option<GeometryViolation>,
     compliance_report: Option<ComplianceReport>,
     library_issues: Vec<framer_library::LibraryIssue>,
     library_issue_error: Option<String>,
@@ -651,6 +658,9 @@ impl Default for FramerApp {
             selected_wall: 0,
             selected: Selection::Wall,
             project_plan: None,
+            physical_scene: None,
+            geometry_audit: GeometryAudit::default(),
+            active_geometry_violation: None,
             compliance_report: None,
             library_issues: Vec::new(),
             library_issue_error: None,
@@ -764,6 +774,8 @@ impl FramerApp {
 
         match generate_project_plan(&self.model) {
             Ok(mut plan) => {
+                let physical_scene = build_physical_scene(&self.model, &plan);
+                let geometry_audit = audit_physical_scene(&physical_scene);
                 let resolved_standards = self.model.resolved_standards();
                 let report = framer_standards::evaluate(&self.model, &resolved_standards, &plan);
                 plan.diagnostics
@@ -774,11 +786,24 @@ impl FramerApp {
                     self.library_issue_error.as_deref(),
                 );
                 self.compliance_report = Some(report);
+                self.physical_scene = Some(physical_scene);
+                self.geometry_audit = geometry_audit;
+                if let Some(active) = self.active_geometry_violation.take() {
+                    self.active_geometry_violation = self
+                        .geometry_audit
+                        .violations
+                        .iter()
+                        .find(|current| same_geometry_violation_identity(&active, current))
+                        .cloned();
+                }
                 self.project_plan = Some(plan);
                 self.error = None;
             }
             Err(error) => {
                 self.project_plan = None;
+                self.physical_scene = None;
+                self.geometry_audit = GeometryAudit::default();
+                self.active_geometry_violation = None;
                 self.compliance_report = None;
                 self.error = Some(error.to_string());
             }
@@ -922,6 +947,7 @@ impl FramerApp {
         self.room_tool_active = false;
         self.opening_drag = None;
         self.wall_drag = None;
+        self.active_geometry_violation = None;
         self.viewport_mode = ViewportMode::Plan;
         self.last_authoring_viewport = ViewportMode::Plan;
     }
@@ -1064,11 +1090,48 @@ impl FramerApp {
     }
 
     fn focus_compliance_source(&mut self, id: ElementId) {
+        self.active_geometry_violation = None;
         self.file_status = Some(if self.select_model_element(&id) {
             format!("Selected compliance source {}", id.0)
         } else {
             format!("No selectable compliance source for {}", id.0)
         });
+    }
+
+    fn focus_diagnostic(&mut self, action: panels::DiagnosticAction) {
+        match action {
+            panels::DiagnosticAction::Source(source) => self.focus_compliance_source(source),
+            panels::DiagnosticAction::Geometry(violation) => {
+                let code = violation.code();
+                let current = self
+                    .geometry_audit
+                    .violations
+                    .iter()
+                    .find(|current| same_geometry_violation_identity(&violation, current))
+                    .cloned();
+                if let Some(current) = current {
+                    self.active_geometry_violation = Some(current.clone());
+                    self.set_workspace_mode(WorkspaceMode::Plan);
+                    self.viewport_mode = ViewportMode::Axonometric;
+                    if let Some((scene_bounds, focus_bounds)) = self
+                        .physical_scene
+                        .as_ref()
+                        .and_then(|scene| geometry_focus_bounds(scene, &current))
+                    {
+                        self.view_3d.frame_bounds(scene_bounds, focus_bounds);
+                        self.file_status = Some(format!("Focused geometry violation {code}"));
+                    } else {
+                        self.file_status = Some(format!(
+                            "Geometry violation {code} has no current bodies to frame"
+                        ));
+                    }
+                } else {
+                    self.active_geometry_violation = None;
+                    self.file_status =
+                        Some(format!("Geometry violation {code} is no longer active"));
+                }
+            }
+        }
     }
 
     fn select_model_element(&mut self, id: &ElementId) -> bool {
@@ -1201,6 +1264,9 @@ impl FramerApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if mode != WorkspaceMode::Plan {
+            self.active_geometry_violation = None;
+        }
         if mode == WorkspaceMode::Render && self.viewport_mode != ViewportMode::Render {
             self.last_authoring_viewport = self.viewport_mode;
         }
@@ -3511,6 +3577,7 @@ impl FramerApp {
 
     fn handle_view_click(&mut self, click: ViewClick) {
         self.opening_drag = None;
+        self.active_geometry_violation = None;
         match click {
             ViewClick::Wall(index) => {
                 self.selected_wall = index;
@@ -3812,6 +3879,57 @@ impl FramerApp {
     }
 }
 
+fn geometry_focus_bounds(
+    scene: &PhysicalScene,
+    violation: &GeometryViolation,
+) -> Option<(Aabb, Aabb)> {
+    let mut bodies = scene.bodies().iter();
+    let mut scene_bounds = bodies.next()?.aabb;
+    for body in bodies {
+        scene_bounds = union_aabb(scene_bounds, body.aabb);
+    }
+
+    let mut focus_bounds = scene.body(violation.body_a())?.aabb;
+    if let Some(body_b) = violation.body_b() {
+        focus_bounds = union_aabb(focus_bounds, scene.body(body_b)?.aabb);
+    }
+    if let GeometryViolation::Overlap(overlap) = violation {
+        focus_bounds = include_physical_point(focus_bounds, overlap.witness);
+    }
+    Some((scene_bounds, focus_bounds))
+}
+
+fn same_geometry_violation_identity(left: &GeometryViolation, right: &GeometryViolation) -> bool {
+    left.code() == right.code()
+        && left.body_a() == right.body_a()
+        && left.body_b() == right.body_b()
+}
+
+fn union_aabb(left: Aabb, right: Aabb) -> Aabb {
+    Aabb {
+        min: PhysicalPoint3::new(
+            left.min.x.min(right.min.x),
+            left.min.y.min(right.min.y),
+            left.min.z.min(right.min.z),
+        ),
+        max: PhysicalPoint3::new(
+            left.max.x.max(right.max.x),
+            left.max.y.max(right.max.y),
+            left.max.z.max(right.max.z),
+        ),
+    }
+}
+
+fn include_physical_point(bounds: Aabb, point: PhysicalPoint3) -> Aabb {
+    union_aabb(
+        bounds,
+        Aabb {
+            min: point,
+            max: point,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, process};
@@ -3842,8 +3960,92 @@ mod tests {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
     }
 
+    fn add_overlapping_wall(app: &mut FramerApp) {
+        let mut wall = app.model.walls[0].clone();
+        wall.id = ElementId::new("geometry-overlap-wall");
+        wall.name = "Geometry overlap wall".to_owned();
+        wall.start.x += Length::from_whole_inches(12);
+        wall.end.x += Length::from_whole_inches(12);
+        wall.openings.clear();
+        wall.dimensions.clear();
+        app.model.walls.push(wall);
+    }
+
+    #[test]
+    fn rebuild_caches_geometry_and_tracks_clean_violation_clean_history() {
+        let mut app = FramerApp::default();
+        assert!(app.physical_scene.is_some());
+        assert!(app.geometry_audit.is_clean());
+
+        app.edit("Add overlapping wall", add_overlapping_wall);
+        assert!(app.physical_scene.is_some());
+        assert!(!app.geometry_audit.is_clean());
+
+        app.undo();
+        assert!(app.physical_scene.is_some());
+        assert!(app.geometry_audit.is_clean());
+
+        app.redo();
+        assert!(app.physical_scene.is_some());
+        assert!(!app.geometry_audit.is_clean());
+
+        let active = app.geometry_audit.violations[0].clone();
+        let ordinary_selection = app.selected.clone();
+        app.focus_diagnostic(panels::DiagnosticAction::Geometry(active.clone()));
+        assert_eq!(app.active_geometry_violation, Some(active));
+        assert_eq!(app.workspace_mode, WorkspaceMode::Plan);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(app.selected, ordinary_selection);
+
+        let measured_before = app.active_geometry_violation.clone().unwrap();
+        let moved = app.model.walls.last_mut().unwrap();
+        moved.start.y += Length::from_inches(0.25);
+        moved.end.y += Length::from_inches(0.25);
+        app.rebuild();
+        let measured_after = app.active_geometry_violation.clone().unwrap();
+        assert!(same_geometry_violation_identity(
+            &measured_before,
+            &measured_after
+        ));
+        assert_ne!(
+            measured_before, measured_after,
+            "active focus should adopt the updated depth or witness"
+        );
+
+        app.set_workspace_mode(WorkspaceMode::Design);
+        assert!(app.active_geometry_violation.is_none());
+        let active = app.geometry_audit.violations[0].clone();
+        app.focus_diagnostic(panels::DiagnosticAction::Geometry(active));
+
+        app.undo();
+        assert!(app.geometry_audit.is_clean());
+        assert!(app.active_geometry_violation.is_none());
+        assert_eq!(app.selected, ordinary_selection);
+    }
+
+    #[test]
+    fn invalid_regeneration_clears_geometry_cache_with_plan() {
+        let mut app = FramerApp::default();
+        app.model.walls[0].end = app.model.walls[0].start;
+
+        app.rebuild();
+
+        assert!(app.project_plan.is_none());
+        assert!(app.physical_scene.is_none());
+        assert!(app.geometry_audit.is_clean());
+    }
+
     #[test]
     fn reset_tools_returns_workflow_commands_to_frame() {
+        let active_geometry_violation = GeometryViolation::BodyUnbuildable(
+            framer_geometry::GeometryBuildDiagnostic::unbuildable(
+                framer_geometry::BodyRef::assembly(
+                    ElementId::new("stale-wall"),
+                    framer_geometry::AssemblyKind::Wall,
+                ),
+                "stale fixture",
+            ),
+        );
         let mut app = FramerApp {
             command_tab: actions::WorkflowTab::Plan,
             viewport_mode: ViewportMode::Render,
@@ -3857,6 +4059,7 @@ mod tests {
                 ..Default::default()
             },
             room_tool_active: true,
+            active_geometry_violation: Some(active_geometry_violation),
             ..Default::default()
         };
 
@@ -3868,6 +4071,7 @@ mod tests {
         assert!(!app.dimension_tool.active);
         assert!(!app.draw_wall_tool.active);
         assert!(!app.room_tool_active);
+        assert!(app.active_geometry_violation.is_none());
     }
 
     #[test]

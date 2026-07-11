@@ -4,9 +4,9 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Partial · **Linked goals:** G-002 (Solver Correctness) / G-014 (Ceilings & Roofs) ·
+> **Status:** Implemented · **Linked goals:** G-002 (Solver Correctness) / G-014 (Ceilings & Roofs) ·
 > **Plan:** [2026-07-10-geometry-overlap-audit.md](../plans/2026-07-10-geometry-overlap-audit.md) ·
-> **Last reviewed:** 2026-07-10
+> **Last reviewed:** 2026-07-11
 
 ## Intent / Purpose
 
@@ -115,7 +115,7 @@ without turning Framer into a general solid modeler.
 
 ## Architecture (grounded in the codebase)
 
-- A new UI-free `crates/framer-geometry` crate owns `PhysicalScene`, `PhysicalBody`, `BodyRef`,
+- The UI-free `crates/framer-geometry` crate owns `PhysicalScene`, `PhysicalBody`, `BodyRef`,
   collision domains, convex-piece lowering, geometry build diagnostics, and overlap auditing. It
   depends on `framer-core` and `framer-solver`; neither core nor solver depends on it.
 - `framer-core/src/model.rs` remains the source of shared assembly boundaries such as
@@ -136,7 +136,8 @@ without turning Framer into a general solid modeler.
   filtering, convex-piece contact queries, canonical pair sorting, and geometry diagnostics.
 - `crates/framer-app/src/app/mod.rs` caches the audit beside the regenerated project plan.
   `panels.rs` lowers geometry violations into the existing diagnostics presentation while retaining
-  both `BodyRef`s for focus behavior. `viewport/scene_build/` applies the active diagnostic highlight.
+  both `BodyRef`s for focus behavior. `viewport/scene_build/` consumes the cached physical scene,
+  applies the active two-body danger highlight, and `axonometric.rs` draws the witness marker.
 - `crates/framer-geometry/src/bin/geometry-audit.rs` is the headless developer entry point. Library
   APIs, not CLI output parsing, remain the machine-readable contract.
 

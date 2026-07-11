@@ -251,7 +251,8 @@ impl FramerApp {
                 }
             }
             ViewportMode::Axonometric => {
-                let Some(plan) = &self.project_plan else {
+                let (Some(plan), Some(physical_scene)) = (&self.project_plan, &self.physical_scene)
+                else {
                     ui.label("No valid framing plan");
                     return;
                 };
@@ -260,6 +261,8 @@ impl FramerApp {
                     AxonometricView {
                         model: &self.model,
                         plan,
+                        physical_scene,
+                        active_geometry_violation: self.active_geometry_violation.as_ref(),
                         selected_wall: self.selected_wall,
                         selection: &self.selected,
                         workspace_mode: self.workspace_mode,

@@ -4,9 +4,66 @@ use framer_core::{
     BoardProfile, Ceiling, ConstructionLayer, FloorDeck, FramingPattern, FramingSpec,
     LayerFunction, Level, MemberFamily, Point2, Room, RoomUsage, Slope, SystemKind,
 };
+use framer_geometry::BodyKind;
 use framer_solver::ProjectFramePlan;
 
 use crate::app::viewport::camera_3d::View3dState;
+
+#[test]
+fn active_overlap_danger_highlights_both_members_and_assemblies() {
+    let mut model = BuildingModel::demo_shell();
+    let mut wall = model.walls[0].clone();
+    wall.id = ElementId::new("scene-overlap-wall");
+    wall.name = "Scene overlap wall".to_owned();
+    wall.start.x += Length::from_whole_inches(12);
+    wall.end.x += Length::from_whole_inches(12);
+    wall.openings.clear();
+    wall.dimensions.clear();
+    model.walls.push(wall);
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let physical_scene = framer_geometry::build_physical_scene(&model, &plan);
+    let audit = framer_geometry::audit_physical_scene(&physical_scene);
+    let danger = color_to_rgba(crate::app::theme::danger());
+
+    for assembly_pair in [false, true] {
+        let violation = audit
+            .violations
+            .iter()
+            .find(|violation| {
+                let Some(body_b) = violation.body_b() else {
+                    return false;
+                };
+                let is_assembly = matches!(violation.body_a().kind(), BodyKind::Assembly(_))
+                    && matches!(body_b.kind(), BodyKind::Assembly(_));
+                is_assembly == assembly_pair
+            })
+            .unwrap_or_else(|| panic!("missing assembly_pair={assembly_pair} overlap"));
+        assert!(body_is_danger_highlighted(
+            Some(violation),
+            violation.body_a()
+        ));
+        assert!(body_is_danger_highlighted(
+            Some(violation),
+            violation.body_b().unwrap()
+        ));
+
+        let scene = Scene3d::from_project_with_geometry(
+            &model,
+            &plan,
+            &physical_scene,
+            Some(violation),
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Full,
+        )
+        .unwrap();
+        assert!(
+            scene.vertices.iter().any(|vertex| vertex.color == danger),
+            "active pair should emit danger-tinted geometry"
+        );
+    }
+}
 
 #[test]
 fn scene_3d_builds_depth_tested_wall_and_member_cuboids() {
