@@ -12,13 +12,15 @@ use framer_core::{
     Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall, WallJoin,
     WallJoinKind,
 };
+use framer_geometry::{GeometryAudit, GeometryViolation};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
 use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
 
 use super::actions::{self, ActionId, WorkflowTab};
 use super::design::{Icon, widgets};
 use super::labels::{
-    diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, join_kind_label, kind_label,
+    diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, geometry_body_label,
+    join_kind_label, kind_label,
 };
 use super::model_edit::{
     next_furnishing_instance_id, next_mep_instance_id, opening_max_bottom, opening_top_clearance,
@@ -3172,9 +3174,10 @@ impl FramerApp {
                 ui,
                 self.error.as_deref(),
                 self.project_plan.as_ref(),
+                &self.geometry_audit,
                 &self.model,
             ) {
-                self.focus_compliance_source(source);
+                self.focus_diagnostic(source);
             }
             ui.separator();
             if let Some(source) = compliance_panel(ui, self.compliance_report.as_ref()) {
@@ -3211,7 +3214,7 @@ impl FramerApp {
         let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
         let error = self.error.clone();
         let diagnostic_counts = DiagnosticCounts {
-            errors: usize::from(error.is_some()),
+            errors: usize::from(error.is_some()) + self.geometry_audit.violations.len(),
             unsupported,
             warnings,
             info,
@@ -3345,9 +3348,10 @@ impl FramerApp {
                     &self.model,
                     error.as_deref(),
                     &diagnostics,
+                    &self.geometry_audit,
                     diagnostic_counts,
                 ) {
-                    self.focus_compliance_source(source);
+                    self.focus_diagnostic(source);
                 }
             });
         });
@@ -4765,6 +4769,12 @@ struct DiagnosticCounts {
     info: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum DiagnosticAction {
+    Source(ElementId),
+    Geometry(GeometryViolation),
+}
+
 const UNSUPPORTED_DIAGNOSTIC_TOOLTIP: &str =
     "Conditions outside the supported prescriptive scope — see diagnostics";
 
@@ -4795,8 +4805,9 @@ fn status_diagnostics_menu(
     model: &BuildingModel,
     error: Option<&str>,
     diagnostics: &[PlanDiagnostic],
+    geometry_audit: &GeometryAudit,
     counts: DiagnosticCounts,
-) -> Option<ElementId> {
+) -> Option<DiagnosticAction> {
     let t = design::active();
     let text_color = if counts.errors > 0 {
         t.danger
@@ -4863,13 +4874,18 @@ fn status_diagnostics_menu(
         if let Some(error) = error {
             diagnostic_error_row(ui, error);
         }
-        if diagnostics.is_empty() && error.is_none() {
+        if diagnostics.is_empty() && geometry_audit.is_clean() && error.is_none() {
             ui.label(RichText::new("No diagnostics").color(t.text_secondary));
         } else {
             ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for violation in &geometry_audit.violations {
+                    if let Some(action) = geometry_diagnostic_row(ui, violation) {
+                        focused = Some(action);
+                    }
+                }
                 for diagnostic in diagnostics {
                     if let Some(source) = diagnostic_row(ui, model, diagnostic) {
-                        focused = Some(source);
+                        focused = Some(DiagnosticAction::Source(source));
                     }
                 }
             });
@@ -6075,8 +6091,9 @@ fn diagnostics_panel(
     ui: &mut Ui,
     error: Option<&str>,
     plan: Option<&ProjectFramePlan>,
+    geometry_audit: &GeometryAudit,
     model: &BuildingModel,
-) -> Option<ElementId> {
+) -> Option<DiagnosticAction> {
     panel_subheader(ui, "Diagnostics");
     let mut focused = None;
     if let Some(error) = error {
@@ -6095,7 +6112,7 @@ fn diagnostics_panel(
             .cloned()
             .collect::<Vec<_>>();
 
-        if diagnostics.is_empty() {
+        if diagnostics.is_empty() && geometry_audit.is_clean() {
             ui.label("No diagnostics");
             return focused;
         }
@@ -6103,30 +6120,48 @@ fn diagnostics_panel(
         let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
 
         ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{} geometry violations",
+                geometry_audit.violations.len()
+            ));
             ui.label(format!("{unsupported} unsupported"))
                 .on_hover_text(UNSUPPORTED_DIAGNOSTIC_TOOLTIP);
             ui.label(format!("{warnings} warnings"));
             ui.label(format!("{info} info"));
         });
 
-        for diagnostic in diagnostics.iter().take(5) {
-            if let Some(source) = diagnostic_row(ui, model, diagnostic) {
-                focused = Some(source);
+        for violation in geometry_audit.violations.iter().take(5) {
+            if let Some(action) = geometry_diagnostic_row(ui, violation) {
+                focused = Some(action);
             }
         }
 
-        if diagnostics.len() > 5 {
-            egui::CollapsingHeader::new(format!("{} more diagnostics", diagnostics.len() - 5))
+        let remaining_rows = 5usize.saturating_sub(geometry_audit.violations.len());
+        for diagnostic in diagnostics.iter().take(remaining_rows) {
+            if let Some(source) = diagnostic_row(ui, model, diagnostic) {
+                focused = Some(DiagnosticAction::Source(source));
+            }
+        }
+
+        let shown = geometry_audit.violations.len().min(5) + diagnostics.len().min(remaining_rows);
+        let total = geometry_audit.violations.len() + diagnostics.len();
+        if total > shown {
+            egui::CollapsingHeader::new(format!("{} more diagnostics", total - shown))
                 .default_open(false)
                 .show(ui, |ui| {
-                    for diagnostic in diagnostics.iter().skip(5) {
+                    for violation in geometry_audit.violations.iter().skip(5) {
+                        if let Some(action) = geometry_diagnostic_row(ui, violation) {
+                            focused = Some(action);
+                        }
+                    }
+                    for diagnostic in diagnostics.iter().skip(remaining_rows) {
                         if let Some(source) = diagnostic_row(ui, model, diagnostic) {
-                            focused = Some(source);
+                            focused = Some(DiagnosticAction::Source(source));
                         }
                     }
                 });
         }
-    } else if error.is_none() {
+    } else if error.is_none() && geometry_audit.is_clean() {
         ui.label("No diagnostics");
     }
     focused
@@ -6140,6 +6175,93 @@ fn diagnostic_error_row(ui: &mut Ui, error: &str) {
         ui.label(RichText::new(error).color(t.text));
     });
     ui.add_space(4.0);
+}
+
+fn geometry_diagnostic_row(ui: &mut Ui, violation: &GeometryViolation) -> Option<DiagnosticAction> {
+    let t = design::active();
+    let body_a = geometry_body_label(violation.body_a());
+    let body_b = violation.body_b().map(geometry_body_label);
+    let row = ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(design::icon_text(Icon::Error, 13.0).color(t.danger));
+            ui.label(RichText::new("Violation").strong().color(t.danger));
+            ui.label(
+                RichText::new(violation.code())
+                    .size(design::text_size::LABEL)
+                    .color(t.text_secondary),
+            );
+        });
+        ui.label(
+            RichText::new(format!("Body A: {body_a}"))
+                .size(design::text_size::LABEL)
+                .color(t.text_muted),
+        );
+        if let Some(body_b) = &body_b {
+            ui.label(
+                RichText::new(format!("Body B: {body_b}"))
+                    .size(design::text_size::LABEL)
+                    .color(t.text_muted),
+            );
+        }
+        ui.label(
+            RichText::new(geometry_violation_message(violation))
+                .size(design::text_size::BODY)
+                .color(t.text),
+        );
+    });
+    let response = ui
+        .interact(
+            row.response.rect,
+            ui.id().with(format!(
+                "geometry-diagnostic-row-{}-{}-{}",
+                violation.code(),
+                violation.body_a(),
+                violation
+                    .body_b()
+                    .map_or_else(|| "none".to_owned(), ToString::to_string)
+            )),
+            egui::Sense::click(),
+        )
+        .on_hover_text("Focus physical geometry violation");
+    let enabled = response.enabled();
+    let label = geometry_diagnostic_row_action_label(violation);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.clone())
+    });
+    ui.add_space(4.0);
+    response
+        .clicked()
+        .then(|| DiagnosticAction::Geometry(violation.clone()))
+}
+
+fn geometry_violation_message(violation: &GeometryViolation) -> String {
+    match violation {
+        GeometryViolation::BodyUnbuildable(diagnostic) => diagnostic.message.clone(),
+        GeometryViolation::QueryUnsupported(diagnostic) => diagnostic.message.clone(),
+        GeometryViolation::Overlap(diagnostic) => format!(
+            "Penetration {:.6} in at witness ({:.6}, {:.6}, {:.6}) in",
+            diagnostic.penetration_depth,
+            diagnostic.witness.x,
+            diagnostic.witness.y,
+            diagnostic.witness.z
+        ),
+    }
+}
+
+pub(super) fn geometry_diagnostic_row_action_label(violation: &GeometryViolation) -> String {
+    match violation.body_b() {
+        Some(body_b) => format!(
+            "Focus geometry violation {} between {} and {}",
+            violation.code(),
+            violation.body_a(),
+            body_b
+        ),
+        None => format!(
+            "Focus geometry violation {} for {}",
+            violation.code(),
+            violation.body_a()
+        ),
+    }
 }
 
 fn diagnostic_row(
@@ -7411,6 +7533,54 @@ mod tests {
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
+    use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic};
+
+    #[test]
+    fn geometry_diagnostic_text_retains_pair_depth_and_witness() {
+        let mut app = FramerApp::default();
+        let mut wall = app.model.walls[0].clone();
+        wall.id = ElementId::new("diagnostic-overlap-wall");
+        wall.name = "Diagnostic overlap wall".to_owned();
+        wall.start.x += Length::from_whole_inches(12);
+        wall.end.x += Length::from_whole_inches(12);
+        wall.openings.clear();
+        wall.dimensions.clear();
+        app.model.walls.push(wall);
+        app.rebuild();
+
+        let overlap = app
+            .geometry_audit
+            .violations
+            .iter()
+            .find(|violation| matches!(violation, GeometryViolation::Overlap(_)))
+            .expect("fixture should produce an overlap");
+        let body_b = overlap.body_b().expect("overlap retains both bodies");
+        let message = geometry_violation_message(overlap);
+        let action_label = geometry_diagnostic_row_action_label(overlap);
+
+        assert_eq!(overlap.code(), "geometry.overlap");
+        assert!(message.contains("Penetration"));
+        assert!(message.contains("witness"));
+        assert!(action_label.contains(&overlap.body_a().to_string()));
+        assert!(action_label.contains(&body_b.to_string()));
+    }
+
+    #[test]
+    fn unbuildable_geometry_diagnostic_is_violation_styled_and_actionable() {
+        let body = BodyRef::assembly(ElementId::new("bad-wall"), AssemblyKind::Wall);
+        let violation = GeometryViolation::BodyUnbuildable(GeometryBuildDiagnostic::unbuildable(
+            body.clone(),
+            "outline did not triangulate",
+        ));
+
+        assert_eq!(violation.code(), "geometry.body.unbuildable");
+        assert_eq!(
+            geometry_violation_message(&violation),
+            "outline did not triangulate"
+        );
+        assert!(geometry_diagnostic_row_action_label(&violation).contains(&body.to_string()));
+        assert!(geometry_body_label(&body).contains("Wall assembly"));
+    }
 
     #[test]
     fn reconnecting_a_roof_plane_reconciles_the_component_overhangs() {

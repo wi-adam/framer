@@ -29,7 +29,9 @@ use framer_core::{
     concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
     save_project as save_project_document,
 };
-use framer_geometry::{GeometryAudit, PhysicalScene, audit_physical_scene, build_physical_scene};
+use framer_geometry::{
+    GeometryAudit, GeometryViolation, PhysicalScene, audit_physical_scene, build_physical_scene,
+};
 use framer_render::math::Vec3;
 use framer_solver::{
     DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
@@ -57,6 +59,7 @@ pub(crate) struct FramerApp {
     project_plan: Option<ProjectFramePlan>,
     physical_scene: Option<PhysicalScene>,
     geometry_audit: GeometryAudit,
+    active_geometry_violation: Option<GeometryViolation>,
     compliance_report: Option<ComplianceReport>,
     library_issues: Vec<framer_library::LibraryIssue>,
     library_issue_error: Option<String>,
@@ -656,6 +659,7 @@ impl Default for FramerApp {
             project_plan: None,
             physical_scene: None,
             geometry_audit: GeometryAudit::default(),
+            active_geometry_violation: None,
             compliance_report: None,
             library_issues: Vec::new(),
             library_issue_error: None,
@@ -783,6 +787,13 @@ impl FramerApp {
                 self.compliance_report = Some(report);
                 self.physical_scene = Some(physical_scene);
                 self.geometry_audit = geometry_audit;
+                if self
+                    .active_geometry_violation
+                    .as_ref()
+                    .is_some_and(|active| !self.geometry_audit.violations.contains(active))
+                {
+                    self.active_geometry_violation = None;
+                }
                 self.project_plan = Some(plan);
                 self.error = None;
             }
@@ -790,6 +801,7 @@ impl FramerApp {
                 self.project_plan = None;
                 self.physical_scene = None;
                 self.geometry_audit = GeometryAudit::default();
+                self.active_geometry_violation = None;
                 self.compliance_report = None;
                 self.error = Some(error.to_string());
             }
@@ -1080,6 +1092,23 @@ impl FramerApp {
         } else {
             format!("No selectable compliance source for {}", id.0)
         });
+    }
+
+    fn focus_diagnostic(&mut self, action: panels::DiagnosticAction) {
+        match action {
+            panels::DiagnosticAction::Source(source) => self.focus_compliance_source(source),
+            panels::DiagnosticAction::Geometry(violation) => {
+                let code = violation.code();
+                if self.geometry_audit.violations.contains(&violation) {
+                    self.active_geometry_violation = Some(violation);
+                    self.file_status = Some(format!("Focused geometry violation {code}"));
+                } else {
+                    self.active_geometry_violation = None;
+                    self.file_status =
+                        Some(format!("Geometry violation {code} is no longer active"));
+                }
+            }
+        }
     }
 
     fn select_model_element(&mut self, id: &ElementId) -> bool {
@@ -3881,6 +3910,14 @@ mod tests {
         app.redo();
         assert!(app.physical_scene.is_some());
         assert!(!app.geometry_audit.is_clean());
+
+        let active = app.geometry_audit.violations[0].clone();
+        app.focus_diagnostic(panels::DiagnosticAction::Geometry(active.clone()));
+        assert_eq!(app.active_geometry_violation, Some(active));
+
+        app.undo();
+        assert!(app.geometry_audit.is_clean());
+        assert!(app.active_geometry_violation.is_none());
     }
 
     #[test]
