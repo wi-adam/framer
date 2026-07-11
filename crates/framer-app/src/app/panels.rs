@@ -6209,6 +6209,10 @@ fn geometry_diagnostic_row(ui: &mut Ui, violation: &GeometryViolation) -> Option
                 .color(t.text),
         );
     });
+    let Some(label) = geometry_diagnostic_row_action_label(violation) else {
+        ui.add_space(4.0);
+        return None;
+    };
     let response = ui
         .interact(
             row.response.rect,
@@ -6224,7 +6228,6 @@ fn geometry_diagnostic_row(ui: &mut Ui, violation: &GeometryViolation) -> Option
         )
         .on_hover_text("Focus physical geometry violation");
     let enabled = response.enabled();
-    let label = geometry_diagnostic_row_action_label(violation);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.clone())
     });
@@ -6248,20 +6251,17 @@ fn geometry_violation_message(violation: &GeometryViolation) -> String {
     }
 }
 
-pub(super) fn geometry_diagnostic_row_action_label(violation: &GeometryViolation) -> String {
-    match violation.body_b() {
-        Some(body_b) => format!(
+pub(super) fn geometry_diagnostic_row_action_label(
+    violation: &GeometryViolation,
+) -> Option<String> {
+    violation.body_b().map(|body_b| {
+        format!(
             "Focus geometry violation {} between {} and {}",
             violation.code(),
             violation.body_a(),
             body_b
-        ),
-        None => format!(
-            "Focus geometry violation {} for {}",
-            violation.code(),
-            violation.body_a()
-        ),
-    }
+        )
+    })
 }
 
 fn diagnostic_row(
@@ -7556,7 +7556,7 @@ mod tests {
             .expect("fixture should produce an overlap");
         let body_b = overlap.body_b().expect("overlap retains both bodies");
         let message = geometry_violation_message(overlap);
-        let action_label = geometry_diagnostic_row_action_label(overlap);
+        let action_label = geometry_diagnostic_row_action_label(overlap).unwrap();
 
         assert_eq!(overlap.code(), "geometry.overlap");
         assert!(message.contains("Penetration"));
@@ -7566,7 +7566,7 @@ mod tests {
     }
 
     #[test]
-    fn unbuildable_geometry_diagnostic_is_violation_styled_and_actionable() {
+    fn unbuildable_geometry_diagnostic_is_violation_styled_without_focus_action() {
         let body = BodyRef::assembly(ElementId::new("bad-wall"), AssemblyKind::Wall);
         let violation = GeometryViolation::BodyUnbuildable(GeometryBuildDiagnostic::unbuildable(
             body.clone(),
@@ -7578,7 +7578,7 @@ mod tests {
             geometry_violation_message(&violation),
             "outline did not triangulate"
         );
-        assert!(geometry_diagnostic_row_action_label(&violation).contains(&body.to_string()));
+        assert_eq!(geometry_diagnostic_row_action_label(&violation), None);
         assert!(geometry_body_label(&body).contains("Wall assembly"));
     }
 
@@ -7597,7 +7597,7 @@ mod tests {
             geometry_violation_message(&violation),
             "shape pair is not supported"
         );
-        let label = geometry_diagnostic_row_action_label(&violation);
+        let label = geometry_diagnostic_row_action_label(&violation).unwrap();
         assert!(label.contains(&body_a.to_string()));
         assert!(label.contains(&body_b.to_string()));
     }
