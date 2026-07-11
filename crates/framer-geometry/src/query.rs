@@ -14,6 +14,8 @@ struct QueryPiece {
     pose: Pose,
     shape: ConvexPolyhedron,
     signature: Vec<[u64; 3]>,
+    aabb_min: Vector,
+    aabb_max: Vector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +55,26 @@ pub(crate) fn solid_contact(
 
     for (left_index, left_piece) in left_shapes.iter().enumerate() {
         for (right_index, right_piece) in right_shapes.iter().enumerate() {
+            let overlaps = [
+                left_piece.aabb_max.x.min(right_piece.aabb_max.x)
+                    - left_piece.aabb_min.x.max(right_piece.aabb_min.x),
+                left_piece.aabb_max.y.min(right_piece.aabb_max.y)
+                    - left_piece.aabb_min.y.max(right_piece.aabb_min.y),
+                left_piece.aabb_max.z.min(right_piece.aabb_max.z)
+                    - left_piece.aabb_min.z.max(right_piece.aabb_min.z),
+            ];
+            if overlaps.iter().any(|overlap| *overlap < -1.0e-12) {
+                continue;
+            }
+            if overlaps.iter().any(|overlap| *overlap <= 1.0e-12) {
+                let witness = (left_piece.aabb_min
+                    + left_piece.aabb_max
+                    + right_piece.aabb_min
+                    + right_piece.aabb_max)
+                    / 4.0;
+                retain_contact(&mut deepest, 0.0, witness, witness, left_index, right_index)?;
+                continue;
+            }
             let primary = contact(
                 &left_piece.pose,
                 &left_piece.shape,
@@ -220,6 +242,8 @@ fn lower_pieces(side: &str, pieces: &[ConvexPiece]) -> Result<Vec<QueryPiece>, Q
                 pose: Pose::translation(center.x, center.y, center.z),
                 shape,
                 signature: point_signature(source),
+                aabb_min: min,
+                aabb_max: max,
             })
         })
         .collect()

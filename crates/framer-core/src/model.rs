@@ -1005,7 +1005,7 @@ impl BuildingModel {
         let mut end_retraction = None;
 
         for join in &self.wall_joins {
-            if join.kind != WallJoinKind::Corner || !wall.has_endpoint(join.point) {
+            if !wall.has_endpoint(join.point) {
                 continue;
             }
             let other_id = if join.first_wall == wall.id {
@@ -1025,6 +1025,29 @@ impl BuildingModel {
             else {
                 continue;
             };
+            if join.kind == WallJoinKind::Tee && !other.has_endpoint(join.point) {
+                let along = wall_along_axis(wall);
+                let direction = if wall.start == join.point {
+                    along
+                } else {
+                    negate_axis(along)
+                };
+                let adjustment = self.wall_band_max_projection_half_ticks(
+                    other,
+                    direction,
+                    band,
+                    interior_sides,
+                );
+                if wall.start == join.point {
+                    update_max(&mut start_retraction, adjustment);
+                } else {
+                    update_max(&mut end_retraction, adjustment);
+                }
+                continue;
+            }
+            if join.kind != WallJoinKind::Corner {
+                continue;
+            }
             let Some(primary_through) = self.primary_corner_through_wall(join, interior_sides)
             else {
                 continue;
@@ -7133,7 +7156,7 @@ mod tests {
     }
 
     #[test]
-    fn wall_envelope_span_keeps_tee_walls_centerline_bounded() {
+    fn wall_envelope_span_butts_partition_against_through_wall_face() {
         let code = FramingDefaults::irc_2021_starter();
         let mut model = BuildingModel::new();
         model
@@ -7151,9 +7174,15 @@ mod tests {
             model.wall_envelope_span(&model.walls[0]),
             (0.0, Length::from_feet(20.0).inches())
         );
+        let through_half = model
+            .system_for(&model.walls[0])
+            .unwrap()
+            .total_thickness()
+            .inches()
+            / 2.0;
         assert_eq!(
             model.wall_envelope_span(&model.walls[1]),
-            (0.0, Length::from_feet(8.0).inches())
+            (through_half, Length::from_feet(8.0).inches())
         );
     }
 

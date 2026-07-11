@@ -85,7 +85,7 @@ pub(super) fn build_members(
             push_body_result(
                 scene,
                 body_ref,
-                ceiling_member_solid(member, outline.as_deref(), reference),
+                ceiling_member_solid(ceiling, member, outline.as_deref(), reference),
             );
         }
     }
@@ -95,6 +95,11 @@ pub(super) fn build_members(
         .iter()
         .flat_map(|roof_plan| &roof_plan.members)
         .filter(|member| member.kind == MemberKind::RidgeBoard)
+        .collect();
+    let roof_members: Vec<_> = plan
+        .roof_plans
+        .iter()
+        .flat_map(|roof_plan| &roof_plan.members)
         .collect();
     for roof_plan in &plan.roof_plans {
         let plane = model
@@ -106,7 +111,7 @@ pub(super) fn build_members(
             push_body_result(
                 scene,
                 body_ref,
-                roof_member_solid(model, plane, member, &ridge_boards),
+                roof_member_solid(model, plane, member, &ridge_boards, &roof_members),
             );
         }
     }
@@ -169,21 +174,190 @@ fn roof_member_solid(
     plane: Option<&RoofPlane>,
     member: &FrameMember,
     ridge_boards: &[&FrameMember],
+    roof_members: &[&FrameMember],
 ) -> Result<PhysicalSolid, String> {
     let is_common_stick_rafter = member.kind == MemberKind::Rafter
         && plane
             .is_some_and(|plane| roof_member_family(model, plane) == Some(MemberFamily::Rafter));
     if is_common_stick_rafter {
         let plane = plane.ok_or_else(|| "common rafter roof plane is missing".to_string())?;
+        let ridge_setback = ridge_face_setback(member, ridge_boards).unwrap_or(0.0);
+        let valley_setback = roof_members
+            .iter()
+            .filter(|target| target.kind == MemberKind::ValleyRafter)
+            .filter_map(|target| endpoint_face_setback(member, target, true))
+            .fold(0.0, f64::max);
         return build_common_rafter_solid(
             member,
             plane,
             matched_bearing_depth(model, plane).map(Length::inches),
-            ridge_face_setback(member, ridge_boards),
+            Some(ridge_setback.max(valley_setback)).filter(|setback| *setback > 0.0),
         )
         .map(|built| built.solid);
     }
-    spatial_board_solid(member)
+    roof_spatial_board_solid(member, roof_members)
+}
+
+fn roof_spatial_board_solid(
+    member: &FrameMember,
+    roof_members: &[&FrameMember],
+) -> Result<PhysicalSolid, String> {
+    let sloped = member
+        .sloped
+        .ok_or_else(|| "spatial member lacks endpoint placement".to_string())?;
+    let original_start = Point3::new(
+        sloped.start.x.inches(),
+        sloped.start.y.inches(),
+        sloped.low_elevation.inches(),
+    );
+    let original_end = Point3::new(
+        sloped.end.x.inches(),
+        sloped.end.y.inches(),
+        sloped.high_elevation.inches(),
+    );
+    let target_kinds: &[MemberKind] = match member.kind {
+        MemberKind::JackRafter | MemberKind::Blocking => {
+            &[MemberKind::HipRafter, MemberKind::ValleyRafter]
+        }
+        MemberKind::HipRafter => &[MemberKind::Rafter, MemberKind::RidgeBoard],
+        MemberKind::ValleyRafter => &[MemberKind::RidgeBoard],
+        _ => return spatial_board_solid_between(member, original_start, original_end),
+    };
+    let start_setback = if member.kind == MemberKind::Blocking {
+        roof_members
+            .iter()
+            .filter(|target| target_kinds.contains(&target.kind))
+            .filter_map(|target| endpoint_face_setback(member, target, false))
+            .fold(0.0, f64::max)
+    } else {
+        0.0
+    };
+    let end_setback = roof_members
+        .iter()
+        .filter(|target| target_kinds.contains(&target.kind))
+        .filter_map(|target| endpoint_face_setback(member, target, true))
+        .fold(0.0, f64::max);
+    let plan_dx = original_end.x - original_start.x;
+    let plan_dy = original_end.y - original_start.y;
+    let plan_length = (plan_dx * plan_dx + plan_dy * plan_dy).sqrt();
+    if plan_length <= f64::EPSILON || start_setback + end_setback >= plan_length {
+        return Err("roof member face setbacks consume its plan length".into());
+    }
+    let delta = vector_between(original_start, original_end);
+    let start = offset(original_start, delta, start_setback / plan_length);
+    let end = offset(original_end, delta, -end_setback / plan_length);
+    spatial_board_solid_between(member, start, end)
+}
+
+fn endpoint_face_setback(source: &FrameMember, target: &FrameMember, at_end: bool) -> Option<f64> {
+    let source_placement = source.sloped?;
+    let target_placement = target.sloped?;
+    let endpoint = if at_end {
+        source_placement.end
+    } else {
+        source_placement.start
+    };
+    let endpoint_z = if at_end {
+        source_placement.high_elevation.inches()
+    } else {
+        source_placement.low_elevation.inches()
+    };
+    let tolerance = Length::from_ticks(1);
+    let target_dx = (target_placement.end.x - target_placement.start.x).inches();
+    let target_dy = (target_placement.end.y - target_placement.start.y).inches();
+    let target_length_squared = target_dx * target_dx + target_dy * target_dy;
+    if target_length_squared <= f64::EPSILON {
+        return None;
+    }
+    let target_t = ((endpoint.x - target_placement.start.x).inches() * target_dx
+        + (endpoint.y - target_placement.start.y).inches() * target_dy)
+        / target_length_squared;
+    let target_tolerance = tolerance.inches() / target_length_squared.sqrt();
+    if target_t < -target_tolerance || target_t > 1.0 + target_tolerance {
+        return None;
+    }
+
+    let source_start = Point3::new(
+        source_placement.start.x.inches(),
+        source_placement.start.y.inches(),
+        source_placement.low_elevation.inches(),
+    );
+    let source_end = Point3::new(
+        source_placement.end.x.inches(),
+        source_placement.end.y.inches(),
+        source_placement.high_elevation.inches(),
+    );
+    let along = normalized(vector_between(source_start, source_end))?;
+    let plan_length = (along.x * along.x + along.y * along.y).sqrt();
+    if plan_length <= f64::EPSILON {
+        return None;
+    }
+    let plan_direction = Point3::new(along.x / plan_length, along.y / plan_length, 0.0);
+    let source_across = Point3::new(-plan_direction.y, plan_direction.x, 0.0);
+    let mut source_section = normalized(cross(along, source_across))?;
+    if source_section.z < 0.0 {
+        source_section = Point3::new(-source_section.x, -source_section.y, -source_section.z);
+    }
+    let target_length = target_length_squared.sqrt();
+    let target_across = Point3::new(-target_dy / target_length, target_dx / target_length, 0.0);
+    let target_start = Point3::new(
+        target_placement.start.x.inches(),
+        target_placement.start.y.inches(),
+        target_placement.low_elevation.inches(),
+    );
+    let target_end = Point3::new(
+        target_placement.end.x.inches(),
+        target_placement.end.y.inches(),
+        target_placement.high_elevation.inches(),
+    );
+    let target_along = normalized(vector_between(target_start, target_end))?;
+    let mut target_section = normalized(cross(target_along, target_across))?;
+    if target_section.z < 0.0 {
+        target_section = Point3::new(-target_section.x, -target_section.y, -target_section.z);
+    }
+    let source_z = [source.side_offset, source.side_offset + source.side_depth]
+        .map(|offset| endpoint_z + source_section.z * offset.inches());
+    let target_anchor_z = target_placement.low_elevation.inches()
+        + (target_placement.high_elevation - target_placement.low_elevation).inches() * target_t;
+    let target_z = [target.side_offset, target.side_offset + target.side_depth]
+        .map(|offset| target_anchor_z + target_section.z * offset.inches());
+    if source_z[1].min(target_z[1]) < source_z[0].max(target_z[0]) - tolerance.inches() {
+        return None;
+    }
+    let direction_dot = plan_direction.x * target_across.x + plan_direction.y * target_across.y;
+    let approach = direction_dot.abs();
+    if approach <= f64::EPSILON {
+        return None;
+    }
+    let side_sign = if at_end {
+        (-direction_dot).signum()
+    } else {
+        direction_dot.signum()
+    };
+    let half = source.cross_section_depth.inches() * 0.5;
+    let section0 = source.side_offset.inches();
+    let section1 = (source.side_offset + source.side_depth).inches();
+    let min_offset = [-half, half]
+        .into_iter()
+        .flat_map(|across_offset| {
+            [section0, section1].into_iter().map(move |section_offset| {
+                let projection = source_across.x * across_offset * target_across.x
+                    + source_across.y * across_offset * target_across.y
+                    + source_section.x * section_offset * target_across.x
+                    + source_section.y * section_offset * target_across.y;
+                side_sign * projection
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    let endpoint_dx = (endpoint.x - target_placement.start.x).inches();
+    let endpoint_dy = (endpoint.y - target_placement.start.y).inches();
+    let current_side_distance =
+        side_sign * (endpoint_dx * target_across.x + endpoint_dy * target_across.y);
+    let required_side_distance = target.cross_section_depth.inches() * 0.5 - min_offset;
+    if current_side_distance.abs() > required_side_distance + tolerance.inches() {
+        return None;
+    }
+    Some((required_side_distance - current_side_distance).max(0.0) / approach)
 }
 
 fn flat_floor_member_solid(
@@ -197,15 +371,74 @@ fn flat_floor_member_solid(
 }
 
 fn ceiling_member_solid(
+    ceiling: &framer_core::Ceiling,
     member: &FrameMember,
     outline: Option<&[Point2]>,
     reference: f64,
 ) -> Result<PhysicalSolid, String> {
     if member.sloped.is_some() {
-        return spatial_board_solid(member);
+        return sloped_ceiling_member_solid(ceiling, member, reference);
     }
     let outline = outline.ok_or_else(|| "ceiling member region cannot be resolved".to_string())?;
     horizontal_surface_member_solid(outline, SpanDirection::Shorter, member, reference, 1.0)
+}
+
+fn sloped_ceiling_member_solid(
+    ceiling: &framer_core::Ceiling,
+    member: &FrameMember,
+    reference: f64,
+) -> Result<PhysicalSolid, String> {
+    let frame = ceiling
+        .frame(Length::from_inches(reference))
+        .ok_or_else(|| "sloped ceiling member has no valid surface frame".to_string())?;
+    let sloped = member
+        .sloped
+        .ok_or_else(|| "sloped ceiling member lacks endpoint placement".to_string())?;
+    let (up_x, up_y) = frame.up_slope();
+    let thickness = member.cross_section_depth.inches();
+    let mut start = Point3::new(
+        sloped.start.x.inches(),
+        sloped.start.y.inches(),
+        sloped.low_elevation.inches(),
+    );
+    let mut end = Point3::new(
+        sloped.end.x.inches(),
+        sloped.end.y.inches(),
+        sloped.high_elevation.inches(),
+    );
+    match member.kind {
+        MemberKind::CeilingJoist => {
+            let section_up = -frame.rise_over_run()
+                / (1.0 + frame.rise_over_run() * frame.rise_over_run()).sqrt();
+            let section0 = member.side_offset.inches();
+            let section1 = (member.side_offset + member.side_depth).inches();
+            let shift0 = section_up * section0;
+            let shift1 = section_up * section1;
+            let start_trim = thickness - shift0.min(shift1);
+            let end_trim = thickness + shift0.max(shift1);
+            start.x += up_x * start_trim;
+            start.y += up_y * start_trim;
+            start.z = frame.elevation_at(start.x, start.y);
+            end.x -= up_x * end_trim;
+            end.y -= up_y * end_trim;
+            end.z = frame.elevation_at(end.x, end.y);
+        }
+        MemberKind::RimJoist => {
+            let midpoint_x = (start.x + end.x) * 0.5;
+            let midpoint_y = (start.y + end.y) * 0.5;
+            let direction = if frame.up_slope_distance(midpoint_x, midpoint_y) <= thickness * 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
+            start.x += up_x * thickness * 0.5 * direction;
+            start.y += up_y * thickness * 0.5 * direction;
+            end.x += up_x * thickness * 0.5 * direction;
+            end.y += up_y * thickness * 0.5 * direction;
+        }
+        _ => {}
+    }
+    spatial_board_solid_between(member, start, end)
 }
 
 fn horizontal_surface_member_solid(
@@ -220,8 +453,10 @@ fn horizontal_surface_member_solid(
     let half = member.cross_section_depth.inches() / 2.0;
     let (u0, u1, v0, v1) = match member.orientation {
         MemberOrientation::Vertical => (
-            member.elevation.inches(),
-            (member.elevation + member.cut_length).inches(),
+            member.elevation.inches() + half,
+            (member.elevation + member.cut_length).inches()
+                - member.cross_section_depth.inches()
+                - half,
             member.x.inches() - half,
             member.x.inches() + half,
         ),
@@ -252,7 +487,8 @@ fn spatial_board_solid(member: &FrameMember) -> Result<PhysicalSolid, String> {
     let sloped = member
         .sloped
         .ok_or_else(|| "spatial member lacks endpoint placement".to_string())?;
-    board_prism(
+    spatial_board_solid_between(
+        member,
         Point3::new(
             sloped.start.x.inches(),
             sloped.start.y.inches(),
@@ -263,6 +499,17 @@ fn spatial_board_solid(member: &FrameMember) -> Result<PhysicalSolid, String> {
             sloped.end.y.inches(),
             sloped.high_elevation.inches(),
         ),
+    )
+}
+
+fn spatial_board_solid_between(
+    member: &FrameMember,
+    start: Point3,
+    end: Point3,
+) -> Result<PhysicalSolid, String> {
+    board_prism(
+        start,
+        end,
         None,
         -member.cross_section_depth.inches() / 2.0,
         member.cross_section_depth.inches() / 2.0,
@@ -794,5 +1041,32 @@ mod tests {
             .unwrap();
         let built = build_common_rafter_solid(member, plane, None, None).unwrap();
         assert_eq!(built.profile.len(), 4);
+    }
+
+    #[test]
+    fn roof_face_setbacks_ignore_plan_coincident_members_on_other_elevations() {
+        let model = example_shell();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let members: Vec<_> = plan
+            .roof_plans
+            .iter()
+            .flat_map(|plan| &plan.members)
+            .collect();
+        let (jack, hip) = members
+            .iter()
+            .filter(|member| member.kind == MemberKind::JackRafter)
+            .find_map(|jack| {
+                members
+                    .iter()
+                    .filter(|member| member.kind == MemberKind::HipRafter)
+                    .find(|hip| endpoint_face_setback(jack, hip, true).is_some())
+                    .map(|hip| (*jack, *hip))
+            })
+            .expect("the hip example has a jack terminating at a hip");
+        let mut raised = hip.clone();
+        let placement = raised.sloped.as_mut().unwrap();
+        placement.low_elevation += Length::from_feet(10.0);
+        placement.high_elevation += Length::from_feet(10.0);
+        assert!(endpoint_face_setback(jack, &raised, true).is_none());
     }
 }

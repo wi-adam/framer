@@ -895,7 +895,7 @@
         },
         "eave_edge": 0,
         "reference_elevation": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "eave_overhang": {
           "ticks": 0
@@ -953,7 +953,7 @@
         },
         "eave_edge": 0,
         "reference_elevation": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "eave_overhang": {
           "ticks": 0
@@ -1011,7 +1011,7 @@
         },
         "eave_edge": 0,
         "reference_elevation": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "eave_overhang": {
           "ticks": 0
@@ -1061,7 +1061,7 @@
         },
         "eave_edge": 0,
         "reference_elevation": {
-          "ticks": 1536
+          "ticks": 1728
         },
         "eave_overhang": {
           "ticks": 0
@@ -1074,7 +1074,7 @@
     "ceilings": [
       {
         "id": "ceiling-1",
-        "name": "South vault",
+        "name": "South ceiling",
         "level": "level-1",
         "system": "system-ceiling-1",
         "region": {
@@ -1115,22 +1115,11 @@
         },
         "height": {
           "ticks": 192
-        },
-        "slope": {
-          "pitch": {
-            "rise": {
-              "ticks": 48
-            },
-            "run": {
-              "ticks": 192
-            }
-          },
-          "low_edge": 0
         }
       },
       {
         "id": "ceiling-2",
-        "name": "North vault",
+        "name": "North ceiling",
         "level": "level-1",
         "system": "system-ceiling-1",
         "region": {
@@ -1171,17 +1160,6 @@
         },
         "height": {
           "ticks": 192
-        },
-        "slope": {
-          "pitch": {
-            "rise": {
-              "ticks": 48
-            },
-            "run": {
-              "ticks": 192
-            }
-          },
-          "low_edge": 0
         }
       }
     ],
