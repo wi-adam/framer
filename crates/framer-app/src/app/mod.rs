@@ -946,6 +946,7 @@ impl FramerApp {
         self.room_tool_active = false;
         self.opening_drag = None;
         self.wall_drag = None;
+        self.active_geometry_violation = None;
         self.viewport_mode = ViewportMode::Plan;
         self.last_authoring_viewport = ViewportMode::Plan;
     }
@@ -1256,6 +1257,9 @@ impl FramerApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if mode != WorkspaceMode::Plan {
+            self.active_geometry_violation = None;
+        }
         if mode == WorkspaceMode::Render && self.viewport_mode != ViewportMode::Render {
             self.last_authoring_viewport = self.viewport_mode;
         }
@@ -3980,6 +3984,11 @@ mod tests {
         assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
         assert_eq!(app.selected, ordinary_selection);
 
+        app.set_workspace_mode(WorkspaceMode::Design);
+        assert!(app.active_geometry_violation.is_none());
+        let active = app.geometry_audit.violations[0].clone();
+        app.focus_diagnostic(panels::DiagnosticAction::Geometry(active));
+
         app.undo();
         assert!(app.geometry_audit.is_clean());
         assert!(app.active_geometry_violation.is_none());
@@ -4000,6 +4009,15 @@ mod tests {
 
     #[test]
     fn reset_tools_returns_workflow_commands_to_frame() {
+        let active_geometry_violation = GeometryViolation::BodyUnbuildable(
+            framer_geometry::GeometryBuildDiagnostic::unbuildable(
+                framer_geometry::BodyRef::assembly(
+                    ElementId::new("stale-wall"),
+                    framer_geometry::AssemblyKind::Wall,
+                ),
+                "stale fixture",
+            ),
+        );
         let mut app = FramerApp {
             command_tab: actions::WorkflowTab::Plan,
             viewport_mode: ViewportMode::Render,
@@ -4013,6 +4031,7 @@ mod tests {
                 ..Default::default()
             },
             room_tool_active: true,
+            active_geometry_violation: Some(active_geometry_violation),
             ..Default::default()
         };
 
@@ -4024,6 +4043,7 @@ mod tests {
         assert!(!app.dimension_tool.active);
         assert!(!app.draw_wall_tool.active);
         assert!(!app.room_tool_active);
+        assert!(app.active_geometry_violation.is_none());
     }
 
     #[test]
