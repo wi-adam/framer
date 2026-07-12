@@ -22,7 +22,7 @@ use camera_3d::{ViewCubeAction, ViewCubeOrientation};
 // Referenced only from the `tests` module below (their non-test users moved into
 // camera_3d), so gate the imports to keep non-test builds warning-clean.
 #[cfg(test)]
-use camera_3d::{DOLLY_MAX, DOLLY_MIN, PAN_MAX_RADII};
+use camera_3d::{DOLLY_MAX, DOLLY_MIN, PAN_MAX_RADII, ZOOM_MAX_3D};
 #[cfg(test)]
 use framer_core::BuildingModel;
 #[cfg(test)]
@@ -742,7 +742,10 @@ mod tests {
         assert!(view.pitch > initial_pitch);
 
         view.zoom_by(10.0);
-        assert_eq!(view.zoom, 3.0);
+        assert_eq!(view.zoom, 10.0);
+
+        view.zoom_by(10.0);
+        assert_eq!(view.zoom, ZOOM_MAX_3D);
 
         view.snap_to(ViewCubeAction::TOP);
         assert_close(view.yaw, 0.0);
