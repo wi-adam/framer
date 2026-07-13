@@ -1,4 +1,5 @@
 mod actions;
+mod component_visibility;
 mod design;
 mod draw_wall;
 mod history;
@@ -40,6 +41,10 @@ use framer_solver::{
 };
 use framer_standards::ComplianceReport;
 
+use component_visibility::{
+    AuthoredComponentKind, ComponentAppearance, ComponentKey, ComponentSelection,
+    ComponentVisibility, IsolationMode, SelectionOp, key_for_selection,
+};
 use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
@@ -57,6 +62,8 @@ pub(crate) struct FramerApp {
     model: BuildingModel,
     selected_wall: usize,
     selected: Selection,
+    component_selection: ComponentSelection,
+    component_visibility: ComponentVisibility,
     project_plan: Option<ProjectFramePlan>,
     physical_scene: Option<PhysicalScene>,
     geometry_audit: GeometryAudit,
@@ -143,6 +150,7 @@ struct Snapshot {
     model: BuildingModel,
     selected: Selection,
     selected_wall: usize,
+    component_selection: ComponentSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +665,8 @@ impl Default for FramerApp {
             model: BuildingModel::demo_shell(),
             selected_wall: 0,
             selected: Selection::Wall,
+            component_selection: ComponentSelection::default(),
+            component_visibility: ComponentVisibility::default(),
             project_plan: None,
             physical_scene: None,
             geometry_audit: GeometryAudit::default(),
@@ -740,7 +750,6 @@ impl FramerApp {
     fn rebuild(&mut self) {
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
-            self.selected = Selection::Wall;
         }
         self.reconcile_active_level();
 
@@ -808,6 +817,7 @@ impl FramerApp {
                 self.error = Some(error.to_string());
             }
         }
+        self.prune_component_presentation();
     }
 
     /// Capture the current restorable state (authored model + selection).
@@ -816,6 +826,7 @@ impl FramerApp {
             model: self.model.clone(),
             selected: self.selected.clone(),
             selected_wall: self.selected_wall,
+            component_selection: self.component_selection.clone(),
         }
     }
 
@@ -825,6 +836,258 @@ impl FramerApp {
         self.model = snapshot.model;
         self.selected = snapshot.selected;
         self.selected_wall = snapshot.selected_wall;
+        self.component_selection = snapshot.component_selection;
+    }
+
+    fn selected_wall_id(&self) -> Option<&str> {
+        self.model
+            .walls
+            .get(self.selected_wall)
+            .map(|wall| wall.id.0.as_str())
+    }
+
+    fn primary_component_key(&self) -> Option<ComponentKey> {
+        key_for_selection(&self.selected, self.selected_wall_id())
+    }
+
+    fn selected_components(&self) -> Vec<ComponentKey> {
+        self.component_selection
+            .active_items(self.primary_component_key())
+    }
+
+    fn selected_component_count(&self) -> usize {
+        self.selected_components().len()
+    }
+
+    fn component_is_selected(&self, key: &ComponentKey) -> bool {
+        self.selected_components().iter().any(|item| item == key)
+    }
+
+    fn renderable_selected_components(&self) -> Vec<ComponentKey> {
+        self.selected_components()
+            .into_iter()
+            .filter(ComponentKey::is_renderable)
+            .collect()
+    }
+
+    fn isolate_selected_components(&mut self, mode: IsolationMode) {
+        let targets = self.renderable_selected_components();
+        self.component_visibility.isolate(mode, targets);
+    }
+
+    fn hide_selected_components(&mut self) {
+        let selected = self.renderable_selected_components();
+        self.component_visibility.hide(selected);
+    }
+
+    fn apply_selection(
+        &mut self,
+        selection: Selection,
+        wall_context: Option<usize>,
+        op: SelectionOp,
+    ) {
+        let current_primary = self.primary_component_key();
+        let target_wall_id = wall_context
+            .and_then(|index| self.model.walls.get(index))
+            .map(|wall| wall.id.0.as_str())
+            .or_else(|| self.selected_wall_id());
+        let target_key = key_for_selection(&selection, target_wall_id);
+
+        match (op, target_key) {
+            (SelectionOp::Toggle, Some(target_key)) => {
+                let primary = self.component_selection.toggle(current_primary, target_key);
+                if let Some(primary) = primary {
+                    if !self.select_component_key_as_primary(&primary) {
+                        self.selected = Selection::None;
+                        self.component_selection.replace(None);
+                    }
+                } else {
+                    self.selected = Selection::None;
+                }
+            }
+            (_, target_key) => {
+                if let Some(index) = wall_context {
+                    self.selected_wall = index;
+                }
+                self.selected = selection;
+                self.component_selection.replace(target_key);
+            }
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected = Selection::None;
+        self.component_selection.replace(None);
+    }
+
+    fn select_component_key_as_primary(&mut self, key: &ComponentKey) -> bool {
+        match key {
+            ComponentKey::Authored { kind, id } => {
+                match kind {
+                    AuthoredComponentKind::Wall => {
+                        let Some(index) = self.model.walls.iter().position(|wall| wall.id.0 == *id)
+                        else {
+                            return false;
+                        };
+                        self.selected_wall = index;
+                        self.selected = Selection::Wall;
+                    }
+                    AuthoredComponentKind::Opening => {
+                        let Some(index) = self.model.walls.iter().position(|wall| {
+                            wall.openings.iter().any(|opening| opening.id.0 == *id)
+                        }) else {
+                            return false;
+                        };
+                        self.selected_wall = index;
+                        self.selected = Selection::Opening(id.clone());
+                    }
+                    AuthoredComponentKind::Dimension => {
+                        let Some(index) = self.model.walls.iter().position(|wall| {
+                            wall.dimensions
+                                .iter()
+                                .any(|dimension| dimension.id.0 == *id)
+                        }) else {
+                            return false;
+                        };
+                        self.selected_wall = index;
+                        self.selected = Selection::Dimension(id.clone());
+                    }
+                    AuthoredComponentKind::Join => self.selected = Selection::Join(id.clone()),
+                    AuthoredComponentKind::Room => self.selected = Selection::Room(id.clone()),
+                    AuthoredComponentKind::RoofPlane => {
+                        self.selected = Selection::RoofPlane(id.clone());
+                    }
+                    AuthoredComponentKind::Ceiling => {
+                        self.selected = Selection::Ceiling(id.clone());
+                    }
+                    AuthoredComponentKind::FloorDeck => {
+                        self.selected = Selection::FloorDeck(id.clone());
+                    }
+                    AuthoredComponentKind::FurnishingInstance => {
+                        self.selected = Selection::FurnishingInstance(id.clone());
+                    }
+                    AuthoredComponentKind::MepInstance => {
+                        self.selected = Selection::MepInstance(id.clone());
+                    }
+                }
+            }
+            ComponentKey::GeneratedMember { host_id, member_id } => {
+                if self.selected_member(host_id, member_id).is_none() {
+                    return false;
+                }
+                if let Some(index) = self
+                    .model
+                    .walls
+                    .iter()
+                    .position(|wall| wall.id.0 == *host_id)
+                {
+                    self.selected_wall = index;
+                }
+                self.selected = Selection::Member {
+                    source_id: host_id.clone(),
+                    member_id: member_id.clone(),
+                };
+            }
+        }
+        true
+    }
+
+    fn live_component_keys(&self) -> std::collections::BTreeSet<ComponentKey> {
+        let mut live = std::collections::BTreeSet::new();
+        for wall in &self.model.walls {
+            live.insert(ComponentKey::authored(
+                AuthoredComponentKind::Wall,
+                wall.id.0.clone(),
+            ));
+            live.extend(wall.openings.iter().map(|opening| {
+                ComponentKey::authored(AuthoredComponentKind::Opening, opening.id.0.clone())
+            }));
+            live.extend(wall.dimensions.iter().map(|dimension| {
+                ComponentKey::authored(AuthoredComponentKind::Dimension, dimension.id.0.clone())
+            }));
+        }
+        live.extend(
+            self.model
+                .wall_joins
+                .iter()
+                .map(|join| ComponentKey::authored(AuthoredComponentKind::Join, join.id.0.clone())),
+        );
+        live.extend(
+            self.model
+                .rooms
+                .iter()
+                .map(|room| ComponentKey::authored(AuthoredComponentKind::Room, room.id.0.clone())),
+        );
+        live.extend(self.model.roof_planes.iter().map(|plane| {
+            ComponentKey::authored(AuthoredComponentKind::RoofPlane, plane.id.0.clone())
+        }));
+        live.extend(self.model.ceilings.iter().map(|ceiling| {
+            ComponentKey::authored(AuthoredComponentKind::Ceiling, ceiling.id.0.clone())
+        }));
+        live.extend(self.model.floor_decks.iter().map(|deck| {
+            ComponentKey::authored(AuthoredComponentKind::FloorDeck, deck.id.0.clone())
+        }));
+        live.extend(self.model.furnishing_instances.iter().map(|instance| {
+            ComponentKey::authored(
+                AuthoredComponentKind::FurnishingInstance,
+                instance.id.0.clone(),
+            )
+        }));
+        live.extend(self.model.mep_instances.iter().map(|instance| {
+            ComponentKey::authored(AuthoredComponentKind::MepInstance, instance.id.0.clone())
+        }));
+        if let Some(plan) = &self.project_plan {
+            for (host_id, members) in plan
+                .wall_plans
+                .iter()
+                .map(|host| (&host.wall.0, host.members.as_slice()))
+                .chain(
+                    plan.roof_plans
+                        .iter()
+                        .map(|host| (&host.roof.0, host.members.as_slice())),
+                )
+                .chain(
+                    plan.ceiling_plans
+                        .iter()
+                        .map(|host| (&host.ceiling.0, host.members.as_slice())),
+                )
+                .chain(
+                    plan.floor_plans
+                        .iter()
+                        .map(|host| (&host.floor.0, host.members.as_slice())),
+                )
+            {
+                live.extend(
+                    members
+                        .iter()
+                        .map(|member| ComponentKey::member(host_id.clone(), member.id.clone())),
+                );
+            }
+        }
+        live
+    }
+
+    fn prune_component_presentation(&mut self) {
+        let current_primary = self.primary_component_key();
+        if self.component_selection.primary() != current_primary.as_ref() {
+            self.component_selection.replace(current_primary);
+        }
+        let live = self.live_component_keys();
+        self.component_selection.retain(|key| live.contains(key));
+        self.component_visibility.retain(|key| live.contains(key));
+
+        if self
+            .primary_component_key()
+            .is_some_and(|key| !live.contains(&key))
+        {
+            if let Some(primary) = self.component_selection.primary().cloned() {
+                if !self.select_component_key_as_primary(&primary) {
+                    self.clear_selection();
+                }
+            } else {
+                self.clear_selection();
+            }
+        }
     }
 
     /// Run a discrete document edit, recording one undo step labelled `label`
@@ -950,6 +1213,8 @@ impl FramerApp {
         self.active_geometry_violation = None;
         self.viewport_mode = ViewportMode::Plan;
         self.last_authoring_viewport = ViewportMode::Plan;
+        self.component_selection = ComponentSelection::default();
+        self.component_visibility = ComponentVisibility::default();
     }
 
     fn new_project(&mut self) {
@@ -1142,31 +1407,32 @@ impl FramerApp {
             .enumerate()
             .find_map(|(index, wall)| (&wall.id == id).then(|| (index, wall.level.clone())))
         {
-            self.selected_wall = index;
             self.set_active_level(level);
-            self.selected = Selection::Wall;
+            self.apply_selection(Selection::Wall, Some(index), SelectionOp::Replace);
             return true;
         }
 
-        for (index, wall) in self.model.walls.iter().enumerate() {
-            if wall.openings.iter().any(|opening| &opening.id == id) {
-                self.selected_wall = index;
-                self.set_active_level(wall.level.clone());
-                self.selected = Selection::Opening(id.0.clone());
-                return true;
-            }
-            if wall.dimensions.iter().any(|dimension| &dimension.id == id) {
-                self.selected_wall = index;
-                self.set_active_level(wall.level.clone());
-                self.selected = Selection::Dimension(id.0.clone());
-                return true;
-            }
-            if wall.bracing.iter().any(|panel| &panel.id == id) {
-                self.selected_wall = index;
-                self.set_active_level(wall.level.clone());
-                self.selected = Selection::Wall;
-                return true;
-            }
+        if let Some((index, level, selection)) =
+            self.model
+                .walls
+                .iter()
+                .enumerate()
+                .find_map(|(index, wall)| {
+                    let selection = if wall.openings.iter().any(|opening| &opening.id == id) {
+                        Some(Selection::Opening(id.0.clone()))
+                    } else if wall.dimensions.iter().any(|dimension| &dimension.id == id) {
+                        Some(Selection::Dimension(id.0.clone()))
+                    } else if wall.bracing.iter().any(|panel| &panel.id == id) {
+                        Some(Selection::Wall)
+                    } else {
+                        None
+                    };
+                    selection.map(|selection| (index, wall.level.clone(), selection))
+                })
+        {
+            self.set_active_level(level);
+            self.apply_selection(selection, Some(index), SelectionOp::Replace);
+            return true;
         }
 
         if let Some(level) = self
@@ -1176,31 +1442,43 @@ impl FramerApp {
             .find_map(|level| (&level.id == id).then(|| level.id.clone()))
         {
             self.set_active_level(level.clone());
-            self.selected = Selection::Level(level.0);
+            self.apply_selection(Selection::Level(level.0), None, SelectionOp::Replace);
             return true;
         }
         if let Some(room) = self.model.rooms.iter().find(|room| &room.id == id) {
-            self.set_active_level(room.level.clone());
-            self.selected = Selection::Room(id.0.clone());
+            let level = room.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(Selection::Room(id.0.clone()), None, SelectionOp::Replace);
             return true;
         }
         if let Some(plane) = self.model.roof_planes.iter().find(|plane| &plane.id == id) {
-            self.set_active_level(plane.level.clone());
-            self.selected = Selection::RoofPlane(id.0.clone());
+            let level = plane.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(
+                Selection::RoofPlane(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if let Some(ceiling) = self.model.ceilings.iter().find(|ceiling| &ceiling.id == id) {
-            self.set_active_level(ceiling.level.clone());
-            self.selected = Selection::Ceiling(id.0.clone());
+            let level = ceiling.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(Selection::Ceiling(id.0.clone()), None, SelectionOp::Replace);
             return true;
         }
         if let Some(deck) = self.model.floor_decks.iter().find(|deck| &deck.id == id) {
-            self.set_active_level(deck.level.clone());
-            self.selected = Selection::FloorDeck(id.0.clone());
+            let level = deck.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(
+                Selection::FloorDeck(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if self.model.systems.iter().any(|system| &system.id == id) {
-            self.selected = Selection::System(id.0.clone());
+            self.apply_selection(Selection::System(id.0.clone()), None, SelectionOp::Replace);
             return true;
         }
         if self
@@ -1209,7 +1487,11 @@ impl FramerApp {
             .iter()
             .any(|material| &material.id == id)
         {
-            self.selected = Selection::Material(id.0.clone());
+            self.apply_selection(
+                Selection::Material(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if self
@@ -1218,15 +1500,27 @@ impl FramerApp {
             .iter()
             .any(|furnishing| &furnishing.id == id)
         {
-            self.selected = Selection::Furnishing(id.0.clone());
+            self.apply_selection(
+                Selection::Furnishing(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if self.model.mep_objects.iter().any(|object| &object.id == id) {
-            self.selected = Selection::MepObject(id.0.clone());
+            self.apply_selection(
+                Selection::MepObject(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if self.model.standards_packs.iter().any(|pack| &pack.id == id) {
-            self.selected = Selection::StandardsPack(id.0.clone());
+            self.apply_selection(
+                Selection::StandardsPack(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if let Some(instance) = self
@@ -1235,8 +1529,13 @@ impl FramerApp {
             .iter()
             .find(|instance| &instance.id == id)
         {
-            self.set_active_level(instance.level.clone());
-            self.selected = Selection::FurnishingInstance(id.0.clone());
+            let level = instance.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(
+                Selection::FurnishingInstance(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if let Some(instance) = self
@@ -1245,8 +1544,13 @@ impl FramerApp {
             .iter()
             .find(|instance| &instance.id == id)
         {
-            self.set_active_level(instance.level.clone());
-            self.selected = Selection::MepInstance(id.0.clone());
+            let level = instance.level.clone();
+            self.set_active_level(level);
+            self.apply_selection(
+                Selection::MepInstance(id.0.clone()),
+                None,
+                SelectionOp::Replace,
+            );
             return true;
         }
         if let Some(level) = self
@@ -1256,7 +1560,7 @@ impl FramerApp {
             .find_map(|line| (&line.id == id).then(|| line.level.clone()))
         {
             self.set_active_level(level.clone());
-            self.selected = Selection::Level(level.0);
+            self.apply_selection(Selection::Level(level.0), None, SelectionOp::Replace);
             return true;
         }
 
@@ -1301,6 +1605,18 @@ impl FramerApp {
                     self.viewport_mode = self.last_authoring_viewport;
                 }
                 self.select_authored_for_design_mode();
+                if self
+                    .component_visibility
+                    .isolation_targets()
+                    .iter()
+                    .any(|target| !target.has_design_3d_geometry())
+                {
+                    self.component_visibility.exit_isolation();
+                    self.file_status = Some(
+                        "Exited isolation — opening, corner, and member groups require Plan 3D"
+                            .to_owned(),
+                    );
+                }
             }
             WorkspaceMode::Render => {
                 self.deactivate_placement_tools();
@@ -1351,6 +1667,9 @@ impl FramerApp {
     }
 
     fn is_selection_deletable(&self) -> bool {
+        if self.selected_component_count() > 1 {
+            return false;
+        }
         matches!(
             self.selected,
             Selection::Opening(_)
@@ -1405,6 +1724,29 @@ impl FramerApp {
             actions::ActionId::Redo => self.history.can_redo(),
             actions::ActionId::ExportComplianceReport => self.compliance_report.is_some(),
             actions::ActionId::DeleteSelection => self.is_selection_deletable(),
+            actions::ActionId::IsolateDim | actions::ActionId::IsolateHide => {
+                let targets = self.renderable_selected_components();
+                self.viewport_mode == ViewportMode::Axonometric
+                    && self.workspace_mode != WorkspaceMode::Render
+                    && !targets.is_empty()
+                    && (self.workspace_mode.shows_generated_plan()
+                        || targets.iter().all(ComponentKey::has_design_3d_geometry))
+            }
+            actions::ActionId::ExitIsolation => {
+                self.workspace_mode != WorkspaceMode::Render
+                    && self.component_visibility.isolation_mode().is_some()
+            }
+            actions::ActionId::HideSelection => {
+                let targets = self.renderable_selected_components();
+                self.workspace_mode != WorkspaceMode::Render
+                    && !targets.is_empty()
+                    && (self.workspace_mode.shows_generated_plan()
+                        || targets.iter().all(ComponentKey::has_design_3d_geometry))
+            }
+            actions::ActionId::ShowAllComponents => {
+                self.workspace_mode != WorkspaceMode::Render
+                    && self.component_visibility.has_hidden()
+            }
             actions::ActionId::CommandSearch
             | actions::ActionId::NewProject
             | actions::ActionId::OpenProject
@@ -1446,12 +1788,56 @@ impl FramerApp {
         if let Some(reason) = self.action_context_disabled_reason(action.enabled_context) {
             return Some(reason);
         }
+        if self.workspace_mode == WorkspaceMode::Render
+            && matches!(
+                id,
+                actions::ActionId::IsolateDim
+                    | actions::ActionId::IsolateHide
+                    | actions::ActionId::ExitIsolation
+                    | actions::ActionId::HideSelection
+                    | actions::ActionId::ShowAllComponents
+            )
+        {
+            return Some("Available in the interactive authoring and Plan views");
+        }
 
         match id {
             actions::ActionId::Undo => Some("Nothing to undo"),
             actions::ActionId::Redo => Some("Nothing to redo"),
             actions::ActionId::ExportComplianceReport => Some("No compliance report available"),
+            actions::ActionId::DeleteSelection if self.selected_component_count() > 1 => {
+                Some("Delete is available for a single selected component")
+            }
             actions::ActionId::DeleteSelection => Some("Select an object to delete"),
+            actions::ActionId::IsolateDim | actions::ActionId::IsolateHide => {
+                let targets = self.renderable_selected_components();
+                if self.viewport_mode == ViewportMode::Axonometric
+                    && !targets.is_empty()
+                    && !self.workspace_mode.shows_generated_plan()
+                    && targets
+                        .iter()
+                        .any(|target| !target.has_design_3d_geometry())
+                {
+                    Some("Opening, corner, and generated-member isolation is available in Plan 3D")
+                } else {
+                    Some("Select one or more components in the 3D view")
+                }
+            }
+            actions::ActionId::ExitIsolation => Some("No component isolation is active"),
+            actions::ActionId::HideSelection => {
+                let targets = self.renderable_selected_components();
+                if !targets.is_empty()
+                    && !self.workspace_mode.shows_generated_plan()
+                    && targets
+                        .iter()
+                        .any(|target| !target.has_design_3d_geometry())
+                {
+                    Some("Opening, corner, and generated-member visibility is available in Plan")
+                } else {
+                    Some("Select one or more visible components")
+                }
+            }
+            actions::ActionId::ShowAllComponents => Some("No components are hidden"),
             actions::ActionId::CommandSearch
             | actions::ActionId::NewProject
             | actions::ActionId::OpenProject
@@ -1519,6 +1905,15 @@ impl FramerApp {
             actions::ActionId::ToolVault => self.toggle_vault_tool(),
             actions::ActionId::ToolFloor => self.toggle_floor_tool(),
             actions::ActionId::DeleteSelection => self.delete_selected(),
+            actions::ActionId::IsolateDim => {
+                self.isolate_selected_components(IsolationMode::DimOthers);
+            }
+            actions::ActionId::IsolateHide => {
+                self.isolate_selected_components(IsolationMode::HideOthers);
+            }
+            actions::ActionId::ExitIsolation => self.component_visibility.exit_isolation(),
+            actions::ActionId::HideSelection => self.hide_selected_components(),
+            actions::ActionId::ShowAllComponents => self.component_visibility.show_all(),
             actions::ActionId::AddDoor => self.add_opening(OpeningKind::Door),
             actions::ActionId::AddWindow => self.add_opening(OpeningKind::Window),
             actions::ActionId::AddGarageDoor => self.add_opening(OpeningKind::GarageDoor),
@@ -1546,6 +1941,13 @@ impl FramerApp {
         }
 
         if ctx.text_edit_focused() {
+            return;
+        }
+
+        // Menus and other egui popups own Escape and keyboard navigation while
+        // open. Leave their input untouched so dismissing the visibility menu
+        // cannot also clear the underlying component selection.
+        if egui::Popup::is_any_open(ctx) {
             return;
         }
 
@@ -2104,7 +2506,7 @@ impl FramerApp {
         self.dimension_tool.clear_picks();
         if dimension_was_selected {
             self.dimension_status = None;
-            self.selected = Selection::Wall;
+            self.clear_selection();
             return;
         }
         if dimension_tool_was_active {
@@ -2113,44 +2515,71 @@ impl FramerApp {
         }
 
         if !matches!(self.selected, Selection::None) {
-            self.selected = Selection::None;
+            self.clear_selection();
         }
     }
 
     fn select_authored_for_design_mode(&mut self) {
-        if let Selection::Member { source_id, .. } = &self.selected {
-            if let Some(index) = self
-                .model
-                .walls
-                .iter()
-                .position(|wall| wall.id.0 == *source_id)
-            {
-                self.selected_wall = index;
-                self.selected = Selection::Wall;
-            } else if self
-                .model
-                .roof_planes
-                .iter()
-                .any(|plane| plane.id.0 == *source_id)
-            {
-                self.selected = Selection::RoofPlane(source_id.clone());
-            } else if self
-                .model
-                .ceilings
-                .iter()
-                .any(|ceiling| ceiling.id.0 == *source_id)
-            {
-                self.selected = Selection::Ceiling(source_id.clone());
-            } else if self
-                .model
-                .floor_decks
-                .iter()
-                .any(|deck| deck.id.0 == *source_id)
-            {
-                self.selected = Selection::FloorDeck(source_id.clone());
-            } else {
-                self.selected = Selection::None;
+        let authored = self
+            .selected_components()
+            .into_iter()
+            .filter_map(|key| match key {
+                ComponentKey::GeneratedMember { host_id, .. } => {
+                    self.authored_host_component(&host_id)
+                }
+                authored @ ComponentKey::Authored { .. } => Some(authored),
+            })
+            .fold(Vec::new(), |mut unique, key| {
+                if !unique.contains(&key) {
+                    unique.push(key);
+                }
+                unique
+            });
+        self.component_selection.set_items(authored);
+        if let Some(primary) = self.component_selection.primary().cloned() {
+            if !self.select_component_key_as_primary(&primary) {
+                self.clear_selection();
             }
+        } else if matches!(self.selected, Selection::Member { .. }) {
+            self.clear_selection();
+        }
+    }
+
+    fn authored_host_component(&self, host_id: &str) -> Option<ComponentKey> {
+        if self.model.walls.iter().any(|wall| wall.id.0 == host_id) {
+            Some(ComponentKey::authored(AuthoredComponentKind::Wall, host_id))
+        } else if self
+            .model
+            .roof_planes
+            .iter()
+            .any(|plane| plane.id.0 == host_id)
+        {
+            Some(ComponentKey::authored(
+                AuthoredComponentKind::RoofPlane,
+                host_id,
+            ))
+        } else if self
+            .model
+            .ceilings
+            .iter()
+            .any(|ceiling| ceiling.id.0 == host_id)
+        {
+            Some(ComponentKey::authored(
+                AuthoredComponentKind::Ceiling,
+                host_id,
+            ))
+        } else if self
+            .model
+            .floor_decks
+            .iter()
+            .any(|deck| deck.id.0 == host_id)
+        {
+            Some(ComponentKey::authored(
+                AuthoredComponentKind::FloorDeck,
+                host_id,
+            ))
+        } else {
+            None
         }
     }
 
@@ -3231,6 +3660,9 @@ impl FramerApp {
         opening_id: String,
         handle: OpeningEditHandle,
     ) {
+        if self.selected_component_count() != 1 {
+            return;
+        }
         let Some(wall) = self.model.walls.get(wall_index) else {
             return;
         };
@@ -3299,6 +3731,9 @@ impl FramerApp {
     }
 
     fn begin_wall_drag(&mut self, wall_index: usize, handle: WallEditHandle) {
+        if self.selected_component_count() != 1 {
+            return;
+        }
         if self.model.walls.get(wall_index).is_none() {
             return;
         }
@@ -3575,30 +4010,46 @@ impl FramerApp {
             .find(|member| member.id == member_id)
     }
 
+    #[cfg(test)]
     fn handle_view_click(&mut self, click: ViewClick) {
+        self.handle_view_click_with_op(click, SelectionOp::Replace);
+    }
+
+    fn handle_view_click_with_op(&mut self, click: ViewClick, selection_op: SelectionOp) {
         self.opening_drag = None;
         self.active_geometry_violation = None;
         match click {
             ViewClick::Wall(index) => {
-                self.selected_wall = index;
-                self.selected = Selection::Wall;
-                self.open_wall_view_from_design_shell();
+                self.apply_selection(Selection::Wall, Some(index), selection_op);
+                if selection_op == SelectionOp::Replace {
+                    self.open_wall_view_from_design_shell();
+                }
             }
             ViewClick::Opening {
                 wall_index,
                 opening_id,
             } => {
-                self.selected_wall = wall_index;
-                self.selected = Selection::Opening(opening_id);
-                self.open_wall_view_from_design_shell();
+                self.apply_selection(
+                    Selection::Opening(opening_id),
+                    Some(wall_index),
+                    selection_op,
+                );
+                if selection_op == SelectionOp::Replace {
+                    self.open_wall_view_from_design_shell();
+                }
             }
             ViewClick::Dimension {
                 wall_index,
                 dimension_id,
             } => {
-                self.selected_wall = wall_index;
-                self.selected = Selection::Dimension(dimension_id);
-                self.open_wall_view_from_design_shell();
+                self.apply_selection(
+                    Selection::Dimension(dimension_id),
+                    Some(wall_index),
+                    selection_op,
+                );
+                if selection_op == SelectionOp::Replace {
+                    self.open_wall_view_from_design_shell();
+                }
             }
             ViewClick::DimensionAnchor { wall_index, anchor } => {
                 self.handle_dimension_anchor_click(wall_index, anchor);
@@ -3629,47 +4080,53 @@ impl FramerApp {
                 self.handle_place_vault(point);
             }
             ViewClick::Room { room_id } => {
-                self.selected = Selection::Room(room_id);
+                self.apply_selection(Selection::Room(room_id), None, selection_op);
             }
             ViewClick::Join { join_id } => {
-                self.selected = Selection::Join(join_id);
+                self.apply_selection(Selection::Join(join_id), None, selection_op);
             }
             ViewClick::FurnishingInstance { instance_id } => {
-                self.selected = Selection::FurnishingInstance(instance_id);
+                self.apply_selection(
+                    Selection::FurnishingInstance(instance_id),
+                    None,
+                    selection_op,
+                );
             }
             ViewClick::MepInstance { instance_id } => {
-                self.selected = Selection::MepInstance(instance_id);
+                self.apply_selection(Selection::MepInstance(instance_id), None, selection_op);
             }
             ViewClick::Member {
                 source_id,
                 member_id,
             } => {
                 if self.workspace_mode.shows_generated_plan() {
-                    if let Some(index) = self
+                    let wall_context = self
                         .model
                         .walls
                         .iter()
                         .position(|wall| wall.id.0 == source_id)
-                    {
-                        self.selected_wall = index;
-                    }
-                    self.selected = Selection::Member {
-                        source_id,
-                        member_id,
-                    };
+                        .or(Some(self.selected_wall));
+                    self.apply_selection(
+                        Selection::Member {
+                            source_id,
+                            member_id,
+                        },
+                        wall_context,
+                        selection_op,
+                    );
                 }
             }
             ViewClick::RoofPlane { id } => {
-                self.selected = Selection::RoofPlane(id);
+                self.apply_selection(Selection::RoofPlane(id), None, selection_op);
             }
             ViewClick::Ceiling { id } => {
-                self.selected = Selection::Ceiling(id);
+                self.apply_selection(Selection::Ceiling(id), None, selection_op);
             }
             ViewClick::FloorDeck { id } => {
-                self.selected = Selection::FloorDeck(id);
+                self.apply_selection(Selection::FloorDeck(id), None, selection_op);
             }
             ViewClick::EmptyCanvas => {
-                self.selected = Selection::None;
+                self.clear_selection();
             }
         }
     }
@@ -3815,6 +4272,14 @@ impl FramerApp {
     /// same panel layout without an [`eframe::Frame`], which can't be
     /// constructed outside the eframe runtime.
     pub(crate) fn ui_root(&mut self, ui: &mut egui::Ui) {
+        // A few legacy authoring paths still write the single inspector
+        // selection directly. Reconcile at the frame boundary so those paths
+        // cannot revive an older ordered component set when their old primary
+        // is selected again later.
+        let current_primary = self.primary_component_key();
+        if self.component_selection.primary() != current_primary.as_ref() {
+            self.component_selection.replace(current_primary);
+        }
         let t = design::active();
         Panel::top("app-header")
             .frame(
@@ -5246,7 +5711,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_exits_selected_dimension() {
+    fn escape_clears_selected_dimension() {
         let mut app = FramerApp::default();
         app.dimension_tool.active = true;
         app.dimension_tool.first_anchor = Some(DimensionAnchorPick {
@@ -5261,7 +5726,8 @@ mod tests {
         assert!(!app.dimension_tool.active);
         assert_eq!(app.dimension_tool.first_anchor, None);
         assert_eq!(app.dimension_tool.second_anchor, None);
-        assert_eq!(app.selected, Selection::Wall);
+        assert_eq!(app.selected, Selection::None);
+        assert!(app.selected_components().is_empty());
         assert_eq!(app.dimension_status, None);
     }
 
@@ -5297,6 +5763,265 @@ mod tests {
         app.handle_view_click(ViewClick::EmptyCanvas);
 
         assert_eq!(app.selected, Selection::None);
+        assert!(app.selected_components().is_empty());
+    }
+
+    #[test]
+    fn command_click_toggles_stable_wall_component_selection() {
+        let mut app = FramerApp::default();
+        let wall_a = app.model.walls[0].id.0.clone();
+        let wall_b = app.model.walls[1].id.0.clone();
+
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+
+        assert_eq!(
+            app.selected_components(),
+            vec![
+                ComponentKey::authored(AuthoredComponentKind::Wall, wall_a.clone()),
+                ComponentKey::authored(AuthoredComponentKind::Wall, wall_b.clone()),
+            ]
+        );
+        assert_eq!(
+            app.selected_wall, 1,
+            "the most recently added wall is primary"
+        );
+        assert_eq!(app.selected, Selection::Wall);
+        assert!(!app.action_enabled(actions::ActionId::DeleteSelection));
+
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+
+        assert_eq!(
+            app.selected_components(),
+            vec![ComponentKey::authored(AuthoredComponentKind::Wall, wall_a)]
+        );
+        assert_eq!(app.selected_wall, 0);
+    }
+
+    #[test]
+    fn undo_restores_complete_component_multi_selection() {
+        let mut app = FramerApp::default();
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+        let expected = app.selected_components();
+
+        app.edit("Rename wall", |app| {
+            app.model.walls[0].name = "Renamed for history".to_owned();
+        });
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.undo();
+
+        assert_eq!(app.selected_components(), expected);
+        assert_eq!(app.selected_wall, 1);
+    }
+
+    #[test]
+    fn isolation_captures_selection_instead_of_following_later_clicks() {
+        let mut app = FramerApp::default();
+        let wall_a =
+            ComponentKey::authored(AuthoredComponentKind::Wall, app.model.walls[0].id.0.clone());
+        let wall_b =
+            ComponentKey::authored(AuthoredComponentKind::Wall, app.model.walls[1].id.0.clone());
+        app.viewport_mode = ViewportMode::Axonometric;
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.execute_action(actions::ActionId::IsolateHide);
+
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Replace);
+
+        assert_eq!(
+            app.component_visibility.authored_appearance(&wall_a),
+            ComponentAppearance::Normal
+        );
+        assert_eq!(
+            app.component_visibility.authored_appearance(&wall_b),
+            ComponentAppearance::Hidden
+        );
+    }
+
+    #[test]
+    fn generated_only_isolation_requires_plan_3d_and_exits_on_design_transition() {
+        let mut app = FramerApp::default();
+        let opening_id = app.model.walls[0].openings[0].id.0.clone();
+        app.viewport_mode = ViewportMode::Axonometric;
+        app.apply_selection(
+            Selection::Opening(opening_id),
+            Some(0),
+            SelectionOp::Replace,
+        );
+
+        assert!(!app.action_enabled(actions::ActionId::IsolateHide));
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::IsolateHide),
+            Some("Opening, corner, and generated-member isolation is available in Plan 3D")
+        );
+
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        assert!(app.action_enabled(actions::ActionId::IsolateHide));
+        app.execute_action(actions::ActionId::IsolateHide);
+        assert_eq!(
+            app.component_visibility.isolation_mode(),
+            Some(IsolationMode::HideOthers)
+        );
+
+        app.set_workspace_mode(WorkspaceMode::Design);
+        assert_eq!(app.component_visibility.isolation_mode(), None);
+    }
+
+    #[test]
+    fn generated_only_visibility_override_requires_plan_workspace() {
+        let mut app = FramerApp::default();
+        let opening_id = app.model.walls[0].openings[0].id.0.clone();
+        let opening_key =
+            ComponentKey::authored(AuthoredComponentKind::Opening, opening_id.clone());
+        app.apply_selection(
+            Selection::Opening(opening_id),
+            Some(0),
+            SelectionOp::Replace,
+        );
+
+        assert!(!app.action_enabled(actions::ActionId::HideSelection));
+        assert_eq!(
+            app.action_disabled_reason(actions::ActionId::HideSelection),
+            Some("Opening, corner, and generated-member visibility is available in Plan")
+        );
+        app.execute_action(actions::ActionId::HideSelection);
+        assert!(
+            app.component_visibility.is_explicitly_visible(&opening_key),
+            "disabled Design dispatch must not create a Plan-only hidden override"
+        );
+
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        assert!(app.action_enabled(actions::ActionId::HideSelection));
+        app.execute_action(actions::ActionId::HideSelection);
+        assert!(!app.component_visibility.is_explicitly_visible(&opening_key));
+    }
+
+    #[test]
+    fn render_workspace_disables_component_presentation_actions() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..FramerApp::default()
+        };
+        app.execute_action(actions::ActionId::IsolateDim);
+        app.component_visibility.hide([ComponentKey::authored(
+            AuthoredComponentKind::Wall,
+            app.model.walls[1].id.0.clone(),
+        )]);
+        app.set_workspace_mode(WorkspaceMode::Render);
+
+        for id in [
+            actions::ActionId::IsolateDim,
+            actions::ActionId::IsolateHide,
+            actions::ActionId::ExitIsolation,
+            actions::ActionId::HideSelection,
+            actions::ActionId::ShowAllComponents,
+        ] {
+            assert!(
+                !app.action_enabled(id),
+                "{id:?} must be unavailable in Render"
+            );
+            assert_eq!(
+                app.action_disabled_reason(id),
+                Some("Available in the interactive authoring and Plan views")
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_selection_replaces_instead_of_resurrecting_multi_selection() {
+        let mut app = FramerApp::default();
+        let first = app.model.walls[0].id.clone();
+        let second = app.model.walls[1].id.clone();
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+        assert_eq!(app.selected_component_count(), 2);
+
+        assert!(app.select_model_element(&first));
+        assert_eq!(
+            app.selected_components(),
+            vec![ComponentKey::authored(
+                AuthoredComponentKind::Wall,
+                first.0.clone()
+            )]
+        );
+        assert!(app.select_model_element(&second));
+        assert_eq!(
+            app.selected_components(),
+            vec![ComponentKey::authored(
+                AuthoredComponentKind::Wall,
+                second.0
+            )]
+        );
+    }
+
+    #[test]
+    fn regeneration_prunes_stale_generated_selection_and_visibility_keys() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        let (host_id, member_id, source_id) = app
+            .project_plan
+            .as_ref()
+            .unwrap()
+            .wall_plans
+            .iter()
+            .find_map(|wall_plan| {
+                wall_plan
+                    .members
+                    .iter()
+                    .find(|member| member.source != wall_plan.wall)
+                    .map(|member| {
+                        (
+                            wall_plan.wall.0.clone(),
+                            member.id.clone(),
+                            member.source.0.clone(),
+                        )
+                    })
+            })
+            .expect("demo shell should contain opening- or corner-sourced framing");
+        let key = ComponentKey::member(host_id.clone(), member_id.clone());
+        app.apply_selection(
+            Selection::Member {
+                source_id: host_id,
+                member_id,
+            },
+            None,
+            SelectionOp::Replace,
+        );
+        app.component_visibility.hide([key.clone()]);
+        app.component_visibility
+            .isolate(IsolationMode::HideOthers, vec![key.clone()]);
+
+        app.edit("Remove generated source", |app| {
+            for wall in &mut app.model.walls {
+                wall.openings.retain(|opening| opening.id.0 != source_id);
+            }
+            app.model.wall_joins.retain(|join| join.id.0 != source_id);
+        });
+
+        assert!(!app.selected_components().contains(&key));
+        assert!(!app.component_visibility.has_hidden());
+        assert_eq!(app.component_visibility.isolation_mode(), None);
+    }
+
+    #[test]
+    fn multi_selection_blocks_direct_wall_and_opening_drag_starts() {
+        let mut app = FramerApp::default();
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+        app.begin_wall_drag(1, WallEditHandle::Body);
+        assert!(app.wall_drag.is_none());
+
+        let opening_id = app.model.walls[0].openings[0].id.0.clone();
+        app.handle_view_click_with_op(
+            ViewClick::Opening {
+                wall_index: 0,
+                opening_id: opening_id.clone(),
+            },
+            SelectionOp::Toggle,
+        );
+        assert!(app.selected_component_count() > 1);
+        app.begin_opening_drag(0, opening_id, OpeningEditHandle::Move);
+        assert!(app.opening_drag.is_none());
     }
 
     #[test]

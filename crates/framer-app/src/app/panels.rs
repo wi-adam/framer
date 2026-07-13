@@ -17,6 +17,9 @@ use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFram
 use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
 
 use super::actions::{self, ActionId, WorkflowTab};
+use super::component_visibility::{
+    AuthoredComponentKind, ComponentKey, IsolationMode, SelectionOp,
+};
 use super::design::{Icon, widgets};
 use super::labels::{
     diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, geometry_body_label,
@@ -704,8 +707,30 @@ impl FramerApp {
 
     pub(super) fn model_tree(&mut self, ui: &mut Ui) {
         panel_header(ui, "Model Browser", self.workspace_badge());
+        let visibility_available = self.workspace_mode != WorkspaceMode::Render;
+        let id = ActionId::ShowAllComponents;
+        let enabled = self.action_enabled(id);
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let response =
+                    ui.add_enabled(enabled, egui::Button::new("Show all components").small());
+                let response = if enabled {
+                    response.on_hover_text(actions::metadata(id).tooltip)
+                } else {
+                    response.on_disabled_hover_text(
+                        self.action_disabled_reason(id)
+                            .unwrap_or(actions::metadata(id).tooltip),
+                    )
+                };
+                if response.clicked() {
+                    self.execute_action(id);
+                }
+            });
+        });
+        ui.add_space(design::space::SM);
 
-        ScrollArea::vertical().show(ui, |ui| {
+        let model_browser_scroll = ScrollArea::vertical().id_salt("model-browser-tree");
+        model_browser_scroll.show(ui, |ui| {
             egui::CollapsingHeader::new("Authored")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -817,7 +842,7 @@ impl FramerApp {
                     )
                     .clicked()
                     {
-                        self.selected = Selection::Site;
+                        self.apply_selection(Selection::Site, None, SelectionOp::Replace);
                     }
                     ui.indent("site-standards", |ui| {
                         for (pack_id, pack_name, from_library, stack_index) in &standards_packs {
@@ -846,7 +871,11 @@ impl FramerApp {
                                 })
                                 .inner
                             {
-                                self.selected = Selection::StandardsPack(pack_id.clone());
+                                self.apply_selection(
+                                    Selection::StandardsPack(pack_id.clone()),
+                                    None,
+                                    SelectionOp::Replace,
+                                );
                             }
                         }
                     });
@@ -857,7 +886,11 @@ impl FramerApp {
                         if tree_row(ui, level_selected, Icon::Level, &level_name, "Level").clicked()
                         {
                             self.set_active_level(ElementId::new(level_id.clone()));
-                            self.selected = Selection::Level(level_id.clone());
+                            self.apply_selection(
+                                Selection::Level(level_id.clone()),
+                                None,
+                                SelectionOp::Replace,
+                            );
                         }
 
                         ui.indent(format!("level-{level_id}"), |ui| {
@@ -868,48 +901,73 @@ impl FramerApp {
                                     continue;
                                 }
 
-                                let wall_selected = self.selected_wall == *index
-                                    && matches!(self.selected, Selection::Wall);
-                                if tree_row(
+                                let wall_key = ComponentKey::authored(
+                                    AuthoredComponentKind::Wall,
+                                    wall_id.clone(),
+                                );
+                                let wall_selected = self.component_is_selected(&wall_key);
+                                let (wall_row, wall_eye) = component_tree_row(
                                     ui,
-                                    wall_selected,
+                                    &wall_key,
                                     Icon::Wall,
                                     wall_name,
                                     "Wall segment",
-                                )
-                                .clicked()
-                                {
-                                    self.selected_wall = *index;
-                                    self.selected = Selection::Wall;
-                                    self.rebuild();
+                                    ComponentTreeRowState::new(
+                                        wall_selected,
+                                        self.component_visibility.is_explicitly_visible(&wall_key),
+                                        visibility_available,
+                                    ),
+                                );
+                                if wall_eye.clicked() {
+                                    self.component_visibility.toggle(wall_key.clone());
+                                }
+                                if wall_row.clicked() {
+                                    self.apply_selection(
+                                        Selection::Wall,
+                                        Some(*index),
+                                        component_selection_op(ui),
+                                    );
                                 }
 
                                 ui.indent(format!("wall-{wall_id}"), |ui| {
                                     for (opening_id, opening_kind, opening_name) in openings {
-                                        let selected = matches!(
-                                            &self.selected,
-                                            Selection::Opening(id) if id == opening_id
+                                        let opening_key = ComponentKey::authored(
+                                            AuthoredComponentKind::Opening,
+                                            opening_id.clone(),
                                         );
-                                        if tree_row(
+                                        let selected = self.component_is_selected(&opening_key);
+                                        let (opening_row, opening_eye) = component_tree_row(
                                             ui,
-                                            selected,
+                                            &opening_key,
                                             opening_tree_icon(*opening_kind),
                                             opening_name,
                                             kind_label(*opening_kind),
-                                        )
-                                        .clicked()
-                                        {
-                                            self.selected_wall = *index;
-                                            self.selected = Selection::Opening(opening_id.clone());
-                                            self.rebuild();
+                                            ComponentTreeRowState::new(
+                                                selected,
+                                                self.component_visibility
+                                                    .is_explicitly_visible(&opening_key),
+                                                visibility_available
+                                                    && self.workspace_mode.shows_generated_plan(),
+                                            ),
+                                        );
+                                        if opening_eye.clicked() {
+                                            self.component_visibility.toggle(opening_key.clone());
+                                        }
+                                        if opening_row.clicked() {
+                                            self.apply_selection(
+                                                Selection::Opening(opening_id.clone()),
+                                                Some(*index),
+                                                component_selection_op(ui),
+                                            );
                                         }
                                     }
                                     for (dimension_id, dimension_kind, dimension_name) in dimensions
                                     {
-                                        let selected = matches!(
-                                            &self.selected,
-                                            Selection::Dimension(id) if id == dimension_id
+                                        let key = ComponentKey::authored(
+                                            AuthoredComponentKind::Dimension,
+                                            dimension_id.clone(),
                                         );
+                                        let selected = self.component_is_selected(&key);
                                         let kind = format!(
                                             "{} dimension",
                                             dimension_kind_label(*dimension_kind)
@@ -923,10 +981,11 @@ impl FramerApp {
                                         )
                                         .clicked()
                                         {
-                                            self.selected_wall = *index;
-                                            self.selected =
-                                                Selection::Dimension(dimension_id.clone());
-                                            self.rebuild();
+                                            self.apply_selection(
+                                                Selection::Dimension(dimension_id.clone()),
+                                                Some(*index),
+                                                component_selection_op(ui),
+                                            );
                                         }
                                     }
                                 });
@@ -936,12 +995,17 @@ impl FramerApp {
                                 if room_level != &level_id {
                                     continue;
                                 }
-                                let selected = matches!(
-                                    &self.selected,
-                                    Selection::Room(id) if id == room_id
+                                let key = ComponentKey::authored(
+                                    AuthoredComponentKind::Room,
+                                    room_id.clone(),
                                 );
+                                let selected = self.component_is_selected(&key);
                                 if tree_row(ui, selected, Icon::Room, room_name, "Room").clicked() {
-                                    self.selected = Selection::Room(room_id.clone());
+                                    self.apply_selection(
+                                        Selection::Room(room_id.clone()),
+                                        None,
+                                        component_selection_op(ui),
+                                    );
                                 }
                             }
 
@@ -949,14 +1013,32 @@ impl FramerApp {
                                 if plane_level != &level_id {
                                     continue;
                                 }
-                                let selected = matches!(
-                                    &self.selected,
-                                    Selection::RoofPlane(id) if id == plane_id
+                                let key = ComponentKey::authored(
+                                    AuthoredComponentKind::RoofPlane,
+                                    plane_id.clone(),
                                 );
-                                if tree_row(ui, selected, Icon::Roof, plane_name, "Roof plane")
-                                    .clicked()
-                                {
-                                    self.selected = Selection::RoofPlane(plane_id.clone());
+                                let selected = self.component_is_selected(&key);
+                                let (row, eye) = component_tree_row(
+                                    ui,
+                                    &key,
+                                    Icon::Roof,
+                                    plane_name,
+                                    "Roof plane",
+                                    ComponentTreeRowState::new(
+                                        selected,
+                                        self.component_visibility.is_explicitly_visible(&key),
+                                        visibility_available,
+                                    ),
+                                );
+                                if eye.clicked() {
+                                    self.component_visibility.toggle(key);
+                                }
+                                if row.clicked() {
+                                    self.apply_selection(
+                                        Selection::RoofPlane(plane_id.clone()),
+                                        None,
+                                        component_selection_op(ui),
+                                    );
                                 }
                             }
 
@@ -964,10 +1046,11 @@ impl FramerApp {
                                 if ceiling_level != &level_id {
                                     continue;
                                 }
-                                let selected = matches!(
-                                    &self.selected,
-                                    Selection::Ceiling(id) if id == ceiling_id
+                                let key = ComponentKey::authored(
+                                    AuthoredComponentKind::Ceiling,
+                                    ceiling_id.clone(),
                                 );
+                                let selected = self.component_is_selected(&key);
                                 // Distinguish a sloped (scissor/vault) ceiling from a
                                 // flat one in the tree.
                                 let kind = if *sloped {
@@ -975,10 +1058,27 @@ impl FramerApp {
                                 } else {
                                     "Flat ceiling"
                                 };
-                                if tree_row(ui, selected, Icon::Ceiling, ceiling_name, kind)
-                                    .clicked()
-                                {
-                                    self.selected = Selection::Ceiling(ceiling_id.clone());
+                                let (row, eye) = component_tree_row(
+                                    ui,
+                                    &key,
+                                    Icon::Ceiling,
+                                    ceiling_name,
+                                    kind,
+                                    ComponentTreeRowState::new(
+                                        selected,
+                                        self.component_visibility.is_explicitly_visible(&key),
+                                        visibility_available,
+                                    ),
+                                );
+                                if eye.clicked() {
+                                    self.component_visibility.toggle(key);
+                                }
+                                if row.clicked() {
+                                    self.apply_selection(
+                                        Selection::Ceiling(ceiling_id.clone()),
+                                        None,
+                                        component_selection_op(ui),
+                                    );
                                 }
                             }
 
@@ -986,14 +1086,32 @@ impl FramerApp {
                                 if deck_level != &level_id {
                                     continue;
                                 }
-                                let selected = matches!(
-                                    &self.selected,
-                                    Selection::FloorDeck(id) if id == deck_id
+                                let key = ComponentKey::authored(
+                                    AuthoredComponentKind::FloorDeck,
+                                    deck_id.clone(),
                                 );
-                                if tree_row(ui, selected, Icon::Floor, deck_name, "Floor deck")
-                                    .clicked()
-                                {
-                                    self.selected = Selection::FloorDeck(deck_id.clone());
+                                let selected = self.component_is_selected(&key);
+                                let (row, eye) = component_tree_row(
+                                    ui,
+                                    &key,
+                                    Icon::Floor,
+                                    deck_name,
+                                    "Floor deck",
+                                    ComponentTreeRowState::new(
+                                        selected,
+                                        self.component_visibility.is_explicitly_visible(&key),
+                                        visibility_available,
+                                    ),
+                                );
+                                if eye.clicked() {
+                                    self.component_visibility.toggle(key);
+                                }
+                                if row.clicked() {
+                                    self.apply_selection(
+                                        Selection::FloorDeck(deck_id.clone()),
+                                        None,
+                                        component_selection_op(ui),
+                                    );
                                 }
                             }
                         });
@@ -1003,11 +1121,34 @@ impl FramerApp {
                         ui.separator();
                         strong_label(ui, "Corners");
                         for (join_id, join_name, join_kind) in joins {
-                            let selected =
-                                matches!(&self.selected, Selection::Join(id) if id == &join_id);
+                            let key = ComponentKey::authored(
+                                AuthoredComponentKind::Join,
+                                join_id.clone(),
+                            );
+                            let selected = self.component_is_selected(&key);
                             let kind = format!("Corner ({})", join_kind_label(join_kind));
-                            if tree_row(ui, selected, Icon::Corner, &join_name, &kind).clicked() {
-                                self.selected = Selection::Join(join_id);
+                            let (row, eye) = component_tree_row(
+                                ui,
+                                &key,
+                                Icon::Corner,
+                                &join_name,
+                                &kind,
+                                ComponentTreeRowState::new(
+                                    selected,
+                                    self.component_visibility.is_explicitly_visible(&key),
+                                    visibility_available
+                                        && self.workspace_mode.shows_generated_plan(),
+                                ),
+                            );
+                            if eye.clicked() {
+                                self.component_visibility.toggle(key);
+                            }
+                            if row.clicked() {
+                                self.apply_selection(
+                                    Selection::Join(join_id),
+                                    None,
+                                    component_selection_op(ui),
+                                );
                             }
                         }
                     }
@@ -1107,14 +1248,15 @@ impl FramerApp {
                     .default_open(true)
                     .show(ui, |ui| {
                         if has_plan {
+                            let selected_components = self.selected_components();
                             for (source_id, label, wall_index, members) in &generated_groups {
-                                let source_selected = matches!(
-                                    &self.selected,
-                                    Selection::Member {
-                                        source_id: selected_source,
-                                        ..
-                                    } if selected_source == source_id
-                                );
+                                let source_selected = selected_components.iter().any(|key| {
+                                    matches!(
+                                        key,
+                                        ComponentKey::GeneratedMember { host_id, .. }
+                                            if host_id == source_id
+                                    )
+                                });
                                 egui::CollapsingHeader::new(format!(
                                     "{label} ({} members)",
                                     members.len()
@@ -1122,28 +1264,37 @@ impl FramerApp {
                                 .default_open(source_selected)
                                 .show(ui, |ui| {
                                     for (member_id, kind) in members {
-                                        let selected = matches!(
-                                            &self.selected,
-                                            Selection::Member {
-                                                source_id: selected_source,
-                                                member_id: selected_member,
-                                            } if selected_source == source_id
-                                                && selected_member == member_id
+                                        let key = ComponentKey::member(
+                                            source_id.clone(),
+                                            member_id.clone(),
                                         );
-                                        if ui
-                                            .selectable_label(
+                                        let selected = self.component_is_selected(&key);
+                                        let name = format!("{}: {}", kind.label(), member_id);
+                                        let (row, eye) = component_tree_row(
+                                            ui,
+                                            &key,
+                                            member_tree_icon(*kind),
+                                            &name,
+                                            "Generated member",
+                                            ComponentTreeRowState::new(
                                                 selected,
-                                                format!("{}: {}", kind.label(), member_id),
-                                            )
-                                            .clicked()
-                                        {
-                                            if let Some(index) = wall_index {
-                                                self.selected_wall = *index;
-                                            }
-                                            self.selected = Selection::Member {
-                                                source_id: source_id.clone(),
-                                                member_id: member_id.clone(),
-                                            };
+                                                self.component_visibility
+                                                    .is_explicitly_visible(&key),
+                                                visibility_available,
+                                            ),
+                                        );
+                                        if eye.clicked() {
+                                            self.component_visibility.toggle(key);
+                                        }
+                                        if row.clicked() {
+                                            self.apply_selection(
+                                                Selection::Member {
+                                                    source_id: source_id.clone(),
+                                                    member_id: member_id.clone(),
+                                                },
+                                                *wall_index,
+                                                component_selection_op(ui),
+                                            );
                                         }
                                     }
                                 });
@@ -1349,7 +1500,11 @@ impl FramerApp {
                         })
                         .inner
                     {
-                        self.selected = Selection::System(id.clone());
+                        self.apply_selection(
+                            Selection::System(id.clone()),
+                            None,
+                            SelectionOp::Replace,
+                        );
                     }
                 }
                 if can_edit {
@@ -1396,7 +1551,11 @@ impl FramerApp {
                         })
                         .inner
                     {
-                        self.selected = Selection::Material(id.clone());
+                        self.apply_selection(
+                            Selection::Material(id.clone()),
+                            None,
+                            SelectionOp::Replace,
+                        );
                     }
                 }
                 if can_edit && ui.button("+ Material").clicked() {
@@ -1425,7 +1584,11 @@ impl FramerApp {
                         })
                         .inner
                     {
-                        self.selected = Selection::Furnishing(id.clone());
+                        self.apply_selection(
+                            Selection::Furnishing(id.clone()),
+                            None,
+                            SelectionOp::Replace,
+                        );
                     }
                 }
 
@@ -1446,7 +1609,11 @@ impl FramerApp {
                         })
                         .inner
                     {
-                        self.selected = Selection::MepObject(id.clone());
+                        self.apply_selection(
+                            Selection::MepObject(id.clone()),
+                            None,
+                            SelectionOp::Replace,
+                        );
                     }
                 }
 
@@ -1779,6 +1946,14 @@ impl FramerApp {
     }
 
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
+        let selected_component_count = self.selected_component_count();
+        if selected_component_count > 1 {
+            panel_header(ui, "Inspector", "Multiple");
+            multi_selection_inspector(ui, selected_component_count);
+            self.inspector_output_sections(ui);
+            return;
+        }
+
         let mut changed = false;
         // A Remove click sets this; executed through edit() after the model
         // borrow below ends, so deletions are one labelled, undoable step.
@@ -2149,7 +2324,11 @@ impl FramerApp {
                 }
 
                 if let Some(dimension_id) = select_dimension {
-                    self.selected = Selection::Dimension(dimension_id);
+                    self.apply_selection(
+                        Selection::Dimension(dimension_id),
+                        Some(self.selected_wall),
+                        SelectionOp::Replace,
+                    );
                 }
             }
             Selection::Opening(id) => {
@@ -2251,7 +2430,11 @@ impl FramerApp {
                 }
 
                 if let Some(dimension_id) = select_dimension {
-                    self.selected = Selection::Dimension(dimension_id);
+                    self.apply_selection(
+                        Selection::Dimension(dimension_id),
+                        Some(self.selected_wall),
+                        SelectionOp::Replace,
+                    );
                 }
             }
             Selection::Dimension(id) => {
@@ -3150,7 +3333,7 @@ impl FramerApp {
             self.waive_standards_rule(rule, reason);
         }
         if let Some(system_id) = deferred_select_system {
-            self.selected = Selection::System(system_id);
+            self.apply_selection(Selection::System(system_id), None, SelectionOp::Replace);
         }
         if let Some((roof_id, eave, rake)) = deferred_roof_overhang_sync {
             sync_connected_roof_overhangs(&mut self.model, &roof_id, eave, rake);
@@ -3168,6 +3351,10 @@ impl FramerApp {
             self.rebuild();
         }
 
+        self.inspector_output_sections(ui);
+    }
+
+    fn inspector_output_sections(&mut self, ui: &mut Ui) {
         if self.workspace_mode.shows_generated_plan() {
             ui.separator();
             if let Some(source) = diagnostics_panel(
@@ -3388,40 +3575,57 @@ impl FramerApp {
         });
         if chosen != current {
             self.set_active_level(ElementId::new(chosen.clone()));
-            self.selected = Selection::Level(chosen);
+            self.apply_selection(Selection::Level(chosen), None, SelectionOp::Replace);
         }
     }
 
-    fn selection_status(&self) -> String {
-        match &self.selected {
-            Selection::None => "Nothing selected".to_owned(),
-            Selection::Site => "Site & standards".to_owned(),
-            Selection::Level(id) => format!("Level: {}", self.level_name(id)),
-            Selection::Wall => self
-                .model
-                .walls
-                .get(self.selected_wall)
-                .map(|wall| format!("Wall segment: {}", wall.name))
-                .unwrap_or_else(|| "Wall segment".to_owned()),
-            Selection::Opening(id) => format!("Opening: {}", self.opening_name(id)),
-            Selection::Dimension(id) => format!("Dimension: {}", self.dimension_name(id)),
-            Selection::Join(id) => format!("Corner: {}", self.corner_name(id)),
-            Selection::Room(id) => format!("Room: {}", self.room_name(id)),
-            Selection::Member { member_id, .. } => format!("Member: {member_id}"),
-            Selection::RoofPlane(id) => format!("Roof plane: {}", self.roof_plane_name(id)),
-            Selection::Ceiling(id) => format!("Ceiling: {}", self.ceiling_name(id)),
-            Selection::FloorDeck(id) => format!("Floor deck: {}", self.floor_deck_name(id)),
-            Selection::System(id) => format!("System: {}", self.system_name(id)),
-            Selection::Material(id) => format!("Material: {}", self.material_name(id)),
-            Selection::Furnishing(id) => format!("Furnishing: {}", self.furnishing_name(id)),
-            Selection::MepObject(id) => format!("MEP object: {}", self.mep_object_name(id)),
-            Selection::StandardsPack(id) => {
-                format!("Standards pack: {}", self.standards_pack_name(id))
+    pub(super) fn selection_status(&self) -> String {
+        let selected_component_count = self.selected_component_count();
+        let status = if selected_component_count > 1 {
+            format!("{selected_component_count} components selected")
+        } else {
+            match &self.selected {
+                Selection::None => "Nothing selected".to_owned(),
+                Selection::Site => "Site & standards".to_owned(),
+                Selection::Level(id) => format!("Level: {}", self.level_name(id)),
+                Selection::Wall => self
+                    .model
+                    .walls
+                    .get(self.selected_wall)
+                    .map(|wall| format!("Wall segment: {}", wall.name))
+                    .unwrap_or_else(|| "Wall segment".to_owned()),
+                Selection::Opening(id) => format!("Opening: {}", self.opening_name(id)),
+                Selection::Dimension(id) => format!("Dimension: {}", self.dimension_name(id)),
+                Selection::Join(id) => format!("Corner: {}", self.corner_name(id)),
+                Selection::Room(id) => format!("Room: {}", self.room_name(id)),
+                Selection::Member { member_id, .. } => format!("Member: {member_id}"),
+                Selection::RoofPlane(id) => format!("Roof plane: {}", self.roof_plane_name(id)),
+                Selection::Ceiling(id) => format!("Ceiling: {}", self.ceiling_name(id)),
+                Selection::FloorDeck(id) => format!("Floor deck: {}", self.floor_deck_name(id)),
+                Selection::System(id) => format!("System: {}", self.system_name(id)),
+                Selection::Material(id) => format!("Material: {}", self.material_name(id)),
+                Selection::Furnishing(id) => format!("Furnishing: {}", self.furnishing_name(id)),
+                Selection::MepObject(id) => format!("MEP object: {}", self.mep_object_name(id)),
+                Selection::StandardsPack(id) => {
+                    format!("Standards pack: {}", self.standards_pack_name(id))
+                }
+                Selection::FurnishingInstance(id) => {
+                    format!("Furnishing instance: {}", self.furnishing_instance_name(id))
+                }
+                Selection::MepInstance(id) => {
+                    format!("MEP instance: {}", self.mep_instance_name(id))
+                }
             }
-            Selection::FurnishingInstance(id) => {
-                format!("Furnishing instance: {}", self.furnishing_instance_name(id))
-            }
-            Selection::MepInstance(id) => format!("MEP instance: {}", self.mep_instance_name(id)),
+        };
+
+        if let Some(mode) = (self.workspace_mode != WorkspaceMode::Render)
+            .then(|| self.component_visibility.isolation_mode())
+            .flatten()
+            .map(IsolationMode::label)
+        {
+            format!("{status} • Isolated: {mode}")
+        } else {
+            status
         }
     }
 
@@ -4063,6 +4267,22 @@ fn empty_inspector_state(ui: &mut Ui) {
         );
         ui.label(
             RichText::new("Select an object to edit its properties.")
+                .size(design::text_size::LABEL)
+                .color(design::active().text_muted),
+        );
+    });
+}
+
+fn multi_selection_inspector(ui: &mut Ui, count: usize) {
+    ui.add_space(design::space::XL);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(format!("{count} components selected"))
+                .strong()
+                .color(design::active().text),
+        );
+        ui.label(
+            RichText::new("Properties are available when one component is selected.")
                 .size(design::text_size::LABEL)
                 .color(design::active().text_muted),
         );
@@ -4734,6 +4954,93 @@ fn tree_row(ui: &mut Ui, selected: bool, icon: Icon, name: &str, kind: &str) -> 
         .inner
 }
 
+/// A selectable component row with an independent trailing visibility control.
+/// The visibility response is separate so hiding a selected component never
+/// changes selection and the hidden row remains available to show again.
+#[derive(Clone, Copy)]
+struct ComponentTreeRowState {
+    selected: bool,
+    visible: bool,
+    visibility_available: bool,
+}
+
+impl ComponentTreeRowState {
+    fn new(selected: bool, visible: bool, visibility_available: bool) -> Self {
+        Self {
+            selected,
+            visible,
+            visibility_available,
+        }
+    }
+}
+
+fn component_tree_row(
+    ui: &mut Ui,
+    key: &ComponentKey,
+    icon: Icon,
+    name: &str,
+    kind: &str,
+    state: ComponentTreeRowState,
+) -> (Response, Response) {
+    ui.push_id(("component-row", key), |ui| {
+        ui.horizontal(|ui| {
+            let row = tree_row_contents(ui, state.selected, icon, name, kind);
+            let eye = ui
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if state.visible {
+                        format!("Hide {name}")
+                    } else {
+                        format!("Show {name}")
+                    };
+                    let color = if state.visible {
+                        design::active().text_secondary
+                    } else {
+                        design::active().text_muted
+                    };
+                    let response = ui
+                        .add_enabled_ui(state.visibility_available, |ui| {
+                            widgets::ghost_icon_button(ui, Icon::Eye, color, &label)
+                        })
+                        .inner;
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            state.visibility_available,
+                            &label,
+                        )
+                    });
+                    let response = if state.visibility_available {
+                        response
+                    } else {
+                        response.on_disabled_hover_text(
+                            "Visibility is unavailable for this component in the active view",
+                        )
+                    };
+                    if !state.visible {
+                        let rect = response.rect.shrink(8.0);
+                        ui.painter().line_segment(
+                            [rect.left_top(), rect.right_bottom()],
+                            Stroke::new(1.25, design::active().text_muted),
+                        );
+                    }
+                    response
+                })
+                .inner;
+            (row, eye)
+        })
+        .inner
+    })
+    .inner
+}
+
+fn component_selection_op(ui: &Ui) -> SelectionOp {
+    if ui.input(|input| input.modifiers.contains(egui::Modifiers::COMMAND)) {
+        SelectionOp::Toggle
+    } else {
+        SelectionOp::Replace
+    }
+}
+
 fn tree_row_contents(ui: &mut Ui, selected: bool, icon: Icon, name: &str, kind: &str) -> Response {
     let tooltip = format!("{kind}: {name}");
     ui.spacing_mut().item_spacing.x = 6.0;
@@ -4756,6 +5063,19 @@ fn opening_tree_icon(kind: OpeningKind) -> Icon {
         OpeningKind::Window | OpeningKind::Skylight => Icon::Window,
         OpeningKind::GarageDoor => Icon::GarageDoor,
         OpeningKind::Stair => Icon::Floor,
+    }
+}
+
+fn member_tree_icon(kind: framer_solver::MemberKind) -> Icon {
+    match kind {
+        framer_solver::MemberKind::FloorJoist | framer_solver::MemberKind::RimJoist => Icon::Floor,
+        framer_solver::MemberKind::CeilingJoist => Icon::Ceiling,
+        framer_solver::MemberKind::Rafter
+        | framer_solver::MemberKind::RidgeBoard
+        | framer_solver::MemberKind::HipRafter
+        | framer_solver::MemberKind::ValleyRafter
+        | framer_solver::MemberKind::JackRafter => Icon::Roof,
+        _ => Icon::Wall,
     }
 }
 

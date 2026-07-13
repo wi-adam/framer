@@ -17,7 +17,7 @@ use super::view_common::{
     draw_view_background, draw_view_border, draw_view_empty, pointer_started_in_rect, viewport_size,
 };
 use super::view_cube::{draw_view_cube, view_cube_rect};
-use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
+use crate::app::{ComponentKey, ComponentVisibility, ViewClick, WallDisplay, WorkspaceMode};
 
 // === extracted block appended below; visibility adjusted in place ===
 
@@ -26,8 +26,8 @@ pub(super) struct AxonometricView<'a> {
     pub(super) plan: &'a ProjectFramePlan,
     pub(super) physical_scene: &'a PhysicalScene,
     pub(super) active_geometry_violation: Option<&'a GeometryViolation>,
-    pub(super) selected_wall: usize,
-    pub(super) selection: &'a Selection,
+    pub(super) selected_components: &'a [ComponentKey],
+    pub(super) component_visibility: &'a ComponentVisibility,
     pub(super) workspace_mode: WorkspaceMode,
     pub(super) wall_display: WallDisplay,
     pub(super) gpu_target_format: Option<wgpu::TextureFormat>,
@@ -44,8 +44,8 @@ pub(super) fn draw_project_axonometric(
         plan,
         physical_scene,
         active_geometry_violation,
-        selected_wall,
-        selection,
+        selected_components,
+        component_visibility,
         workspace_mode,
         wall_display,
         gpu_target_format,
@@ -73,6 +73,8 @@ pub(super) fn draw_project_axonometric(
     let panning = dragging_middle || (dragging_primary && shift);
     let orbiting = dragging_primary && !shift;
     let dragging_from_cube = orbiting && pointer_started_in_rect(press_origin, cube_rect);
+    let canvas_clicked =
+        response.clicked() && pointer.is_some_and(|position| !cube_rect.contains(position));
 
     if panning {
         view.pan(response.drag_delta(), drawing.width().min(drawing.height()));
@@ -95,23 +97,20 @@ pub(super) fn draw_project_axonometric(
         plan,
         physical_scene,
         active_geometry_violation,
-        selected_wall,
-        selection,
+        selected_components,
+        component_visibility,
         workspace_mode,
         wall_display,
     ) else {
         draw_view_empty(&painter, rect, "No 3D geometry");
-        return None;
+        return canvas_clicked.then_some(ViewClick::EmptyCanvas);
     };
     let Some(projector) = OrbitProjector::from_points(&scene.points, drawing, *view) else {
         draw_view_empty(&painter, rect, "No wall segments");
-        return None;
+        return canvas_clicked.then_some(ViewClick::EmptyCanvas);
     };
 
-    let clicked = pointer
-        .filter(|position| !cube_rect.contains(*position))
-        .and_then(|position| scene.pick(position, &projector))
-        .filter(|_| response.clicked());
+    let clicked = resolve_scene_click(canvas_clicked, pointer, &scene, &projector);
 
     // Fill geometry goes through the wgpu pipeline. Outline mode produces no fill
     // triangles (and in the Design workspace there are no members either), so guard
@@ -159,7 +158,7 @@ pub(super) fn draw_project_axonometric(
                 projector.project_point(edge.a).pos,
                 projector.project_point(edge.b).pos,
             ],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0, theme::with_alpha(color, edge.alpha)),
         );
     }
 
@@ -208,4 +207,55 @@ pub(super) fn draw_project_axonometric(
     }
 
     clicked
+}
+
+fn resolve_scene_click(
+    canvas_clicked: bool,
+    pointer: Option<egui::Pos2>,
+    scene: &Scene3d,
+    projector: &OrbitProjector,
+) -> Option<ViewClick> {
+    canvas_clicked.then(|| {
+        pointer
+            .and_then(|position| scene.pick(position, projector))
+            .unwrap_or(ViewClick::EmptyCanvas)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{Pos2, Rect, Vec2};
+
+    use super::*;
+    use crate::app::Selection;
+
+    #[test]
+    fn empty_3d_canvas_click_returns_clear_selection_event() {
+        let model = BuildingModel::demo_wall();
+        let plan = framer_solver::generate_project_plan(&model).unwrap();
+        let scene = Scene3d::from_project(
+            &model,
+            &plan,
+            0,
+            &Selection::Wall,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        let drawing = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let projector = OrbitProjector::from_points(
+            &scene.points,
+            drawing,
+            crate::app::viewport::camera_3d::View3dState::default(),
+        )
+        .unwrap();
+        let empty = Pos2::new(drawing.left() + 2.0, drawing.top() + 2.0);
+        assert!(scene.pick(empty, &projector).is_none());
+
+        assert!(matches!(
+            resolve_scene_click(true, Some(empty), &scene, &projector),
+            Some(ViewClick::EmptyCanvas)
+        ));
+        assert!(resolve_scene_click(false, Some(empty), &scene, &projector).is_none());
+    }
 }

@@ -1,6 +1,6 @@
 use eframe::egui::{
     self, Align2, ComboBox, FontId, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
-    Ui, Vec2,
+    Ui, Vec2, containers::menu::MenuButton,
 };
 use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
@@ -10,7 +10,7 @@ use super::draw_wall::SnapResult;
 use super::labels::{dimension_axis_label, dimension_kind_label};
 #[cfg(test)]
 use super::model_edit::OpeningEditHandle;
-use super::{FramerApp, Selection, ViewClick, ViewportMode, design, theme};
+use super::{FramerApp, Selection, SelectionOp, ViewClick, ViewportMode, design, theme};
 
 mod camera_2d;
 pub(super) use camera_2d::View2dState;
@@ -101,12 +101,22 @@ impl FramerApp {
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
         self.cursor_model = None;
         let mut toolbar_anchor = None;
+        let multiple_components_selected = self.selected_component_count() > 1;
+        let viewport_selection = if multiple_components_selected {
+            Selection::None
+        } else {
+            self.selected.clone()
+        };
         // The draw tool's resolved snap for this frame, written back into tool
         // state so the next frame can apply sticky hysteresis.
         let mut snap_out: Option<SnapResult> = None;
         // The active wall-endpoint drag (state owned here) and the event the plan
         // emits for it this frame.
-        let active_wall_drag = self.wall_drag.map(|drag| (drag.wall_index, drag.handle));
+        let active_wall_drag = if multiple_components_selected {
+            None
+        } else {
+            self.wall_drag.map(|drag| (drag.wall_index, drag.handle))
+        };
         let mut wall_drag_out: Option<WallDragEvent> = None;
         let click = match self.viewport_mode {
             ViewportMode::Plan | ViewportMode::RoofPlan => {
@@ -122,7 +132,7 @@ impl FramerApp {
                     PlanView {
                         model: &self.model,
                         selected_wall: self.selected_wall,
-                        selection: &self.selected,
+                        selection: &viewport_selection,
                         layers: self.layers,
                         draw_tool: &draw_tool,
                         room_tool_active: self.room_tool_active,
@@ -148,11 +158,11 @@ impl FramerApp {
                 // remembered for the session (materializes on first view).
                 let camera = self.elevation_views.entry(wall.id.0.clone()).or_default();
                 if !self.workspace_mode.shows_generated_plan() {
-                    let selected_opening = match &self.selected {
+                    let selected_opening = match &viewport_selection {
                         Selection::Opening(id) => Some(id.as_str()),
                         _ => None,
                     };
-                    let selected_dimension = match &self.selected {
+                    let selected_dimension = match &viewport_selection {
                         Selection::Dimension(id) => Some(id.as_str()),
                         _ => None,
                     };
@@ -168,10 +178,9 @@ impl FramerApp {
                         .as_ref()
                         .filter(|pick| pick.wall_index == self.selected_wall)
                         .map(|pick| &pick.anchor);
-                    let active_opening_drag = self
-                        .opening_drag
-                        .as_ref()
-                        .filter(|drag| drag.wall_index == self.selected_wall);
+                    let active_opening_drag = self.opening_drag.as_ref().filter(|drag| {
+                        !multiple_components_selected && drag.wall_index == self.selected_wall
+                    });
                     let wall_index = self.selected_wall;
                     let elevation_response = draw_wall_design_elevation(
                         ui,
@@ -179,6 +188,7 @@ impl FramerApp {
                         DesignElevationView {
                             selected_opening,
                             selected_dimension,
+                            edit_handles_enabled: !multiple_components_selected,
                             dimension_tool_active: self.dimension_tool.active,
                             dimension_tool_axis: self.dimension_tool.axis,
                             first_dimension_anchor: first_anchor,
@@ -219,7 +229,7 @@ impl FramerApp {
                         ui.label("No generated framing for selected wall");
                         return;
                     };
-                    let selected_member = match &self.selected {
+                    let selected_member = match &viewport_selection {
                         Selection::Member {
                             source_id,
                             member_id,
@@ -227,7 +237,7 @@ impl FramerApp {
                         _ => None,
                     };
                     let section_x = if self.show_section {
-                        section_position(wall, &self.selected)
+                        section_position(wall, &viewport_selection)
                     } else {
                         None
                     };
@@ -256,6 +266,13 @@ impl FramerApp {
                     ui.label("No valid framing plan");
                     return;
                 };
+                let selected_components = self.selected_components();
+                if !selected_components.is_empty()
+                    || self.component_visibility.isolation_mode().is_some()
+                    || self.component_visibility.has_hidden()
+                {
+                    toolbar_anchor = Some(Pos2::new(canvas.center().x, canvas.bottom() - 8.0));
+                }
                 draw_project_axonometric(
                     ui,
                     AxonometricView {
@@ -263,8 +280,8 @@ impl FramerApp {
                         plan,
                         physical_scene,
                         active_geometry_violation: self.active_geometry_violation.as_ref(),
-                        selected_wall: self.selected_wall,
-                        selection: &self.selected,
+                        selected_components: &selected_components,
+                        component_visibility: &self.component_visibility,
                         workspace_mode: self.workspace_mode,
                         wall_display: self.layers.wall_display,
                         gpu_target_format: self.gpu_target_format,
@@ -284,7 +301,14 @@ impl FramerApp {
         }
 
         if let Some(click) = click {
-            self.handle_view_click(click);
+            let selection_op = ui.input(|input| {
+                if input.modifiers.command {
+                    SelectionOp::Toggle
+                } else {
+                    SelectionOp::Replace
+                }
+            });
+            self.handle_view_click_with_op(click, selection_op);
         }
 
         if !matches!(
@@ -320,12 +344,17 @@ impl FramerApp {
     fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2, canvas: Rect) {
         let duplicate_opening = self.can_duplicate_selected_opening();
         let delete_selection = self.action_enabled(ActionId::DeleteSelection);
-        if !duplicate_opening && !delete_selection {
+        let presentation_actions = !self.renderable_selected_components().is_empty()
+            || self.component_visibility.isolation_mode().is_some()
+            || self.component_visibility.has_hidden();
+        if !duplicate_opening && !delete_selection && !presentation_actions {
             return;
         }
 
         let t = design::active();
-        let action_count = usize::from(duplicate_opening) + usize::from(delete_selection);
+        let action_count = usize::from(duplicate_opening)
+            + usize::from(delete_selection)
+            + usize::from(presentation_actions);
         let spacing = 2.0;
         let width = action_count as f32 * design::control::ICON_BTN
             + action_count.saturating_sub(1) as f32 * spacing
@@ -388,13 +417,75 @@ impl FramerApp {
                                     self.execute_action(ActionId::DeleteSelection);
                                 }
                             }
+                            if presentation_actions {
+                                let (response, _) = MenuButton::new(
+                                    design::icon_text(design::Icon::Eye, 14.0)
+                                        .color(t.text_secondary),
+                                )
+                                .ui(ui, |ui| {
+                                    ui.set_min_width(184.0);
+                                    for id in [
+                                        ActionId::IsolateDim,
+                                        ActionId::IsolateHide,
+                                        ActionId::ExitIsolation,
+                                    ] {
+                                        let action = actions::metadata(id);
+                                        let enabled = self.action_enabled(id);
+                                        let button = ui
+                                            .add_enabled(enabled, egui::Button::new(action.label));
+                                        let button = if enabled {
+                                            button.on_hover_text(action.tooltip)
+                                        } else {
+                                            button.on_disabled_hover_text(
+                                                self.action_disabled_reason(id)
+                                                    .unwrap_or(action.tooltip),
+                                            )
+                                        };
+                                        if button.clicked() {
+                                            self.execute_action(id);
+                                            ui.close();
+                                        }
+                                    }
+                                    ui.separator();
+                                    for id in [ActionId::HideSelection, ActionId::ShowAllComponents]
+                                    {
+                                        let action = actions::metadata(id);
+                                        let enabled = self.action_enabled(id);
+                                        let button = ui
+                                            .add_enabled(enabled, egui::Button::new(action.label));
+                                        let button = if enabled {
+                                            button.on_hover_text(action.tooltip)
+                                        } else {
+                                            button.on_disabled_hover_text(
+                                                self.action_disabled_reason(id)
+                                                    .unwrap_or(action.tooltip),
+                                            )
+                                        };
+                                        if button.clicked() {
+                                            self.execute_action(id);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                let enabled = response.enabled();
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        enabled,
+                                        "Component visibility",
+                                    )
+                                });
+                                response.on_hover_text("Component visibility and isolation");
+                            }
                         });
                     });
             });
     }
 
     fn can_duplicate_selected_opening(&self) -> bool {
-        self.workspace_mode.allows_design_edits() && matches!(self.selected, Selection::Opening(_))
+        self.workspace_mode.allows_design_edits()
+            && self.selected_component_count() == 1
+            && matches!(self.selected, Selection::Opening(_))
     }
 
     fn workspace_header(&mut self, ui: &mut Ui) {
