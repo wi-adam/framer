@@ -17,6 +17,11 @@ use super::geom::Point3;
 /// and the point under the cursor tracks the cursor closely. Derived from the
 /// render camera's framing (`2 · 1.05 / cos(vfov/2)` ≈ 2.2 at the default 36° FOV).
 const PAN_RADII_PER_VIEWPORT: f32 = 2.1;
+/// Zoom bounds for the shared 3D/Render camera (1.0 == fit-to-bounds). The
+/// generous upper bound supports close inspection of joints and other framing
+/// details, matching the Plan/Elevation camera's maximum detail scale.
+pub(super) const ZOOM_MIN_3D: f32 = 0.35;
+pub(super) const ZOOM_MAX_3D: f32 = 40.0;
 /// Clamp on the pan offset's length (radius units), so the pivot can't drift so
 /// far the model is lost off-screen. The view-cube "Home" recenters.
 pub(super) const PAN_MAX_RADII: f32 = 20.0;
@@ -160,7 +165,7 @@ impl View3dState {
 
     pub(super) fn zoom_by(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
-            self.zoom = (self.zoom * factor).clamp(0.35, 3.0);
+            self.zoom = (self.zoom * factor).clamp(ZOOM_MIN_3D, ZOOM_MAX_3D);
         }
     }
 
@@ -183,7 +188,7 @@ impl View3dState {
         let scene_center = center(scene);
         let focus_center = center(focus);
         self.pan = (focus_center - scene_center) * (1.0 / scene_radius);
-        self.zoom = (scene_radius / focus_radius * 0.72).clamp(0.35, 3.0);
+        self.zoom = (scene_radius / focus_radius * 0.72).clamp(ZOOM_MIN_3D, ZOOM_MAX_3D);
         self.dolly = 1.0;
     }
 
@@ -272,7 +277,28 @@ mod tests {
         assert!(view.pan.x > 0.3, "focus center should pan toward +X");
         assert!(view.pan.y.abs() < 1.0e-6);
         assert!(view.pan.z.abs() < 1.0e-6);
-        assert!(view.zoom > 1.0);
+        assert!(
+            view.zoom > 3.0,
+            "focused geometry should zoom past the former 3× ceiling: {}",
+            view.zoom
+        );
         assert_eq!(view.dolly, 1.0);
+    }
+
+    #[test]
+    fn frame_bounds_clamps_tiny_focus_to_max_zoom() {
+        let scene = Aabb {
+            min: PhysicalPoint3::new(0.0, 0.0, 0.0),
+            max: PhysicalPoint3::new(200.0, 200.0, 200.0),
+        };
+        let focus = Aabb {
+            min: PhysicalPoint3::new(99.0, 99.0, 99.0),
+            max: PhysicalPoint3::new(101.0, 101.0, 101.0),
+        };
+        let mut view = View3dState::default();
+
+        view.frame_bounds(scene, focus);
+
+        assert_eq!(view.zoom, ZOOM_MAX_3D);
     }
 }
