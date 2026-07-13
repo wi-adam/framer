@@ -277,7 +277,28 @@ mod tests {
         assert!(view.pan.x > 0.3, "focus center should pan toward +X");
         assert!(view.pan.y.abs() < 1.0e-6);
         assert!(view.pan.z.abs() < 1.0e-6);
-        assert!(view.zoom > 1.0);
+        assert!(
+            view.zoom > 3.0,
+            "focused geometry should zoom past the former 3× ceiling: {}",
+            view.zoom
+        );
         assert_eq!(view.dolly, 1.0);
+    }
+
+    #[test]
+    fn frame_bounds_clamps_tiny_focus_to_max_zoom() {
+        let scene = Aabb {
+            min: PhysicalPoint3::new(0.0, 0.0, 0.0),
+            max: PhysicalPoint3::new(200.0, 200.0, 200.0),
+        };
+        let focus = Aabb {
+            min: PhysicalPoint3::new(99.0, 99.0, 99.0),
+            max: PhysicalPoint3::new(101.0, 101.0, 101.0),
+        };
+        let mut view = View3dState::default();
+
+        view.frame_bounds(scene, focus);
+
+        assert_eq!(view.zoom, ZOOM_MAX_3D);
     }
 }
