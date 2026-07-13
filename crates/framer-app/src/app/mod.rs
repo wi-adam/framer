@@ -859,6 +859,7 @@ impl FramerApp {
         self.selected_components().len()
     }
 
+    #[cfg(test)]
     fn component_is_selected(&self, key: &ComponentKey) -> bool {
         self.selected_components().iter().any(|item| item == key)
     }

@@ -729,6 +729,9 @@ impl FramerApp {
         });
         ui.add_space(design::space::SM);
 
+        // Browser rows are rebuilt every frame. Resolve the ordered selection
+        // once so dense generated trees do not clone ids for every row.
+        let selected_components = self.selected_components();
         let model_browser_scroll = ScrollArea::vertical().id_salt("model-browser-tree");
         model_browser_scroll.show(ui, |ui| {
             egui::CollapsingHeader::new("Authored")
@@ -905,7 +908,7 @@ impl FramerApp {
                                     AuthoredComponentKind::Wall,
                                     wall_id.clone(),
                                 );
-                                let wall_selected = self.component_is_selected(&wall_key);
+                                let wall_selected = selected_components.contains(&wall_key);
                                 let (wall_row, wall_eye) = component_tree_row(
                                     ui,
                                     &wall_key,
@@ -935,7 +938,7 @@ impl FramerApp {
                                             AuthoredComponentKind::Opening,
                                             opening_id.clone(),
                                         );
-                                        let selected = self.component_is_selected(&opening_key);
+                                        let selected = selected_components.contains(&opening_key);
                                         let (opening_row, opening_eye) = component_tree_row(
                                             ui,
                                             &opening_key,
@@ -967,7 +970,7 @@ impl FramerApp {
                                             AuthoredComponentKind::Dimension,
                                             dimension_id.clone(),
                                         );
-                                        let selected = self.component_is_selected(&key);
+                                        let selected = selected_components.contains(&key);
                                         let kind = format!(
                                             "{} dimension",
                                             dimension_kind_label(*dimension_kind)
@@ -999,7 +1002,7 @@ impl FramerApp {
                                     AuthoredComponentKind::Room,
                                     room_id.clone(),
                                 );
-                                let selected = self.component_is_selected(&key);
+                                let selected = selected_components.contains(&key);
                                 if tree_row(ui, selected, Icon::Room, room_name, "Room").clicked() {
                                     self.apply_selection(
                                         Selection::Room(room_id.clone()),
@@ -1017,7 +1020,7 @@ impl FramerApp {
                                     AuthoredComponentKind::RoofPlane,
                                     plane_id.clone(),
                                 );
-                                let selected = self.component_is_selected(&key);
+                                let selected = selected_components.contains(&key);
                                 let (row, eye) = component_tree_row(
                                     ui,
                                     &key,
@@ -1050,7 +1053,7 @@ impl FramerApp {
                                     AuthoredComponentKind::Ceiling,
                                     ceiling_id.clone(),
                                 );
-                                let selected = self.component_is_selected(&key);
+                                let selected = selected_components.contains(&key);
                                 // Distinguish a sloped (scissor/vault) ceiling from a
                                 // flat one in the tree.
                                 let kind = if *sloped {
@@ -1090,7 +1093,7 @@ impl FramerApp {
                                     AuthoredComponentKind::FloorDeck,
                                     deck_id.clone(),
                                 );
-                                let selected = self.component_is_selected(&key);
+                                let selected = selected_components.contains(&key);
                                 let (row, eye) = component_tree_row(
                                     ui,
                                     &key,
@@ -1125,7 +1128,7 @@ impl FramerApp {
                                 AuthoredComponentKind::Join,
                                 join_id.clone(),
                             );
-                            let selected = self.component_is_selected(&key);
+                            let selected = selected_components.contains(&key);
                             let kind = format!("Corner ({})", join_kind_label(join_kind));
                             let (row, eye) = component_tree_row(
                                 ui,
@@ -1248,7 +1251,6 @@ impl FramerApp {
                     .default_open(true)
                     .show(ui, |ui| {
                         if has_plan {
-                            let selected_components = self.selected_components();
                             for (source_id, label, wall_index, members) in &generated_groups {
                                 let source_selected = selected_components.iter().any(|key| {
                                     matches!(
@@ -1268,7 +1270,7 @@ impl FramerApp {
                                             source_id.clone(),
                                             member_id.clone(),
                                         );
-                                        let selected = self.component_is_selected(&key);
+                                        let selected = selected_components.contains(&key);
                                         let name = format!("{}: {}", kind.label(), member_id);
                                         let (row, eye) = component_tree_row(
                                             ui,
