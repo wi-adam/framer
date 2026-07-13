@@ -18,6 +18,9 @@ use egui_kittest::kittest::Queryable;
 use framer_core::{DimensionAxis, DimensionKind, Length, OpeningKind, Point2};
 
 use super::actions::{self, ActionId};
+use super::component_visibility::{
+    AuthoredComponentKind, ComponentKey, IsolationMode, SelectionOp,
+};
 use super::{
     FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels,
 };
@@ -278,6 +281,393 @@ fn model_tree_and_status_use_names_and_corner_language() {
             .is_none(),
         "status breadcrumb should not expose opening ids"
     );
+}
+
+#[test]
+fn authored_component_eye_is_accessible_reversible_and_keeps_hidden_row_selectable() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let (wall_id, wall_name) = {
+        let wall = &harness.state().model.walls[0];
+        (wall.id.0.clone(), wall.name.clone())
+    };
+    let key = ComponentKey::authored(AuthoredComponentKind::Wall, wall_id);
+    let model_before = harness.state().model.clone();
+    let plan_before = harness.state().project_plan.clone();
+    let undo_before = harness.state().history.undo_label().map(str::to_owned);
+
+    let hide_label = format!("Hide {wall_name}");
+    assert_accessible_button(&harness, &hide_label, "authored component eye");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .click();
+    harness.run();
+
+    assert!(
+        !harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "the eye should hide only the authored component presentation"
+    );
+    assert_eq!(harness.state().model, model_before);
+    assert_eq!(harness.state().project_plan, plan_before);
+    assert_eq!(
+        harness.state().history.undo_label().map(str::to_owned),
+        undo_before,
+        "visibility changes must not enter document history"
+    );
+
+    let show_label = format!("Show {wall_name}");
+    assert_accessible_button(&harness, &show_label, "hidden authored component eye");
+    assert_accessible_button(&harness, &wall_name, "hidden authored component row");
+
+    harness
+        .state_mut()
+        .apply_selection(Selection::Wall, Some(1), SelectionOp::Replace);
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &wall_name)
+        .click();
+    harness.run();
+    assert!(
+        harness.state().component_is_selected(&key),
+        "a hidden component row should remain selectable"
+    );
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &show_label)
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "the hidden row eye should restore the component"
+    );
+    assert_accessible_button(
+        &harness,
+        &format!("Hide {wall_name}"),
+        "restored authored component eye",
+    );
+}
+
+#[test]
+fn generated_component_eye_uses_host_and_member_identity() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let (host_id, member_id, member_name, wall_index) = {
+        let app = harness.state();
+        let wall_plan = app
+            .project_plan
+            .as_ref()
+            .and_then(|plan| plan.wall_plans.first())
+            .expect("demo shell wall framing");
+        let member = wall_plan.members.first().expect("generated wall member");
+        let wall_index = app
+            .model
+            .walls
+            .iter()
+            .position(|wall| wall.id == wall_plan.wall)
+            .expect("generated wall host should be authored");
+        (
+            wall_plan.wall.0.clone(),
+            member.id.clone(),
+            format!("{}: {}", member.kind.label(), member.id),
+            wall_index,
+        )
+    };
+    let key = ComponentKey::member(host_id.clone(), member_id.clone());
+
+    harness.state_mut().apply_selection(
+        Selection::Member {
+            source_id: host_id,
+            member_id,
+        },
+        Some(wall_index),
+        SelectionOp::Replace,
+    );
+    harness.state_mut().workspace_mode = WorkspaceMode::Plan;
+    harness.state_mut().command_tab = actions::WorkflowTab::Plan;
+    harness.run();
+
+    let hide_label = format!("Hide {member_name}");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .scroll_to_me();
+    harness.run();
+    assert_accessible_button(&harness, &hide_label, "generated component eye");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .click();
+    harness.run();
+
+    assert!(
+        !harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "the generated eye should address the exact host + member leaf"
+    );
+    let show_label = format!("Show {member_name}");
+    assert_accessible_button(&harness, &show_label, "hidden generated component eye");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &show_label)
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key)
+    );
+}
+
+#[test]
+fn model_browser_show_all_restores_hidden_component_overrides() {
+    let mut harness = demo_harness();
+    harness.run();
+    let (wall_id, wall_name) = {
+        let wall = &harness.state().model.walls[0];
+        (wall.id.0.clone(), wall.name.clone())
+    };
+    let key = ComponentKey::authored(AuthoredComponentKind::Wall, wall_id);
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &format!("Hide {wall_name}"))
+        .click();
+    harness.run();
+    assert_accessible_button(&harness, "Show all components", "Model Browser");
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Show all components")
+        .click();
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key)
+    );
+    assert_accessible_button(
+        &harness,
+        "Show all components",
+        "disabled Model Browser recovery action",
+    );
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Show all components")
+        .click();
+    harness.run_ok();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "the disabled recovery action must not change presentation state"
+    );
+}
+
+#[test]
+fn render_workspace_suppresses_isolation_status_and_disables_browser_eyes() {
+    let mut harness = demo_harness();
+    harness.run();
+    let (wall_id, wall_name) = {
+        let wall = &harness.state().model.walls[0];
+        (wall.id.0.clone(), wall.name.clone())
+    };
+    let key = ComponentKey::authored(AuthoredComponentKind::Wall, wall_id);
+    harness
+        .state_mut()
+        .component_visibility
+        .isolate(IsolationMode::DimOthers, vec![key.clone()]);
+    harness
+        .state_mut()
+        .set_workspace_mode(WorkspaceMode::Render);
+    harness.run_ok();
+
+    assert!(!harness.state().selection_status().contains("Isolated"));
+    let hide_label = format!("Hide {wall_name}");
+    assert_accessible_button(&harness, &hide_label, "disabled Render browser eye");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .click();
+    harness.run_ok();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "Render browser eyes must not mutate interactive-only presentation state"
+    );
+}
+
+#[test]
+fn design_disables_plan_only_opening_visibility_eye() {
+    let mut harness = demo_harness();
+    harness.run();
+    let (opening_id, opening_name) = harness
+        .state()
+        .model
+        .walls
+        .iter()
+        .flat_map(|wall| &wall.openings)
+        .map(|opening| (opening.id.0.clone(), opening.name.clone()))
+        .next()
+        .expect("demo shell opening");
+    let key = ComponentKey::authored(AuthoredComponentKind::Opening, opening_id);
+    let hide_label = format!("Hide {opening_name}");
+
+    assert_accessible_button(&harness, &hide_label, "disabled Design opening eye");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .click();
+    harness.run_ok();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "Design omits rough-opening framing, so its eye must not create an invisible override"
+    );
+
+    harness.state_mut().set_workspace_mode(WorkspaceMode::Plan);
+    harness.run_ok();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &hide_label)
+        .click();
+    harness.run_ok();
+    assert!(
+        !harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "Plan renders the opening's generated frame, so its eye should be enabled"
+    );
+}
+
+#[test]
+fn model_tree_command_or_ctrl_click_toggles_multi_selection() {
+    let mut harness = demo_harness();
+    harness.run();
+    let room_level = harness.state().model.levels[0].id.0.clone();
+    harness.state_mut().model.rooms.push(framer_core::Room::new(
+        "room-multi-select",
+        "Multi-select room",
+        framer_core::RoomUsage::default(),
+        room_level,
+        Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
+    ));
+    harness.run();
+
+    let walls = harness
+        .state()
+        .model
+        .walls
+        .iter()
+        .take(2)
+        .map(|wall| (wall.id.0.clone(), wall.name.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(walls.len(), 2, "demo shell should expose two wall rows");
+    let first_key = ComponentKey::authored(AuthoredComponentKind::Wall, walls[0].0.clone());
+    let second_key = ComponentKey::authored(AuthoredComponentKind::Wall, walls[1].0.clone());
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &walls[0].1)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &walls[1].1)
+        .click_modifiers(egui::Modifiers::CTRL);
+    harness.run();
+
+    assert_eq!(harness.state().selected_component_count(), 2);
+    assert!(harness.state().component_is_selected(&first_key));
+    assert!(harness.state().component_is_selected(&second_key));
+    assert_accessible_label(
+        &harness,
+        "2 components selected",
+        "multi-selection inspector and status",
+    );
+    let primary_id_label = format!("ID: {}", walls[1].0);
+    assert!(
+        harness
+            .query_all_by_label(&primary_id_label)
+            .next()
+            .is_none(),
+        "multi-selection should suppress the primary component's single-object editor"
+    );
+    let isolated = harness.state().selected_components();
+    harness
+        .state_mut()
+        .component_visibility
+        .isolate(IsolationMode::DimOthers, isolated);
+    harness.run();
+    assert_accessible_label(
+        &harness,
+        "2 components selected • Isolated: Dim others",
+        "active isolation status",
+    );
+
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &walls[1].1)
+        .click_modifiers(egui::Modifiers::COMMAND);
+    harness.run();
+    assert_eq!(harness.state().selected_component_count(), 1);
+    assert!(harness.state().component_is_selected(&first_key));
+    assert!(!harness.state().component_is_selected(&second_key));
+
+    let (room_id, room_name) = {
+        let room = harness
+            .state()
+            .model
+            .rooms
+            .first()
+            .expect("demo shell should expose a room row");
+        (room.id.0.clone(), room.name.clone())
+    };
+    let room_key = ComponentKey::authored(AuthoredComponentKind::Room, room_id);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &room_name)
+        .scroll_to_me();
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &room_name)
+        .click_modifiers(egui::Modifiers::CTRL);
+    harness.run();
+    assert_eq!(harness.state().selected_component_count(), 2);
+    assert!(harness.state().component_is_selected(&first_key));
+    assert!(harness.state().component_is_selected(&room_key));
+}
+
+#[test]
+fn plan_multi_selection_keeps_generated_output_sections_visible() {
+    let mut harness = demo_harness();
+    harness.run();
+    let wall_names = harness
+        .state()
+        .model
+        .walls
+        .iter()
+        .take(2)
+        .map(|wall| wall.name.clone())
+        .collect::<Vec<_>>();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &wall_names[0])
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &wall_names[1])
+        .click_modifiers(egui::Modifiers::COMMAND);
+    harness.run();
+    harness.state_mut().set_workspace_mode(WorkspaceMode::Plan);
+    harness.run();
+
+    for section in ["Diagnostics", "Compliance", "BOM"] {
+        assert_accessible_label(&harness, section, "Plan multi-selection inspector");
+    }
 }
 
 #[test]
@@ -918,6 +1308,54 @@ fn command_search_suppresses_canvas_context_toolbar() {
         harness.query_all_by_label("Delete").next().is_none(),
         "global command search should hide canvas-local context actions underneath it"
     );
+}
+
+#[test]
+fn visibility_popup_escape_preserves_selection_and_isolation_then_exit_remains_reachable() {
+    let mut harness = demo_harness();
+    harness.run();
+    harness.state_mut().set_workspace_mode(WorkspaceMode::Plan);
+    harness.state_mut().viewport_mode = ViewportMode::Axonometric;
+    harness.state_mut().execute_action(ActionId::IsolateDim);
+    harness.run();
+
+    assert_accessible_button(&harness, "Component visibility", "3D context toolbar");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Component visibility")
+        .click();
+    harness.run();
+    assert_accessible_button(&harness, "Exit Isolation", "component visibility popup");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert_eq!(harness.state().selected_component_count(), 1);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(IsolationMode::DimOthers)
+    );
+    assert!(
+        harness
+            .query_all_by_label("Exit Isolation")
+            .next()
+            .is_none()
+    );
+
+    harness.state_mut().clear_selection();
+    harness.run();
+    assert_accessible_button(
+        &harness,
+        "Component visibility",
+        "isolation recovery context toolbar",
+    );
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Component visibility")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Exit Isolation")
+        .click();
+    harness.run();
+    assert_eq!(harness.state().component_visibility.isolation_mode(), None);
 }
 
 #[test]
