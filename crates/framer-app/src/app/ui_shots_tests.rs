@@ -118,6 +118,29 @@ fn select_tab(harness: &mut Harness<'_, FramerApp>, tab: actions::WorkflowTab) {
     harness.state_mut().select_workflow_tab(tab);
 }
 
+fn open_3d_component_context_menu(harness: &mut Harness<'_, FramerApp>) {
+    let rect = harness.get_by_label("3D viewport").rect();
+    for y in [0.25, 0.375, 0.5, 0.625, 0.75] {
+        for x in [0.25, 0.375, 0.5, 0.625, 0.75] {
+            let position = egui::pos2(egui::lerp(rect.x_range(), x), egui::lerp(rect.y_range(), y));
+            harness.event(egui::Event::PointerMoved(position));
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run_ok();
+            if harness.state().context_menu_context.is_some() {
+                return;
+            }
+        }
+    }
+    panic!("the demo-shell 3D viewport should expose at least one pickable component");
+}
+
 fn prepare_geometry_overlap(harness: &mut Harness<'_, FramerApp>) {
     let mut wall = harness.state().model.walls[0].clone();
     wall.id = ElementId::new("ui-shot-overlap-wall");
@@ -291,6 +314,17 @@ fn capture_ui_shot_deck() {
             .is_none(),
         "Escape should close the component-visibility popup"
     );
+
+    open_3d_component_context_menu(&mut harness);
+    harness.get_by_label("Isolate ⏵").click();
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-selection-context-menu",
+    );
+    harness.get_by_label("Dim Others").click();
+    harness.run_ok();
 
     harness
         .state_mut()
@@ -502,6 +536,16 @@ fn capture_ui_shot_deck() {
         &mut index,
         "dark-plan-3d-isolate-dim-others",
     );
+    open_3d_component_context_menu(&mut dark);
+    dark.get_by_label("Isolate ⏵").click();
+    shot(
+        &mut dark,
+        &dir,
+        &mut index,
+        "dark-plan-3d-selection-context-menu",
+    );
+    dark.get_by_label("Dim Others").click();
+    dark.run_ok();
     dark.state_mut()
         .execute_action(actions::ActionId::ExitIsolation);
     select_tab(&mut dark, actions::WorkflowTab::Frame);

@@ -1,5 +1,6 @@
 mod actions;
 mod component_visibility;
+mod context_menu;
 mod design;
 mod draw_wall;
 mod history;
@@ -45,6 +46,7 @@ use component_visibility::{
     AuthoredComponentKind, ComponentAppearance, ComponentKey, ComponentSelection,
     ComponentVisibility, IsolationMode, SelectionOp, key_for_selection,
 };
+use context_menu::ContextMenuContext;
 use draw_wall::{SnapResult, joins_for_new_wall};
 use history::History;
 use model_edit::{
@@ -64,6 +66,9 @@ pub(crate) struct FramerApp {
     selected: Selection,
     component_selection: ComponentSelection,
     component_visibility: ComponentVisibility,
+    /// Target/surface snapshot for the currently open canvas context menu.
+    /// Presentation-only and never serialized; egui owns the popup's open state.
+    context_menu_context: Option<ContextMenuContext>,
     project_plan: Option<ProjectFramePlan>,
     physical_scene: Option<PhysicalScene>,
     geometry_audit: GeometryAudit,
@@ -522,6 +527,54 @@ enum ViewClick {
     EmptyCanvas,
 }
 
+impl ViewClick {
+    fn component_key(&self, model: &BuildingModel) -> Option<ComponentKey> {
+        match self {
+            Self::Wall(index) => model
+                .walls
+                .get(*index)
+                .map(|wall| ComponentKey::authored(AuthoredComponentKind::Wall, wall.id.0.clone())),
+            Self::Opening { opening_id, .. } => Some(ComponentKey::authored(
+                AuthoredComponentKind::Opening,
+                opening_id.clone(),
+            )),
+            Self::Join { join_id } => Some(ComponentKey::authored(
+                AuthoredComponentKind::Join,
+                join_id.clone(),
+            )),
+            Self::Member {
+                source_id,
+                member_id,
+            } => Some(ComponentKey::member(source_id.clone(), member_id.clone())),
+            Self::RoofPlane { id } => Some(ComponentKey::authored(
+                AuthoredComponentKind::RoofPlane,
+                id.clone(),
+            )),
+            Self::Ceiling { id } => Some(ComponentKey::authored(
+                AuthoredComponentKind::Ceiling,
+                id.clone(),
+            )),
+            Self::FloorDeck { id } => Some(ComponentKey::authored(
+                AuthoredComponentKind::FloorDeck,
+                id.clone(),
+            )),
+            Self::Dimension { .. }
+            | Self::DimensionAnchor { .. }
+            | Self::DimensionPlacement { .. }
+            | Self::DrawWallPoint { .. }
+            | Self::DrawWallCancel
+            | Self::PlaceRoom { .. }
+            | Self::PlaceCeiling { .. }
+            | Self::PlaceFloor { .. }
+            | Self::PlaceVault { .. }
+            | Self::Room { .. }
+            | Self::FurnishingInstance { .. }
+            | Self::MepInstance { .. }
+            | Self::EmptyCanvas => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DimensionToolState {
     active: bool,
@@ -667,6 +720,7 @@ impl Default for FramerApp {
             selected: Selection::Wall,
             component_selection: ComponentSelection::default(),
             component_visibility: ComponentVisibility::default(),
+            context_menu_context: None,
             project_plan: None,
             physical_scene: None,
             geometry_audit: GeometryAudit::default(),
@@ -859,6 +913,12 @@ impl FramerApp {
         self.selected_components().len()
     }
 
+    fn component_key_is_selected(&self, key: &ComponentKey) -> bool {
+        let current_primary = self.primary_component_key();
+        self.component_selection
+            .contains_active(current_primary.as_ref(), key)
+    }
+
     #[cfg(test)]
     fn component_is_selected(&self, key: &ComponentKey) -> bool {
         self.selected_components().iter().any(|item| item == key)
@@ -879,6 +939,28 @@ impl FramerApp {
     fn hide_selected_components(&mut self) {
         let selected = self.renderable_selected_components();
         self.component_visibility.hide(selected);
+    }
+
+    fn prepare_viewport_context_menu(&mut self, click: Option<ViewClick>) {
+        let Some(click) = click else {
+            self.context_menu_context = None;
+            return;
+        };
+        let Some(target) = click
+            .component_key(&self.model)
+            .filter(ComponentKey::is_renderable)
+        else {
+            self.context_menu_context = None;
+            return;
+        };
+
+        if !self.component_key_is_selected(&target) {
+            self.handle_view_click_with_op(click, SelectionOp::Replace);
+        }
+
+        self.context_menu_context = self
+            .component_key_is_selected(&target)
+            .then(|| ContextMenuContext::viewport(self.viewport_mode, target));
     }
 
     fn apply_selection(
@@ -1216,6 +1298,7 @@ impl FramerApp {
         self.last_authoring_viewport = ViewportMode::Plan;
         self.component_selection = ComponentSelection::default();
         self.component_visibility = ComponentVisibility::default();
+        self.context_menu_context = None;
     }
 
     fn new_project(&mut self) {
@@ -1569,6 +1652,7 @@ impl FramerApp {
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        self.context_menu_context = None;
         if mode != WorkspaceMode::Plan {
             self.active_geometry_violation = None;
         }
@@ -1637,6 +1721,7 @@ impl FramerApp {
 
     fn set_authoring_viewport_mode(&mut self, mode: ViewportMode) {
         debug_assert_ne!(mode, ViewportMode::Render);
+        self.context_menu_context = None;
         if self.workspace_mode == WorkspaceMode::Render {
             self.set_workspace_mode(WorkspaceMode::Design);
         }
@@ -5797,6 +5882,105 @@ mod tests {
             vec![ComponentKey::authored(AuthoredComponentKind::Wall, wall_a)]
         );
         assert_eq!(app.selected_wall, 0);
+    }
+
+    #[test]
+    fn viewport_context_click_preserves_a_multi_selection_member() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+        let selected = app.selected_components();
+
+        app.prepare_viewport_context_menu(Some(ViewClick::Wall(0)));
+
+        assert_eq!(app.selected_components(), selected);
+        assert_eq!(
+            app.context_menu_context,
+            Some(ContextMenuContext::viewport(
+                ViewportMode::Axonometric,
+                selected[0].clone(),
+            ))
+        );
+    }
+
+    #[test]
+    fn viewport_context_click_replaces_selection_with_a_different_component() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+        app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
+        app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Toggle);
+        let target =
+            ComponentKey::authored(AuthoredComponentKind::Wall, app.model.walls[2].id.0.clone());
+
+        app.prepare_viewport_context_menu(Some(ViewClick::Wall(2)));
+
+        assert_eq!(app.selected_components(), vec![target.clone()]);
+        assert_eq!(
+            app.context_menu_context,
+            Some(ContextMenuContext::viewport(
+                ViewportMode::Axonometric,
+                target,
+            ))
+        );
+    }
+
+    #[test]
+    fn generated_member_uses_the_same_viewport_context_selection_path() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        app.viewport_mode = ViewportMode::Axonometric;
+        let (host_id, member_id) = app
+            .project_plan
+            .as_ref()
+            .unwrap()
+            .wall_plans
+            .iter()
+            .find_map(|wall_plan| {
+                wall_plan
+                    .members
+                    .first()
+                    .map(|member| (wall_plan.wall.0.clone(), member.id.clone()))
+            })
+            .expect("demo shell should contain generated wall framing");
+        let target = ComponentKey::member(host_id.clone(), member_id.clone());
+
+        app.prepare_viewport_context_menu(Some(ViewClick::Member {
+            source_id: host_id,
+            member_id,
+        }));
+
+        assert_eq!(app.selected_components(), vec![target.clone()]);
+        assert_eq!(
+            app.context_menu_context,
+            Some(ContextMenuContext::viewport(
+                ViewportMode::Axonometric,
+                target,
+            ))
+        );
+    }
+
+    #[test]
+    fn empty_secondary_canvas_target_closes_menu_without_clearing_selection() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+        app.prepare_viewport_context_menu(Some(ViewClick::Wall(0)));
+        let selected = app.selected_components();
+        assert!(app.context_menu_context.is_some());
+
+        app.prepare_viewport_context_menu(Some(ViewClick::EmptyCanvas));
+
+        assert_eq!(app.context_menu_context, None);
+        assert_eq!(app.selected_components(), selected);
     }
 
     #[test]

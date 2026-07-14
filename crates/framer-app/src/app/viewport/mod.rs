@@ -6,6 +6,7 @@ use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
 use super::WorkspaceMode;
 use super::actions::{self, ActionId};
+use super::context_menu;
 use super::draw_wall::SnapResult;
 use super::labels::{dimension_axis_label, dimension_kind_label};
 #[cfg(test)]
@@ -101,6 +102,7 @@ impl FramerApp {
         let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
         self.cursor_model = None;
         let mut toolbar_anchor = None;
+        let mut axonometric_response = None;
         let multiple_components_selected = self.selected_component_count() > 1;
         let viewport_selection = if multiple_components_selected {
             Selection::None
@@ -273,7 +275,7 @@ impl FramerApp {
                 {
                     toolbar_anchor = Some(Pos2::new(canvas.center().x, canvas.bottom() - 8.0));
                 }
-                draw_project_axonometric(
+                let output = draw_project_axonometric(
                     ui,
                     AxonometricView {
                         model: &self.model,
@@ -288,7 +290,14 @@ impl FramerApp {
                         gpu_depth_format: self.gpu_depth_format,
                     },
                     &mut self.view_3d,
-                )
+                );
+                let AxonometricResponse {
+                    response,
+                    primary_click,
+                    secondary_click,
+                } = output;
+                axonometric_response = Some((response, secondary_click));
+                primary_click
             }
             ViewportMode::Render => {
                 self.draw_project_render(ui);
@@ -301,6 +310,7 @@ impl FramerApp {
         }
 
         if let Some(click) = click {
+            self.context_menu_context = None;
             let selection_op = ui.input(|input| {
                 if input.modifiers.command {
                     SelectionOp::Toggle
@@ -309,6 +319,40 @@ impl FramerApp {
                 }
             });
             self.handle_view_click_with_op(click, selection_op);
+        }
+
+        if let Some((response, secondary_click)) = axonometric_response {
+            if response.secondary_clicked() {
+                self.prepare_viewport_context_menu(secondary_click);
+            }
+
+            let model = self
+                .context_menu_context
+                .as_ref()
+                .map(context_menu::build_context_menu)
+                .filter(|model| !model.is_empty());
+            let mut chosen = None;
+            response.context_menu(|ui| {
+                let Some(model) = model.as_ref().filter(|_| !self.command_search.open) else {
+                    ui.close();
+                    return;
+                };
+                chosen = context_menu::render_context_menu(ui, model, |id| {
+                    context_menu::ContextActionState {
+                        enabled: self.action_enabled(id),
+                        disabled_reason: self.action_disabled_reason(id),
+                    }
+                });
+                if chosen.is_some() {
+                    ui.close();
+                }
+            });
+            if let Some(id) = chosen {
+                self.execute_action(id);
+                self.context_menu_context = None;
+            } else if !response.context_menu_opened() {
+                self.context_menu_context = None;
+            }
         }
 
         if !matches!(

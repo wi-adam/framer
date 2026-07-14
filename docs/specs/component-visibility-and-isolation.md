@@ -6,8 +6,9 @@
 >
 > **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) / G-011
 > (CAD Workspace UX) · **Plan:**
-> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md) ·
-> **Last reviewed:** 2026-07-12
+> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
+> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
+> **Last reviewed:** 2026-07-13
 
 ## Intent / Purpose
 
@@ -53,6 +54,11 @@ workflow-strip chrome.
 - Isolation captures the selected set when the command is invoked. Later
   selection changes do not silently redefine that isolated set. Exit Isolation
   restores ordinary per-component visibility.
+- In interactive 3-D, secondary-clicking a component opens its canvas selection
+  menu. A component outside the current selection replaces the selection before
+  the menu opens; secondary-clicking a member of the current multi-selection
+  preserves the whole selected set. Secondary-clicking empty canvas or the
+  ViewCube does not open a component menu or clear selection.
 - Wall, roof, ceiling, and floor hosts can be isolated in either Design or Plan
   3-D. Opening rough frames, corners, and exact generated members require Plan
   3-D because Design intentionally omits generated framing. Entering Design with
@@ -91,10 +97,10 @@ workflow-strip chrome.
 | Command | Primary surface | Secondary surface | Enabled context | Undo |
 | --- | --- | --- | --- | --- |
 | Toggle component visibility | Model Browser eye | — | Component rendered in active interactive 3-D workspace | No |
-| Isolate — Dim others | Selection context menu/toolbar | Command search | Interactive 3-D + component selection | No |
-| Isolate — Hide others | Selection context menu/toolbar | Command search | Interactive 3-D + component selection | No |
-| Exit Isolation | Selection context menu/toolbar | Command search | Active isolation | No |
-| Hide selected | Selection context menu/toolbar | Command search | Component selection | No |
+| Isolate — Dim others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | No |
+| Isolate — Hide others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | No |
+| Exit Isolation | 3-D selection context menu | Context toolbar / command search | Active isolation | No |
+| Hide selected | 3-D selection context menu | Context toolbar / command search | Component selection | No |
 | Show all components | Model Browser / selection context menu | Command search | Any hidden override | No |
 
 ## Decisions (locked)
@@ -115,6 +121,10 @@ workflow-strip chrome.
   not belong in `BuildingModel`, `ProjectFramePlan`, or `.framer`.
 - **Interactive 3-D first.** Path-traced Render needs separate component-aware
   scene/BVH and CPU/GPU material work; it is not approximated here.
+- **Selection-preserving secondary click.** Opening a menu on an already-selected
+  component keeps the ordered selection intact; a different target becomes the
+  new selection. This matches the menu's command target without making
+  right-click an additive-selection gesture.
 
 ## Architecture (grounded in the codebase)
 
@@ -127,8 +137,14 @@ workflow-strip chrome.
   accessible `Show …` / `Hide …` eye responses.
 - `crates/framer-app/src/app/viewport/axonometric.rs` forwards the complete
   selection plus visibility state into the scene builder and reports
-  Command/Ctrl click intent. Empty 3-D canvas returns the same clear-selection
-  event as the 2-D Plan view.
+  primary and secondary pick intent. Empty primary click returns the same
+  clear-selection event as the 2-D Plan view; empty secondary click does not.
+- `crates/framer-app/src/app/context_menu.rs` owns the typed menu context/model,
+  the 3-D canvas builder, and the shared menu renderer. Surface builders compose
+  `ActionId`s while `FramerApp` remains the single source of command enablement
+  and dispatch. A future Model Browser builder remains separate from viewport
+  composition and can later consume registered contributions without changing
+  the model or renderer.
 - `crates/framer-app/src/app/viewport/scene_build/` resolves each authored
   assembly/member leaf to normal, dimmed, or hidden before emission. Hidden
   leaves omit geometry and picks. Dimmed leaves are routed after the opaque
@@ -158,3 +174,4 @@ workflow-strip chrome.
 - Tri-state visibility controls on level/generated-host headers.
 - Component-aware filtering or transmissive ghosting in path-traced Render.
 - Authoring a temporary suppression as construction intent.
+- A Model Browser right-click menu and a runtime/plugin contribution registry.

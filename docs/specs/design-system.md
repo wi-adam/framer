@@ -6,8 +6,9 @@
 >
 > **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
-> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md) ·
-> **Last reviewed:** 2026-07-12
+> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
+> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
+> **Last reviewed:** 2026-07-13
 
 ## Goal
 
@@ -111,7 +112,7 @@ Each reads `theme(ui)` so it restyles for free:
 - `property_row(label, value_widget)` — left label / right-aligned value field.
 - `swatch_field(...)` — wall-type visual stripe + dropdown.
 - `chip(text, tone)`, `status_item(...)`, `tab_bar(...)`, `panel_header(...)`.
-- Canvas overlays: `marking_menu(actions)`, `context_toolbar(actions)`,
+- Canvas overlays: shared context-menu model/renderer, `context_toolbar(actions)`,
   `view_cube`, `axis_gizmo`, `scale_bar`, `nav_widget`.
 - Domain visuals: `wall_glyph`, `opening_glyph`, `roof_glyph`, `layer_stack_glyph`,
   `section_cut_glyph`, `framing_swatch`, and `validation_badge`.
@@ -146,6 +147,11 @@ a style preference:
 - **Opaque elevation.** Menus, popups, and the command palette render fully opaque
   with a shadow; underlying content never bleeds through. Escape dismisses the
   topmost transient surface first.
+- **Surface-scoped context menus.** Canvas and Model Browser menus share compact
+  rendering, spacing, accessibility, and action-state treatment, but each surface
+  composes its own sections from its own target context. Viewport-only actions do
+  not leak into browser rows, and a viewport with no relevant commands opens no
+  menu.
 - **Selection lifecycle.** Plain click replaces component selection; Command/Ctrl-
   click toggles stable authored/generated component identities and the most recent
   item becomes primary. Clicking empty canvas or pressing Escape clears the set.
