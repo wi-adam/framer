@@ -343,6 +343,7 @@ mirrors this exact math.
 | `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. It owns the ordered stable component selection and session-only component visibility/isolation state, centralizes replace/toggle/clear selection paths, and prunes presentation keys after regeneration. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document; `RenderSettings` is also session-only presentation state for sun/exposure controls. `WorkflowTab`, `WorkspaceMode`, and `ViewportMode` coupling lives here: output workflow tabs enter Render/Plan workspaces, authoring tabs restore the Design workspace and apply soft default views. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. Standards authoring edit ops (project-local pack creation, starter-pack import, stack add/reorder/remove, and waive overlays) also live here so every mutation goes through undoable `edit()`. The derived compliance report is regenerated with each plan, lowered into plan diagnostics, and exported as a CSV sidecar. |
 | `actions.rs` | UI-only command metadata (`ActionId`, `EnabledContext`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; enabled/disabled state is evaluated by `FramerApp`, and model mutations still live on `FramerApp`. |
 | `component_visibility.rs` | App-only stable `ComponentKey`, ordered `ComponentSelection`, per-component hidden overrides, frozen isolation targets/modes, and authored/generated/semantic-source appearance resolution. This is disposable presentation state; it never enters core, solver, or `.framer`. |
+| `context_menu.rs` | App-only typed context-menu surface/target context, section/item model, explicit surface builders, and one egui renderer that reads existing `ActionId` state. Interactive 3-D owns the first builder; the future Model Browser menu remains independently composed, and a later contribution registry can replace builder internals without changing the model/renderer/dispatch contract. |
 | `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. Renderable authored/generated browser rows expose independent accessible visibility eyes and ordered multi-selection; the inspector renders a read-only summary for heterogeneous selections. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation, including `next_standards_pack_id`). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + same-level auto-join derivation. |
@@ -362,17 +363,18 @@ styling goes here, not inline; command routing policy belongs in
 
 ### `src/app/viewport/` — the viewports (layered modules)
 
-`workspace` (`viewport/mod.rs:91`) renders the workspace/view bar, contextual tool options
-strip, selection context toolbar, and one viewport per frame based on `ViewportMode`. Workflow
+`workspace` (`viewport/mod.rs:94`) renders the workspace/view bar, contextual tool options
+strip, selection context toolbar, surface-scoped 3-D context menu, and one viewport per frame based on `ViewportMode`. Workflow
 tabs in `panels.rs` own Design/Render/Plan workspace switching; the workspace/view bar owns the
 authoring camera segmented control (`Shell`/`Plan`, `Wall`/`Elevation`, `Roof`, `3D`) and hides it
 in the Render workspace. The tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
-placement context, including the active drafting level, and the selection context toolbar owns
-selected-object lifecycle actions plus component isolate/hide/show commands.
+placement context, including the active drafting level. The selection context toolbar remains a
+compact fallback, while secondary-clicking 3-D geometry opens the shared-rendered canvas menu for
+component isolate/hide/show commands.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | `workspace` dispatcher + shared viewport input/header. |
+| `mod.rs` | `workspace` dispatcher + shared viewport input/header, primary/secondary pick routing, and 3-D context-menu invocation. |
 | `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, the overhang-aware roof authoring overlay, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |

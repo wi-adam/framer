@@ -89,7 +89,9 @@ pub(crate) enum CommandSurface {
     WorkspaceViewBar,
     WorkflowCommandStrip,
     CommandStripFlyout,
+    CanvasContextMenu,
     ContextToolbar,
+    ModelBrowser,
     ToolOptionsStrip,
     Inspector,
     PlanWorkspace,
@@ -208,6 +210,15 @@ const SEARCH_PROJECT: &[CommandSurface] =
     &[CommandSurface::CommandSearch, CommandSurface::ProjectMenu];
 const SEARCH_CONTEXT: &[CommandSurface] = &[
     CommandSurface::CommandSearch,
+    CommandSurface::ContextToolbar,
+];
+const SEARCH_CANVAS_CONTEXT: &[CommandSurface] = &[
+    CommandSurface::CommandSearch,
+    CommandSurface::ContextToolbar,
+];
+const SEARCH_COMPONENT_PRESENTATION: &[CommandSurface] = &[
+    CommandSurface::CommandSearch,
+    CommandSurface::CanvasContextMenu,
     CommandSurface::ContextToolbar,
 ];
 const SEARCH_INSPECTOR: &[CommandSurface] =
@@ -528,8 +539,8 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         icon: Icon::Eye,
         tooltip: "Keep the selected components solid and dim the rest of the 3D scene",
         owner: ActionOwner::View,
-        primary_surface: CommandSurface::ContextToolbar,
-        secondary_surfaces: SEARCH,
+        primary_surface: CommandSurface::CanvasContextMenu,
+        secondary_surfaces: SEARCH_CANVAS_CONTEXT,
         command_strip: None,
         enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
@@ -540,8 +551,8 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         icon: Icon::Eye,
         tooltip: "Show only the selected components in the 3D scene",
         owner: ActionOwner::View,
-        primary_surface: CommandSurface::ContextToolbar,
-        secondary_surfaces: SEARCH,
+        primary_surface: CommandSurface::CanvasContextMenu,
+        secondary_surfaces: SEARCH_CANVAS_CONTEXT,
         command_strip: None,
         enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
@@ -552,8 +563,8 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         icon: Icon::Eye,
         tooltip: "Restore the ordinary component visibility view",
         owner: ActionOwner::View,
-        primary_surface: CommandSurface::ContextToolbar,
-        secondary_surfaces: SEARCH,
+        primary_surface: CommandSurface::CanvasContextMenu,
+        secondary_surfaces: SEARCH_CANVAS_CONTEXT,
         command_strip: None,
         enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
@@ -564,8 +575,8 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         icon: Icon::Eye,
         tooltip: "Hide the selected components in the interactive 3D scene",
         owner: ActionOwner::View,
-        primary_surface: CommandSurface::ContextToolbar,
-        secondary_surfaces: SEARCH,
+        primary_surface: CommandSurface::CanvasContextMenu,
+        secondary_surfaces: SEARCH_CANVAS_CONTEXT,
         command_strip: None,
         enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
@@ -576,8 +587,8 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         icon: Icon::Eye,
         tooltip: "Clear every per-component hidden override",
         owner: ActionOwner::View,
-        primary_surface: CommandSurface::ContextToolbar,
-        secondary_surfaces: SEARCH,
+        primary_surface: CommandSurface::ModelBrowser,
+        secondary_surfaces: SEARCH_COMPONENT_PRESENTATION,
         command_strip: None,
         enabled_context: EnabledContext::Always,
         mutates_authored_intent: false,
@@ -998,6 +1009,33 @@ mod tests {
                 "{id:?} shortcut should match the handled keyboard path"
             );
         }
+    }
+
+    #[test]
+    fn component_presentation_actions_route_through_their_real_context_surfaces() {
+        for id in [
+            ActionId::IsolateDim,
+            ActionId::IsolateHide,
+            ActionId::ExitIsolation,
+            ActionId::HideSelection,
+        ] {
+            let action = metadata(id);
+            assert_eq!(action.primary_surface, CommandSurface::CanvasContextMenu);
+            assert!(
+                action
+                    .secondary_surfaces
+                    .contains(&CommandSurface::ContextToolbar),
+                "{id:?} must retain the compact toolbar fallback"
+            );
+        }
+
+        let show_all = metadata(ActionId::ShowAllComponents);
+        assert_eq!(show_all.primary_surface, CommandSurface::ModelBrowser);
+        assert!(
+            show_all
+                .secondary_surfaces
+                .contains(&CommandSurface::CanvasContextMenu)
+        );
     }
 
     #[test]

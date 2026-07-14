@@ -128,6 +128,21 @@ impl ComponentSelection {
         self.items = dedupe(items);
     }
 
+    pub(super) fn contains_active(
+        &self,
+        current_primary: Option<&ComponentKey>,
+        key: &ComponentKey,
+    ) -> bool {
+        let Some(current_primary) = current_primary else {
+            return false;
+        };
+        if self.items.last() == Some(current_primary) {
+            self.items.contains(key)
+        } else {
+            current_primary == key
+        }
+    }
+
     /// Toggle `key`, preserving interaction order and returning the new primary.
     pub(super) fn toggle(
         &mut self,
@@ -401,6 +416,21 @@ mod tests {
             Some(wall_b.clone())
         );
         assert_eq!(selection.items(), &[wall_b]);
+    }
+
+    #[test]
+    fn active_selection_membership_ignores_stale_ordered_items() {
+        let wall_a = ComponentKey::authored(AuthoredComponentKind::Wall, "wall-a");
+        let wall_b = ComponentKey::authored(AuthoredComponentKind::Wall, "wall-b");
+        let wall_c = ComponentKey::authored(AuthoredComponentKind::Wall, "wall-c");
+        let mut selection = ComponentSelection::default();
+        selection.set_items(vec![wall_a.clone(), wall_b.clone()]);
+
+        assert!(selection.contains_active(Some(&wall_b), &wall_a));
+        assert!(selection.contains_active(Some(&wall_b), &wall_b));
+        assert!(!selection.contains_active(Some(&wall_c), &wall_a));
+        assert!(selection.contains_active(Some(&wall_c), &wall_c));
+        assert!(!selection.contains_active(None, &wall_b));
     }
 
     #[test]

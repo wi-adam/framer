@@ -104,6 +104,29 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
     );
 }
 
+fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
+    let rect = harness.get_by_label("3D viewport").rect();
+    for y in [0.25, 0.375, 0.5, 0.625, 0.75] {
+        for x in [0.25, 0.375, 0.5, 0.625, 0.75] {
+            let position = egui::pos2(egui::lerp(rect.x_range(), x), egui::lerp(rect.y_range(), y));
+            harness.event(egui::Event::PointerMoved(position));
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            harness.run();
+            if harness.state().context_menu_context.is_some() {
+                return;
+            }
+        }
+    }
+    panic!("the demo-shell 3D viewport should expose at least one pickable component");
+}
+
 /// The app boots, the demo shell loads, the framing plan regenerates, and the
 /// full panel tree lays out — all without panicking — and the window title is
 /// present in the accessibility tree.
@@ -1896,6 +1919,58 @@ fn axonometric_view_lays_out_in_every_wall_display_mode() {
             "3D view in {mode:?} mode should lay out without panicking"
         );
     }
+}
+
+#[test]
+fn axonometric_secondary_click_opens_context_menu_and_dispatches_isolation() {
+    let mut harness = demo_harness();
+    harness.run();
+    harness.state_mut().set_workspace_mode(WorkspaceMode::Plan);
+    harness.state_mut().viewport_mode = ViewportMode::Axonometric;
+    harness.run();
+
+    secondary_click_pickable_3d_component(&mut harness);
+
+    assert_accessible_button(&harness, "Isolate ⏵", "3D selection context menu");
+    harness.get_by_label("Isolate ⏵").click();
+    harness.run();
+    assert_accessible_button(&harness, "Dim Others", "Isolate submenu");
+    assert_accessible_button(&harness, "Hide Others", "Isolate submenu");
+
+    harness.get_by_label("Dim Others").click();
+    harness.run();
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(IsolationMode::DimOthers)
+    );
+
+    let selected = harness.state().selected_components();
+    secondary_click_pickable_3d_component(&mut harness);
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+    assert_eq!(harness.state().selected_components(), selected);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(IsolationMode::DimOthers),
+        "Escape should dismiss the popup before changing isolation or selection"
+    );
+    assert_eq!(harness.state().context_menu_context, None);
+    assert!(harness.query_all_by_label("Isolate ⏵").next().is_none());
+
+    let viewport = harness.get_by_label("3D viewport").rect();
+    let empty = viewport.left_top() + egui::vec2(2.0, 2.0);
+    harness.event(egui::Event::PointerMoved(empty));
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos: empty,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    harness.run();
+    assert!(harness.query_all_by_label("Isolate ⏵").next().is_none());
+    assert_eq!(harness.state().selected_components(), selected);
 }
 
 /// Drive the ceiling inspector's slope editor through the real UI: select the demo
