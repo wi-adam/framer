@@ -21,8 +21,9 @@ to wire up.
   explicit `edit(label, |m| …)` transaction boundary. Not a command/inverse
   system. (Snapshots are correct-by-construction here — no hand-written inverses,
   solver-safe — and cheap at Framer's KB-scale documents.)
-- **Restore scope:** the document **model + selection** (`selected`,
-  `selected_wall`). The camera, view mode, and workspace mode are *not* restored —
+- **Restore scope:** the document **model + complete component selection**
+  (`selected`, `selected_wall`, ordered `component_selection`). Per-component
+  visibility/isolation, camera, view mode, and workspace mode are *not* restored —
   a stable viewpoint that re-focuses the edited object is the standard CAD feel.
 - **Load / New / Reset:** **clear** the history (Open/New/Reset start fresh; you
   cannot undo across a file load).

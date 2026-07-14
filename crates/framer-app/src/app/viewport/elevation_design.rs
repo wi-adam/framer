@@ -42,6 +42,7 @@ pub(super) struct DesignElevationResponse {
 pub(super) struct DesignElevationView<'a> {
     pub(super) selected_opening: Option<&'a str>,
     pub(super) selected_dimension: Option<&'a str>,
+    pub(super) edit_handles_enabled: bool,
     pub(super) dimension_tool_active: bool,
     pub(super) dimension_tool_axis: DimensionAxis,
     pub(super) first_dimension_anchor: Option<&'a DimensionAnchor>,
@@ -58,6 +59,7 @@ pub(super) fn draw_wall_design_elevation(
     let DesignElevationView {
         selected_opening,
         selected_dimension,
+        edit_handles_enabled,
         dimension_tool_active,
         dimension_tool_axis,
         first_dimension_anchor,
@@ -113,7 +115,7 @@ pub(super) fn draw_wall_design_elevation(
         && second_dimension_anchor.is_some();
     let mut hovered_handle = None;
     let mut hovered_dimension_move = None;
-    if let Some(position) = pointer {
+    if edit_handles_enabled && let Some(position) = pointer {
         if !dimension_tool_active {
             hovered_handle = hit_opening_edit_target(wall_rect, scale, wall, position);
         } else if !pending_dimension_active {
@@ -145,7 +147,10 @@ pub(super) fn draw_wall_design_elevation(
             selected || active,
             hovered || handle_hovered,
         );
-        if !dimension_tool_active && (selected || hovered || active || handle_hovered) {
+        if edit_handles_enabled
+            && !dimension_tool_active
+            && (selected || hovered || active || handle_hovered)
+        {
             draw_opening_edit_handles(
                 &painter,
                 opening_rect,
@@ -172,7 +177,10 @@ pub(super) fn draw_wall_design_elevation(
             ui.ctx()
                 .set_cursor_icon(cursor_for_opening_handle(active.handle, true));
         }
-    } else if !panning && response.drag_started_by(egui::PointerButton::Primary) {
+    } else if edit_handles_enabled
+        && !panning
+        && response.drag_started_by(egui::PointerButton::Primary)
+    {
         let hit = press_origin.and_then(|position| {
             if pending_dimension_active {
                 None

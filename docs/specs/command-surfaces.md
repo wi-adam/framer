@@ -5,12 +5,14 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented; view–workflow alignment (Render output tab, soft default
-> views, applicability gating, render settings, view-strip restyle) landed
-> 2026-07-09 · **Linked goal:** G-011 (CAD Workspace UX) ·
+> views, applicability gating, render settings, view-strip restyle) and component
+> visibility/isolation command routing landed through
+> 2026-07-12 · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
 > [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
-> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
-> **Last reviewed:** 2026-07-09
+> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md),
+> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md) ·
+> **Last reviewed:** 2026-07-12
 
 ## Intent / Purpose
 
@@ -153,6 +155,11 @@ workbench, but purpose-built for wood-framed structures.
   marking menus / shortcut menus / compact context toolbars; selected-object edits
   belong in the inspector; insertion variants belong in a catalog, flyout, or
   host-aware Insert chooser.
+- Component presentation follows that routing: Model Browser eye controls own
+  per-component show/hide, while the 3-D selection context menu owns isolate with
+  explicit **Dim others** and **Hide others** modes, Exit Isolation, Hide Selected,
+  and Show All. The same presentation commands remain reachable in command search
+  and never occupy permanent workflow-strip space.
 - View and drafting state belongs where it explains the current view: viewport
   tabs/header for major view changes, status/view-control bar for snap/grid/ortho/
   layer visibility, navigation bar / ViewCube for camera controls, and inspector
@@ -278,15 +285,17 @@ workbench, but purpose-built for wood-framed structures.
   contextual tool options strip, workspace header, and selection context toolbar;
   it is the right home for workspace/view switching, active placement settings,
   context actions, marking menu hooks, navigation controls, and tool feedback
-  that depend on canvas selection or placement state.
+  that depend on canvas selection or placement state. Its component-visibility
+  menu is the primary command home for interactive 3-D isolation.
 - `crates/framer-app/src/app/actions.rs` holds lightweight command metadata
   (`ActionId`, workflow tab, panel, surfaces, labels, icons, flyout membership,
   enabling context, and intent-mutation flags) without becoming a generic
   command bus. Actual
   mutations continue routing through existing `FramerApp` methods such as
   `toggle_draw_wall_tool`, `add_opening`, `add_roof`, `delete_selected`, `undo`,
-  and `redo`; command search reads this metadata and dispatches back through
-  those same app action paths.
+  and `redo`; component visibility/isolation actions route through the same
+  metadata and app dispatch without becoming authored mutations. Command search
+  reads this metadata and dispatches back through those same app action paths.
 - Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` cover
   smoke-level reachability for core command surfaces, including app-header
   quick access, workflow-strip tabs/panels, flyouts, contextual selection

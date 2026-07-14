@@ -22,6 +22,7 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | [Undo / Redo Infrastructure](undo-redo.md) | — | Implemented |
 | [Design System](design-system.md) | G-011 | Implemented (evolving) |
 | [Command Surfaces](command-surfaces.md) | G-011 | Implemented |
+| [Component Visibility, Multi-Selection, and Isolation](component-visibility-and-isolation.md) | G-003 / G-011 | Implemented |
 | [Build & CI](build-and-ci.md) | — (infrastructure) | Implemented |
 
 Related durable specs that live elsewhere because they are heavily cross-linked:

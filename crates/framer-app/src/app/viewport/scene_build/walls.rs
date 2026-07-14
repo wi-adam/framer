@@ -7,12 +7,15 @@ use framer_core::{BuildingModel, ConstructionSystem, ElementId, GableWallProfile
 
 use super::super::gpu::GpuVertex;
 use super::super::theme;
-use super::style::{layer_band_color, material_color, neutral_band_color};
+use super::style::{
+    apply_component_appearance, component_alpha, layer_band_color, material_color,
+    neutral_band_color,
+};
 use super::{
     GABLE_RENDER_QUAD_FACES, GABLE_TRIANGLE_FACES, OutlineEdge, PickSolid, Point3, SceneBuilder,
     color_to_rgba,
 };
-use crate::app::{ViewClick, WallDisplay};
+use crate::app::{ComponentAppearance, ViewClick, WallDisplay};
 
 struct WallSegmentSpan {
     x0: f32,
@@ -55,6 +58,13 @@ fn wall_color(base: Color32, selected: bool, danger: bool) -> Color32 {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WallHighlight {
+    selected: bool,
+    danger: bool,
+    appearance: ComponentAppearance,
+}
+
 impl SceneBuilder {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_wall_envelope(
@@ -68,6 +78,7 @@ impl SceneBuilder {
         gable: Option<&GableWallProfile>,
         selected: bool,
         danger: bool,
+        appearance: ComponentAppearance,
         wall_display: WallDisplay,
     ) {
         // The full-thickness span and envelope box, shared by Outline (its edges)
@@ -97,7 +108,10 @@ impl SceneBuilder {
                             layer_band_span(interior_sign, total, off, layer.thickness);
                         off += layer.thickness;
                         let base = material_color(model, &layer.material);
-                        let color = wall_color(base, selected, danger);
+                        let color = apply_component_appearance(
+                            wall_color(base, selected, danger),
+                            appearance,
+                        );
                         self.push_wall_layer(
                             wall,
                             LayerBand::new(side0, side1, color),
@@ -113,7 +127,10 @@ impl SceneBuilder {
                 // Degenerate model with no resolvable system: draw a single band
                 // over the full thickness so the wall is still visible.
                 None => {
-                    let color = wall_color(neutral_band_color(), selected, danger);
+                    let color = apply_component_appearance(
+                        wall_color(neutral_band_color(), selected, danger),
+                        appearance,
+                    );
                     self.push_wall_layer(
                         wall,
                         LayerBand::new(env0, env1, color),
@@ -130,7 +147,10 @@ impl SceneBuilder {
             // without the per-layer colors. Openings still cut it (push_wall_layer
             // does the 4-segment decomposition).
             WallDisplay::Width => {
-                let color = wall_color(neutral_band_color(), selected, danger);
+                let color = apply_component_appearance(
+                    wall_color(neutral_band_color(), selected, danger),
+                    appearance,
+                );
                 self.push_wall_layer(
                     wall,
                     LayerBand::new(env0, env1, color),
@@ -146,9 +166,14 @@ impl SceneBuilder {
             // overlay (and feed its corners into `points` so the projector still
             // frames the scene when nothing fills it).
             WallDisplay::Outline => {
-                self.push_wall_outline(&envelope, selected, danger);
+                let highlight = WallHighlight {
+                    selected,
+                    danger,
+                    appearance,
+                };
+                self.push_wall_outline(&envelope, highlight);
                 if let Some(gable) = gable {
-                    self.push_gable_outline(wall, gable, env0, env1, selected, danger);
+                    self.push_gable_outline(wall, gable, env0, env1, highlight);
                 }
             }
         }
@@ -173,7 +198,7 @@ impl SceneBuilder {
     /// Collect the 12 edges of the wall's full-thickness envelope for the
     /// [`WallDisplay::Outline`] painter overlay. Produces no fill geometry, so the
     /// corners are also fed into `points` to keep the orbit projector framed.
-    fn push_wall_outline(&mut self, envelope: &WallCuboid, selected: bool, danger: bool) {
+    fn push_wall_outline(&mut self, envelope: &WallCuboid, highlight: WallHighlight) {
         if envelope.is_degenerate() {
             return;
         }
@@ -182,8 +207,9 @@ impl SceneBuilder {
             self.outline_edges.push(OutlineEdge {
                 a: envelope.corners[a],
                 b: envelope.corners[b],
-                selected,
-                danger,
+                selected: highlight.selected,
+                danger: highlight.danger,
+                alpha: component_alpha(highlight.appearance),
             });
         }
     }
@@ -197,8 +223,7 @@ impl SceneBuilder {
         profile: &GableWallProfile,
         side0: f32,
         side1: f32,
-        selected: bool,
-        danger: bool,
+        highlight: WallHighlight,
     ) {
         let prism = GablePrism::new(wall, profile, side0, side1);
         self.points.extend(prism.corners);
@@ -206,8 +231,9 @@ impl SceneBuilder {
             self.outline_edges.push(OutlineEdge {
                 a: prism.corners[a],
                 b: prism.corners[b],
-                selected,
-                danger,
+                selected: highlight.selected,
+                danger: highlight.danger,
+                alpha: component_alpha(highlight.appearance),
             });
         }
     }
@@ -373,17 +399,17 @@ impl SceneBuilder {
 
         self.points.extend(cuboid.corners);
         for face in cuboid.faces() {
-            let base = self.vertices.len() as u32;
+            let (vertices, indices) = self.mesh_buffers();
+            let base = vertices.len() as u32;
             for corner in face.corners {
                 let point = cuboid.corners[corner];
-                self.vertices.push(GpuVertex {
+                vertices.push(GpuVertex {
                     position: [point.x, point.y, point.z],
                     color,
                     normal: [face.normal.x, face.normal.y, face.normal.z],
                 });
             }
-            self.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 

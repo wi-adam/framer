@@ -5,9 +5,11 @@ use framer_core::{BuildingModel, ElementId, Length, Point2, RoofPlane, SurfaceRe
 use framer_geometry::{AssemblyKind, BodyRef, GeometryViolation};
 
 use super::super::theme;
-use super::style::{SurfaceFace, surface_color};
+use super::style::{SurfaceFace, apply_component_appearance, surface_color};
 use super::{PickSolid, Point3, SceneBuilder, brighten, color_to_rgba};
-use crate::app::{Selection, ViewClick};
+use crate::app::{
+    AuthoredComponentKind, ComponentAppearance, ComponentKey, ComponentVisibility, ViewClick,
+};
 
 enum SurfaceReverseFace {
     /// A cutaway/translucent presentation uses one face so alpha is applied once.
@@ -22,6 +24,7 @@ enum SurfaceReverseFace {
 struct SurfaceHighlight {
     selected: bool,
     danger: bool,
+    appearance: ComponentAppearance,
 }
 
 impl SceneBuilder {
@@ -37,6 +40,8 @@ impl SceneBuilder {
         if outline.len() < 3 {
             return;
         }
+        let previous_transparent_mode =
+            self.begin_transparent(highlight.appearance == ComponentAppearance::Dimmed);
         let shade = |c: Color32| {
             let color = if highlight.danger {
                 theme::with_alpha(theme::danger(), c.a().max(168))
@@ -45,7 +50,7 @@ impl SceneBuilder {
             } else {
                 c
             };
-            color_to_rgba(color)
+            color_to_rgba(apply_component_appearance(color, highlight.appearance))
         };
         // Both faces share the same triangulation; the normal (uniform per face)
         // decides which way each lights, so winding need not be reversed.
@@ -74,16 +79,23 @@ impl SceneBuilder {
             outline.to_vec(),
             triangles.to_vec(),
         ));
+        self.restore_transparent(previous_transparent_mode);
     }
 }
 
 pub(super) fn push_ceiling_surfaces(
     builder: &mut SceneBuilder,
     model: &BuildingModel,
-    selection: &Selection,
+    selected_components: &[ComponentKey],
+    component_visibility: &ComponentVisibility,
     active_geometry_violation: Option<&GeometryViolation>,
 ) {
     for ceiling in &model.ceilings {
+        let key = super::authored_key(AuthoredComponentKind::Ceiling, &ceiling.id.0);
+        let appearance = component_visibility.authored_appearance(&key);
+        if appearance == ComponentAppearance::Hidden {
+            continue;
+        }
         let Some(plan) = region_outline_plan(model, &ceiling.region) else {
             continue;
         };
@@ -109,7 +121,7 @@ pub(super) fn push_ceiling_surfaces(
         };
         let triangles = framer_core::triangulate_simple_polygon(&plan);
         let color = surface_color(model, &ceiling.system, SurfaceFace::Ceiling);
-        let selected = matches!(selection, Selection::Ceiling(id) if id == &ceiling.id.0);
+        let selected = super::is_selected(selected_components, &key);
         let danger = super::body_is_danger_highlighted(
             active_geometry_violation,
             &BodyRef::assembly(ceiling.id.clone(), AssemblyKind::Ceiling),
@@ -122,7 +134,11 @@ pub(super) fn push_ceiling_surfaces(
             ViewClick::Ceiling {
                 id: ceiling.id.0.clone(),
             },
-            SurfaceHighlight { selected, danger },
+            SurfaceHighlight {
+                selected,
+                danger,
+                appearance,
+            },
         );
     }
 }
@@ -130,10 +146,16 @@ pub(super) fn push_ceiling_surfaces(
 pub(super) fn push_floor_surfaces(
     builder: &mut SceneBuilder,
     model: &BuildingModel,
-    selection: &Selection,
+    selected_components: &[ComponentKey],
+    component_visibility: &ComponentVisibility,
     active_geometry_violation: Option<&GeometryViolation>,
 ) {
     for deck in &model.floor_decks {
+        let key = super::authored_key(AuthoredComponentKind::FloorDeck, &deck.id.0);
+        let appearance = component_visibility.authored_appearance(&key);
+        if appearance == ComponentAppearance::Hidden {
+            continue;
+        }
         let z = level_elevation(model, &deck.level);
         let Some(plan) = region_outline_plan(model, &deck.region) else {
             continue;
@@ -141,7 +163,7 @@ pub(super) fn push_floor_surfaces(
         let verts = lift_outline(&plan, z);
         let triangles = framer_core::triangulate_simple_polygon(&plan);
         let color = surface_color(model, &deck.system, SurfaceFace::Floor);
-        let selected = matches!(selection, Selection::FloorDeck(id) if id == &deck.id.0);
+        let selected = super::is_selected(selected_components, &key);
         let danger = super::body_is_danger_highlighted(
             active_geometry_violation,
             &BodyRef::assembly(deck.id.clone(), AssemblyKind::FloorDeck),
@@ -154,7 +176,11 @@ pub(super) fn push_floor_surfaces(
             ViewClick::FloorDeck {
                 id: deck.id.0.clone(),
             },
-            SurfaceHighlight { selected, danger },
+            SurfaceHighlight {
+                selected,
+                danger,
+                appearance,
+            },
         );
     }
 }
@@ -170,7 +196,8 @@ const PLAN_ROOF_ALPHA: u8 = 88;
 pub(super) fn push_roof_surfaces(
     builder: &mut SceneBuilder,
     model: &BuildingModel,
-    selection: &Selection,
+    selected_components: &[ComponentKey],
+    component_visibility: &ComponentVisibility,
     active_geometry_violation: Option<&GeometryViolation>,
     transparent: bool,
 ) {
@@ -178,6 +205,11 @@ pub(super) fn push_roof_surfaces(
     // ceiling again per plane.
     let cathedral = model.roof_cathedral_flags();
     for (index, plane) in model.roof_planes.iter().enumerate() {
+        let key = super::authored_key(AuthoredComponentKind::RoofPlane, &plane.id.0);
+        let appearance = component_visibility.authored_appearance(&key);
+        if appearance == ComponentAppearance::Hidden {
+            continue;
+        }
         let (surface_points, triangles) = match model.roof_surface_triangulation(plane) {
             Some(triangulation) => (triangulation.points, triangulation.triangles),
             None => {
@@ -220,7 +252,7 @@ pub(super) fn push_roof_surfaces(
                 verts: bearing_verts,
             }
         };
-        let selected = matches!(selection, Selection::RoofPlane(id) if id == &plane.id.0);
+        let selected = super::is_selected(selected_components, &key);
         let danger = super::body_is_danger_highlighted(
             active_geometry_violation,
             &BodyRef::assembly(plane.id.clone(), AssemblyKind::RoofPlane),
@@ -233,7 +265,11 @@ pub(super) fn push_roof_surfaces(
             ViewClick::RoofPlane {
                 id: plane.id.0.clone(),
             },
-            SurfaceHighlight { selected, danger },
+            SurfaceHighlight {
+                selected,
+                danger,
+                appearance,
+            },
         );
     }
 }

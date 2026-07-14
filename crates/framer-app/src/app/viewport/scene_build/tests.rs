@@ -24,6 +24,11 @@ fn active_overlap_danger_highlights_both_members_and_assemblies() {
     let physical_scene = framer_geometry::build_physical_scene(&model, &plan);
     let audit = framer_geometry::audit_physical_scene(&physical_scene);
     let danger = color_to_rgba(crate::app::theme::danger());
+    let selected_components = [ComponentKey::authored(
+        AuthoredComponentKind::Wall,
+        model.walls[0].id.0.clone(),
+    )];
+    let component_visibility = ComponentVisibility::default();
 
     for assembly_pair in [false, true] {
         let violation = audit
@@ -52,8 +57,8 @@ fn active_overlap_danger_highlights_both_members_and_assemblies() {
             &plan,
             &physical_scene,
             Some(violation),
-            0,
-            &Selection::Wall,
+            &selected_components,
+            &component_visibility,
             WorkspaceMode::Plan,
             WallDisplay::Full,
         )
@@ -267,6 +272,432 @@ fn scene_3d_outline_highlights_only_the_selected_walls_edges() {
     let selected_edges = outline.outline_edges.iter().filter(|e| e.selected).count();
     assert_eq!(selected_edges, 12);
     assert_eq!(outline.outline_edges.len(), model.walls.len() * 12);
+}
+
+#[test]
+fn scene_3d_highlights_every_selected_wall() {
+    let model = BuildingModel::demo_shell();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let selected: Vec<_> = model
+        .walls
+        .iter()
+        .take(2)
+        .map(|wall| ComponentKey::authored(AuthoredComponentKind::Wall, wall.id.0.clone()))
+        .collect();
+    let scene = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &selected,
+        &ComponentVisibility::default(),
+        WorkspaceMode::Design,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+
+    assert_eq!(
+        scene
+            .outline_edges
+            .iter()
+            .filter(|edge| edge.selected)
+            .count(),
+        24
+    );
+}
+
+#[test]
+fn hidden_exact_member_omits_only_that_geometry_and_pick() {
+    let model = BuildingModel::demo_wall();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let wall_plan = plan.wall_plans.first().expect("demo wall plan");
+    let member = wall_plan.members.first().expect("generated wall member");
+    let member_key = ComponentKey::member(&wall_plan.wall.0, &member.id);
+    let baseline = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[],
+        &ComponentVisibility::default(),
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+    let mut visibility = ComponentVisibility::default();
+    visibility.hide([member_key]);
+    let hidden = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[],
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+
+    let member_pick_count = |scene: &Scene3d| {
+        scene
+            .picks
+            .iter()
+            .filter(|pick| matches!(pick.click, ViewClick::Member { .. }))
+            .count()
+    };
+    assert_eq!(member_pick_count(&hidden) + 1, member_pick_count(&baseline));
+    assert!(hidden.vertices.len() < baseline.vertices.len());
+    assert!(hidden.picks.iter().all(|pick| !matches!(
+        &pick.click,
+        ViewClick::Member { source_id, member_id }
+            if source_id == &wall_plan.wall.0 && member_id == &member.id
+    )));
+}
+
+#[test]
+fn hidden_wall_host_omits_its_assembly_openings_members_and_picks() {
+    let model = BuildingModel::demo_shell();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let wall_index = model
+        .walls
+        .iter()
+        .position(|wall| !wall.openings.is_empty())
+        .expect("demo shell wall with opening");
+    let wall = &model.walls[wall_index];
+    let mut visibility = ComponentVisibility::default();
+    visibility.hide([ComponentKey::authored(
+        AuthoredComponentKind::Wall,
+        wall.id.0.clone(),
+    )]);
+    let scene = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[],
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+
+    assert!(scene.picks.iter().all(|pick| match &pick.click {
+        ViewClick::Wall(found) => *found != wall_index,
+        ViewClick::Opening {
+            wall_index: found, ..
+        } => *found != wall_index,
+        ViewClick::Member { source_id, .. } => source_id != &wall.id.0,
+        _ => true,
+    }));
+    assert!(scene.picks.iter().any(|pick| matches!(
+        pick.click,
+        ViewClick::Wall(found) if found != wall_index
+    )));
+}
+
+#[test]
+fn opening_source_isolation_keeps_only_its_generated_group_with_host_picks() {
+    let model = BuildingModel::demo_wall();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let wall = &model.walls[0];
+    let wall_plan = plan.wall_plans.first().expect("demo wall plan");
+    let opening = wall.openings.first().expect("demo wall opening");
+    let expected: std::collections::BTreeSet<_> = wall_plan
+        .members
+        .iter()
+        .filter(|member| member.source == opening.id)
+        .map(|member| member.id.as_str())
+        .collect();
+    assert!(!expected.is_empty());
+    assert!(
+        wall_plan
+            .members
+            .iter()
+            .any(|member| member.source != opening.id)
+    );
+    let opening_key = ComponentKey::authored(AuthoredComponentKind::Opening, opening.id.0.clone());
+    let mut visibility = ComponentVisibility::default();
+    visibility.isolate(
+        crate::app::IsolationMode::HideOthers,
+        vec![opening_key.clone()],
+    );
+    let scene = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[opening_key],
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+    let actual: std::collections::BTreeSet<_> = scene
+        .picks
+        .iter()
+        .filter_map(|pick| match &pick.click {
+            ViewClick::Member {
+                source_id,
+                member_id,
+            } => {
+                assert_eq!(
+                    source_id, &wall.id.0,
+                    "pick must preserve plan-host identity"
+                );
+                Some(member_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(actual, expected);
+    let active_blue = color_to_rgba(crate::app::theme::active_blue());
+    assert!(!scene.vertices.is_empty());
+    assert!(
+        scene
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == active_blue),
+        "every member in the selected rough-opening group should use the exact-selection highlight"
+    );
+    assert!(scene.picks.iter().any(|pick| matches!(
+        &pick.click,
+        ViewClick::Opening { opening_id, .. } if opening_id == &opening.id.0
+    )));
+    assert!(
+        scene
+            .picks
+            .iter()
+            .all(|pick| !matches!(pick.click, ViewClick::Wall(_)))
+    );
+}
+
+#[test]
+fn corner_source_isolation_keeps_only_matching_generated_members() {
+    let model = BuildingModel::demo_shell();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let (join, expected) = model
+        .wall_joins
+        .iter()
+        .find_map(|join| {
+            let members = plan
+                .wall_plans
+                .iter()
+                .flat_map(|wall_plan| {
+                    wall_plan
+                        .members
+                        .iter()
+                        .filter(|member| member.source == join.id)
+                        .map(|member| (wall_plan.wall.0.clone(), member.id.clone()))
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            (!members.is_empty()).then_some((join, members))
+        })
+        .expect("demo shell should generate corner-sourced framing");
+    let join_key = ComponentKey::authored(AuthoredComponentKind::Join, join.id.0.clone());
+    let mut visibility = ComponentVisibility::default();
+    visibility.isolate(
+        crate::app::IsolationMode::HideOthers,
+        vec![join_key.clone()],
+    );
+    let scene = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[join_key],
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+    let actual = scene
+        .picks
+        .iter()
+        .filter_map(|pick| match &pick.click {
+            ViewClick::Member {
+                source_id,
+                member_id,
+            } => Some((source_id.clone(), member_id.clone())),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(actual, expected);
+    let active_blue = color_to_rgba(crate::app::theme::active_blue());
+    assert!(
+        scene
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == active_blue),
+        "selected corner framing should use the semantic-group active highlight"
+    );
+}
+
+#[test]
+fn hidden_opening_omits_its_pick_and_source_members_but_keeps_common_framing() {
+    let model = BuildingModel::demo_wall();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let wall_plan = plan.wall_plans.first().expect("demo wall plan");
+    let opening = model.walls[0].openings.first().expect("demo wall opening");
+    let source_members: std::collections::BTreeSet<_> = wall_plan
+        .members
+        .iter()
+        .filter(|member| member.source == opening.id)
+        .map(|member| member.id.as_str())
+        .collect();
+    let common_members: std::collections::BTreeSet<_> = wall_plan
+        .members
+        .iter()
+        .filter(|member| member.source != opening.id)
+        .map(|member| member.id.as_str())
+        .collect();
+    assert!(!source_members.is_empty() && !common_members.is_empty());
+    let mut visibility = ComponentVisibility::default();
+    visibility.hide([ComponentKey::authored(
+        AuthoredComponentKind::Opening,
+        opening.id.0.clone(),
+    )]);
+    let scene = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[],
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Outline,
+    )
+    .unwrap();
+    let visible_members: std::collections::BTreeSet<_> = scene
+        .picks
+        .iter()
+        .filter_map(|pick| match &pick.click {
+            ViewClick::Member { member_id, .. } => Some(member_id.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(source_members.is_disjoint(&visible_members));
+    assert!(common_members.is_subset(&visible_members));
+    assert!(scene.picks.iter().all(|pick| !matches!(
+        &pick.click,
+        ViewClick::Opening { opening_id, .. } if opening_id == &opening.id.0
+    )));
+    assert!(
+        scene
+            .picks
+            .iter()
+            .any(|pick| matches!(pick.click, ViewClick::Wall(0)))
+    );
+}
+
+#[test]
+fn dim_isolation_keeps_picks_and_routes_low_alpha_through_transparent_pass() {
+    let model = BuildingModel::demo_wall();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let wall_plan = plan.wall_plans.first().expect("demo wall plan");
+    let target = ComponentKey::member(&wall_plan.wall.0, &wall_plan.members[0].id);
+    let baseline = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[],
+        &ComponentVisibility::default(),
+        WorkspaceMode::Plan,
+        WallDisplay::Full,
+    )
+    .unwrap();
+    let mut visibility = ComponentVisibility::default();
+    visibility.isolate(crate::app::IsolationMode::DimOthers, vec![target.clone()]);
+    let dimmed = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        std::slice::from_ref(&target),
+        &visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Full,
+    )
+    .unwrap();
+
+    assert_eq!(dimmed.picks.len(), baseline.picks.len());
+    assert!(
+        dimmed.points.len() == baseline.points.len()
+            && dimmed
+                .points
+                .iter()
+                .zip(&baseline.points)
+                .all(|(actual, expected)| {
+                    actual.x == expected.x && actual.y == expected.y && actual.z == expected.z
+                }),
+        "dim isolation keeps full-scene camera framing"
+    );
+    assert!(dimmed.opaque_index_count < baseline.opaque_index_count);
+    assert!(dimmed.transparent_index_count > baseline.transparent_index_count);
+    let split = dimmed.opaque_index_count as usize;
+    let dim_alpha = style::DIMMED_COMPONENT_ALPHA as f32 / 255.0;
+    assert!(dimmed.indices[..split].iter().all(|index| {
+        (dimmed.vertices[*index as usize].color[3] - dim_alpha).abs() > f32::EPSILON
+    }));
+    assert!(
+        dimmed.indices[split..]
+            .iter()
+            .all(|index| dimmed.vertices[*index as usize].color[3] < 1.0)
+    );
+    assert!(
+        dimmed
+            .vertices
+            .iter()
+            .any(|vertex| { (vertex.color[3] - dim_alpha).abs() < f32::EPSILON })
+    );
+
+    let mut hidden_visibility = ComponentVisibility::default();
+    hidden_visibility.isolate(crate::app::IsolationMode::HideOthers, vec![target.clone()]);
+    let hidden = Scene3d::from_project_with_visibility(
+        &model,
+        &plan,
+        &[target],
+        &hidden_visibility,
+        WorkspaceMode::Plan,
+        WallDisplay::Full,
+    )
+    .unwrap();
+    assert!(
+        hidden.points.len() < baseline.points.len(),
+        "hide isolation camera bounds must derive from the visible target set"
+    );
+}
+
+#[test]
+fn outline_isolation_omits_hidden_walls_and_dims_context_edges() {
+    let model = BuildingModel::demo_shell();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    let target = ComponentKey::authored(AuthoredComponentKind::Wall, model.walls[0].id.0.clone());
+    let build = |mode| {
+        let mut visibility = ComponentVisibility::default();
+        visibility.isolate(mode, vec![target.clone()]);
+        Scene3d::from_project_with_visibility(
+            &model,
+            &plan,
+            std::slice::from_ref(&target),
+            &visibility,
+            WorkspaceMode::Design,
+            WallDisplay::Outline,
+        )
+        .unwrap()
+    };
+    let hidden = build(crate::app::IsolationMode::HideOthers);
+    assert_eq!(hidden.outline_edges.len(), 12);
+    assert!(
+        hidden
+            .outline_edges
+            .iter()
+            .all(|edge| edge.selected && edge.alpha == u8::MAX)
+    );
+
+    let dimmed = build(crate::app::IsolationMode::DimOthers);
+    assert_eq!(dimmed.outline_edges.len(), model.walls.len() * 12);
+    assert_eq!(
+        dimmed
+            .outline_edges
+            .iter()
+            .filter(|edge| edge.alpha == style::DIMMED_COMPONENT_ALPHA)
+            .count(),
+        (model.walls.len() - 1) * 12
+    );
+    assert_eq!(
+        dimmed
+            .outline_edges
+            .iter()
+            .filter(|edge| edge.selected && edge.alpha == u8::MAX)
+            .count(),
+        12
+    );
 }
 
 #[test]
@@ -697,6 +1128,51 @@ fn surfaces_emit_geometry_and_pick_volumes() {
             .iter()
             .any(|c| matches!(c, ViewClick::FloorDeck { id } if id == "deck-1")),
     );
+}
+
+#[test]
+fn hidden_surface_hosts_omit_their_authored_pick_and_generated_members() {
+    fn authored_pick_id(click: &ViewClick) -> Option<&str> {
+        match click {
+            ViewClick::RoofPlane { id }
+            | ViewClick::Ceiling { id }
+            | ViewClick::FloorDeck { id } => Some(id),
+            _ => None,
+        }
+    }
+
+    let model = surface_model();
+    let plan = framer_solver::generate_project_plan(&model).unwrap();
+    for (kind, hidden_id) in [
+        (AuthoredComponentKind::RoofPlane, "roof-1"),
+        (AuthoredComponentKind::Ceiling, "ceiling-1"),
+        (AuthoredComponentKind::FloorDeck, "deck-1"),
+    ] {
+        let mut visibility = ComponentVisibility::default();
+        visibility.hide([ComponentKey::authored(kind, hidden_id)]);
+        let scene = Scene3d::from_project_with_visibility(
+            &model,
+            &plan,
+            &[],
+            &visibility,
+            WorkspaceMode::Plan,
+            WallDisplay::Outline,
+        )
+        .unwrap();
+        assert!(scene.picks.iter().all(|pick| {
+            authored_pick_id(&pick.click) != Some(hidden_id)
+                && !matches!(
+                    &pick.click,
+                    ViewClick::Member { source_id, .. } if source_id == hidden_id
+                )
+        }));
+        assert!(
+            scene
+                .picks
+                .iter()
+                .any(|pick| { authored_pick_id(&pick.click).is_some_and(|id| id != hidden_id) })
+        );
+    }
 }
 
 #[test]
