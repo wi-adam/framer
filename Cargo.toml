@@ -31,7 +31,7 @@ framer-render = { path = "crates/framer-render" }
 framer-solver = { path = "crates/framer-solver" }
 framer-standards = { path = "crates/framer-standards" }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-pollster = "0.4.0"
+pollster = "1.0.1"
 parry3d-f64 = { version = "0.29.0", default-features = false, features = ["required-features", "alloc", "std", "enhanced-determinism"] }
 rayon = "1.11.0"
 rstar = "0.13.0"
