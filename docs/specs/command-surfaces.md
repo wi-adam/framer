@@ -11,8 +11,9 @@
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
 > [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
 > [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md),
-> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md) ·
-> **Last reviewed:** 2026-07-12
+> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
+> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
+> **Last reviewed:** 2026-07-13
 
 ## Intent / Purpose
 
@@ -160,6 +161,15 @@ workbench, but purpose-built for wood-framed structures.
   explicit **Dim others** and **Hide others** modes, Exit Isolation, Hide Selected,
   and Show All. The same presentation commands remain reachable in command search
   and never occupy permanent workflow-strip space.
+- Context menus use one typed context/model and one renderer, but composition is
+  surface-specific. The canvas builder receives the active viewport and picked
+  target; the future Model Browser builder receives its row target and never
+  inherits viewport-only commands implicitly. A view contributes no menu until
+  it has meaningful commands for that target.
+- Secondary-click selection is resolved before a canvas menu is composed. A
+  secondary-clicked target outside the current selection replaces it; a target
+  already in a multi-selection preserves the set. Active tools own conflicting
+  secondary-click gestures first, including ending an in-progress wall run.
 - View and drafting state belongs where it explains the current view: viewport
   tabs/header for major view changes, status/view-control bar for snap/grid/ortho/
   layer visibility, navigation bar / ViewCube for camera controls, and inspector
@@ -265,6 +275,12 @@ workbench, but purpose-built for wood-framed structures.
   for commands that are useful but not worth permanent chrome.
 - **No core command dependency:** command metadata and rendering live in
   `framer-app`; `framer-core`, `framer-solver`, and `framer-render` remain UI-free.
+- **Shared renderer, explicit builders before registry:** menu visuals,
+  accessibility, disabled reasons, and dispatch use one model/renderer contract;
+  closed surface/view builders use explicit matching while the set is small. If
+  independent modules later need to contribute entries, a registry replaces the
+  builders' internals rather than the context, model, renderer, or `ActionId`
+  dispatch contracts.
 
 ## Architecture (grounded in the codebase)
 
@@ -296,6 +312,11 @@ workbench, but purpose-built for wood-framed structures.
   and `redo`; component visibility/isolation actions route through the same
   metadata and app dispatch without becoming authored mutations. Command search
   reads this metadata and dispatches back through those same app action paths.
+- `crates/framer-app/src/app/context_menu.rs` owns the app-only menu context,
+  section/item model, surface-specific composition, and shared egui renderer.
+  `viewport/mod.rs` supplies the 3-D picked target and applies selection before
+  rendering. Model Browser composition remains a separate builder when added;
+  neither surface registers a second copy of command behavior.
 - Headless UI tests in `crates/framer-app/src/app/ui_harness_tests.rs` cover
   smoke-level reachability for core command surfaces, including app-header
   quick access, workflow-strip tabs/panels, flyouts, contextual selection

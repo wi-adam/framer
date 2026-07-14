@@ -2,7 +2,7 @@
 //! the GPU callback, view-cube interaction, and picking. Uses the
 //! `AxonometricView<'_>` bundle to keep the call site legible.
 
-use eframe::egui::{self, Sense, Stroke, Ui};
+use eframe::egui::{self, Response, Sense, Stroke, Ui, WidgetInfo, WidgetType};
 use eframe::{egui_wgpu, wgpu};
 use framer_core::BuildingModel;
 use framer_geometry::{GeometryViolation, PhysicalScene};
@@ -34,11 +34,17 @@ pub(super) struct AxonometricView<'a> {
     pub(super) gpu_depth_format: Option<wgpu::TextureFormat>,
 }
 
+pub(super) struct AxonometricResponse {
+    pub(super) response: Response,
+    pub(super) primary_click: Option<ViewClick>,
+    pub(super) secondary_click: Option<ViewClick>,
+}
+
 pub(super) fn draw_project_axonometric(
     ui: &mut Ui,
     axonometric: AxonometricView<'_>,
     view: &mut View3dState,
-) -> Option<ViewClick> {
+) -> AxonometricResponse {
     let AxonometricView {
         model,
         plan,
@@ -54,6 +60,7 @@ pub(super) fn draw_project_axonometric(
 
     let desired = viewport_size(ui);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "3D viewport"));
     let painter = ui.painter_at(rect);
 
     draw_view_background(&painter, rect, theme::sheet());
@@ -73,8 +80,10 @@ pub(super) fn draw_project_axonometric(
     let panning = dragging_middle || (dragging_primary && shift);
     let orbiting = dragging_primary && !shift;
     let dragging_from_cube = orbiting && pointer_started_in_rect(press_origin, cube_rect);
-    let canvas_clicked =
-        response.clicked() && pointer.is_some_and(|position| !cube_rect.contains(position));
+    let canvas_primary_clicked = response.clicked_by(egui::PointerButton::Primary)
+        && pointer.is_some_and(|position| !cube_rect.contains(position));
+    let canvas_secondary_clicked = response.clicked_by(egui::PointerButton::Secondary)
+        && pointer.is_some_and(|position| !cube_rect.contains(position));
 
     if panning {
         view.pan(response.drag_delta(), drawing.width().min(drawing.height()));
@@ -103,14 +112,24 @@ pub(super) fn draw_project_axonometric(
         wall_display,
     ) else {
         draw_view_empty(&painter, rect, "No 3D geometry");
-        return canvas_clicked.then_some(ViewClick::EmptyCanvas);
+        return AxonometricResponse {
+            response,
+            primary_click: canvas_primary_clicked.then_some(ViewClick::EmptyCanvas),
+            secondary_click: canvas_secondary_clicked.then_some(ViewClick::EmptyCanvas),
+        };
     };
     let Some(projector) = OrbitProjector::from_points(&scene.points, drawing, *view) else {
         draw_view_empty(&painter, rect, "No wall segments");
-        return canvas_clicked.then_some(ViewClick::EmptyCanvas);
+        return AxonometricResponse {
+            response,
+            primary_click: canvas_primary_clicked.then_some(ViewClick::EmptyCanvas),
+            secondary_click: canvas_secondary_clicked.then_some(ViewClick::EmptyCanvas),
+        };
     };
 
-    let clicked = resolve_scene_click(canvas_clicked, pointer, &scene, &projector);
+    let primary_click = resolve_scene_click(canvas_primary_clicked, pointer, &scene, &projector);
+    let secondary_click =
+        resolve_scene_click(canvas_secondary_clicked, pointer, &scene, &projector);
 
     // Fill geometry goes through the wgpu pipeline. Outline mode produces no fill
     // triangles (and in the Design workspace there are no members either), so guard
@@ -196,17 +215,25 @@ pub(super) fn draw_project_axonometric(
         } else {
             cube_hover_pointer
         },
-        response.clicked() && !dragging_from_cube,
+        response.clicked_by(egui::PointerButton::Primary) && !dragging_from_cube,
         *view,
         gpu_target_format,
         gpu_depth_format,
     );
     if let Some(action) = cube_action {
         view.snap_to(action);
-        return None;
+        return AxonometricResponse {
+            response,
+            primary_click: None,
+            secondary_click: None,
+        };
     }
 
-    clicked
+    AxonometricResponse {
+        response,
+        primary_click,
+        secondary_click,
+    }
 }
 
 fn resolve_scene_click(
