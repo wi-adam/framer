@@ -29,11 +29,14 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{ElementId, Length};
+use framer_core::{ElementId, Length, OpeningKind};
 use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
-use super::{FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, actions, design, panels};
+use super::{
+    AuthoredComponentKind, ComponentKey, FramerApp, RoofForm, Selection, SelectionOp, ViewportMode,
+    WallDisplay, actions, design, panels,
+};
 
 fn shots_dir() -> PathBuf {
     match std::env::var_os("UI_SHOTS_DIR") {
@@ -237,6 +240,119 @@ fn capture_ui_shot_deck() {
     }
     harness.state_mut().viewport_mode = ViewportMode::Plan;
 
+    // Component presentation states in generated Plan 3-D: ordered multi-selection,
+    // both isolation treatments, the command menu, a reversible hidden browser row,
+    // and one semantic rough-opening framing group.
+    select_tab(&mut harness, actions::WorkflowTab::Plan);
+    harness.state_mut().viewport_mode = ViewportMode::Axonometric;
+    let second_wall_index = (back_wall_index + 1) % harness.state().model.walls.len();
+    harness.state_mut().apply_selection(
+        Selection::Wall,
+        Some(back_wall_index),
+        SelectionOp::Replace,
+    );
+    harness.state_mut().apply_selection(
+        Selection::Wall,
+        Some(second_wall_index),
+        SelectionOp::Toggle,
+    );
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-multi-selected-walls",
+    );
+
+    harness
+        .state_mut()
+        .execute_action(actions::ActionId::IsolateDim);
+    shot(&mut harness, &dir, &mut index, "plan-3d-isolate-dim-others");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Component visibility")
+        .click();
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-component-visibility-menu",
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run_ok();
+    assert_eq!(harness.state().selected_component_count(), 2);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(super::IsolationMode::DimOthers),
+        "closing the menu must not clear the selection or isolation"
+    );
+    assert!(
+        harness
+            .query_all_by_label("Exit Isolation")
+            .next()
+            .is_none(),
+        "Escape should close the component-visibility popup"
+    );
+
+    harness
+        .state_mut()
+        .execute_action(actions::ActionId::IsolateHide);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(super::IsolationMode::HideOthers)
+    );
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-isolate-hide-others",
+    );
+    harness
+        .state_mut()
+        .execute_action(actions::ActionId::ExitIsolation);
+
+    let hidden_wall = ComponentKey::authored(
+        AuthoredComponentKind::Wall,
+        harness.state().model.walls[back_wall_index].id.0.clone(),
+    );
+    harness.state_mut().component_visibility.toggle(hidden_wall);
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-hidden-wall-browser-row",
+    );
+    harness.state_mut().component_visibility.show_all();
+
+    let (door_wall_index, door_id) = harness
+        .state()
+        .model
+        .walls
+        .iter()
+        .enumerate()
+        .find_map(|(wall_index, wall)| {
+            wall.openings
+                .iter()
+                .find(|opening| opening.kind == OpeningKind::Door)
+                .map(|opening| (wall_index, opening.id.0.clone()))
+        })
+        .expect("demo shell has a door rough opening");
+    harness.state_mut().apply_selection(
+        Selection::Opening(door_id),
+        Some(door_wall_index),
+        SelectionOp::Replace,
+    );
+    harness
+        .state_mut()
+        .execute_action(actions::ActionId::IsolateHide);
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "plan-3d-isolated-door-rough-frame",
+    );
+    harness
+        .state_mut()
+        .execute_action(actions::ActionId::ExitIsolation);
+
     // A roof-specific checkpoint: the default shell has no authored roof, so
     // capture the two views that caught regressions only after generating one.
     harness.state_mut().add_roof(RoofForm::Gable);
@@ -365,6 +481,31 @@ fn capture_ui_shot_deck() {
     dark.state_mut().selected_wall = dark_back_wall_index;
     dark.state_mut().selected = Selection::Wall;
     shot(&mut dark, &dir, &mut index, "dark-wall-selected");
+    select_tab(&mut dark, actions::WorkflowTab::Plan);
+    dark.state_mut().viewport_mode = ViewportMode::Axonometric;
+    let dark_second_wall_index = (dark_back_wall_index + 1) % dark.state().model.walls.len();
+    dark.state_mut().apply_selection(
+        Selection::Wall,
+        Some(dark_back_wall_index),
+        SelectionOp::Replace,
+    );
+    dark.state_mut().apply_selection(
+        Selection::Wall,
+        Some(dark_second_wall_index),
+        SelectionOp::Toggle,
+    );
+    dark.state_mut()
+        .execute_action(actions::ActionId::IsolateDim);
+    shot(
+        &mut dark,
+        &dir,
+        &mut index,
+        "dark-plan-3d-isolate-dim-others",
+    );
+    dark.state_mut()
+        .execute_action(actions::ActionId::ExitIsolation);
+    select_tab(&mut dark, actions::WorkflowTab::Frame);
+    dark.state_mut().viewport_mode = ViewportMode::Plan;
     prepare_geometry_overlap(&mut dark);
     shot(&mut dark, &dir, &mut index, "geometry-overlap-focused-dark");
     dark.get_by_role_and_label(egui::accesskit::Role::Button, "Diagnostics")

@@ -16,9 +16,14 @@ use framer_solver::{FrameMember, ProjectFramePlan};
 
 use super::geom::{OrbitProjector, Point3};
 use super::gpu::GpuVertex;
-use crate::app::{Selection, ViewClick, WallDisplay, WorkspaceMode};
+use crate::app::{
+    AuthoredComponentKind, ComponentAppearance, ComponentKey, ComponentVisibility, ViewClick,
+    WallDisplay, WorkspaceMode,
+};
+#[cfg(test)]
+use crate::app::{Selection, key_for_selection};
 
-use style::highlighted_member_color;
+use style::{apply_component_appearance, highlighted_member_color};
 use surfaces::{level_elevation, push_ceiling_surfaces, push_floor_surfaces, push_roof_surfaces};
 use walls::{interior_sign, wall_total_thickness};
 
@@ -61,6 +66,7 @@ pub(super) struct OutlineEdge {
     pub(super) b: Point3,
     pub(super) selected: bool,
     pub(super) danger: bool,
+    pub(super) alpha: u8,
 }
 
 #[derive(Default)]
@@ -71,6 +77,9 @@ struct SceneBuilder {
     picks: Vec<PickSolid>,
     outline_edges: Vec<OutlineEdge>,
     opaque_index_count: u32,
+    transparent_vertices: Vec<GpuVertex>,
+    transparent_indices: Vec<u32>,
+    transparent_mode: bool,
 }
 
 fn body_is_danger_highlighted(active: Option<&GeometryViolation>, body_ref: &BodyRef) -> bool {
@@ -103,6 +112,28 @@ fn geometry_member_color(
     }
 }
 
+fn authored_key(kind: AuthoredComponentKind, id: &str) -> ComponentKey {
+    ComponentKey::authored(kind, id)
+}
+
+fn is_selected(selected_components: &[ComponentKey], key: &ComponentKey) -> bool {
+    selected_components.iter().any(|selected| selected == key)
+}
+
+fn member_selection(
+    selected_components: &[ComponentKey],
+    host: &ComponentKey,
+    member_key: &ComponentKey,
+    member: &FrameMember,
+) -> (bool, bool) {
+    let host_selected = is_selected(selected_components, host);
+    let member_or_semantic_group_selected = is_selected(selected_components, member_key)
+        || selected_components.iter().any(|selected| {
+            selected != host && selected.semantic_source_id() == Some(member.source.0.as_str())
+        });
+    (host_selected, member_or_semantic_group_selected)
+}
+
 impl Scene3d {
     #[cfg(test)]
     pub(super) fn from_project(
@@ -114,13 +145,43 @@ impl Scene3d {
         wall_display: WallDisplay,
     ) -> Option<Self> {
         let physical_scene = framer_geometry::build_physical_scene(model, plan);
+        let selected_wall_id = model
+            .walls
+            .get(selected_wall)
+            .map(|wall| wall.id.0.as_str());
+        let selected_components: Vec<_> = key_for_selection(selection, selected_wall_id)
+            .into_iter()
+            .collect();
+        let component_visibility = ComponentVisibility::default();
         Self::from_project_with_geometry(
             model,
             plan,
             &physical_scene,
             None,
-            selected_wall,
-            selection,
+            &selected_components,
+            &component_visibility,
+            workspace_mode,
+            wall_display,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_project_with_visibility(
+        model: &BuildingModel,
+        plan: &ProjectFramePlan,
+        selected_components: &[ComponentKey],
+        component_visibility: &ComponentVisibility,
+        workspace_mode: WorkspaceMode,
+        wall_display: WallDisplay,
+    ) -> Option<Self> {
+        let physical_scene = framer_geometry::build_physical_scene(model, plan);
+        Self::from_project_with_geometry(
+            model,
+            plan,
+            &physical_scene,
+            None,
+            selected_components,
+            component_visibility,
             workspace_mode,
             wall_display,
         )
@@ -132,8 +193,8 @@ impl Scene3d {
         plan: &ProjectFramePlan,
         physical_scene: &PhysicalScene,
         active_geometry_violation: Option<&GeometryViolation>,
-        selected_wall: usize,
-        selection: &Selection,
+        selected_components: &[ComponentKey],
+        component_visibility: &ComponentVisibility,
         workspace_mode: WorkspaceMode,
         wall_display: WallDisplay,
     ) -> Option<Self> {
@@ -158,22 +219,21 @@ impl Scene3d {
         let mut builder = SceneBuilder::default();
         let shows_generated_plan = workspace_mode.shows_generated_plan();
         if shows_generated_plan {
-            for (wall_index, wall) in model.walls.iter().enumerate() {
+            for wall in &model.walls {
                 if let Some(wall_plan) = plan.wall_plan(&wall.id) {
-                    // `selected_wall` remains the active editing context when a
-                    // roof/ceiling/floor member is selected. Do not let that stale
-                    // index highlight an unrelated wall's entire generated plan.
-                    let wall_selected =
-                        selected_wall == wall_index && matches!(selection, Selection::Wall);
+                    let host = authored_key(AuthoredComponentKind::Wall, &wall.id.0);
                     for member in &wall_plan.members {
-                        let member_selected = matches!(
-                            selection,
-                            Selection::Member { source_id, member_id }
-                                if source_id == &wall.id.0 && member_id == &member.id
-                        );
+                        let member_key = ComponentKey::member(&wall.id.0, &member.id);
+                        let appearance =
+                            component_visibility.member_appearance(&host, &member_key, member);
+                        if appearance == ComponentAppearance::Hidden {
+                            continue;
+                        }
+                        let (source_selected, member_selected) =
+                            member_selection(selected_components, &host, &member_key, member);
                         let color = geometry_member_color(
                             member.kind,
-                            wall_selected,
+                            source_selected,
                             member_selected,
                             member_is_danger_highlighted(
                                 active_geometry_violation,
@@ -181,22 +241,28 @@ impl Scene3d {
                                 member,
                             ),
                         );
-                        builder.push_shared_member(physical_scene, &wall.id, member, color);
+                        builder.push_shared_member(
+                            physical_scene,
+                            &wall.id,
+                            member,
+                            color,
+                            appearance,
+                        );
                     }
                 }
             }
 
             for floor_plan in &plan.floor_plans {
+                let host = authored_key(AuthoredComponentKind::FloorDeck, &floor_plan.floor.0);
                 for member in &floor_plan.members {
-                    let source_selected = matches!(
-                        selection,
-                        Selection::FloorDeck(id) if id == &floor_plan.floor.0
-                    );
-                    let member_selected = matches!(
-                        selection,
-                        Selection::Member { source_id, member_id }
-                            if source_id == &floor_plan.floor.0 && member_id == &member.id
-                    );
+                    let member_key = ComponentKey::member(&floor_plan.floor.0, &member.id);
+                    let appearance =
+                        component_visibility.member_appearance(&host, &member_key, member);
+                    if appearance == ComponentAppearance::Hidden {
+                        continue;
+                    }
+                    let (source_selected, member_selected) =
+                        member_selection(selected_components, &host, &member_key, member);
                     builder.push_shared_member(
                         physical_scene,
                         &floor_plan.floor,
@@ -211,20 +277,21 @@ impl Scene3d {
                                 member,
                             ),
                         ),
+                        appearance,
                     );
                 }
             }
             for ceiling_plan in &plan.ceiling_plans {
+                let host = authored_key(AuthoredComponentKind::Ceiling, &ceiling_plan.ceiling.0);
                 for member in &ceiling_plan.members {
-                    let source_selected = matches!(
-                        selection,
-                        Selection::Ceiling(id) if id == &ceiling_plan.ceiling.0
-                    );
-                    let member_selected = matches!(
-                        selection,
-                        Selection::Member { source_id, member_id }
-                            if source_id == &ceiling_plan.ceiling.0 && member_id == &member.id
-                    );
+                    let member_key = ComponentKey::member(&ceiling_plan.ceiling.0, &member.id);
+                    let appearance =
+                        component_visibility.member_appearance(&host, &member_key, member);
+                    if appearance == ComponentAppearance::Hidden {
+                        continue;
+                    }
+                    let (source_selected, member_selected) =
+                        member_selection(selected_components, &host, &member_key, member);
                     builder.push_shared_member(
                         physical_scene,
                         &ceiling_plan.ceiling,
@@ -239,18 +306,21 @@ impl Scene3d {
                                 member,
                             ),
                         ),
+                        appearance,
                     );
                 }
             }
             for roof_plan in &plan.roof_plans {
+                let host = authored_key(AuthoredComponentKind::RoofPlane, &roof_plan.roof.0);
                 for member in &roof_plan.members {
-                    let source_selected =
-                        matches!(selection, Selection::RoofPlane(id) if id == &roof_plan.roof.0);
-                    let member_selected = matches!(
-                        selection,
-                        Selection::Member { source_id, member_id }
-                            if source_id == &roof_plan.roof.0 && member_id == &member.id
-                    );
+                    let member_key = ComponentKey::member(&roof_plan.roof.0, &member.id);
+                    let appearance =
+                        component_visibility.member_appearance(&host, &member_key, member);
+                    if appearance == ComponentAppearance::Hidden {
+                        continue;
+                    }
+                    let (source_selected, member_selected) =
+                        member_selection(selected_components, &host, &member_key, member);
                     let color = geometry_member_color(
                         member.kind,
                         source_selected,
@@ -261,7 +331,13 @@ impl Scene3d {
                             member,
                         ),
                     );
-                    builder.push_shared_member(physical_scene, &roof_plan.roof, member, color);
+                    builder.push_shared_member(
+                        physical_scene,
+                        &roof_plan.roof,
+                        member,
+                        color,
+                        appearance,
+                    );
                 }
             }
         }
@@ -273,15 +349,28 @@ impl Scene3d {
             push_roof_surfaces(
                 &mut builder,
                 model,
-                selection,
+                selected_components,
+                component_visibility,
                 active_geometry_violation,
                 false,
             );
         }
 
         // Ceilings and floor decks remain opaque authored surfaces in every mode.
-        push_ceiling_surfaces(&mut builder, model, selection, active_geometry_violation);
-        push_floor_surfaces(&mut builder, model, selection, active_geometry_violation);
+        push_ceiling_surfaces(
+            &mut builder,
+            model,
+            selected_components,
+            component_visibility,
+            active_geometry_violation,
+        );
+        push_floor_surfaces(
+            &mut builder,
+            model,
+            selected_components,
+            component_visibility,
+            active_geometry_violation,
+        );
 
         builder.finish_opaque();
 
@@ -289,31 +378,43 @@ impl Scene3d {
             push_roof_surfaces(
                 &mut builder,
                 model,
-                selection,
+                selected_components,
+                component_visibility,
                 active_geometry_violation,
                 true,
             );
         }
 
         for (wall_index, wall) in model.walls.iter().enumerate() {
+            let wall_key = authored_key(AuthoredComponentKind::Wall, &wall.id.0);
+            let appearance = component_visibility.authored_appearance(&wall_key);
             let total = wall_total_thickness(model, wall, fallback_depth);
             let sign = interior_sign(&interior_sides, &wall.id);
             let base_elevation = level_elevation(model, &wall.level);
-            let wall_selected = selected_wall == wall_index && matches!(selection, Selection::Wall);
-            let body_ref = BodyRef::assembly(wall.id.clone(), AssemblyKind::Wall);
-            builder.push_wall_envelope(
-                model,
-                wall,
-                wall_index,
-                total,
-                sign,
-                base_elevation,
-                gable_profiles.get(&wall.id),
-                wall_selected,
-                body_is_danger_highlighted(active_geometry_violation, &body_ref),
-                wall_display,
-            );
+            if appearance != ComponentAppearance::Hidden {
+                let wall_selected = is_selected(selected_components, &wall_key);
+                let body_ref = BodyRef::assembly(wall.id.clone(), AssemblyKind::Wall);
+                builder.push_wall_envelope(
+                    model,
+                    wall,
+                    wall_index,
+                    total,
+                    sign,
+                    base_elevation,
+                    gable_profiles.get(&wall.id),
+                    wall_selected,
+                    body_is_danger_highlighted(active_geometry_violation, &body_ref),
+                    appearance,
+                    wall_display,
+                );
+            }
             for opening in &wall.openings {
+                let opening_key = authored_key(AuthoredComponentKind::Opening, &opening.id.0);
+                if component_visibility.opening_appearance(&wall_key, &opening_key)
+                    == ComponentAppearance::Hidden
+                {
+                    continue;
+                }
                 builder.push_opening_pick(
                     wall,
                     wall_index,
@@ -352,46 +453,51 @@ impl SceneBuilder {
         owner: &framer_core::ElementId,
         member: &FrameMember,
         color: Color32,
+        appearance: ComponentAppearance,
     ) {
         let body_ref = BodyRef::member(owner.clone(), member.kind, member.id.clone());
         let Some(body) = physical_scene.body(&body_ref) else {
             return;
         };
+        let previous_transparent_mode =
+            self.begin_transparent(appearance == ComponentAppearance::Dimmed);
         self.push_member_body(
             body,
             ViewClick::Member {
                 source_id: owner.0.clone(),
                 member_id: member.id.clone(),
             },
-            color,
+            apply_component_appearance(color, appearance),
         );
+        self.restore_transparent(previous_transparent_mode);
     }
 
     fn push_triangle(&mut self, points: [Point3; 3], color: [f32; 4]) {
         let normal = face_normal(points[0], points[1], points[2]);
-        let base = self.vertices.len() as u32;
+        let (vertices, indices) = self.mesh_buffers();
+        let base = vertices.len() as u32;
         for point in points {
-            self.vertices.push(GpuVertex {
+            vertices.push(GpuVertex {
                 position: [point.x, point.y, point.z],
                 color,
                 normal: [normal.x, normal.y, normal.z],
             });
         }
-        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
     fn push_quad(&mut self, points: [Point3; 4], color: [f32; 4]) {
         let normal = face_normal(points[0], points[1], points[2]);
-        let base = self.vertices.len() as u32;
+        let (vertices, indices) = self.mesh_buffers();
+        let base = vertices.len() as u32;
         for point in points {
-            self.vertices.push(GpuVertex {
+            vertices.push(GpuVertex {
                 position: [point.x, point.y, point.z],
                 color,
                 normal: [normal.x, normal.y, normal.z],
             });
         }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     /// Emit one face of a surface from precomputed triangle index triples (an
     /// ear-clip from `triangulate_simple_polygon`, correct for concave outlines),
@@ -404,24 +510,57 @@ impl SceneBuilder {
         color: [f32; 4],
     ) {
         for &[ia, ib, ic] in triangles {
-            let base = self.vertices.len() as u32;
+            let (vertices, indices) = self.mesh_buffers();
+            let base = vertices.len() as u32;
             for &index in &[ia, ib, ic] {
                 let point = verts[index];
-                self.vertices.push(GpuVertex {
+                vertices.push(GpuVertex {
                     position: [point.x, point.y, point.z],
                     color,
                     normal: [normal.x, normal.y, normal.z],
                 });
             }
-            self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
+    }
+
+    fn mesh_buffers(&mut self) -> (&mut Vec<GpuVertex>, &mut Vec<u32>) {
+        if self.transparent_mode {
+            (
+                &mut self.transparent_vertices,
+                &mut self.transparent_indices,
+            )
+        } else {
+            (&mut self.vertices, &mut self.indices)
+        }
+    }
+
+    fn begin_transparent(&mut self, force: bool) -> bool {
+        let previous = self.transparent_mode;
+        self.transparent_mode |= force;
+        previous
+    }
+
+    fn restore_transparent(&mut self, previous: bool) {
+        self.transparent_mode = previous;
     }
 
     fn finish_opaque(&mut self) {
         self.opaque_index_count = self.indices.len() as u32;
+        self.transparent_mode = true;
     }
 
-    fn finish(self) -> Scene3d {
+    fn finish(mut self) -> Scene3d {
+        // Pass-classified buffers are authoritative: dimmed solids can be
+        // encountered during the nominal opaque recipe and are deferred here.
+        self.opaque_index_count = self.indices.len() as u32;
+        let transparent_vertex_base = self.vertices.len() as u32;
+        self.vertices.append(&mut self.transparent_vertices);
+        self.indices.extend(
+            self.transparent_indices
+                .into_iter()
+                .map(|index| index + transparent_vertex_base),
+        );
         let total_index_count = self.indices.len() as u32;
         Scene3d {
             vertices: self.vertices,

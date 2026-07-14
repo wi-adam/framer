@@ -5,6 +5,11 @@ use framer_core::{AssemblyFace, BuildingModel, ElementId, Material};
 use framer_solver::MemberKind;
 
 use super::super::theme;
+use crate::app::ComponentAppearance;
+
+/// Low-opacity context used by "Isolate — Dim others". Keeping one shared alpha
+/// makes triangle fills and the painter-owned wall outline read consistently.
+pub(super) const DIMMED_COMPONENT_ALPHA: u8 = 48;
 
 pub(in crate::app::viewport) fn color_to_rgba(color: Color32) -> [f32; 4] {
     [
@@ -56,6 +61,30 @@ pub(in crate::app::viewport) fn brighten(color: Color32, amount: u8) -> Color32 
         color.b().saturating_add(amount),
         color.a(),
     ))
+}
+
+/// Apply the presentation appearance after selection/danger coloring. Hidden
+/// components are rejected by their emitter; dimmed components retain their RGB
+/// identity but carry real alpha so the scene builder routes them transparently.
+pub(super) fn apply_component_appearance(
+    color: Color32,
+    appearance: ComponentAppearance,
+) -> Color32 {
+    match appearance {
+        ComponentAppearance::Normal => color,
+        ComponentAppearance::Dimmed => {
+            theme::with_alpha(color, color.a().min(component_alpha(appearance)))
+        }
+        ComponentAppearance::Hidden => color,
+    }
+}
+
+pub(super) const fn component_alpha(appearance: ComponentAppearance) -> u8 {
+    match appearance {
+        ComponentAppearance::Normal => u8::MAX,
+        ComponentAppearance::Dimmed => DIMMED_COMPONENT_ALPHA,
+        ComponentAppearance::Hidden => 0,
+    }
 }
 
 pub(in crate::app::viewport) fn member_color(kind: MemberKind) -> Color32 {

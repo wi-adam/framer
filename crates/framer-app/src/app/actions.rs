@@ -32,6 +32,11 @@ pub(crate) enum ActionId {
     ToolVault,
     ToolFloor,
     DeleteSelection,
+    IsolateDim,
+    IsolateHide,
+    ExitIsolation,
+    HideSelection,
+    ShowAllComponents,
     AddDoor,
     AddWindow,
     AddGarageDoor,
@@ -186,7 +191,12 @@ impl ActionMetadata {
             | ActionId::AddHipRoof
             | ActionId::DimensionKind
             | ActionId::DimensionAxis
-            | ActionId::ToggleSection => None,
+            | ActionId::ToggleSection
+            | ActionId::IsolateDim
+            | ActionId::IsolateHide
+            | ActionId::ExitIsolation
+            | ActionId::HideSelection
+            | ActionId::ShowAllComponents => None,
         }
     }
 }
@@ -513,6 +523,66 @@ pub(crate) const ACTIONS: &[ActionMetadata] = &[
         mutates_authored_intent: true,
     },
     ActionMetadata {
+        id: ActionId::IsolateDim,
+        label: "Isolate — Dim Others",
+        icon: Icon::Eye,
+        tooltip: "Keep the selected components solid and dim the rest of the 3D scene",
+        owner: ActionOwner::View,
+        primary_surface: CommandSurface::ContextToolbar,
+        secondary_surfaces: SEARCH,
+        command_strip: None,
+        enabled_context: EnabledContext::Always,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
+        id: ActionId::IsolateHide,
+        label: "Isolate — Hide Others",
+        icon: Icon::Eye,
+        tooltip: "Show only the selected components in the 3D scene",
+        owner: ActionOwner::View,
+        primary_surface: CommandSurface::ContextToolbar,
+        secondary_surfaces: SEARCH,
+        command_strip: None,
+        enabled_context: EnabledContext::Always,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
+        id: ActionId::ExitIsolation,
+        label: "Exit Isolation",
+        icon: Icon::Eye,
+        tooltip: "Restore the ordinary component visibility view",
+        owner: ActionOwner::View,
+        primary_surface: CommandSurface::ContextToolbar,
+        secondary_surfaces: SEARCH,
+        command_strip: None,
+        enabled_context: EnabledContext::Always,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
+        id: ActionId::HideSelection,
+        label: "Hide Selected Components",
+        icon: Icon::Eye,
+        tooltip: "Hide the selected components in the interactive 3D scene",
+        owner: ActionOwner::View,
+        primary_surface: CommandSurface::ContextToolbar,
+        secondary_surfaces: SEARCH,
+        command_strip: None,
+        enabled_context: EnabledContext::Always,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
+        id: ActionId::ShowAllComponents,
+        label: "Show All Components",
+        icon: Icon::Eye,
+        tooltip: "Clear every per-component hidden override",
+        owner: ActionOwner::View,
+        primary_surface: CommandSurface::ContextToolbar,
+        secondary_surfaces: SEARCH,
+        command_strip: None,
+        enabled_context: EnabledContext::Always,
+        mutates_authored_intent: false,
+    },
+    ActionMetadata {
         id: ActionId::AddDoor,
         label: "Door",
         icon: Icon::Door,
@@ -709,6 +779,11 @@ mod tests {
         ActionId::ToolVault,
         ActionId::ToolFloor,
         ActionId::DeleteSelection,
+        ActionId::IsolateDim,
+        ActionId::IsolateHide,
+        ActionId::ExitIsolation,
+        ActionId::HideSelection,
+        ActionId::ShowAllComponents,
         ActionId::AddDoor,
         ActionId::AddWindow,
         ActionId::AddGarageDoor,
@@ -746,6 +821,11 @@ mod tests {
             | ActionId::ToolVault
             | ActionId::ToolFloor
             | ActionId::DeleteSelection
+            | ActionId::IsolateDim
+            | ActionId::IsolateHide
+            | ActionId::ExitIsolation
+            | ActionId::HideSelection
+            | ActionId::ShowAllComponents
             | ActionId::AddDoor
             | ActionId::AddWindow
             | ActionId::AddGarageDoor
@@ -848,6 +928,11 @@ mod tests {
             ActionId::ViewRoof,
             ActionId::View3d,
             ActionId::ViewRender,
+            ActionId::IsolateDim,
+            ActionId::IsolateHide,
+            ActionId::ExitIsolation,
+            ActionId::HideSelection,
+            ActionId::ShowAllComponents,
         ] {
             assert_eq!(
                 metadata(id).enabled_context,
@@ -980,6 +1065,11 @@ mod tests {
             ActionId::ViewRoof,
             ActionId::View3d,
             ActionId::DeleteSelection,
+            ActionId::IsolateDim,
+            ActionId::IsolateHide,
+            ActionId::ExitIsolation,
+            ActionId::HideSelection,
+            ActionId::ShowAllComponents,
         ] {
             assert_ne!(
                 metadata(id).primary_surface,

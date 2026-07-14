@@ -5,8 +5,9 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX) ·
-> **Plan:** [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md) ·
-> **Last reviewed:** 2026-07-07
+> **Plan:** [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
+> [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md) ·
+> **Last reviewed:** 2026-07-12
 
 ## Goal
 
@@ -145,8 +146,15 @@ a style preference:
 - **Opaque elevation.** Menus, popups, and the command palette render fully opaque
   with a shadow; underlying content never bleeds through. Escape dismisses the
   topmost transient surface first.
-- **Selection lifecycle.** Clicking empty canvas clears the selection, and the
-  inspector shows a friendly empty state. Destructive actions use the danger tone.
+- **Selection lifecycle.** Plain click replaces component selection; Command/Ctrl-
+  click toggles stable authored/generated component identities and the most recent
+  item becomes primary. Clicking empty canvas or pressing Escape clears the set.
+  A multi-selection uses a read-only summary instead of exposing single-object edit,
+  duplicate, or delete controls. Destructive actions use the danger tone.
+- **Visibility controls.** Renderable authored and generated Model Browser rows
+  expose a trailing accessible `Show …` / `Hide …` eye independent of row
+  selection. Hidden rows stay in the tree, and active isolation is named in the
+  status bar rather than encoded by color alone.
 - **Status truth.** The status bar shows live values only — no hardcoded readouts.
   (Zoom must track the camera; readouts that cannot be real yet are removed, not
   faked.)
@@ -161,8 +169,9 @@ a style preference:
   contextual tabs/options while a tool is active.
 - **Workspace/view bar:** current workspace, view tabs, level selector, display
   preset, and view-layout controls close to the viewport.
-- **Model Browser:** search + filter icon, dense disclosure tree, visibility toggles,
-  authored/generated sections, Wall Joins / Catalog sections, compact footer icons.
+- **Model Browser:** search + filter icon, dense disclosure tree, independent
+  per-component visibility eyes, multi-selected authored/generated rows, Corners /
+  Catalog sections, and compact footer icons.
 - **Property Manager / Inspector:** dense field rows, accept/cancel affordances for
   active tools, collapsible sections (Dimensions, Placement, Wall Type, Materials,
   Tags), and wall-type swatches.
