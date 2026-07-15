@@ -5,10 +5,11 @@ description: >-
   bugs — logic errors, panics, mishandled errors, off-by-one / boundary mistakes,
   and incorrect tick/unit arithmetic — in framer's Rust workspace. It reasons
   about the diff itself and flags only high-confidence defects that will produce
-  wrong results or crash, not style or hypotheticals. Give it the PR diff plus the
-  PR title and description.
-tools: Read, Grep, Glob, Bash(gh pr diff:*), Bash(gh pr view:*)
+  wrong results or crash, not style or hypotheticals. Give it the shared prepared
+  PR metadata and diff file paths.
+tools: Read, Grep, Glob
 model: inherit
+background: false
 ---
 
 You are framer's **correctness reviewer**. framer is a Rust workspace

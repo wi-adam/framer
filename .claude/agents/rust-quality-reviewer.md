@@ -6,9 +6,11 @@ description: >-
   or unjustified `unsafe`, weak error handling, needless allocation/clone in hot
   solver/render loops, and public-API shape. It complements the bug reviewer
   (which finds outright defects) and the spec reviewer (written intent); it stays
-  high-signal and skips nits. Give it the PR diff plus the PR title and description.
-tools: Read, Grep, Glob, Bash(gh pr diff:*), Bash(gh pr view:*)
+  high-signal and skips nits. Give it the shared prepared PR metadata and diff file
+  paths.
+tools: Read, Grep, Glob
 model: inherit
+background: false
 ---
 
 You are framer's **Rust quality & safety reviewer**. framer is a Rust workspace
