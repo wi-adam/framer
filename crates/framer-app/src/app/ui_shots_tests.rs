@@ -33,6 +33,7 @@ use framer_core::{ElementId, Length, OpeningKind};
 use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
+use super::viewport::{BuiltInPreset, SplitAxis};
 use super::{
     AuthoredComponentKind, ComponentKey, FramerApp, RoofForm, Selection, SelectionOp, ViewportMode,
     WallDisplay, actions, design, panels,
@@ -100,11 +101,23 @@ fn shot(harness: &mut Harness<'_, FramerApp>, dir: &Path, index: &mut u32, name:
 /// camera in low-resolution preview mode and stop as soon as either renderer has
 /// an image.
 fn warm_render(harness: &mut Harness<'_, FramerApp>) {
-    harness.state_mut().render_motion_cooldown = 24;
+    {
+        let runtime = harness.state().viewport_workspace.active_runtime();
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.render.motion_cooldown = 24;
+    }
     for _ in 0..80 {
         harness.run_steps(1);
-        let state = harness.state();
-        if state.render_view.samples() > 0 || state.render_gpu.samples() > 0 {
+        let has_samples = {
+            let runtime = harness.state().viewport_workspace.active_runtime();
+            let runtime = runtime
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            runtime.render.cpu.samples() > 0 || runtime.render.gpu.samples() > 0
+        };
+        if has_samples {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -116,6 +129,11 @@ fn warm_render(harness: &mut Harness<'_, FramerApp>) {
 /// "Design" also appears as a panel badge and in the status bar.
 fn select_tab(harness: &mut Harness<'_, FramerApp>, tab: actions::WorkflowTab) {
     harness.state_mut().select_workflow_tab(tab);
+}
+
+fn sync_active_viewport_mode(harness: &mut Harness<'_, FramerApp>) {
+    let mode = harness.state().viewport_workspace.active_mode();
+    harness.state_mut().viewport_mode = mode;
 }
 
 fn open_3d_component_context_menu(harness: &mut Harness<'_, FramerApp>) {
@@ -204,6 +222,48 @@ fn capture_ui_shot_deck() {
         }
         shot(&mut harness, &dir, &mut index, name);
     }
+
+    // Tiled workspace checkpoints: mixed two-up, repeated-type Four Up with
+    // distinct canonical 3D angles, and the named-layout menu.
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::PlanAnd3d)
+        .unwrap();
+    sync_active_viewport_mode(&mut harness);
+    shot(&mut harness, &dir, &mut index, "viewport-plan-and-3d");
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::FourUp)
+        .unwrap();
+    sync_active_viewport_mode(&mut harness);
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "viewport-four-up-distinct-3d",
+    );
+    harness
+        .state_mut()
+        .viewport_workspace
+        .save_named_preset("Inspection desk")
+        .unwrap();
+    harness.get_by_label("Layouts").click();
+    shot(
+        &mut harness,
+        &dir,
+        &mut index,
+        "viewport-layout-presets-menu",
+    );
+    harness.key_press(egui::Key::Escape);
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::Focus)
+        .unwrap();
+    sync_active_viewport_mode(&mut harness);
+    harness.run_ok();
 
     // Transient statuses are canvas toasts, not toolbar rows, so capture them
     // once before clearing the state for the rest of the deck.
@@ -418,7 +478,13 @@ fn capture_ui_shot_deck() {
                 .retain(|member| Some(&member.id) == middle.as_ref());
         }
     }
-    harness.state_mut().view_3d = super::viewport::View3dState::roof_framing_detail_shot();
+    {
+        let runtime = harness.state().viewport_workspace.active_runtime();
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.view_3d = super::viewport::View3dState::roof_framing_detail_shot();
+    }
     harness.ctx.request_repaint();
     harness.run_steps(2);
     shot(
@@ -427,7 +493,13 @@ fn capture_ui_shot_deck() {
         &mut index,
         "roofed-plan-rafter-ridge-cuts-detail",
     );
-    harness.state_mut().view_3d = super::viewport::View3dState::roof_framing_eave_detail_shot();
+    {
+        let runtime = harness.state().viewport_workspace.active_runtime();
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.view_3d = super::viewport::View3dState::roof_framing_eave_detail_shot();
+    }
     harness.ctx.request_repaint();
     harness.run_steps(2);
     shot(
@@ -438,7 +510,13 @@ fn capture_ui_shot_deck() {
     );
     harness.state_mut().project_plan = full_roof_plan;
     harness.state_mut().layers.wall_display = full_wall_display;
-    harness.state_mut().view_3d = Default::default();
+    {
+        let runtime = harness.state().viewport_workspace.active_runtime();
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.view_3d = Default::default();
+    }
     select_tab(&mut harness, actions::WorkflowTab::Render);
     warm_render(&mut harness);
     shot(&mut harness, &dir, &mut index, "roofed-render-view");
@@ -456,6 +534,36 @@ fn capture_ui_shot_deck() {
         .expect("demo shell has a back wall");
     small.state_mut().selected_wall = small_back_wall_index;
     small.state_mut().selected = Selection::Wall;
+    small
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::FourUp)
+        .unwrap();
+    sync_active_viewport_mode(&mut small);
+    shot(&mut small, &dir, &mut index, "small-viewport-four-up");
+    let quadrant_ids = small.state().viewport_workspace.layout.pane_ids();
+    for id in quadrant_ids {
+        small
+            .state_mut()
+            .viewport_workspace
+            .split(id, SplitAxis::Horizontal)
+            .unwrap();
+    }
+    let column_ids = small.state().viewport_workspace.layout.pane_ids();
+    for id in column_ids {
+        small
+            .state_mut()
+            .viewport_workspace
+            .split(id, SplitAxis::Vertical)
+            .unwrap();
+    }
+    sync_active_viewport_mode(&mut small);
+    shot(&mut small, &dir, &mut index, "small-viewport-sixteen-pane");
+    small
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::Focus)
+        .unwrap();
     small.state_mut().viewport_mode = ViewportMode::Axonometric;
     shot(&mut small, &dir, &mut index, "small-3d-view");
     select_tab(&mut small, actions::WorkflowTab::Render);

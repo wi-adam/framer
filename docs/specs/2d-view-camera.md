@@ -4,14 +4,16 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction)
+> **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) ·
+> **Plan:** [2026-07-14 tiled viewport workspaces](../plans/2026-07-14-tiled-viewport-workspaces.md) ·
+> **Last reviewed:** 2026-07-14
 
 ## Goal
 
 Give the 2D views — the **Plan** ("shell") view and the **Elevation** ("wall")
-views — pan and zoom. Today every 2D view is locked to a fit-to-bounds framing
-computed fresh each frame: there is no way to zoom into a detail or scroll
-around a large drawing. We want navigation that feels like a 2D design tool,
+views — pan and zoom. Before this feature, every 2D view was locked to a
+fit-to-bounds framing computed fresh each frame, with no way to zoom into a
+detail or scroll around a large drawing. Navigation should feel like a 2D design tool,
 mirrors the conventions the Render view's camera already established, and
 layers on top of the existing fit-to-bounds math without rewriting any of the
 drawing or hit-testing code.
@@ -24,10 +26,11 @@ drawing or hit-testing code.
   opening-handle dragging.
 - **Scope — all three 2D drawings:** the Plan/shell view, the Design-workspace
   wall elevation, and the Plan-workspace wall elevation.
-- **Reset / camera memory — per-view memory.** The Plan view remembers its own
-  camera; each wall's elevation remembers its own, keyed by wall id. Re-fit on
-  demand via double-click on empty space or the `F` key.
-- **One elevation camera per wall, shared across both elevation variants.** Both
+- **Reset / camera memory — per-pane memory.** Each pane remembers one Plan/Roof
+  camera; each wall's elevation remembers its own camera inside that pane, keyed
+  by wall id. Re-fit on demand via double-click on empty space or the `F` key.
+  Different panes never share mutable 2D camera state.
+- **One elevation camera per wall per pane, shared across both elevation variants.** Both
   the Design-workspace and Plan-workspace elevations fit the *same* wall
   (length × height), so a remembered zoom/pan is meaningful in either and the
   bookkeeping halves. Note the two variants fit into slightly different content
@@ -43,16 +46,14 @@ drawing or hit-testing code.
 
 ## Why fold into the existing transforms (not a new draw layer)
 
-Grounded in the current codebase (`crates/framer-app/src/app/viewport.rs`):
+Grounded in the current codebase (`crates/framer-app/src/app/viewport/`):
 
 - Every model→screen mapping in the 2D views funnels through just two places:
-  - **Plan:** `plan_point` (`viewport.rs:2083`) and its inverse
-    `plan_inverse_point` (`viewport.rs:2100`).
+  - **Plan:** `plan_point` and its inverse `plan_inverse_point` in `geom.rs`.
   - **Elevation:** `WallElevationLayout { wall_rect, scale }`
-    (`viewport.rs:3218`), whose `new()` computes the fit. *Both* elevation draw
-    functions (`draw_wall_design_elevation` `viewport.rs:2999`,
-    `draw_wall_elevation` `viewport.rs:3800`) derive every line, rect, handle,
-    and hit-test from those two fields.
+    in `view_common.rs`, whose `new()` computes the fit. Both elevation renderers
+    (`elevation_design.rs` and `elevation_framing.rs`) derive every line, rect,
+    handle, and hit-test from those two fields.
 - Therefore a camera folded into those two primitives propagates pan/zoom to all
   drawing **and** hit-testing for free — no call-site churn beyond threading a
   `&View2dState` parameter through.
@@ -69,21 +70,21 @@ undo-redo spec's "camera is not restored" rule,
 ```
 crates/framer-core    (unchanged) — no camera concept here
 crates/framer-app
-  └── app/viewport.rs
-        - View2dState (NEW): { zoom, pan } + pan_by / zoom_at / reset / transforms
-        - plan_point / plan_inverse_point: take &View2dState, fold camera in
-        - WallElevationLayout::new: takes &View2dState, bakes camera into wall_rect+scale
-        - apply_view_2d_input (NEW): shared input helper for all three views
-        - draw_project_plan / draw_wall_design_elevation / draw_wall_elevation:
-          take &mut View2dState; allocate Sense::click_and_drag()
-  └── app/mod.rs
-        - FramerApp gains: plan_view: View2dState,
-                           elevation_views: HashMap<String, View2dState>
-        - load/new clears elevation_views; rebuild() prunes entries for
-          walls that no longer exist (keeps the map in sync however a wall leaves)
+  └── app/viewport/camera_2d.rs
+        - View2dState: { zoom, pan } + pan_by / zoom_at / reset / transforms
+        - apply_view_2d_input: shared input helper for all three drawings
+  └── app/viewport/geom.rs + view_common.rs
+        - plan_point / plan_inverse_point fold in &View2dState
+        - WallElevationLayout::new bakes the camera into wall_rect + scale
+  └── app/viewport/pane.rs
+        - ViewportPaneRuntime owns plan_view: View2dState
+        - and elevation_views: HashMap<String, View2dState>
+  └── app/viewport/workspace_state.rs
+        - load/new resets every live pane's 2D cameras
+        - rebuild prunes deleted wall ids from every pane runtime
 ```
 
-### Data structure (`viewport.rs`)
+### Data structure (`viewport/camera_2d.rs`)
 
 ```rust
 /// 2D pan/zoom camera, layered on top of a view's fit-to-bounds base transform.
@@ -103,16 +104,18 @@ impl Default for View2dState {
 
 `Default` is the identity transform — pixel-identical to today's fit-to-bounds.
 
-`FramerApp` gains two fields:
+Each `ViewportPaneRuntime` owns two fields:
 
 ```rust
-plan_view: View2dState,                         // the shell/plan camera
+plan_view: View2dState,                         // the Plan/Roof camera
 elevation_views: HashMap<String, View2dState>,  // keyed by wall id (ElementId.0)
 ```
 
-The active elevation camera is fetched with
+The pane's active elevation camera is fetched with
 `elevation_views.entry(wall.id.0.clone()).or_default()` before the elevation
-draw call, so a wall's camera materializes on first view and persists after.
+draw call, so a wall's camera materializes on first view and persists while that
+pane lives. Applying a layout preset creates fresh pane runtimes; named presets
+deliberately omit project-dependent 2D pan/zoom.
 
 ### The transform
 
@@ -202,7 +205,7 @@ fn apply_view_2d_input(ui: &Ui, response: &Response, drawing: Rect,
 | Double-click empty space, or `F` (hovered) | `reset()` |
 | Plain left-drag / click | Untouched → selection & opening-handle drag |
 
-Rules, mirroring the Render view (`viewport.rs:450–485`):
+Rules, mirroring the Render view (`viewport/render.rs`):
 
 - **Zoom/scroll fire only when `response.hovered()`** — never hijacks global
   scroll.
@@ -222,13 +225,12 @@ Rules, mirroring the Render view (`viewport.rs:450–485`):
   gates off `draw_wall_design_elevation`'s opening-handle drag for the frame, so
   Space-pan and handle-drag never fire together. Plain left-drag still drags
   handles.
-- **Per-wall key hygiene:** `elevation_views` is cleared wholesale on
-  `new_project` / `reset_demo` / `reset_wall_demo` / `load_project_file` via
-  `reset_2d_cameras`, and `rebuild()` prunes any entry whose wall id is no longer
-  in the model. The map therefore stays in sync however a wall is removed (no
-  single-wall delete exists today; this covers one without it having to remember
-  to prune). The double-click re-fit fires only over empty canvas (each view
-  passes `over_element`), so it never fights element selection.
+- **Per-wall key hygiene:** every live pane's `elevation_views` is cleared on
+  `new_project` / `reset_demo` / `reset_wall_demo` / `load_project_file` through
+  `ViewportWorkspaceState::reset_2d_cameras`, and `rebuild()` prunes any entry
+  whose wall id is no longer in the model from every runtime. The maps therefore
+  stay in sync however a wall is removed. Double-click re-fit fires only over
+  empty canvas (each view passes `over_element`), so it never fights selection.
 - **Pan clamp:** `clamp_pan` bounds the offset to ±half-extent ·
   `PAN_LIMIT_FACTOR` · `zoom.max(1.0)` per axis. The zoom-scaling is what keeps
   the clamp from fighting a cursor-anchored zoom into a corner (whose required

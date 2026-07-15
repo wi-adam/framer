@@ -16,6 +16,7 @@
 //! instead. When the adapter lacks compute support the caller falls back to the
 //! CPU renderer (`render_job`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
@@ -228,8 +229,10 @@ impl GpuRenderState {
 
     /// Builds the callback for this frame and advances the sample counter while
     /// still converging. Returns `None` if there is nothing cached to render.
+    #[allow(clippy::too_many_arguments)]
     fn callback(
         &mut self,
+        target_id: u64,
         width: u32,
         height: u32,
         srgb_target: bool,
@@ -272,6 +275,7 @@ impl GpuRenderState {
         }
 
         Some(PathTraceCallback {
+            target_id,
             scene_key: self.scene_key,
             gpu_scene,
             uniforms,
@@ -346,9 +350,12 @@ fn hash_vec3(value: framer_render::math::Vec3, state: &mut impl std::hash::Hashe
 
 /// Registers the GPU path-trace callback for `drawing`, syncing cached state and
 /// returning whether the renderer is still accumulating (so the caller can keep
-/// requesting repaints). Returns `false` if the GPU scene could not be prepared.
+/// requesting repaints). Distinct target IDs always route to distinct mutable
+/// callback resources, even when their scene, camera, and resolution are
+/// otherwise identical. Returns `false` if the GPU scene could not be prepared.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint(
+pub(crate) fn paint_for_target(
+    target_id: u64,
     state: &mut GpuRenderState,
     painter: &eframe::egui::Painter,
     drawing: eframe::egui::Rect,
@@ -362,6 +369,7 @@ pub(crate) fn paint(
 ) -> bool {
     state.sync(model, opts, width, height);
     let Some(callback) = state.callback(
+        target_id,
         width,
         height,
         target_format.is_srgb(),
@@ -375,8 +383,45 @@ pub(crate) fn paint(
     true
 }
 
+/// Schedule release of callback-owned GPU resources for a closed logical pane.
+pub(crate) fn release_target(painter: &eframe::egui::Painter, target_id: u64) {
+    painter.add(egui_wgpu::Callback::new_paint_callback(
+        painter.clip_rect(),
+        PathTraceCleanupCallback { target_id },
+    ));
+}
+
+struct PathTraceCleanupCallback {
+    target_id: u64,
+}
+
+impl CallbackTrait for PathTraceCleanupCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _screen: &ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(store) = resources.get_mut::<PtResourceStore<PtResources>>() {
+            let _ = store.remove(self.target_id);
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: eframe::egui::PaintCallbackInfo,
+        _render_pass: &mut wgpu::RenderPass<'static>,
+        _resources: &CallbackResources,
+    ) {
+    }
+}
+
 /// The per-frame paint callback: dispatches one accumulation sample and blits.
 struct PathTraceCallback {
+    target_id: u64,
     scene_key: u64,
     gpu_scene: Arc<GpuScene>,
     uniforms: GpuUniforms,
@@ -399,9 +444,16 @@ impl CallbackTrait for PathTraceCallback {
         egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let needs_rebuild = resources
-            .get::<PtResources>()
-            .is_none_or(|r| r.target_format != self.target_format || r.backend != self.backend);
+        if resources.get::<PtResourceStore<PtResources>>().is_none() {
+            resources.insert(PtResourceStore::<PtResources>::default());
+        }
+
+        let store = resources
+            .get_mut::<PtResourceStore<PtResources>>()
+            .expect("pathtrace resource store exists");
+        let needs_rebuild = store.get(self.target_id).is_none_or(|resource| {
+            resource.target_format != self.target_format || resource.backend != self.backend
+        });
         if needs_rebuild {
             let res = PtResources::new(
                 device,
@@ -413,11 +465,11 @@ impl CallbackTrait for PathTraceCallback {
                 self.backend,
             );
             res.build_acceleration_structures(device, queue);
-            resources.insert(res);
+            store.insert(self.target_id, res);
         } else {
-            let res = resources
-                .get_mut::<PtResources>()
-                .expect("pathtrace resources exist");
+            let res = store
+                .get_mut(self.target_id)
+                .expect("target pathtrace resources exist");
             if res.scene_key != self.scene_key {
                 res.upload_scene(device, &self.gpu_scene, self.scene_key);
                 res.build_acceleration_structures(device, queue);
@@ -427,9 +479,9 @@ impl CallbackTrait for PathTraceCallback {
             }
         }
 
-        let res = resources
-            .get::<PtResources>()
-            .expect("pathtrace resources exist");
+        let res = store
+            .get(self.target_id)
+            .expect("target pathtrace resources exist");
         queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&self.uniforms));
 
         let groups_x = self.width.div_ceil(WORKGROUP);
@@ -474,7 +526,10 @@ impl CallbackTrait for PathTraceCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
-        let Some(res) = resources.get::<PtResources>() else {
+        let Some(res) = resources
+            .get::<PtResourceStore<PtResources>>()
+            .and_then(|store| store.get(self.target_id))
+        else {
             return;
         };
         // Blit the denoised buffer (cross-faded toward raw by the uniform) while
@@ -487,6 +542,38 @@ impl CallbackTrait for PathTraceCallback {
         render_pass.set_pipeline(&res.blit_pipeline);
         render_pass.set_bind_group(0, blit_bg, &[]);
         render_pass.draw(0..3, 0..1);
+    }
+}
+
+/// Target-qualified callback resources. The generic value keeps the routing
+/// contract independently testable without constructing a GPU device.
+struct PtResourceStore<T> {
+    targets: HashMap<u64, T>,
+}
+
+impl<T> Default for PtResourceStore<T> {
+    fn default() -> Self {
+        Self {
+            targets: HashMap::new(),
+        }
+    }
+}
+
+impl<T> PtResourceStore<T> {
+    fn get(&self, target_id: u64) -> Option<&T> {
+        self.targets.get(&target_id)
+    }
+
+    fn get_mut(&mut self, target_id: u64) -> Option<&mut T> {
+        self.targets.get_mut(&target_id)
+    }
+
+    fn insert(&mut self, target_id: u64, resources: T) -> Option<T> {
+        self.targets.insert(target_id, resources)
+    }
+
+    fn remove(&mut self, target_id: u64) -> Option<T> {
+        self.targets.remove(&target_id)
     }
 }
 
@@ -1131,6 +1218,46 @@ fn make_atrous_bind_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pathtrace_resource_store_routes_identical_values_by_target() {
+        let mut store = PtResourceStore::default();
+        store.insert(17, vec![1_u8]);
+        store.insert(23, vec![1_u8]);
+
+        store.get_mut(17).expect("target 17 exists").push(2);
+
+        assert_eq!(store.targets.len(), 2);
+        assert_eq!(store.get(17).map(Vec::as_slice), Some([1, 2].as_slice()));
+        assert_eq!(store.get(23).map(Vec::as_slice), Some([1].as_slice()));
+        assert!(store.get(0).is_none());
+
+        assert_eq!(store.remove(17), Some(vec![1, 2]));
+        assert!(store.get(17).is_none());
+        assert!(store.get(23).is_some());
+    }
+
+    #[test]
+    fn gpu_render_callback_carries_the_logical_target_id() {
+        let model = BuildingModel::demo_wall();
+        let opts = RenderOptions::default();
+        let mut state = GpuRenderState::default();
+        state.sync(&model, &opts, 64, 48);
+
+        let callback = state
+            .callback(
+                91,
+                64,
+                48,
+                true,
+                false,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                PathTraceBackend::ComputeBvh,
+            )
+            .expect("synced state produces a callback");
+
+        assert_eq!(callback.target_id, 91);
+    }
 
     #[test]
     fn ray_query_shader_replaces_only_intersection_layer() {

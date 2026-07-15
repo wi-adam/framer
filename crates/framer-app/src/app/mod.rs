@@ -19,9 +19,9 @@ mod ui_harness_tests;
 mod ui_shots_tests;
 mod viewport;
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
@@ -57,7 +57,7 @@ use model_edit::{
     translate_keeps_ortho, translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, compliance_report_path, export_paths, write_text_file};
-use viewport::{View2dState, View3dState, WallDragEvent};
+use viewport::{PaneId, ViewportWorkspaceState, WallDragEvent};
 
 pub(crate) struct FramerApp {
     config: AppConfig,
@@ -88,22 +88,24 @@ pub(crate) struct FramerApp {
     workspace_mode: WorkspaceMode,
     viewport_mode: ViewportMode,
     last_authoring_viewport: ViewportMode,
-    view_3d: View3dState,
-    /// Pan/zoom camera for the whole-project Plan ("shell") view.
-    plan_view: View2dState,
-    /// Per-wall pan/zoom cameras for the Elevation ("wall") views, keyed by wall
-    /// id and shared across the Design- and Plan-workspace elevation variants.
-    /// Presentation state: never serialized, cleared on new/load.
-    elevation_views: HashMap<String, View2dState>,
+    /// Pane to reactivate when leaving the global Render command context. The
+    /// ID is validated against the current layout before use because applying a
+    /// preset replaces all session identities.
+    last_authoring_pane: Option<PaneId>,
+    /// Tiled viewport topology, per-pane camera/render runtimes, and app-local
+    /// named layout presets. Presentation-only; never part of `.framer`.
+    viewport_workspace: ViewportWorkspaceState,
+    /// Heavy owned document snapshot shared by deferred native viewports.
+    /// `rebuild()` is the document-generation boundary and invalidates it;
+    /// independently mutable presentation state is refreshed every root frame.
+    deferred_document_cache: Option<Arc<viewport::OwnedPaneDocument>>,
+    /// Monotonic generation tag attached to snapshot-derived deferred events.
+    /// A child painted against an older owned snapshot must not apply model
+    /// indices or actions after the root document has rebuilt.
+    document_revision: u64,
     /// Session-only render controls surfaced by the Render workflow tab.
     /// Presentation state: never serialized.
     render_settings: RenderSettings,
-    render_view: render_job::RenderViewState,
-    render_gpu: render::GpuRenderState,
-    /// Frames remaining in "camera moving" mode (hysteresis after the last orbit/
-    /// zoom input), used to drop the Render view to a lower internal resolution
-    /// while interacting so orbiting stays smooth. 0 = settled / full resolution.
-    render_motion_cooldown: u32,
     dimension_tool: DimensionToolState,
     draw_wall_tool: DrawWallToolState,
     room_tool_active: bool,
@@ -741,13 +743,11 @@ impl Default for FramerApp {
             workspace_mode: WorkspaceMode::Design,
             viewport_mode: ViewportMode::Plan,
             last_authoring_viewport: ViewportMode::Plan,
-            view_3d: View3dState::default(),
-            plan_view: View2dState::default(),
-            elevation_views: HashMap::new(),
+            last_authoring_pane: None,
+            viewport_workspace: ViewportWorkspaceState::default(),
+            deferred_document_cache: None,
+            document_revision: 0,
             render_settings: RenderSettings::default(),
-            render_view: render_job::RenderViewState::default(),
-            render_gpu: render::GpuRenderState::default(),
-            render_motion_cooldown: 0,
             dimension_tool: DimensionToolState::default(),
             draw_wall_tool: DrawWallToolState::default(),
             room_tool_active: false,
@@ -781,7 +781,7 @@ impl FramerApp {
 
         let render_state = cc.wgpu_render_state.as_ref();
         let render_smoke = config.render.smoke_frames;
-        Self {
+        let mut app = Self {
             config,
             gpu_target_format: render_state.map(|rs| rs.target_format),
             gpu_depth_format: render_state.map(|_| eframe::wgpu::TextureFormat::Depth24Plus),
@@ -799,10 +799,14 @@ impl FramerApp {
             }),
             render_smoke,
             ..Self::default()
-        }
+        };
+        app.viewport_workspace = ViewportWorkspaceState::new(ViewportMode::Plan, cc.storage);
+        app
     }
 
     fn rebuild(&mut self) {
+        self.deferred_document_cache = None;
+        self.document_revision = self.document_revision.wrapping_add(1);
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
         }
@@ -812,16 +816,8 @@ impl FramerApp {
         // stays in sync with the model however a wall is removed (keys are wall
         // ids). new/load clear it wholesale via `reset_2d_cameras`; this covers
         // any future single-wall deletion without it having to remember to prune.
-        if !self.elevation_views.is_empty() {
-            let live: std::collections::HashSet<&str> = self
-                .model
-                .walls
-                .iter()
-                .map(|wall| wall.id.0.as_str())
-                .collect();
-            self.elevation_views
-                .retain(|id, _| live.contains(id.as_str()));
-        }
+        self.viewport_workspace
+            .retain_elevation_cameras(self.model.walls.iter().map(|wall| wall.id.0.as_str()));
 
         self.model.apply_driving_dimensions();
 
@@ -1286,8 +1282,7 @@ impl FramerApp {
     /// model is replaced wholesale, so cameras don't carry stale framing or
     /// dangling wall-id keys into a different document.
     fn reset_2d_cameras(&mut self) {
-        self.plan_view = View2dState::default();
-        self.elevation_views.clear();
+        self.viewport_workspace.reset_2d_cameras();
     }
 
     fn reset_active_level(&mut self) {
@@ -1347,6 +1342,8 @@ impl FramerApp {
         self.active_geometry_violation = None;
         self.viewport_mode = ViewportMode::Plan;
         self.last_authoring_viewport = ViewportMode::Plan;
+        self.viewport_workspace.set_active_mode(ViewportMode::Plan);
+        self.last_authoring_pane = Some(self.viewport_workspace.active_id());
         self.component_selection = ComponentSelection::default();
         self.component_visibility = ComponentVisibility::default();
         self.context_menu_context = None;
@@ -1518,7 +1515,12 @@ impl FramerApp {
                         .as_ref()
                         .and_then(|scene| geometry_focus_bounds(scene, &current))
                     {
-                        self.view_3d.frame_bounds(scene_bounds, focus_bounds);
+                        self.viewport_workspace
+                            .active_runtime()
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .view_3d
+                            .frame_bounds(scene_bounds, focus_bounds);
                         self.file_status = Some(format!("Focused geometry violation {code}"));
                     } else {
                         self.file_status = Some(format!(
@@ -1707,8 +1709,13 @@ impl FramerApp {
         if mode != WorkspaceMode::Plan {
             self.active_geometry_violation = None;
         }
+        // Actions and tests may update the legacy active-mode mirror before the
+        // central workspace gets a frame. Commit that intent to the active leaf
+        // before looking for an existing Render/authoring pane.
+        self.viewport_workspace.set_active_mode(self.viewport_mode);
         if mode == WorkspaceMode::Render && self.viewport_mode != ViewportMode::Render {
             self.last_authoring_viewport = self.viewport_mode;
+            self.last_authoring_pane = Some(self.viewport_workspace.active_id());
         }
         let leaving_render =
             self.workspace_mode == WorkspaceMode::Render && mode != WorkspaceMode::Render;
@@ -1729,7 +1736,7 @@ impl FramerApp {
 
         if self.workspace_mode == mode {
             if mode == WorkspaceMode::Render {
-                self.viewport_mode = ViewportMode::Render;
+                self.activate_render_viewport();
             }
             return;
         }
@@ -1738,7 +1745,7 @@ impl FramerApp {
         match mode {
             WorkspaceMode::Design => {
                 if leaving_render {
-                    self.viewport_mode = self.last_authoring_viewport;
+                    self.restore_authoring_viewport();
                 }
                 self.select_authored_for_design_mode();
                 if self
@@ -1757,16 +1764,78 @@ impl FramerApp {
             WorkspaceMode::Render => {
                 self.deactivate_placement_tools();
                 self.dimension_status = None;
-                self.viewport_mode = ViewportMode::Render;
+                self.activate_render_viewport();
             }
             WorkspaceMode::Plan => {
                 self.dimension_tool.active = false;
                 self.dimension_tool.clear_picks();
                 if leaving_render {
-                    self.viewport_mode = self.last_authoring_viewport;
+                    self.restore_authoring_viewport();
                 }
                 self.rebuild();
             }
+        }
+    }
+
+    fn activate_render_viewport(&mut self) {
+        let render_pane = self
+            .viewport_workspace
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|id| {
+                self.viewport_workspace
+                    .layout
+                    .pane(*id)
+                    .is_some_and(|pane| pane.config().mode() == ViewportMode::Render)
+            });
+        if let Some(id) = render_pane {
+            let _ = self.viewport_workspace.set_active(id);
+        } else {
+            self.viewport_workspace
+                .set_active_mode(ViewportMode::Render);
+        }
+        self.viewport_mode = ViewportMode::Render;
+    }
+
+    fn restore_authoring_viewport(&mut self) {
+        if let Some(remembered) = self
+            .last_authoring_pane
+            .filter(|id| self.viewport_workspace.layout.pane(*id).is_some())
+        {
+            if self
+                .viewport_workspace
+                .layout
+                .pane(remembered)
+                .is_some_and(|pane| pane.config().mode() == ViewportMode::Render)
+            {
+                let _ = self
+                    .viewport_workspace
+                    .set_mode(remembered, self.last_authoring_viewport);
+            }
+            let _ = self.viewport_workspace.set_active(remembered);
+            self.viewport_mode = self.viewport_workspace.active_mode();
+            return;
+        }
+
+        let authoring = self
+            .viewport_workspace
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|id| {
+                self.viewport_workspace
+                    .layout
+                    .pane(*id)
+                    .is_some_and(|pane| pane.config().mode() != ViewportMode::Render)
+            });
+        if let Some(id) = authoring {
+            let _ = self.viewport_workspace.set_active(id);
+            self.viewport_mode = self.viewport_workspace.active_mode();
+        } else {
+            self.viewport_workspace
+                .set_active_mode(self.last_authoring_viewport);
+            self.viewport_mode = self.last_authoring_viewport;
         }
     }
 
@@ -1777,7 +1846,9 @@ impl FramerApp {
             self.set_workspace_mode(WorkspaceMode::Design);
         }
         self.viewport_mode = mode;
+        self.viewport_workspace.set_active_mode(mode);
         self.last_authoring_viewport = mode;
+        self.last_authoring_pane = Some(self.viewport_workspace.active_id());
     }
 
     fn has_selected_wall_elevation_context(&self) -> bool {
@@ -1851,6 +1922,14 @@ impl FramerApp {
     }
 
     fn action_enabled(&self, id: actions::ActionId) -> bool {
+        self.action_enabled_for_viewport(id, self.viewport_mode)
+    }
+
+    fn action_enabled_for_viewport(
+        &self,
+        id: actions::ActionId,
+        viewport_mode: ViewportMode,
+    ) -> bool {
         let action = actions::metadata(id);
         if !self.action_context_enabled(action.enabled_context) {
             return false;
@@ -1863,7 +1942,7 @@ impl FramerApp {
             actions::ActionId::DeleteSelection => self.is_selection_deletable(),
             actions::ActionId::IsolateDim | actions::ActionId::IsolateHide => {
                 let targets = self.renderable_selected_components();
-                self.viewport_mode == ViewportMode::Axonometric
+                viewport_mode == ViewportMode::Axonometric
                     && self.workspace_mode != WorkspaceMode::Render
                     && !targets.is_empty()
                     && (self.workspace_mode.shows_generated_plan()
@@ -1917,7 +1996,15 @@ impl FramerApp {
     }
 
     fn action_disabled_reason(&self, id: actions::ActionId) -> Option<&'static str> {
-        if self.action_enabled(id) {
+        self.action_disabled_reason_for_viewport(id, self.viewport_mode)
+    }
+
+    fn action_disabled_reason_for_viewport(
+        &self,
+        id: actions::ActionId,
+        viewport_mode: ViewportMode,
+    ) -> Option<&'static str> {
+        if self.action_enabled_for_viewport(id, viewport_mode) {
             return None;
         }
 
@@ -1948,7 +2035,7 @@ impl FramerApp {
             actions::ActionId::DeleteSelection => Some("Select an object to delete"),
             actions::ActionId::IsolateDim | actions::ActionId::IsolateHide => {
                 let targets = self.renderable_selected_components();
-                if self.viewport_mode == ViewportMode::Axonometric
+                if viewport_mode == ViewportMode::Axonometric
                     && !targets.is_empty()
                     && !self.workspace_mode.shows_generated_plan()
                     && targets
@@ -2624,6 +2711,7 @@ impl FramerApp {
 
     fn exit_current_context(&mut self) {
         if self.draw_wall_tool.active {
+            self.draw_wall_tool.previous_snap = None;
             // Esc cancels the current polyline run first, then leaves the tool.
             if self.draw_wall_tool.start.take().is_none() {
                 self.draw_wall_tool.active = false;
@@ -4209,6 +4297,7 @@ impl FramerApp {
             }
             ViewClick::DrawWallCancel => {
                 self.draw_wall_tool.start = None;
+                self.draw_wall_tool.previous_snap = None;
             }
             ViewClick::PlaceRoom { point } => {
                 self.handle_place_room(point);
@@ -4388,7 +4477,7 @@ impl eframe::App for FramerApp {
             if frames_left == 0 {
                 eprintln!(
                     "render smoke complete: {} samples accumulated",
-                    self.render_gpu.samples()
+                    self.viewport_workspace.lock_active().render.gpu.samples()
                 );
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
@@ -4398,12 +4487,26 @@ impl eframe::App for FramerApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.ui_root(ui);
+        if self.viewport_workspace.storage_dirty
+            && let Some(storage) = frame.storage_mut()
+        {
+            self.viewport_workspace.save(storage);
+            storage.flush();
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         design::save_theme(storage);
+        self.viewport_workspace.save(storage);
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        // eframe 0.35 invokes periodic save from deferred child viewport frames,
+        // where native-window geometry can be mistaken for the root window.
+        // Named layout saves flush explicitly; clean shutdown still calls save.
+        std::time::Duration::MAX
     }
 }
 
@@ -5500,6 +5603,113 @@ mod tests {
     }
 
     #[test]
+    fn render_workflow_reuses_a_render_pane_and_restores_the_authoring_pane() {
+        let mut app = FramerApp::default();
+        let authoring = app.viewport_workspace.active_id();
+        app.viewport_workspace
+            .set_mode(authoring, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_mode = ViewportMode::Axonometric;
+        let render = app
+            .viewport_workspace
+            .split(authoring, viewport::SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(render, ViewportMode::Render)
+            .unwrap();
+        app.viewport_workspace.set_active(authoring).unwrap();
+
+        app.select_workflow_tab(actions::WorkflowTab::Render);
+
+        assert_eq!(app.viewport_workspace.active_id(), render);
+        assert_eq!(app.viewport_mode, ViewportMode::Render);
+        assert_eq!(
+            app.viewport_workspace
+                .layout
+                .pane(authoring)
+                .unwrap()
+                .config()
+                .mode(),
+            ViewportMode::Axonometric
+        );
+
+        app.select_workflow_tab(actions::WorkflowTab::Frame);
+
+        assert_eq!(app.viewport_workspace.active_id(), authoring);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+    }
+
+    #[test]
+    fn render_workflow_restores_the_authoring_pane_it_converted() {
+        let mut app = FramerApp::default();
+        let plan = app.viewport_workspace.active_id();
+        let three_d = app
+            .viewport_workspace
+            .split(plan, viewport::SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(three_d, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_mode = ViewportMode::Axonometric;
+
+        app.select_workflow_tab(actions::WorkflowTab::Render);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+        assert_eq!(app.viewport_workspace.active_id(), three_d);
+        assert_eq!(app.viewport_mode, ViewportMode::Render);
+        assert_eq!(
+            app.viewport_workspace
+                .layout
+                .pane_ids()
+                .into_iter()
+                .map(|id| {
+                    app.viewport_workspace
+                        .layout
+                        .pane(id)
+                        .unwrap()
+                        .config()
+                        .mode()
+                })
+                .collect::<Vec<_>>(),
+            vec![ViewportMode::Plan, ViewportMode::Render]
+        );
+
+        app.select_workflow_tab(actions::WorkflowTab::Frame);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert_eq!(app.viewport_workspace.active_id(), three_d);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(
+            app.viewport_workspace
+                .layout
+                .pane_ids()
+                .into_iter()
+                .map(|id| {
+                    app.viewport_workspace
+                        .layout
+                        .pane(id)
+                        .unwrap()
+                        .config()
+                        .mode()
+                })
+                .collect::<Vec<_>>(),
+            vec![ViewportMode::Plan, ViewportMode::Axonometric]
+        );
+    }
+
+    #[test]
+    fn periodic_autosave_is_disabled_for_deferred_native_viewports() {
+        let app = FramerApp::default();
+
+        assert_eq!(
+            eframe::App::auto_save_interval(&app),
+            std::time::Duration::MAX
+        );
+    }
+
+    #[test]
     fn view_actions_route_through_render_workspace_boundary() {
         let mut app = FramerApp {
             viewport_mode: ViewportMode::RoofPlan,
@@ -6078,6 +6288,35 @@ mod tests {
         assert_eq!(
             app.component_visibility.authored_appearance(&wall_b),
             ComponentAppearance::Hidden
+        );
+    }
+
+    #[test]
+    fn presentation_action_availability_is_qualified_by_viewport_mode() {
+        let app = FramerApp::default();
+
+        assert!(
+            !app.action_enabled_for_viewport(actions::ActionId::IsolateDim, ViewportMode::Plan,)
+        );
+        assert!(
+            app.action_enabled_for_viewport(
+                actions::ActionId::IsolateDim,
+                ViewportMode::Axonometric,
+            )
+        );
+        assert_eq!(
+            app.action_disabled_reason_for_viewport(
+                actions::ActionId::IsolateDim,
+                ViewportMode::Plan,
+            ),
+            Some("Select one or more components in the 3D view")
+        );
+        assert_eq!(
+            app.action_disabled_reason_for_viewport(
+                actions::ActionId::IsolateDim,
+                ViewportMode::Axonometric,
+            ),
+            None
         );
     }
 
@@ -6807,6 +7046,32 @@ mod tests {
         assert!(app.draw_wall_tool.active);
         assert_eq!(app.draw_wall_tool.start, Some(pt(120.0, 0.0)));
         assert_eq!(app.model.walls.len(), 1);
+    }
+
+    #[test]
+    fn cancelling_a_draw_wall_run_invalidates_held_snap_state() {
+        let mut app = empty_draw_wall_app();
+        let held = SnapResult {
+            point: pt(24.0, 36.0),
+            kind: draw_wall::SnapKind::Endpoint,
+            guides: draw_wall::NO_GUIDES,
+        };
+        app.draw_wall_tool.start = Some(pt(0.0, 0.0));
+        app.draw_wall_tool.previous_snap = Some(held);
+
+        app.handle_view_click(ViewClick::DrawWallCancel);
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
+
+        app.draw_wall_tool.start = Some(pt(12.0, 12.0));
+        app.draw_wall_tool.previous_snap = Some(held);
+        app.exit_current_context();
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
     }
 
     #[test]

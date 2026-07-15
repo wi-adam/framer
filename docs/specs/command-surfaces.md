@@ -6,14 +6,15 @@
 >
 > **Status:** Implemented; view–workflow alignment (Render output tab, soft default
 > views, applicability gating, render settings, view-strip restyle) and component
-> visibility/isolation command routing landed through
-> 2026-07-12 · **Linked goal:** G-011 (CAD Workspace UX) ·
+> visibility/isolation command routing landed through 2026-07-12; tiled viewport
+> command routing landed 2026-07-14 · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-03 command surfaces](../plans/2026-07-03-command-surfaces.md),
 > [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
 > [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md),
 > [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
-> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
-> **Last reviewed:** 2026-07-13
+> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md),
+> [2026-07-14 tiled viewport workspaces](../plans/2026-07-14-tiled-viewport-workspaces.md) ·
+> **Last reviewed:** 2026-07-14
 
 ## Intent / Purpose
 
@@ -112,17 +113,29 @@ workbench, but purpose-built for wood-framed structures.
   separated from the authoring tabs. There is no standalone workspace switcher
   row.
 - The view tabs list **authoring cameras only** (`Shell`, `Wall/Elevation`,
-  `Roof`, `3D`), rendered as a compact segmented control in the viewport header
-  — not small floating text. `Render` is not a view tab; it is the Render
-  output workflow tab. The view strip is hidden in the Render workspace (that
-  workspace has exactly one view). Entering the Render workspace remembers the
-  current authoring view and restores it when an authoring tab is reselected.
+  `Roof`, `3D`), rendered as a compact segmented control in the workspace header
+  — not small floating text. They are global command shortcuts for the active
+  pane, not a second layout definition. Every pane also has a compact mode chooser
+  because a layout may mix or repeat view types. `Render` remains absent from the
+  authoring view tabs; it is selected either from a pane chooser or through the
+  Render output workflow tab.
+- Workflow context and pane content are related but not one-to-one. Entering the
+  Render command context activates an existing Render pane or converts the active
+  pane without replacing the split tree; reselecting an authoring workflow restores
+  the remembered surviving authoring pane. Other visible panes remain alive, and a
+  visible Render pane may continue refining while another pane is active.
+- The workspace header owns the **Layouts** menu for typed built-ins, named app-local
+  presets, and explicit **Save current layout…**. Each docked pane header owns that pane's view
+  chooser plus Split Left/Right, Split Top/Bottom, Duplicate, Pop Out, and Close.
+  Split dividers resize the topology directly; the active pane has an explicit
+  focus treatment. These controls are presentation-only and do not enter undo/redo
+  or `.framer`.
 - Each authoring workflow tab has a **soft default view**, applied on tab switch
   only when the current view does not already serve the tab (the 3D view serves
   every authoring tab): `Design` → Shell, `Frame` → Shell, `Openings` → Wall
   (the selected wall's elevation, when a wall is selected), `Roofs` → Roof,
   `Annotate` → Wall. After the switch the view remains freely switchable — the
-  default never locks.
+  default never locks. The default changes only the active pane.
 - Within the authoring workspace, tool activation keeps the existing
   **auto-snap**: activating a tool from any authoring view switches to the view
   the tool operates in. In output workspaces (`Render`, `Plan`) authoring tools
@@ -166,6 +179,11 @@ workbench, but purpose-built for wood-framed structures.
   target; the future Model Browser builder receives its row target and never
   inherits viewport-only commands implicitly. A view contributes no menu until
   it has meaningful commands for that target.
+- Deferred pane headers expose the view-scoped presentation actions that are valid
+  without synchronous authoring drag ownership. The child emits a typed action
+  tagged with its pane id; the root activates that source pane, evaluates the same
+  action metadata/disabled reason as every other surface, and performs the action.
+  Deferred callbacks never mutate the document or history directly.
 - Secondary-click selection is resolved before a canvas menu is composed. A
   secondary-clicked target outside the current selection replaces it; a target
   already in a multi-selection preserves the set. Active tools own conflicting
@@ -207,7 +225,8 @@ workbench, but purpose-built for wood-framed structures.
 | Project/document actions (`New`, `Open`, `Save`, profile, help, theme) | App/quick-access bar or project menu | Command search / shortcuts | Workflow command strip |
 | Sample/demo loaders | Project menu or examples picker | Command search | Workflow command strip |
 | Workspace mode (`Design`, `Render`, `Plan`) | Workflow tab strip (output tabs `Render`/`Plan` = output workspaces) | Command search | A second standalone switcher row |
-| View mode (`Shell`, `Wall/Elevation`, `Roof`, `3D`) | Viewport view tabs (segmented control) | Command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns; a `Render` view tab |
+| View mode (`Plan`, `Roof`, `Elevation`, `3D`, `Render`) | Active-pane workspace tabs for authoring views; each pane's mode chooser for mixed layouts | Workflow Render action / command search / shortcuts | Mixed into modeling panels; duplicate floating canvas dropdowns |
+| Viewport layout (`Split`, `Duplicate`, `Pop Out`, `Close`, built-in/custom preset) | Pane header for leaf operations; workspace Layouts menu for whole-layout operations | — | Workflow command strip; project serialization |
 | Render settings (sun azimuth/elevation, exposure) | Render workflow tab panels | None yet | Always-visible authoring chrome; inspector |
 | Diagnostics (errors, warnings, unsupported, info) | Status-bar counters → diagnostics popover | Plan workspace inspector / command search | Visible-but-dead counters; buried in a single workspace |
 | Drafting/view state (`Grid`, `Snap`, `Ortho`, layers) | Status/view-control bar | Command search | Inspector property rows |
@@ -260,7 +279,13 @@ workbench, but purpose-built for wood-framed structures.
   selection, and owns the render-settings strip. This generalizes the
   Plan-as-workflow-tab pattern instead of adding a new mechanism, and it
   removes the worst workflow-tab × view mismatches (a modeling ribbon over a
-  path-traced view).
+  path-traced view). Tiled workspaces extend this without undoing the command
+  decision: Render remains the global output command context, while Render panes
+  may coexist with authoring panes and have independent cameras/accumulators.
+- **Layout commands are viewport chrome** (decided 2026-07-14): whole-layout
+  presets live in the workspace header and leaf operations live in pane headers.
+  They are app presentation, not authored commands, so they do not consume
+  workflow-strip budget or project history.
 - **Authoring tabs set a soft default view** (decided 2026-07-08): a workflow
   tab switch jumps to the tab's natural view unless the current view already
   serves that tab; the user can switch away immediately. This makes the
@@ -290,22 +315,26 @@ workbench, but purpose-built for wood-framed structures.
 - `crates/framer-app/src/app/panels.rs` currently owns `app_header`, `toolbar`,
   inspector bodies, and `status_bar`. `app_header` owns quick-access project/edit
   controls plus Project and Examples menus; `toolbar()` renders the workflow tab
-  row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`)
+  row (`Design`, `Frame`, `Openings`, `Roofs`, `Annotate`, `Inspect`, `Render`, `Plan`)
   plus compact modeling/generated command panels, insertion flyouts for opening
   and roof-form variants, and the app-header / Cmd/Ctrl+K command-search modal.
-  View/workspace switching and active tool options live in workspace-adjacent
-  chrome.
+  Global workflow switching lives here; active-pane view/layout switching and
+  active tool options live in workspace-adjacent chrome.
 - `crates/framer-app/src/app/design/widgets.rs` owns reusable controls such as
   `tool_button`, `tool_group`, `icon_button`, `toggle_switch`, and inspector
   sections. It should evolve toward compact CAD primitives (small command buttons,
   split buttons, flyouts, panel headers, option rows), while command-routing policy
   stays in this spec.
 - `crates/framer-app/src/app/viewport/mod.rs` owns the workspace/view bar,
-  contextual tool options strip, workspace header, and selection context toolbar;
-  it is the right home for workspace/view switching, active placement settings,
-  context actions, marking menu hooks, navigation controls, and tool feedback
-  that depend on canvas selection or placement state. Its component-visibility
-  menu is the primary command home for interactive 3-D isolation.
+  Layouts menu, recursive split chrome, pane headers, contextual tool options,
+  active-pane selection toolbar, and pane-tagged event reduction. It is the right
+  home for active-pane view switching, layout/preset controls, active placement
+  settings, context actions, navigation controls, and tool feedback that depend
+  on canvas selection or placement state. Its component-visibility menu remains
+  the primary command home for docked interactive 3-D isolation.
+- `crates/framer-app/src/app/viewport/deferred.rs` owns the child-window header
+  and the typed pane-action bridge. It may surface view switching and presentation
+  actions, but all applicability checks and dispatch stay root-owned.
 - `crates/framer-app/src/app/actions.rs` holds lightweight command metadata
   (`ActionId`, workflow tab, panel, surfaces, labels, icons, flyout membership,
   enabling context, and intent-mutation flags) without becoming a generic

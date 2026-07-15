@@ -21,6 +21,7 @@ use super::actions::{self, ActionId};
 use super::component_visibility::{
     AuthoredComponentKind, ComponentKey, IsolationMode, SelectionOp,
 };
+use super::viewport::BuiltInPreset;
 use super::{
     FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels,
 };
@@ -105,9 +106,16 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
 }
 
 fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
+    secondary_click_pickable_3d_component_at_xs(harness, &[0.25, 0.375, 0.5, 0.625, 0.75]);
+}
+
+fn secondary_click_pickable_3d_component_at_xs(
+    harness: &mut Harness<FramerApp>,
+    x_positions: &[f32],
+) {
     let rect = harness.get_by_label("3D viewport").rect();
     for y in [0.25, 0.375, 0.5, 0.625, 0.75] {
-        for x in [0.25, 0.375, 0.5, 0.625, 0.75] {
+        for &x in x_positions {
             let position = egui::pos2(egui::lerp(rect.x_range(), x), egui::lerp(rect.y_range(), y));
             harness.event(egui::Event::PointerMoved(position));
             for pressed in [true, false] {
@@ -1576,6 +1584,515 @@ fn workspace_view_bar_owns_workspace_and_view_controls() {
 }
 
 #[test]
+fn tiled_viewport_builtins_expose_bounded_pane_chrome_at_narrow_size() {
+    use eframe::egui::accesskit::Role;
+
+    let size = egui::vec2(1040.0, 680.0);
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    for (preset, expected_modes) in [
+        (
+            BuiltInPreset::PlanAnd3d,
+            vec![ViewportMode::Plan, ViewportMode::Axonometric],
+        ),
+        (
+            BuiltInPreset::FourUp,
+            vec![
+                ViewportMode::Plan,
+                ViewportMode::Elevation,
+                ViewportMode::Axonometric,
+                ViewportMode::Axonometric,
+            ],
+        ),
+    ] {
+        let mut harness = demo_harness_with_size(size);
+        harness.run();
+        harness
+            .state_mut()
+            .viewport_workspace
+            .apply_builtin(preset)
+            .expect("built-in viewport layout should instantiate");
+        harness.run();
+
+        let panes = {
+            let layout = &harness.state().viewport_workspace.layout;
+            layout
+                .pane_ids()
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        layout
+                            .pane(id)
+                            .expect("layout pane ID should resolve")
+                            .config()
+                            .mode(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            panes.iter().map(|(_, mode)| *mode).collect::<Vec<_>>(),
+            expected_modes,
+            "{} should expose its locked pane modes",
+            preset.name()
+        );
+
+        for (id, _) in &panes {
+            let label = format!("View {}", id.get());
+            let rect = harness.get_by_label(&label).rect();
+            assert!(
+                rect.left() >= window.left()
+                    && rect.top() >= window.top()
+                    && rect.right() <= window.right()
+                    && rect.bottom() <= window.bottom(),
+                "{} pane header '{label}' should stay inside {size:?}, got {rect:?}",
+                preset.name()
+            );
+        }
+
+        for (label, expected_count) in [
+            (
+                "Plan",
+                expected_modes
+                    .iter()
+                    .filter(|mode| **mode == ViewportMode::Plan)
+                    .count(),
+            ),
+            (
+                "Elevation",
+                expected_modes
+                    .iter()
+                    .filter(|mode| **mode == ViewportMode::Elevation)
+                    .count(),
+            ),
+            (
+                "3D",
+                expected_modes
+                    .iter()
+                    .filter(|mode| **mode == ViewportMode::Axonometric)
+                    .count(),
+            ),
+        ] {
+            let mode_controls = harness
+                .query_all_by_role(Role::ComboBox)
+                .filter(|node| node.value().as_deref() == Some(label))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                mode_controls.len(),
+                expected_count,
+                "{} should expose one mode control valued '{label}' per matching pane",
+                preset.name()
+            );
+            for control in mode_controls {
+                let rect = control.rect();
+                assert!(
+                    rect.left() >= window.left()
+                        && rect.top() >= window.top()
+                        && rect.right() <= window.right()
+                        && rect.bottom() <= window.bottom(),
+                    "{} mode control '{label}' should stay inside {size:?}, got {rect:?}",
+                    preset.name()
+                );
+            }
+        }
+
+        for (id, _) in &panes {
+            let action_menu_label = format!("View {} viewport actions", id.get());
+            let menu = harness.get_by_role_and_label(Role::Button, &action_menu_label);
+            let rect = menu.rect();
+            assert!(
+                rect.left() >= window.left()
+                    && rect.top() >= window.top()
+                    && rect.right() <= window.right()
+                    && rect.bottom() <= window.bottom(),
+                "{} viewport action menu should stay inside {size:?}, got {rect:?}",
+                preset.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn render_workspace_applying_design_and_render_keeps_render_command_context() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Render);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Design + Render")
+        .click();
+    harness.run_steps(1);
+
+    let app = harness.state();
+    let modes = app
+        .viewport_workspace
+        .layout
+        .pane_ids()
+        .into_iter()
+        .map(|id| {
+            app.viewport_workspace
+                .layout
+                .pane(id)
+                .expect("layout pane ID should resolve")
+                .config()
+                .mode()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(modes, vec![ViewportMode::Axonometric, ViewportMode::Render]);
+    assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Render);
+    assert_eq!(app.viewport_mode, ViewportMode::Render);
+}
+
+#[test]
+fn render_workspace_applying_saved_authoring_layout_restores_it_on_exit() {
+    use eframe::egui::accesskit::Role;
+
+    const PRESET_NAME: &str = "Plan focus";
+
+    let mut harness = demo_harness();
+    harness.run();
+    assert_eq!(
+        harness.state().viewport_workspace.active_mode(),
+        ViewportMode::Plan
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Save current layout…")
+        .click();
+    harness.run_steps(1);
+
+    let dialog = harness.get_by_role_and_label(Role::Window, "Save viewport layout");
+    dialog.get_by_role(Role::TextInput).focus();
+    harness.run_steps(1);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.event(egui::Event::Text(PRESET_NAME.to_owned()));
+    harness.run_steps(1);
+    let dialog = harness.get_by_role_and_label(Role::Window, "Save viewport layout");
+    assert_eq!(
+        dialog.get_by_role(Role::TextInput).value().as_deref(),
+        Some(PRESET_NAME)
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Save viewport layout")
+        .get_by_role_and_label(Role::Button, "Save")
+        .click();
+    harness.run_steps(1);
+    assert!(
+        !harness.state().viewport_workspace.save_preset_open,
+        "Save should close the custom-preset dialog"
+    );
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, PRESET_NAME)
+        .click();
+    harness.run_steps(1);
+
+    let app = harness.state();
+    assert_eq!(app.viewport_workspace.layout.pane_count(), 1);
+    assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Render);
+    assert_eq!(app.viewport_mode, ViewportMode::Render);
+
+    harness.get_by_label("Frame").click();
+    harness.run_steps(1);
+    let app = harness.state();
+    assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Plan);
+    assert_eq!(app.viewport_mode, ViewportMode::Plan);
+}
+
+#[test]
+fn tiled_viewport_maximum_balanced_layout_keeps_compact_chrome_reachable() {
+    use eframe::egui::accesskit::Role;
+
+    let size = egui::vec2(1040.0, 680.0);
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    let mut harness = demo_harness_with_size(size);
+    harness.run();
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::FourUp)
+        .unwrap();
+    let quadrant_ids = harness.state().viewport_workspace.layout.pane_ids();
+    for id in quadrant_ids {
+        harness
+            .state_mut()
+            .viewport_workspace
+            .split(id, super::viewport::SplitAxis::Horizontal)
+            .unwrap();
+    }
+    let column_ids = harness.state().viewport_workspace.layout.pane_ids();
+    for id in column_ids {
+        harness
+            .state_mut()
+            .viewport_workspace
+            .split(id, super::viewport::SplitAxis::Vertical)
+            .unwrap();
+    }
+    harness.run();
+
+    let pane_ids = harness.state().viewport_workspace.layout.pane_ids();
+    assert_eq!(pane_ids.len(), 16);
+    for id in pane_ids {
+        for (role, label) in [
+            (Role::ComboBox, format!("View {} mode", id.get())),
+            (Role::Button, format!("View {} viewport actions", id.get())),
+        ] {
+            let rect = harness.get_by_role_and_label(role, &label).rect();
+            assert!(
+                rect.left() >= window.left()
+                    && rect.top() >= window.top()
+                    && rect.right() <= window.right()
+                    && rect.bottom() <= window.bottom(),
+                "compact pane control '{label}' should stay inside {size:?}, got {rect:?}"
+            );
+        }
+    }
+
+    let splitters = harness
+        .query_all_by_role_and_label(Role::Slider, "Horizontal viewport split divider")
+        .count()
+        + harness
+            .query_all_by_role_and_label(Role::Slider, "Vertical viewport split divider")
+            .count();
+    assert_eq!(
+        splitters, 15,
+        "every split should expose an accessible divider"
+    );
+}
+
+#[test]
+fn tiled_viewport_mode_control_activates_its_pane_and_switches_only_that_pane() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::PlanAnd3d)
+        .unwrap();
+    harness.run();
+
+    let pane_ids = harness.state().viewport_workspace.layout.pane_ids();
+    let [plan_pane, view_3d_pane] = pane_ids.as_slice() else {
+        panic!("Plan + 3D should produce exactly two panes");
+    };
+    assert_eq!(harness.state().viewport_workspace.active_id(), *plan_pane);
+
+    harness
+        .query_all_by_role(Role::ComboBox)
+        .find(|node| node.value().as_deref() == Some("3D"))
+        .expect("3D pane should expose its current mode through the combobox value")
+        .click();
+    harness.run();
+    assert_eq!(
+        harness.state().viewport_workspace.active_id(),
+        *view_3d_pane,
+        "opening a pane-local mode control should activate its source pane"
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, "Elevation")
+        .click();
+    harness.run();
+
+    let app = harness.state();
+    assert_eq!(app.viewport_workspace.active_id(), *view_3d_pane);
+    assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+    assert_eq!(
+        app.viewport_workspace
+            .layout
+            .pane(*view_3d_pane)
+            .unwrap()
+            .config()
+            .mode(),
+        ViewportMode::Elevation
+    );
+    assert_eq!(
+        app.viewport_workspace
+            .layout
+            .pane(*plan_pane)
+            .unwrap()
+            .config()
+            .mode(),
+        ViewportMode::Plan,
+        "switching one pane must not replace its sibling's mode"
+    );
+}
+
+#[test]
+fn tiled_viewport_split_control_and_last_pane_close_guard_drive_layout_state() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    let only_pane = harness.state().viewport_workspace.active_id();
+    let only_pane_actions = format!("View {} viewport actions", only_pane.get());
+
+    harness
+        .get_by_role_and_label(Role::Button, &only_pane_actions)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Close viewport")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().viewport_workspace.layout.pane_count(), 1);
+    assert_eq!(harness.state().viewport_workspace.active_id(), only_pane);
+    assert_eq!(
+        harness.state().file_status.as_deref(),
+        Some("the last viewport pane cannot close")
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, &only_pane_actions)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Split left / right")
+        .click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().viewport_workspace.layout.pane_count(), 2);
+    harness.run_steps(1);
+    let pane_ids = harness.state().viewport_workspace.layout.pane_ids();
+    assert_eq!(pane_ids.len(), 2);
+    for id in pane_ids {
+        harness.get_by_role_and_label(Role::Button, &format!("View {} viewport actions", id.get()));
+    }
+}
+
+#[test]
+fn tiled_viewport_closing_the_active_pane_preserves_the_surviving_view_type() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    harness
+        .state_mut()
+        .viewport_workspace
+        .apply_builtin(BuiltInPreset::PlanAnd3d)
+        .unwrap();
+    harness.run();
+
+    let plan_pane = harness.state().viewport_workspace.active_id();
+    assert_eq!(
+        harness.state().viewport_workspace.active_mode(),
+        ViewportMode::Plan
+    );
+    harness
+        .get_by_role_and_label(
+            Role::Button,
+            &format!("View {} viewport actions", plan_pane.get()),
+        )
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Close viewport")
+        .click();
+    harness.run_steps(2);
+
+    let app = harness.state();
+    assert_eq!(app.viewport_workspace.layout.pane_count(), 1);
+    assert_eq!(
+        app.viewport_workspace.active_mode(),
+        ViewportMode::Axonometric
+    );
+    assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+}
+
+#[test]
+fn tiled_viewport_pop_out_control_registers_a_deferred_viewport_output() {
+    use eframe::egui::ViewportId;
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    let pane_id = harness.state().viewport_workspace.active_id();
+    let pane_actions = format!("View {} viewport actions", pane_id.get());
+
+    harness
+        .get_by_role_and_label(Role::Button, &pane_actions)
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Pop out viewport")
+        .click();
+    harness.run_steps(1);
+
+    assert!(
+        harness
+            .state()
+            .viewport_workspace
+            .layout
+            .pane(pane_id)
+            .unwrap()
+            .config()
+            .is_popped_out()
+    );
+    let has_native_deferred_output = harness
+        .output()
+        .viewport_output
+        .keys()
+        .any(|id| *id != ViewportId::ROOT);
+    let embedded_header = format!("Pane {}", pane_id.get());
+    let has_embedded_callback = harness
+        .query_all_by_label(&embedded_header)
+        .next()
+        .is_some();
+    assert!(
+        has_native_deferred_output || has_embedded_callback,
+        "pop-out should produce a native deferred viewport or egui's embedded callback fallback"
+    );
+    if has_embedded_callback {
+        let dock_label = format!("Dock pane {}", pane_id.get());
+        assert_accessible_button(&harness, &dock_label, "embedded deferred viewport");
+        harness
+            .get_by_role_and_label(Role::Button, &dock_label)
+            .click();
+        harness.run_steps(2);
+        assert!(
+            !harness
+                .state()
+                .viewport_workspace
+                .layout
+                .pane(pane_id)
+                .unwrap()
+                .config()
+                .is_popped_out(),
+            "the embedded deferred Dock control should reduce through the root event queue"
+        );
+    }
+}
+
+#[test]
 fn transient_status_toasts_do_not_reflow_main_panels() {
     let mut harness = demo_harness();
     harness.run();
@@ -2020,6 +2537,58 @@ fn axonometric_secondary_click_opens_context_menu_and_dispatches_isolation() {
     harness.run();
     assert!(harness.query_all_by_label("Isolate ⏵").next().is_none());
     assert_eq!(harness.state().selected_components(), selected);
+}
+
+#[test]
+fn tiled_context_menu_click_over_sibling_keeps_source_pane_active() {
+    let mut harness = demo_harness();
+    harness.run();
+    let source = {
+        let app = harness.state_mut();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        app.viewport_workspace
+            .apply_builtin(BuiltInPreset::PlanAnd3d)
+            .unwrap();
+        let panes = app.viewport_workspace.layout.pane_ids();
+        let source = panes[0];
+        let sibling = panes[1];
+        app.viewport_workspace
+            .set_mode(source, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(sibling, ViewportMode::Plan)
+            .unwrap();
+        app.viewport_workspace.set_active(source).unwrap();
+        app.viewport_workspace
+            .layout
+            .set_split_ratio(&[], 0.18)
+            .unwrap();
+        app.viewport_mode = ViewportMode::Axonometric;
+        source
+    };
+    harness.run();
+
+    secondary_click_pickable_3d_component_at_xs(
+        &mut harness,
+        &[0.95, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25],
+    );
+    let source_rect = harness.get_by_label("3D viewport").rect();
+    let isolate = harness.get_by_label("Isolate ⏵");
+    assert!(
+        isolate.rect().center().x > source_rect.right(),
+        "the regression requires the popup action to overlap the sibling pane"
+    );
+
+    isolate.click();
+    harness.run();
+    assert_eq!(harness.state().viewport_workspace.active_id(), source);
+    harness.get_by_label("Dim Others").click();
+    harness.run();
+    assert_eq!(harness.state().viewport_workspace.active_id(), source);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(IsolationMode::DimOthers)
+    );
 }
 
 /// Drive the ceiling inspector's slope editor through the real UI: select the demo

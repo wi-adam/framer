@@ -22,6 +22,7 @@ use crate::app::{ComponentKey, ComponentVisibility, ViewClick, WallDisplay, Work
 // === extracted block appended below; visibility adjusted in place ===
 
 pub(super) struct AxonometricView<'a> {
+    pub(super) target_id: u64,
     pub(super) model: &'a BuildingModel,
     pub(super) plan: &'a ProjectFramePlan,
     pub(super) physical_scene: &'a PhysicalScene,
@@ -46,6 +47,7 @@ pub(super) fn draw_project_axonometric(
     view: &mut View3dState,
 ) -> AxonometricResponse {
     let AxonometricView {
+        target_id,
         model,
         plan,
         physical_scene,
@@ -139,7 +141,7 @@ pub(super) fn draw_project_axonometric(
             let callback = egui_wgpu::Callback::new_paint_callback(
                 drawing,
                 Framer3dCallback {
-                    frame_key: Framer3dFrameKey::MODEL,
+                    frame_key: Framer3dFrameKey::model(target_id),
                     vertices: scene.vertices,
                     indices: scene.indices,
                     opaque_index_count: scene.opaque_index_count,
@@ -217,6 +219,7 @@ pub(super) fn draw_project_axonometric(
         },
         response.clicked_by(egui::PointerButton::Primary) && !dragging_from_cube,
         *view,
+        target_id,
         gpu_target_format,
         gpu_depth_format,
     );

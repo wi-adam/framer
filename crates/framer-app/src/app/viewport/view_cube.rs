@@ -265,12 +265,14 @@ fn view_cube_face_geometry(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_view_cube(
     painter: &egui::Painter,
     rect: Rect,
     pointer: Option<Pos2>,
     clicked: bool,
     view: View3dState,
+    target_id: u64,
     gpu_target_format: Option<wgpu::TextureFormat>,
     gpu_depth_format: Option<wgpu::TextureFormat>,
 ) -> Option<ViewCubeAction> {
@@ -315,7 +317,7 @@ pub(super) fn draw_view_cube(
         painter.add(egui_wgpu::Callback::new_paint_callback(
             body_rect,
             Framer3dCallback {
-                frame_key: Framer3dFrameKey::VIEW_CUBE,
+                frame_key: Framer3dFrameKey::view_cube(target_id),
                 opaque_index_count: indices.len() as u32,
                 transparent_index_count: 0,
                 uniforms: GpuUniforms::from_projector_with_depth_base(&projector, body_rect, 0.14),
