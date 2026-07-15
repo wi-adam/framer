@@ -76,7 +76,7 @@ use pane_view::{
 };
 
 mod deferred;
-use deferred::DeferredPaneEvent;
+use deferred::{DeferredPaneEvent, DeferredPaneSnapshot};
 
 mod layout;
 #[cfg(test)]
@@ -447,7 +447,10 @@ impl FramerApp {
                     let actions = self.deferred_presentation_actions(mode);
                     (
                         id,
-                        Arc::new(document_snapshot.with_presentation_actions(actions)),
+                        DeferredPaneSnapshot::new(
+                            self.document_revision,
+                            Arc::new(document_snapshot.with_presentation_actions(actions)),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -462,53 +465,76 @@ impl FramerApp {
 
     fn drain_deferred_pane_events(&mut self, ctx: &egui::Context) {
         for event in self.viewport_workspace.drain_deferred_events() {
-            match event {
-                DeferredPaneEvent::Canvas(events) => {
-                    let id = self
-                        .viewport_workspace
-                        .layout
-                        .pane_ids()
-                        .into_iter()
-                        .find(|id| id.get() == events.target_id);
+            self.apply_deferred_pane_event(ctx, event);
+        }
+    }
+
+    fn apply_deferred_pane_event(&mut self, ctx: &egui::Context, event: DeferredPaneEvent) {
+        match event {
+            DeferredPaneEvent::Canvas { revision, events } => {
+                let id = self
+                    .viewport_workspace
+                    .layout
+                    .pane_ids()
+                    .into_iter()
+                    .find(|id| id.get() == events.target_id);
+                if revision != self.document_revision {
                     if let Some(id) = id {
-                        let context_requested = events.secondary_click.is_some();
-                        self.apply_pane_canvas_events(id, *events);
-                        if context_requested {
-                            let model = self.context_menu_context.as_ref().and_then(|context| {
-                                let model = context_menu::build_context_menu(context);
-                                (!model.is_empty()).then_some(model)
-                            });
-                            self.viewport_workspace
-                                .set_deferred_context_menu(ctx, id, model);
-                            // The child owns popup lifetime after root-side
-                            // composition; do not leak its transient context
-                            // into a docked pane rendered later this frame.
-                            self.context_menu_context = None;
-                        }
+                        // A stale secondary-click may have left its child menu
+                        // waiting for root composition. Close that transient UI
+                        // without applying any snapshot-derived model indices.
+                        self.viewport_workspace
+                            .set_deferred_context_menu(ctx, id, revision, None);
+                    }
+                    return;
+                }
+                if let Some(id) = id {
+                    let context_requested = events.secondary_click.is_some();
+                    self.apply_pane_canvas_events(id, *events);
+                    if context_requested {
+                        let model = self.context_menu_context.as_ref().and_then(|context| {
+                            let model = context_menu::build_context_menu(context);
+                            (!model.is_empty()).then_some(model)
+                        });
+                        self.viewport_workspace
+                            .set_deferred_context_menu(ctx, id, revision, model);
+                        // The child owns popup lifetime after root-side
+                        // composition; do not leak its transient context into a
+                        // docked pane rendered later this frame.
+                        self.context_menu_context = None;
                     }
                 }
-                DeferredPaneEvent::Activate(id) => {
-                    self.apply_pane_ui_command(PaneUiCommand::Activate(id));
+            }
+            DeferredPaneEvent::Activate(id) => {
+                self.apply_pane_ui_command(PaneUiCommand::Activate(id));
+            }
+            DeferredPaneEvent::Dock(id) => {
+                if let Err(error) = self.viewport_workspace.set_popped_out(id, false) {
+                    self.file_status = Some(error.to_string());
                 }
-                DeferredPaneEvent::Dock(id) => {
-                    if let Err(error) = self.viewport_workspace.set_popped_out(id, false) {
-                        self.file_status = Some(error.to_string());
-                    }
-                }
-                DeferredPaneEvent::SetMode { pane_id, mode } => {
-                    self.apply_pane_ui_command(PaneUiCommand::SetMode(pane_id, mode));
-                }
-                DeferredPaneEvent::Action { pane_id, action } => {
-                    self.apply_pane_ui_command(PaneUiCommand::Activate(pane_id));
-                    if self.action_enabled(action) {
-                        self.execute_action(action);
-                    } else if let Some(reason) = self.action_disabled_reason(action) {
-                        self.file_status = Some(reason.to_owned());
-                    }
-                    self.context_menu_context = None;
+            }
+            DeferredPaneEvent::SetMode { pane_id, mode } => {
+                self.apply_pane_ui_command(PaneUiCommand::SetMode(pane_id, mode));
+            }
+            DeferredPaneEvent::Action {
+                revision,
+                pane_id,
+                action,
+            } => {
+                if revision != self.document_revision {
                     self.viewport_workspace
-                        .set_deferred_context_menu(ctx, pane_id, None);
+                        .set_deferred_context_menu(ctx, pane_id, revision, None);
+                    return;
                 }
+                self.apply_pane_ui_command(PaneUiCommand::Activate(pane_id));
+                if self.action_enabled(action) {
+                    self.execute_action(action);
+                } else if let Some(reason) = self.action_disabled_reason(action) {
+                    self.file_status = Some(reason.to_owned());
+                }
+                self.context_menu_context = None;
+                self.viewport_workspace
+                    .set_deferred_context_menu(ctx, pane_id, revision, None);
             }
         }
     }
@@ -733,6 +759,7 @@ impl FramerApp {
                 draw_wall_active: self.draw_wall_tool.active,
                 draw_wall_start: self.draw_wall_tool.start,
                 snap_step: self.snap_step,
+                draw_wall_snap_valid: self.draw_wall_tool.previous_snap.is_some(),
                 room_tool_active: self.room_tool_active,
                 ceiling_tool_active: self.ceiling_tool_active,
                 vault_tool_active: self.vault_tool_active,
@@ -1568,6 +1595,7 @@ impl FramerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::component_visibility::{AuthoredComponentKind, ComponentKey};
 
     #[test]
     fn four_up_layout_allocates_four_disjoint_exact_tile_rectangles() {
@@ -1772,6 +1800,114 @@ mod tests {
         assert_eq!(app.selected_wall, 1);
         assert_eq!(app.selected, Selection::Wall);
         assert!(app.context_menu_context.is_some());
+    }
+
+    #[test]
+    fn current_revision_deferred_canvas_event_applies_selection() {
+        let mut app = FramerApp::default();
+        let pane_id = app.viewport_workspace.active_id();
+        app.selected = Selection::Site;
+        let mut events = PaneCanvasEvents::new(pane_id.get());
+        events.primary_click = Some(ViewClick::Wall(1));
+
+        app.apply_deferred_pane_event(
+            &egui::Context::default(),
+            DeferredPaneEvent::Canvas {
+                revision: app.document_revision,
+                events: Box::new(events),
+            },
+        );
+
+        assert_eq!(app.selected_wall, 1);
+        assert_eq!(app.selected, Selection::Wall);
+    }
+
+    #[test]
+    fn stale_revision_deferred_canvas_event_cannot_select_rebuilt_model_indices() {
+        let mut app = FramerApp::default();
+        let pane_id = app.viewport_workspace.active_id();
+        let stale_revision = app.document_revision;
+        let mut events = PaneCanvasEvents::new(pane_id.get());
+        events.primary_click = Some(ViewClick::Wall(1));
+
+        app.model.walls.remove(0);
+        app.rebuild();
+        app.selected = Selection::Site;
+        app.selected_wall = 0;
+        app.apply_deferred_pane_event(
+            &egui::Context::default(),
+            DeferredPaneEvent::Canvas {
+                revision: stale_revision,
+                events: Box::new(events),
+            },
+        );
+
+        assert_eq!(app.selected_wall, 0);
+        assert_eq!(app.selected, Selection::Site);
+    }
+
+    #[test]
+    fn stale_revision_deferred_action_cannot_mutate_current_visibility() {
+        let mut app = FramerApp::default();
+        let pane_id = app.viewport_workspace.active_id();
+        let wall =
+            ComponentKey::authored(AuthoredComponentKind::Wall, app.model.walls[0].id.0.clone());
+        app.component_visibility.hide([wall.clone()]);
+        let stale_revision = app.document_revision;
+
+        app.rebuild();
+        assert!(!app.component_visibility.is_explicitly_visible(&wall));
+        app.apply_deferred_pane_event(
+            &egui::Context::default(),
+            DeferredPaneEvent::Action {
+                revision: stale_revision,
+                pane_id,
+                action: ActionId::ShowAllComponents,
+            },
+        );
+
+        assert!(!app.component_visibility.is_explicitly_visible(&wall));
+        assert!(app.history.undo_label().is_none());
+    }
+
+    #[test]
+    fn current_revision_deferred_action_executes_against_current_state() {
+        let mut app = FramerApp::default();
+        let pane_id = app.viewport_workspace.active_id();
+        let wall =
+            ComponentKey::authored(AuthoredComponentKind::Wall, app.model.walls[0].id.0.clone());
+        app.component_visibility.hide([wall.clone()]);
+
+        app.apply_deferred_pane_event(
+            &egui::Context::default(),
+            DeferredPaneEvent::Action {
+                revision: app.document_revision,
+                pane_id,
+                action: ActionId::ShowAllComponents,
+            },
+        );
+
+        assert!(app.component_visibility.is_explicitly_visible(&wall));
+        assert_eq!(app.history.undo_label(), Some("Show All Components"));
+    }
+
+    #[test]
+    fn presentation_only_deferred_activation_survives_document_rebuild() {
+        let mut app = FramerApp::default();
+        let first = app.viewport_workspace.active_id();
+        let second = app
+            .viewport_workspace
+            .split(first, SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace.set_active(first).unwrap();
+
+        app.rebuild();
+        app.apply_deferred_pane_event(
+            &egui::Context::default(),
+            DeferredPaneEvent::Activate(second),
+        );
+
+        assert_eq!(app.viewport_workspace.active_id(), second);
     }
 
     #[test]

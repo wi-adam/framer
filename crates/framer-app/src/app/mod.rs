@@ -99,6 +99,10 @@ pub(crate) struct FramerApp {
     /// `rebuild()` is the document-generation boundary and invalidates it;
     /// independently mutable presentation state is refreshed every root frame.
     deferred_document_cache: Option<Arc<viewport::OwnedPaneDocument>>,
+    /// Monotonic generation tag attached to snapshot-derived deferred events.
+    /// A child painted against an older owned snapshot must not apply model
+    /// indices or actions after the root document has rebuilt.
+    document_revision: u64,
     /// Session-only render controls surfaced by the Render workflow tab.
     /// Presentation state: never serialized.
     render_settings: RenderSettings,
@@ -742,6 +746,7 @@ impl Default for FramerApp {
             last_authoring_pane: None,
             viewport_workspace: ViewportWorkspaceState::default(),
             deferred_document_cache: None,
+            document_revision: 0,
             render_settings: RenderSettings::default(),
             dimension_tool: DimensionToolState::default(),
             draw_wall_tool: DrawWallToolState::default(),
@@ -801,6 +806,7 @@ impl FramerApp {
 
     fn rebuild(&mut self) {
         self.deferred_document_cache = None;
+        self.document_revision = self.document_revision.wrapping_add(1);
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
         }
@@ -2705,6 +2711,7 @@ impl FramerApp {
 
     fn exit_current_context(&mut self) {
         if self.draw_wall_tool.active {
+            self.draw_wall_tool.previous_snap = None;
             // Esc cancels the current polyline run first, then leaves the tool.
             if self.draw_wall_tool.start.take().is_none() {
                 self.draw_wall_tool.active = false;
@@ -4290,6 +4297,7 @@ impl FramerApp {
             }
             ViewClick::DrawWallCancel => {
                 self.draw_wall_tool.start = None;
+                self.draw_wall_tool.previous_snap = None;
             }
             ViewClick::PlaceRoom { point } => {
                 self.handle_place_room(point);
@@ -7038,6 +7046,32 @@ mod tests {
         assert!(app.draw_wall_tool.active);
         assert_eq!(app.draw_wall_tool.start, Some(pt(120.0, 0.0)));
         assert_eq!(app.model.walls.len(), 1);
+    }
+
+    #[test]
+    fn cancelling_a_draw_wall_run_invalidates_held_snap_state() {
+        let mut app = empty_draw_wall_app();
+        let held = SnapResult {
+            point: pt(24.0, 36.0),
+            kind: draw_wall::SnapKind::Endpoint,
+            guides: draw_wall::NO_GUIDES,
+        };
+        app.draw_wall_tool.start = Some(pt(0.0, 0.0));
+        app.draw_wall_tool.previous_snap = Some(held);
+
+        app.handle_view_click(ViewClick::DrawWallCancel);
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
+
+        app.draw_wall_tool.start = Some(pt(12.0, 12.0));
+        app.draw_wall_tool.previous_snap = Some(held);
+        app.exit_current_context();
+
+        assert!(app.draw_wall_tool.active);
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
     }
 
     #[test]

@@ -10,13 +10,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use eframe::{Storage, egui};
 
-use super::deferred::{DeferredPaneEvent, DeferredPaneHandle, show_deferred_pane};
+use super::deferred::{
+    DeferredPaneEvent, DeferredPaneHandle, DeferredPaneSnapshot, show_deferred_pane,
+};
 use super::layout::{
     BuiltInPreset, LayoutError, PaneConfig, PaneId, PaneIdGenerator, PresetCatalog, SplitAxis,
     UserPreset, ViewportLayout,
 };
 use super::pane::ViewportPaneRuntime;
-use super::pane_view::OwnedPaneFrame;
 use crate::app::ViewportMode;
 use crate::app::context_menu::ContextMenuModel;
 
@@ -199,10 +200,11 @@ impl ViewportWorkspaceState {
         &self,
         ctx: &egui::Context,
         id: PaneId,
+        revision: u64,
         model: Option<ContextMenuModel>,
     ) {
         if let Some(handle) = self.deferred.get(&id) {
-            handle.update_context_menu(model);
+            handle.update_context_menu(revision, model);
             ctx.request_repaint_of(handle.viewport_id());
         }
     }
@@ -227,7 +229,7 @@ impl ViewportWorkspaceState {
     pub(super) fn show_deferred(
         &mut self,
         ctx: &egui::Context,
-        snapshots: &[(PaneId, Arc<OwnedPaneFrame>)],
+        snapshots: &[(PaneId, DeferredPaneSnapshot)],
     ) {
         self.reconcile_deferred();
         for (id, handle) in &self.deferred {
@@ -239,7 +241,7 @@ impl ViewportWorkspaceState {
                 .mode();
             handle.set_mode(mode);
             let snapshot = snapshots.iter().find_map(|(snapshot_id, snapshot)| {
-                (*snapshot_id == *id).then(|| Arc::clone(snapshot))
+                (*snapshot_id == *id).then(|| snapshot.clone())
             });
             handle.update_snapshot(snapshot);
             show_deferred_pane(ctx, handle);

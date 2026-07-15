@@ -25,13 +25,38 @@ use crate::app::context_menu::{self, ContextActionState, ContextMenuModel};
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [880.0, 640.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [320.0, 240.0];
 
+/// One immutable child-frame input tagged with the root document generation
+/// that produced it. The frame and revision move through the bridge together
+/// so a callback can never pair fresh metadata with an older document clone.
+#[derive(Clone)]
+pub(super) struct DeferredPaneSnapshot {
+    revision: u64,
+    frame: Arc<OwnedPaneFrame>,
+}
+
+impl DeferredPaneSnapshot {
+    pub(super) fn new(revision: u64, frame: Arc<OwnedPaneFrame>) -> Self {
+        Self { revision, frame }
+    }
+}
+
 /// Root-owned work emitted by a deferred pane callback.
 pub(super) enum DeferredPaneEvent {
-    Canvas(Box<PaneCanvasEvents>),
+    Canvas {
+        revision: u64,
+        events: Box<PaneCanvasEvents>,
+    },
     Activate(PaneId),
     Dock(PaneId),
-    SetMode { pane_id: PaneId, mode: ViewportMode },
-    Action { pane_id: PaneId, action: ActionId },
+    SetMode {
+        pane_id: PaneId,
+        mode: ViewportMode,
+    },
+    Action {
+        revision: u64,
+        pane_id: PaneId,
+        action: ActionId,
+    },
 }
 
 /// Mutable state captured by egui's `Send + Sync + 'static` deferred callback.
@@ -40,12 +65,33 @@ pub(super) enum DeferredPaneEvent {
 /// drawing use the exact same camera and progressive-render resources.
 struct DeferredPaneState {
     mode: ViewportMode,
-    snapshot: Option<Arc<OwnedPaneFrame>>,
+    snapshot: Option<DeferredPaneSnapshot>,
     runtime: PaneRuntimeHandle,
     native_focused: bool,
     initial_window_size_pending: bool,
-    context_menu_model: Option<ContextMenuModel>,
-    context_menu_pending: bool,
+    context_menu: DeferredContextMenuState,
+}
+
+#[derive(Clone, Default)]
+enum DeferredContextMenuState {
+    #[default]
+    Closed,
+    Pending {
+        revision: u64,
+    },
+    Ready {
+        revision: u64,
+        model: ContextMenuModel,
+    },
+}
+
+impl DeferredContextMenuState {
+    fn revision(&self) -> Option<u64> {
+        match self {
+            Self::Closed => None,
+            Self::Pending { revision } | Self::Ready { revision, .. } => Some(*revision),
+        }
+    }
 }
 
 /// Cloneable root/child bridge for one popped-out pane.
@@ -71,8 +117,7 @@ impl DeferredPaneHandle {
                 runtime,
                 native_focused: false,
                 initial_window_size_pending: true,
-                context_menu_model: None,
-                context_menu_pending: false,
+                context_menu: DeferredContextMenuState::Closed,
             })),
             events,
         }
@@ -80,23 +125,40 @@ impl DeferredPaneHandle {
 
     /// Replace the immutable document snapshot consumed by the child callback.
     /// Passing `None` leaves the child alive with a compact loading fallback.
-    pub(super) fn update_snapshot(&self, snapshot: Option<Arc<OwnedPaneFrame>>) {
-        self.lock_state().snapshot = snapshot;
+    pub(super) fn update_snapshot(&self, snapshot: Option<DeferredPaneSnapshot>) {
+        let mut state = self.lock_state();
+        let previous_revision = state.snapshot.as_ref().map(|snapshot| snapshot.revision);
+        let next_revision = snapshot.as_ref().map(|snapshot| snapshot.revision);
+        if previous_revision != next_revision {
+            state.context_menu = DeferredContextMenuState::Closed;
+        }
+        state.snapshot = snapshot;
     }
 
     pub(super) fn set_mode(&self, mode: ViewportMode) {
         let mut state = self.lock_state();
         state.mode = mode;
         if mode != ViewportMode::Axonometric {
-            state.context_menu_model = None;
-            state.context_menu_pending = false;
+            state.context_menu = DeferredContextMenuState::Closed;
         }
     }
 
-    pub(super) fn update_context_menu(&self, model: Option<ContextMenuModel>) {
+    /// Install or clear root-composed menu content only for the request that
+    /// produced it. A late revision R response must not overwrite a newer R+1
+    /// request already visible to the child callback.
+    pub(super) fn update_context_menu(&self, revision: u64, model: Option<ContextMenuModel>) {
         let mut state = self.lock_state();
-        state.context_menu_model = model;
-        state.context_menu_pending = false;
+        let snapshot_matches = state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.revision == revision);
+        if !snapshot_matches || state.context_menu.revision() != Some(revision) {
+            return;
+        }
+        state.context_menu = match model {
+            Some(model) => DeferredContextMenuState::Ready { revision, model },
+            None => DeferredContextMenuState::Closed,
+        };
     }
 
     pub(super) fn mode(&self) -> ViewportMode {
@@ -133,21 +195,24 @@ impl DeferredPaneHandle {
         std::mem::take(&mut state.initial_window_size_pending)
     }
 
-    fn begin_context_menu_request(&self) {
+    fn begin_context_menu_request(&self, revision: u64) {
         let mut state = self.lock_state();
-        state.context_menu_model = None;
-        state.context_menu_pending = true;
+        state.context_menu = DeferredContextMenuState::Pending { revision };
     }
 
     fn clear_context_menu(&self) {
-        let mut state = self.lock_state();
-        state.context_menu_model = None;
-        state.context_menu_pending = false;
+        self.lock_state().context_menu = DeferredContextMenuState::Closed;
     }
 
-    fn context_menu_state(&self) -> (Option<ContextMenuModel>, bool) {
+    fn context_menu_state(&self) -> (Option<ContextMenuModel>, bool, Option<u64>) {
         let state = self.lock_state();
-        (state.context_menu_model.clone(), state.context_menu_pending)
+        match &state.context_menu {
+            DeferredContextMenuState::Closed => (None, false, None),
+            DeferredContextMenuState::Pending { revision } => (None, true, Some(*revision)),
+            DeferredContextMenuState::Ready { revision, model } => {
+                (Some(model.clone()), false, Some(*revision))
+            }
+        }
     }
 
     fn emit(&self, ctx: &Context, event: DeferredPaneEvent) {
@@ -192,12 +257,18 @@ impl DeferredPaneHandle {
             (state.mode, state.snapshot.clone())
         };
         let presentation_actions = snapshot
-            .as_deref()
-            .map(OwnedPaneFrame::presentation_actions)
+            .as_ref()
+            .map(|snapshot| snapshot.frame.presentation_actions())
             .unwrap_or_default()
             .to_vec();
 
-        self.draw_header(ui, &ctx, mode, &presentation_actions);
+        self.draw_header(
+            ui,
+            &ctx,
+            mode,
+            snapshot.as_ref().map(|snapshot| snapshot.revision),
+            &presentation_actions,
+        );
         ui.separator();
 
         let Some(snapshot) = snapshot else {
@@ -213,7 +284,7 @@ impl DeferredPaneHandle {
                 ui,
                 self.pane_id.get(),
                 mode,
-                snapshot.as_frame(),
+                snapshot.frame.as_frame(),
                 PaneInteractionPolicy::DEFERRED,
                 runtime,
             );
@@ -227,17 +298,17 @@ impl DeferredPaneHandle {
                 .events
                 .secondary_click
                 .as_ref()
-                .and_then(|click| click.component_key(snapshot.as_frame().model))
+                .and_then(|click| click.component_key(snapshot.frame.as_frame().model))
                 .is_some_and(|target| target.is_renderable());
             if context_candidate {
-                self.begin_context_menu_request();
+                self.begin_context_menu_request(snapshot.revision);
             } else {
                 self.clear_context_menu();
             }
         }
 
         if let Some(response) = output.axonometric_response.as_ref() {
-            let (context_model, context_pending) = self.context_menu_state();
+            let (context_model, context_pending, context_revision) = self.context_menu_state();
             let mut chosen = None;
             response.context_menu(|ui| {
                 if let Some(model) = context_model.as_ref() {
@@ -262,13 +333,16 @@ impl DeferredPaneHandle {
             });
             if let Some(action) = chosen {
                 self.clear_context_menu();
-                self.emit(
-                    &ctx,
-                    DeferredPaneEvent::Action {
-                        pane_id: self.pane_id,
-                        action,
-                    },
-                );
+                if let Some(revision) = context_revision {
+                    self.emit(
+                        &ctx,
+                        DeferredPaneEvent::Action {
+                            revision,
+                            pane_id: self.pane_id,
+                            action,
+                        },
+                    );
+                }
             } else if !secondary_requested && !response.context_menu_opened() {
                 self.clear_context_menu();
             }
@@ -277,7 +351,13 @@ impl DeferredPaneHandle {
         }
 
         if activated || cursor_changed || canvas_events_need_root(&output.events) {
-            self.emit(&ctx, DeferredPaneEvent::Canvas(Box::new(output.events)));
+            self.emit(
+                &ctx,
+                DeferredPaneEvent::Canvas {
+                    revision: snapshot.revision,
+                    events: Box::new(output.events),
+                },
+            );
         }
     }
 
@@ -286,6 +366,7 @@ impl DeferredPaneHandle {
         ui: &mut Ui,
         ctx: &Context,
         current_mode: ViewportMode,
+        document_revision: Option<u64>,
         presentation_actions: &[PanePresentationAction],
     ) {
         let mut selected_mode = current_mode;
@@ -337,13 +418,16 @@ impl DeferredPaneHandle {
                             )
                         };
                         if button.clicked() {
-                            self.emit(
-                                ctx,
-                                DeferredPaneEvent::Action {
-                                    pane_id: self.pane_id,
-                                    action: action.action,
-                                },
-                            );
+                            if let Some(revision) = document_revision {
+                                self.emit(
+                                    ctx,
+                                    DeferredPaneEvent::Action {
+                                        revision,
+                                        pane_id: self.pane_id,
+                                        action: action.action,
+                                    },
+                                );
+                            }
                             ui.close();
                         }
                     }
@@ -440,6 +524,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::app::FramerApp;
     use crate::app::component_visibility::{AuthoredComponentKind, ComponentKey};
     use crate::app::context_menu::{ContextMenuContext, build_context_menu};
     use crate::app::viewport::PaneIdGenerator;
@@ -450,6 +535,11 @@ mod tests {
             ids.allocate().expect("first pane id"),
             ids.allocate().expect("second pane id"),
         )
+    }
+
+    fn snapshot(revision: u64) -> DeferredPaneSnapshot {
+        let mut app = FramerApp::default();
+        DeferredPaneSnapshot::new(revision, Arc::new(app.deferred_document_snapshot()))
     }
 
     #[test]
@@ -535,24 +625,72 @@ mod tests {
         let runtime = Arc::new(Mutex::new(ViewportPaneRuntime::default()));
         let (sender, _receiver) = mpsc::channel();
         let handle = DeferredPaneHandle::new(pane_id, ViewportMode::Axonometric, runtime, sender);
+        handle.update_snapshot(Some(snapshot(7)));
 
-        handle.begin_context_menu_request();
-        let (model, pending) = handle.context_menu_state();
+        handle.begin_context_menu_request(7);
+        let (model, pending, revision) = handle.context_menu_state();
         assert!(model.is_none());
         assert!(pending);
+        assert_eq!(revision, Some(7));
 
         let context = ContextMenuContext::viewport(
             ViewportMode::Axonometric,
             ComponentKey::authored(AuthoredComponentKind::Wall, "wall-1"),
         );
-        handle.update_context_menu(Some(build_context_menu(&context)));
-        let (model, pending) = handle.context_menu_state();
+        handle.update_context_menu(7, Some(build_context_menu(&context)));
+        let (model, pending, revision) = handle.context_menu_state();
         assert!(model.is_some_and(|model| !model.is_empty()));
         assert!(!pending);
+        assert_eq!(revision, Some(7));
 
         handle.clear_context_menu();
-        let (model, pending) = handle.context_menu_state();
+        let (model, pending, revision) = handle.context_menu_state();
         assert!(model.is_none());
         assert!(!pending);
+        assert_eq!(revision, None);
+    }
+
+    #[test]
+    fn context_menu_state_is_invalidated_and_cleared_by_matching_revision_only() {
+        let (pane_id, _) = pane_ids();
+        let runtime = Arc::new(Mutex::new(ViewportPaneRuntime::default()));
+        let (sender, _receiver) = mpsc::channel();
+        let handle = DeferredPaneHandle::new(pane_id, ViewportMode::Axonometric, runtime, sender);
+        let context = ContextMenuContext::viewport(
+            ViewportMode::Axonometric,
+            ComponentKey::authored(AuthoredComponentKind::Wall, "wall-1"),
+        );
+        let model = build_context_menu(&context);
+
+        handle.update_snapshot(Some(snapshot(7)));
+        handle.begin_context_menu_request(7);
+        handle.update_context_menu(7, None);
+        assert_eq!(
+            handle.context_menu_state().2,
+            None,
+            "the root's matching stale-canvas clear releases Pending"
+        );
+
+        handle.begin_context_menu_request(7);
+        handle.update_context_menu(7, Some(model.clone()));
+        assert_eq!(handle.context_menu_state().2, Some(7));
+
+        handle.update_snapshot(Some(snapshot(8)));
+        assert_eq!(handle.context_menu_state().2, None);
+
+        handle.begin_context_menu_request(8);
+        handle.update_context_menu(7, None);
+        let (installed, pending, revision) = handle.context_menu_state();
+        assert!(installed.is_none());
+        assert!(pending, "a late R7 clear must preserve the R8 request");
+        assert_eq!(revision, Some(8));
+
+        handle.update_context_menu(7, Some(model.clone()));
+        assert!(handle.context_menu_state().1);
+        handle.update_context_menu(8, Some(model));
+        let (installed, pending, revision) = handle.context_menu_state();
+        assert!(installed.is_some_and(|model| !model.is_empty()));
+        assert!(!pending);
+        assert_eq!(revision, Some(8));
     }
 }

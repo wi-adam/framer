@@ -50,6 +50,9 @@ pub(super) struct PaneToolInput<'a> {
     pub(super) draw_wall_active: bool,
     pub(super) draw_wall_start: Option<Point2>,
     pub(super) snap_step: Option<Length>,
+    /// Root-owned snap lifecycle signal. `false` means the current segment or
+    /// tool run reset, so the pane must discard any held hysteresis.
+    pub(super) draw_wall_snap_valid: bool,
     pub(super) room_tool_active: bool,
     pub(super) ceiling_tool_active: bool,
     pub(super) vault_tool_active: bool,
@@ -68,6 +71,7 @@ impl PaneToolInput<'_> {
             draw_wall_active: false,
             draw_wall_start: None,
             snap_step: None,
+            draw_wall_snap_valid: false,
             room_tool_active: false,
             ceiling_tool_active: false,
             vault_tool_active: false,
@@ -319,7 +323,6 @@ pub(super) fn draw_pane_canvas(
             SelectionOp::Replace
         }
     });
-    let previous_snap = runtime.previous_snap;
     runtime.cursor_model = None;
 
     let no_selection = Selection::None;
@@ -337,11 +340,12 @@ pub(super) fn draw_pane_canvas(
 
     match mode {
         ViewportMode::Plan | ViewportMode::RoofPlan => {
+            let previous_snap = sync_draw_wall_previous_snap(runtime, tools.draw_wall_snap_valid);
             let draw_tool = DrawWallPlanInput {
                 active: tools.draw_wall_active,
                 start: tools.draw_wall_start,
                 snap_step: tools.snap_step,
-                previous_snap: policy.authoring_gestures.then_some(previous_snap).flatten(),
+                previous_snap,
             };
             let active_wall_drag = (!multiple_components_selected && policy.authoring_gestures)
                 .then_some(tools.active_wall_drag)
@@ -549,6 +553,23 @@ pub(super) fn draw_pane_canvas(
     output
 }
 
+/// Synchronize the pane-local hysteresis cache with the root tool lifecycle.
+///
+/// The pane owns frame-to-frame rendering state, but committing/cancelling a
+/// segment and toggling the tool happen in the root event reducer. Mirroring
+/// the root's validity signal here ensures those resets invalidate the pane
+/// cache before the next snap is resolved without copying snap state between
+/// panes.
+fn sync_draw_wall_previous_snap(
+    runtime: &mut ViewportPaneRuntime,
+    snap_valid: bool,
+) -> Option<SnapResult> {
+    if !snap_valid {
+        runtime.previous_snap = None;
+    }
+    runtime.previous_snap
+}
+
 /// Modal tool clicks are never allowed to escape a deferred callback. Ordinary
 /// selection and empty-canvas clicks remain available for root-side handling.
 fn filter_click(click: Option<ViewClick>, policy: PaneInteractionPolicy) -> Option<ViewClick> {
@@ -571,6 +592,51 @@ fn filter_click(click: Option<ViewClick>, policy: PaneInteractionPolicy) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::draw_wall::{NO_GUIDES, SnapKind};
+
+    fn snap_at(x_inches: f64, y_inches: f64) -> SnapResult {
+        SnapResult {
+            point: Point2::new(Length::from_inches(x_inches), Length::from_inches(y_inches)),
+            kind: SnapKind::Endpoint,
+            guides: NO_GUIDES,
+        }
+    }
+
+    #[test]
+    fn draw_wall_cancel_reducer_clears_pane_snap_before_next_segment() {
+        let stale = snap_at(12.0, 18.0);
+        let mut app = crate::app::FramerApp::default();
+        app.toggle_draw_wall_tool();
+        app.draw_wall_tool.start = Some(Point2::new(Length::ZERO, Length::ZERO));
+        app.draw_wall_tool.previous_snap = Some(stale);
+        let mut runtime = ViewportPaneRuntime {
+            previous_snap: Some(stale),
+            ..ViewportPaneRuntime::default()
+        };
+
+        app.handle_view_click(ViewClick::DrawWallCancel);
+        let next =
+            sync_draw_wall_previous_snap(&mut runtime, app.draw_wall_tool.previous_snap.is_some());
+
+        assert_eq!(app.draw_wall_tool.start, None);
+        assert_eq!(app.draw_wall_tool.previous_snap, None);
+        assert_eq!(next, None);
+        assert_eq!(runtime.previous_snap, None);
+    }
+
+    #[test]
+    fn live_draw_wall_snap_signal_preserves_pane_owned_hysteresis() {
+        let current = snap_at(30.0, 42.0);
+        let mut runtime = ViewportPaneRuntime {
+            previous_snap: Some(current),
+            ..ViewportPaneRuntime::default()
+        };
+
+        let next = sync_draw_wall_previous_snap(&mut runtime, true);
+
+        assert_eq!(next, Some(current));
+        assert_eq!(runtime.previous_snap, Some(current));
+    }
 
     #[test]
     fn owned_snapshot_derivatives_share_payload_and_keep_actions_independent() {
