@@ -18,6 +18,7 @@ use super::layout::{
 use super::pane::ViewportPaneRuntime;
 use super::pane_view::OwnedPaneFrame;
 use crate::app::ViewportMode;
+use crate::app::context_menu::ContextMenuModel;
 
 pub(in crate::app) type PaneRuntimeHandle = Arc<Mutex<ViewportPaneRuntime>>;
 
@@ -192,6 +193,18 @@ impl ViewportWorkspaceState {
 
     pub(super) fn drain_deferred_events(&self) -> Vec<DeferredPaneEvent> {
         self.deferred_rx.try_iter().collect()
+    }
+
+    pub(super) fn set_deferred_context_menu(
+        &self,
+        ctx: &egui::Context,
+        id: PaneId,
+        model: Option<ContextMenuModel>,
+    ) {
+        if let Some(handle) = self.deferred.get(&id) {
+            handle.update_context_menu(model);
+            ctx.request_repaint_of(handle.viewport_id());
+        }
     }
 
     pub(super) fn has_deferred_panes(&self) -> bool {

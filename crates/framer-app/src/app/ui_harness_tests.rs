@@ -106,9 +106,16 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
 }
 
 fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
+    secondary_click_pickable_3d_component_at_xs(harness, &[0.25, 0.375, 0.5, 0.625, 0.75]);
+}
+
+fn secondary_click_pickable_3d_component_at_xs(
+    harness: &mut Harness<FramerApp>,
+    x_positions: &[f32],
+) {
     let rect = harness.get_by_label("3D viewport").rect();
     for y in [0.25, 0.375, 0.5, 0.625, 0.75] {
-        for x in [0.25, 0.375, 0.5, 0.625, 0.75] {
+        for &x in x_positions {
             let position = egui::pos2(egui::lerp(rect.x_range(), x), egui::lerp(rect.y_range(), y));
             harness.event(egui::Event::PointerMoved(position));
             for pressed in [true, false] {
@@ -2530,6 +2537,58 @@ fn axonometric_secondary_click_opens_context_menu_and_dispatches_isolation() {
     harness.run();
     assert!(harness.query_all_by_label("Isolate ⏵").next().is_none());
     assert_eq!(harness.state().selected_components(), selected);
+}
+
+#[test]
+fn tiled_context_menu_click_over_sibling_keeps_source_pane_active() {
+    let mut harness = demo_harness();
+    harness.run();
+    let source = {
+        let app = harness.state_mut();
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        app.viewport_workspace
+            .apply_builtin(BuiltInPreset::PlanAnd3d)
+            .unwrap();
+        let panes = app.viewport_workspace.layout.pane_ids();
+        let source = panes[0];
+        let sibling = panes[1];
+        app.viewport_workspace
+            .set_mode(source, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(sibling, ViewportMode::Plan)
+            .unwrap();
+        app.viewport_workspace.set_active(source).unwrap();
+        app.viewport_workspace
+            .layout
+            .set_split_ratio(&[], 0.18)
+            .unwrap();
+        app.viewport_mode = ViewportMode::Axonometric;
+        source
+    };
+    harness.run();
+
+    secondary_click_pickable_3d_component_at_xs(
+        &mut harness,
+        &[0.95, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25],
+    );
+    let source_rect = harness.get_by_label("3D viewport").rect();
+    let isolate = harness.get_by_label("Isolate ⏵");
+    assert!(
+        isolate.rect().center().x > source_rect.right(),
+        "the regression requires the popup action to overlap the sibling pane"
+    );
+
+    isolate.click();
+    harness.run();
+    assert_eq!(harness.state().viewport_workspace.active_id(), source);
+    harness.get_by_label("Dim Others").click();
+    harness.run();
+    assert_eq!(harness.state().viewport_workspace.active_id(), source);
+    assert_eq!(
+        harness.state().component_visibility.isolation_mode(),
+        Some(IsolationMode::DimOthers)
+    );
 }
 
 /// Drive the ceiling inspector's slope editor through the real UI: select the demo

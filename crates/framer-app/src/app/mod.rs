@@ -21,6 +21,7 @@ mod viewport;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
@@ -94,6 +95,10 @@ pub(crate) struct FramerApp {
     /// Tiled viewport topology, per-pane camera/render runtimes, and app-local
     /// named layout presets. Presentation-only; never part of `.framer`.
     viewport_workspace: ViewportWorkspaceState,
+    /// Heavy owned document snapshot shared by deferred native viewports.
+    /// `rebuild()` is the document-generation boundary and invalidates it;
+    /// independently mutable presentation state is refreshed every root frame.
+    deferred_document_cache: Option<Arc<viewport::OwnedPaneDocument>>,
     /// Session-only render controls surfaced by the Render workflow tab.
     /// Presentation state: never serialized.
     render_settings: RenderSettings,
@@ -736,6 +741,7 @@ impl Default for FramerApp {
             last_authoring_viewport: ViewportMode::Plan,
             last_authoring_pane: None,
             viewport_workspace: ViewportWorkspaceState::default(),
+            deferred_document_cache: None,
             render_settings: RenderSettings::default(),
             dimension_tool: DimensionToolState::default(),
             draw_wall_tool: DrawWallToolState::default(),
@@ -794,6 +800,7 @@ impl FramerApp {
     }
 
     fn rebuild(&mut self) {
+        self.deferred_document_cache = None;
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
         }
@@ -1786,24 +1793,36 @@ impl FramerApp {
     }
 
     fn restore_authoring_viewport(&mut self) {
-        let remembered = self.last_authoring_pane.filter(|id| {
-            self.viewport_workspace
+        if let Some(remembered) = self
+            .last_authoring_pane
+            .filter(|id| self.viewport_workspace.layout.pane(*id).is_some())
+        {
+            if self
+                .viewport_workspace
                 .layout
-                .pane(*id)
-                .is_some_and(|pane| pane.config().mode() != ViewportMode::Render)
-        });
-        let authoring = remembered.or_else(|| {
-            self.viewport_workspace
-                .layout
-                .pane_ids()
-                .into_iter()
-                .find(|id| {
-                    self.viewport_workspace
-                        .layout
-                        .pane(*id)
-                        .is_some_and(|pane| pane.config().mode() != ViewportMode::Render)
-                })
-        });
+                .pane(remembered)
+                .is_some_and(|pane| pane.config().mode() == ViewportMode::Render)
+            {
+                let _ = self
+                    .viewport_workspace
+                    .set_mode(remembered, self.last_authoring_viewport);
+            }
+            let _ = self.viewport_workspace.set_active(remembered);
+            self.viewport_mode = self.viewport_workspace.active_mode();
+            return;
+        }
+
+        let authoring = self
+            .viewport_workspace
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|id| {
+                self.viewport_workspace
+                    .layout
+                    .pane(*id)
+                    .is_some_and(|pane| pane.config().mode() != ViewportMode::Render)
+            });
         if let Some(id) = authoring {
             let _ = self.viewport_workspace.set_active(id);
             self.viewport_mode = self.viewport_workspace.active_mode();
@@ -5610,6 +5629,66 @@ mod tests {
 
         assert_eq!(app.viewport_workspace.active_id(), authoring);
         assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+    }
+
+    #[test]
+    fn render_workflow_restores_the_authoring_pane_it_converted() {
+        let mut app = FramerApp::default();
+        let plan = app.viewport_workspace.active_id();
+        let three_d = app
+            .viewport_workspace
+            .split(plan, viewport::SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(three_d, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_mode = ViewportMode::Axonometric;
+
+        app.select_workflow_tab(actions::WorkflowTab::Render);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+        assert_eq!(app.viewport_workspace.active_id(), three_d);
+        assert_eq!(app.viewport_mode, ViewportMode::Render);
+        assert_eq!(
+            app.viewport_workspace
+                .layout
+                .pane_ids()
+                .into_iter()
+                .map(|id| {
+                    app.viewport_workspace
+                        .layout
+                        .pane(id)
+                        .unwrap()
+                        .config()
+                        .mode()
+                })
+                .collect::<Vec<_>>(),
+            vec![ViewportMode::Plan, ViewportMode::Render]
+        );
+
+        app.select_workflow_tab(actions::WorkflowTab::Frame);
+
+        assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+        assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+        assert_eq!(app.viewport_workspace.active_id(), three_d);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(
+            app.viewport_workspace
+                .layout
+                .pane_ids()
+                .into_iter()
+                .map(|id| {
+                    app.viewport_workspace
+                        .layout
+                        .pane(id)
+                        .unwrap()
+                        .config()
+                        .mode()
+                })
+                .collect::<Vec<_>>(),
+            vec![ViewportMode::Plan, ViewportMode::Axonometric]
+        );
     }
 
     #[test]

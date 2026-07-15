@@ -20,6 +20,7 @@ use super::pane_view::{
 use super::{PaneRuntimeHandle, ViewportPaneRuntime};
 use crate::app::ViewportMode;
 use crate::app::actions::{self, ActionId};
+use crate::app::context_menu::{self, ContextActionState, ContextMenuModel};
 
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [880.0, 640.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [320.0, 240.0];
@@ -42,6 +43,9 @@ struct DeferredPaneState {
     snapshot: Option<Arc<OwnedPaneFrame>>,
     runtime: PaneRuntimeHandle,
     native_focused: bool,
+    initial_window_size_pending: bool,
+    context_menu_model: Option<ContextMenuModel>,
+    context_menu_pending: bool,
 }
 
 /// Cloneable root/child bridge for one popped-out pane.
@@ -66,6 +70,9 @@ impl DeferredPaneHandle {
                 snapshot: None,
                 runtime,
                 native_focused: false,
+                initial_window_size_pending: true,
+                context_menu_model: None,
+                context_menu_pending: false,
             })),
             events,
         }
@@ -78,7 +85,18 @@ impl DeferredPaneHandle {
     }
 
     pub(super) fn set_mode(&self, mode: ViewportMode) {
-        self.lock_state().mode = mode;
+        let mut state = self.lock_state();
+        state.mode = mode;
+        if mode != ViewportMode::Axonometric {
+            state.context_menu_model = None;
+            state.context_menu_pending = false;
+        }
+    }
+
+    pub(super) fn update_context_menu(&self, model: Option<ContextMenuModel>) {
+        let mut state = self.lock_state();
+        state.context_menu_model = model;
+        state.context_menu_pending = false;
     }
 
     pub(super) fn mode(&self) -> ViewportMode {
@@ -108,6 +126,28 @@ impl DeferredPaneHandle {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn take_initial_window_size(&self) -> bool {
+        let mut state = self.lock_state();
+        std::mem::take(&mut state.initial_window_size_pending)
+    }
+
+    fn begin_context_menu_request(&self) {
+        let mut state = self.lock_state();
+        state.context_menu_model = None;
+        state.context_menu_pending = true;
+    }
+
+    fn clear_context_menu(&self) {
+        let mut state = self.lock_state();
+        state.context_menu_model = None;
+        state.context_menu_pending = false;
+    }
+
+    fn context_menu_state(&self) -> (Option<ContextMenuModel>, bool) {
+        let state = self.lock_state();
+        (state.context_menu_model.clone(), state.context_menu_pending)
     }
 
     fn emit(&self, ctx: &Context, event: DeferredPaneEvent) {
@@ -181,6 +221,61 @@ impl DeferredPaneHandle {
             output
         });
 
+        let secondary_requested = output.events.secondary_click.is_some();
+        if secondary_requested {
+            let context_candidate = output
+                .events
+                .secondary_click
+                .as_ref()
+                .and_then(|click| click.component_key(snapshot.as_frame().model))
+                .is_some_and(|target| target.is_renderable());
+            if context_candidate {
+                self.begin_context_menu_request();
+            } else {
+                self.clear_context_menu();
+            }
+        }
+
+        if let Some(response) = output.axonometric_response.as_ref() {
+            let (context_model, context_pending) = self.context_menu_state();
+            let mut chosen = None;
+            response.context_menu(|ui| {
+                if let Some(model) = context_model.as_ref() {
+                    chosen = context_menu::render_context_menu(ui, model, |action| {
+                        let state = presentation_actions
+                            .iter()
+                            .find(|candidate| candidate.action == action);
+                        ContextActionState {
+                            enabled: state.is_some_and(|state| state.enabled),
+                            disabled_reason: state.and_then(|state| state.disabled_reason),
+                        }
+                    });
+                    if chosen.is_some() {
+                        ui.close();
+                    }
+                } else if context_pending {
+                    ui.weak("Preparing menu…");
+                    ui.ctx().request_repaint();
+                } else {
+                    ui.close();
+                }
+            });
+            if let Some(action) = chosen {
+                self.clear_context_menu();
+                self.emit(
+                    &ctx,
+                    DeferredPaneEvent::Action {
+                        pane_id: self.pane_id,
+                        action,
+                    },
+                );
+            } else if !secondary_requested && !response.context_menu_opened() {
+                self.clear_context_menu();
+            }
+        } else {
+            self.clear_context_menu();
+        }
+
         if activated || cursor_changed || canvas_events_need_root(&output.events) {
             self.emit(&ctx, DeferredPaneEvent::Canvas(Box::new(output.events)));
         }
@@ -238,10 +333,7 @@ impl DeferredPaneHandle {
                             button.on_hover_text(metadata.tooltip)
                         } else {
                             button.on_disabled_hover_text(
-                                action
-                                    .disabled_reason
-                                    .as_deref()
-                                    .unwrap_or(metadata.tooltip),
+                                action.disabled_reason.unwrap_or(metadata.tooltip),
                             )
                         };
                         if button.clicked() {
@@ -285,21 +377,30 @@ impl DeferredPaneHandle {
 /// On integrations without native multi-viewport support, egui invokes the
 /// same callback immediately inside its embedded-window fallback.
 pub(super) fn show_deferred_pane(ctx: &Context, handle: &DeferredPaneHandle) {
-    let mode = handle.mode();
-    let builder = ViewportBuilder::default()
-        .with_title(format!(
-            "Framer — {} · Pane {}",
-            mode_label(mode),
-            handle.pane_id.get()
-        ))
-        .with_inner_size(DEFAULT_WINDOW_SIZE)
-        .with_min_inner_size(MIN_WINDOW_SIZE)
-        .with_resizable(true);
+    let builder = deferred_viewport_builder(handle);
     let callback_handle = handle.clone();
 
     ctx.show_viewport_deferred(handle.viewport_id(), builder, move |ui, viewport_class| {
         callback_handle.draw(ui, viewport_class)
     });
+}
+
+fn deferred_viewport_builder(handle: &DeferredPaneHandle) -> ViewportBuilder {
+    let mode = handle.mode();
+    let mut builder = ViewportBuilder::default()
+        .with_title(format!(
+            "Framer — {} · Pane {}",
+            mode_label(mode),
+            handle.pane_id.get()
+        ))
+        .with_min_inner_size(MIN_WINDOW_SIZE)
+        .with_resizable(true);
+    // `inner_size` is a viewport command after creation, so repeating it would
+    // overwrite a user's native-window resize on every parent pass.
+    if handle.take_initial_window_size() {
+        builder = builder.with_inner_size(DEFAULT_WINDOW_SIZE);
+    }
+    builder
 }
 
 const VIEWPORT_MODES: [ViewportMode; 5] = [
@@ -339,6 +440,8 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::app::component_visibility::{AuthoredComponentKind, ComponentKey};
+    use crate::app::context_menu::{ContextMenuContext, build_context_menu};
     use crate::app::viewport::PaneIdGenerator;
 
     fn pane_ids() -> (PaneId, PaneId) {
@@ -403,5 +506,53 @@ mod tests {
         let handle =
             DeferredPaneHandle::new(pane_id, ViewportMode::Plan, Arc::clone(&runtime), sender);
         assert_callback(move |ui, viewport_class| handle.draw(ui, viewport_class));
+    }
+
+    #[test]
+    fn deferred_viewport_default_size_is_only_requested_once() {
+        let (pane_id, _) = pane_ids();
+        let runtime = Arc::new(Mutex::new(ViewportPaneRuntime::default()));
+        let (sender, _receiver) = mpsc::channel();
+        let handle =
+            DeferredPaneHandle::new(pane_id, ViewportMode::Plan, Arc::clone(&runtime), sender);
+
+        let initial = deferred_viewport_builder(&handle);
+        let update = deferred_viewport_builder(&handle);
+
+        assert_eq!(initial.inner_size, Some(DEFAULT_WINDOW_SIZE.into()));
+        assert_eq!(update.inner_size, None);
+        assert_eq!(
+            update.min_inner_size,
+            Some(MIN_WINDOW_SIZE.into()),
+            "minimum size remains a persistent window constraint"
+        );
+        assert_eq!(update.resizable, Some(true));
+    }
+
+    #[test]
+    fn deferred_context_menu_waits_for_and_installs_root_composition() {
+        let (pane_id, _) = pane_ids();
+        let runtime = Arc::new(Mutex::new(ViewportPaneRuntime::default()));
+        let (sender, _receiver) = mpsc::channel();
+        let handle = DeferredPaneHandle::new(pane_id, ViewportMode::Axonometric, runtime, sender);
+
+        handle.begin_context_menu_request();
+        let (model, pending) = handle.context_menu_state();
+        assert!(model.is_none());
+        assert!(pending);
+
+        let context = ContextMenuContext::viewport(
+            ViewportMode::Axonometric,
+            ComponentKey::authored(AuthoredComponentKind::Wall, "wall-1"),
+        );
+        handle.update_context_menu(Some(build_context_menu(&context)));
+        let (model, pending) = handle.context_menu_state();
+        assert!(model.is_some_and(|model| !model.is_empty()));
+        assert!(!pending);
+
+        handle.clear_context_menu();
+        let (model, pending) = handle.context_menu_state();
+        assert!(model.is_none());
+        assert!(!pending);
     }
 }

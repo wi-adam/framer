@@ -69,6 +69,7 @@ mod pane;
 pub(super) use pane::ViewportPaneRuntime;
 
 mod pane_view;
+pub(super) use pane_view::OwnedPaneDocument;
 use pane_view::{
     OwnedPaneFrame, PANE_PRESENTATION_ACTIONS, PaneCanvasEvents, PaneCanvasOutput, PaneFrame,
     PaneGpuInput, PaneInteractionPolicy, PanePresentationAction, PaneToolInput, draw_pane_canvas,
@@ -278,7 +279,7 @@ fn viewport_mode_label(mode: ViewportMode) -> &'static str {
 
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
-        self.drain_deferred_pane_events();
+        self.drain_deferred_pane_events(ui.ctx());
         // Keep legacy command/action surfaces wired to the active leaf while
         // the layout remains the authoritative per-pane mode store.
         if self.viewport_workspace.active_mode() != self.viewport_mode {
@@ -301,6 +302,27 @@ impl FramerApp {
         let mut panes = Vec::new();
         let mut splitters = Vec::new();
         collect_docked_layout(&root, bounds, &mut Vec::new(), &mut panes, &mut splitters);
+
+        // Activation is part of dispatching the pointer press, not a deferred
+        // layout mutation. Apply it before any pane reduces canvas events so a
+        // click in an inactive Plan pane uses that pane's mode for shell-to-wall
+        // navigation and selection semantics. Popup layers are excluded so a
+        // menu overlapping another tile remains qualified to its source pane.
+        let press_origin = ui.ctx().input(|input| input.pointer.press_origin());
+        let pressed_pane = press_origin
+            .filter(|position| ui.ctx().layer_id_at(*position) == Some(ui.layer_id()))
+            .and_then(|position| {
+                panes
+                    .iter()
+                    .find(|pane| pane.rect.contains(position))
+                    .map(|pane| pane.id)
+            });
+        if let Some(target) = pressed_pane
+            && let Some(command) =
+                pointer_activation_command(self.viewport_workspace.active_id(), target)
+        {
+            self.apply_pane_ui_command(command);
+        }
 
         let t = design::active();
         let mut commands = Vec::new();
@@ -430,11 +452,15 @@ impl FramerApp {
                 })
                 .collect::<Vec<_>>();
             self.viewport_workspace.show_deferred(ui.ctx(), &snapshots);
+        } else {
+            // Do not retain a duplicate large document after the final native
+            // viewport closes. The next pop-out lazily rebuilds the cache.
+            self.deferred_document_cache = None;
         }
         self.viewport_preset_dialog(ui.ctx());
     }
 
-    fn drain_deferred_pane_events(&mut self) {
+    fn drain_deferred_pane_events(&mut self, ctx: &egui::Context) {
         for event in self.viewport_workspace.drain_deferred_events() {
             match event {
                 DeferredPaneEvent::Canvas(events) => {
@@ -445,7 +471,20 @@ impl FramerApp {
                         .into_iter()
                         .find(|id| id.get() == events.target_id);
                     if let Some(id) = id {
+                        let context_requested = events.secondary_click.is_some();
                         self.apply_pane_canvas_events(id, *events);
+                        if context_requested {
+                            let model = self.context_menu_context.as_ref().and_then(|context| {
+                                let model = context_menu::build_context_menu(context);
+                                (!model.is_empty()).then_some(model)
+                            });
+                            self.viewport_workspace
+                                .set_deferred_context_menu(ctx, id, model);
+                            // The child owns popup lifetime after root-side
+                            // composition; do not leak its transient context
+                            // into a docked pane rendered later this frame.
+                            self.context_menu_context = None;
+                        }
                     }
                 }
                 DeferredPaneEvent::Activate(id) => {
@@ -466,12 +505,15 @@ impl FramerApp {
                     } else if let Some(reason) = self.action_disabled_reason(action) {
                         self.file_status = Some(reason.to_owned());
                     }
+                    self.context_menu_context = None;
+                    self.viewport_workspace
+                        .set_deferred_context_menu(ctx, pane_id, None);
                 }
             }
         }
     }
 
-    fn deferred_document_snapshot(&self) -> OwnedPaneFrame {
+    fn deferred_document_snapshot(&mut self) -> OwnedPaneFrame {
         let selected_components = self.selected_components();
         let frame = PaneFrame {
             model: &self.model,
@@ -495,7 +537,14 @@ impl FramerApp {
                 ray_query_enabled: self.config.render.ray_query,
             },
         };
-        OwnedPaneFrame::from_frame(&frame)
+        let document = if let Some(document) = &self.deferred_document_cache {
+            Arc::clone(document)
+        } else {
+            let document = Arc::new(OwnedPaneDocument::from_frame(&frame));
+            self.deferred_document_cache = Some(Arc::clone(&document));
+            document
+        };
+        OwnedPaneFrame::from_frame(document, &frame)
     }
 
     fn deferred_presentation_actions(
@@ -507,9 +556,7 @@ impl FramerApp {
             .map(|action| PanePresentationAction {
                 action,
                 enabled: self.action_enabled_for_viewport(action, viewport_mode),
-                disabled_reason: self
-                    .action_disabled_reason_for_viewport(action, viewport_mode)
-                    .map(str::to_owned),
+                disabled_reason: self.action_disabled_reason_for_viewport(action, viewport_mode),
             })
             .collect()
     }
@@ -525,16 +572,6 @@ impl FramerApp {
         let active = active_id == id;
         let mode = self.viewport_workspace.layout.pane(id)?.config().mode();
         let t = design::active();
-
-        let pointer_pressed = ui.ctx().input(|input| {
-            input
-                .pointer
-                .press_origin()
-                .is_some_and(|position| pane.rect.contains(position))
-        });
-        if pointer_pressed && let Some(command) = pointer_activation_command(active_id, id) {
-            commands.push(command);
-        }
 
         ui.painter().rect_filled(pane.rect, 2.0, t.canvas);
         ui.painter().rect_stroke(
@@ -760,17 +797,9 @@ impl FramerApp {
             axonometric_response,
         } = output;
         let toolbar_anchor = events.toolbar_anchor;
-        let secondary_click = events.secondary_click.clone();
         self.apply_pane_canvas_events(id, events);
 
         if let Some(response) = axonometric_response {
-            if response.secondary_clicked() {
-                // Context composition reads the active view mode. Activate the
-                // source pane now (before the queued generic pointer activation)
-                // so an inactive 3D pane cannot inherit another pane's mode.
-                self.apply_pane_ui_command(PaneUiCommand::Activate(id));
-                self.prepare_viewport_context_menu(secondary_click);
-            }
             let model = self
                 .context_menu_context
                 .as_ref()
@@ -795,7 +824,7 @@ impl FramerApp {
             if let Some(action) = chosen {
                 self.execute_action(action);
                 self.context_menu_context = None;
-            } else if !response.context_menu_opened() {
+            } else if self.viewport_workspace.active_id() == id && !response.context_menu_opened() {
                 self.context_menu_context = None;
             }
         }
@@ -824,6 +853,14 @@ impl FramerApp {
         }
         if let Some(wall_drag) = events.wall_drag {
             self.handle_wall_drag_event(wall_drag);
+        }
+        if let Some(click) = events.secondary_click {
+            if let Some(command) =
+                pointer_activation_command(self.viewport_workspace.active_id(), id)
+            {
+                self.apply_pane_ui_command(command);
+            }
+            self.prepare_viewport_context_menu(Some(click));
         }
         if let Some(click) = events.primary_click {
             self.context_menu_context = None;
@@ -1681,6 +1718,115 @@ mod tests {
             app.viewport_workspace.active_mode(),
             ViewportMode::Elevation
         );
+    }
+
+    #[test]
+    fn inactive_plan_pane_activates_before_wall_selection() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Design);
+        let plan = app.viewport_workspace.active_id();
+        let three_d = app
+            .viewport_workspace
+            .split(plan, SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(three_d, ViewportMode::Axonometric)
+            .unwrap();
+        app.apply_pane_ui_command(PaneUiCommand::Activate(three_d));
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+
+        let command = pointer_activation_command(app.viewport_workspace.active_id(), plan)
+            .expect("pressing the inactive Plan pane activates it");
+        app.apply_pane_ui_command(command);
+        app.handle_view_click(ViewClick::Wall(1));
+
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+        app.viewport_workspace.set_active_mode(app.viewport_mode);
+        assert_eq!(app.viewport_workspace.active_id(), plan);
+        assert_eq!(
+            app.viewport_workspace.active_mode(),
+            ViewportMode::Elevation
+        );
+    }
+
+    #[test]
+    fn deferred_secondary_click_updates_selection_and_context() {
+        let mut app = FramerApp::default();
+        let plan = app.viewport_workspace.active_id();
+        let deferred = app
+            .viewport_workspace
+            .split(plan, SplitAxis::Horizontal)
+            .unwrap();
+        app.viewport_workspace
+            .set_mode(deferred, ViewportMode::Axonometric)
+            .unwrap();
+        app.viewport_workspace.set_active(plan).unwrap();
+        app.viewport_mode = ViewportMode::Plan;
+        let mut events = PaneCanvasEvents::new(deferred.get());
+        events.secondary_click = Some(ViewClick::Wall(1));
+
+        app.apply_pane_canvas_events(deferred, events);
+
+        assert_eq!(app.viewport_workspace.active_id(), deferred);
+        assert_eq!(app.viewport_mode, ViewportMode::Axonometric);
+        assert_eq!(app.selected_wall, 1);
+        assert_eq!(app.selected, Selection::Wall);
+        assert!(app.context_menu_context.is_some());
+    }
+
+    #[test]
+    fn deferred_snapshot_cache_reuses_document_and_refreshes_presentation() {
+        let mut app = FramerApp::default();
+        let first = app.deferred_document_snapshot();
+
+        app.selected = Selection::Site;
+        app.show_section = false;
+        app.render_settings.exposure = 2.5;
+        let second = app.deferred_document_snapshot();
+
+        {
+            let first_frame = first.as_frame();
+            let second_frame = second.as_frame();
+            assert!(std::ptr::eq(first_frame.model, second_frame.model));
+            assert!(std::ptr::eq(
+                first_frame.plan.expect("default model has a plan"),
+                second_frame.plan.expect("cached model keeps its plan")
+            ));
+            assert!(std::ptr::eq(
+                first_frame
+                    .physical_scene
+                    .expect("default model has a physical scene"),
+                second_frame
+                    .physical_scene
+                    .expect("cached model keeps its physical scene")
+            ));
+            assert_eq!(second_frame.selection, &Selection::Site);
+            assert!(!second_frame.show_section);
+            assert_eq!(second_frame.render_settings.exposure, 2.5);
+        }
+
+        app.model.walls[0].name = "Rebuilt wall".to_owned();
+        app.rebuild();
+        let rebuilt = app.deferred_document_snapshot();
+        let second_frame = second.as_frame();
+        let rebuilt_frame = rebuilt.as_frame();
+
+        assert!(!std::ptr::eq(second_frame.model, rebuilt_frame.model));
+        assert!(!std::ptr::eq(
+            second_frame.plan.expect("cached model has a plan"),
+            rebuilt_frame.plan.expect("rebuilt model has a plan")
+        ));
+        assert!(!std::ptr::eq(
+            second_frame
+                .physical_scene
+                .expect("cached model has a physical scene"),
+            rebuilt_frame
+                .physical_scene
+                .expect("rebuilt model has a physical scene")
+        ));
+        assert_eq!(rebuilt_frame.model.walls[0].name, "Rebuilt wall");
+        assert_eq!(rebuilt_frame.selection, &Selection::Site);
+        assert_eq!(rebuilt_frame.render_settings.exposure, 2.5);
     }
 
     #[test]

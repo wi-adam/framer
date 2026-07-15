@@ -122,10 +122,16 @@ pub(super) struct OwnedPaneFrame {
     presentation_actions: Vec<PanePresentationAction>,
 }
 
-struct OwnedPaneFramePayload {
+/// Heavy document state shared across deferred panes and root repaints until
+/// the next authored-document rebuild.
+pub(in crate::app) struct OwnedPaneDocument {
     model: BuildingModel,
     plan: Option<ProjectFramePlan>,
     physical_scene: Option<PhysicalScene>,
+}
+
+struct OwnedPaneFramePayload {
+    document: Arc<OwnedPaneDocument>,
     active_geometry_violation: Option<GeometryViolation>,
     selected_wall: usize,
     selection: Selection,
@@ -142,7 +148,7 @@ struct OwnedPaneFramePayload {
 pub(super) struct PanePresentationAction {
     pub(super) action: ActionId,
     pub(super) enabled: bool,
-    pub(super) disabled_reason: Option<String>,
+    pub(super) disabled_reason: Option<&'static str>,
 }
 
 pub(super) const PANE_PRESENTATION_ACTIONS: [ActionId; 5] = [
@@ -154,13 +160,12 @@ pub(super) const PANE_PRESENTATION_ACTIONS: [ActionId; 5] = [
 ];
 
 impl OwnedPaneFrame {
-    /// Clone the immutable portion of a root-frame input for a deferred child.
-    pub(super) fn from_frame(frame: &PaneFrame<'_>) -> Self {
+    /// Clone the volatile presentation portion of a root-frame input while
+    /// sharing its rebuild-scoped document snapshot.
+    pub(super) fn from_frame(document: Arc<OwnedPaneDocument>, frame: &PaneFrame<'_>) -> Self {
         Self {
             payload: Arc::new(OwnedPaneFramePayload {
-                model: frame.model.clone(),
-                plan: frame.plan.cloned(),
-                physical_scene: frame.physical_scene.cloned(),
+                document,
                 active_geometry_violation: frame.active_geometry_violation.cloned(),
                 selected_wall: frame.selected_wall,
                 selection: frame.selection.clone(),
@@ -191,10 +196,11 @@ impl OwnedPaneFrame {
     /// Deferred snapshots never expose an in-progress modal authoring gesture.
     pub(super) fn as_frame(&self) -> PaneFrame<'_> {
         let payload = self.payload.as_ref();
+        let document = payload.document.as_ref();
         PaneFrame {
-            model: &payload.model,
-            plan: payload.plan.as_ref(),
-            physical_scene: payload.physical_scene.as_ref(),
+            model: &document.model,
+            plan: document.plan.as_ref(),
+            physical_scene: document.physical_scene.as_ref(),
             active_geometry_violation: payload.active_geometry_violation.as_ref(),
             selected_wall: payload.selected_wall,
             selection: &payload.selection,
@@ -206,6 +212,17 @@ impl OwnedPaneFrame {
             render_settings: payload.render_settings,
             tools: PaneToolInput::disabled(),
             gpu: payload.gpu,
+        }
+    }
+}
+
+impl OwnedPaneDocument {
+    /// Deep-clone the document generation consumed by deferred children.
+    pub(super) fn from_frame(frame: &PaneFrame<'_>) -> Self {
+        Self {
+            model: frame.model.clone(),
+            plan: frame.plan.cloned(),
+            physical_scene: frame.physical_scene.cloned(),
         }
     }
 }
@@ -250,7 +267,7 @@ pub(super) struct PaneCanvasEvents {
 }
 
 impl PaneCanvasEvents {
-    fn new(target_id: u64) -> Self {
+    pub(super) fn new(target_id: u64) -> Self {
         Self {
             target_id,
             primary_click: None,
@@ -582,7 +599,8 @@ mod tests {
             gpu: PaneGpuInput::default(),
         };
 
-        let owned = OwnedPaneFrame::from_frame(&frame);
+        let document = Arc::new(OwnedPaneDocument::from_frame(&frame));
+        let owned = OwnedPaneFrame::from_frame(document, &frame);
         let enabled = owned.with_presentation_actions(vec![PanePresentationAction {
             action: ActionId::HideSelection,
             enabled: true,
@@ -591,7 +609,7 @@ mod tests {
         let disabled = owned.with_presentation_actions(vec![PanePresentationAction {
             action: ActionId::HideSelection,
             enabled: false,
-            disabled_reason: Some("Unavailable in this viewport".to_owned()),
+            disabled_reason: Some("Unavailable in this viewport"),
         }]);
         let borrowed = enabled.as_frame();
 
@@ -617,9 +635,7 @@ mod tests {
         );
         assert!(!disabled.presentation_actions()[0].enabled);
         assert_eq!(
-            disabled.presentation_actions()[0]
-                .disabled_reason
-                .as_deref(),
+            disabled.presentation_actions()[0].disabled_reason,
             Some("Unavailable in this viewport")
         );
         assert_eq!(disabled.as_frame().tools, PaneToolInput::disabled());
