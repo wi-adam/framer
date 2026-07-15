@@ -138,9 +138,9 @@ pub(crate) struct FramerApp {
     ortho: bool,
     snap_step: Option<Length>,
     cursor_model: Option<Point2>,
-    /// Undo/redo history of authored-model edits. Ephemeral presentation state:
-    /// never serialized, cleared on load/new/reset. See
-    /// `docs/plans/2026-06-17-undo-redo-design.md`.
+    /// Undo/redo history of authored-model edits and explicit component
+    /// visibility/isolation actions. Ephemeral presentation state: never
+    /// serialized, cleared on load/new/reset. See `docs/specs/undo-redo.md`.
     history: History<Snapshot>,
 }
 
@@ -148,14 +148,15 @@ pub(crate) struct FramerApp {
 /// are KB-scale clones, so a deep history is cheap.
 const HISTORY_LIMIT: usize = 200;
 
-/// One restorable point: the authored document plus the transient selection we
-/// restore alongside it. Not serialized.
+/// One restorable point: the authored document plus the transient selection and
+/// component visibility state we restore alongside it. Not serialized.
 #[derive(Clone)]
 struct Snapshot {
     model: BuildingModel,
     selected: Selection,
     selected_wall: usize,
     component_selection: ComponentSelection,
+    component_visibility: ComponentVisibility,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -874,23 +875,26 @@ impl FramerApp {
         self.prune_component_presentation();
     }
 
-    /// Capture the current restorable state (authored model + selection).
+    /// Capture the current restorable state (authored model + selection and
+    /// component visibility).
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             model: self.model.clone(),
             selected: self.selected.clone(),
             selected_wall: self.selected_wall,
             component_selection: self.component_selection.clone(),
+            component_visibility: self.component_visibility.clone(),
         }
     }
 
-    /// Restore a snapshot's model and selection. Does not re-solve; callers
-    /// follow with `rebuild()`.
+    /// Restore a snapshot's model, selection, and component visibility. Does not
+    /// re-solve; callers rebuild only when authored intent changed.
     fn restore(&mut self, snapshot: Snapshot) {
         self.model = snapshot.model;
         self.selected = snapshot.selected;
         self.selected_wall = snapshot.selected_wall;
         self.component_selection = snapshot.component_selection;
+        self.component_visibility = snapshot.component_visibility;
     }
 
     fn selected_wall_id(&self) -> Option<&str> {
@@ -931,14 +935,51 @@ impl FramerApp {
             .collect()
     }
 
+    /// Run one explicit component visibility/isolation action through the same
+    /// session history as authored edits. The full snapshot keeps interleaved
+    /// model and presentation actions linear while the equality guard drops
+    /// no-op presentation commands.
+    fn edit_component_visibility(
+        &mut self,
+        label: impl Into<String>,
+        edit: impl FnOnce(&mut ComponentVisibility),
+    ) {
+        self.settle_history(false);
+        let before = self.snapshot();
+        edit(&mut self.component_visibility);
+        if self.component_visibility != before.component_visibility {
+            self.history.record(before, label);
+        }
+    }
+
+    fn toggle_component_visibility(&mut self, key: ComponentKey, name: &str) {
+        let verb = if self.component_visibility.is_explicitly_visible(&key) {
+            "Hide"
+        } else {
+            "Show"
+        };
+        self.edit_component_visibility(format!("{verb} {name}"), |visibility| {
+            visibility.toggle(key);
+        });
+    }
+
     fn isolate_selected_components(&mut self, mode: IsolationMode) {
         let targets = self.renderable_selected_components();
-        self.component_visibility.isolate(mode, targets);
+        let action = match mode {
+            IsolationMode::DimOthers => actions::ActionId::IsolateDim,
+            IsolationMode::HideOthers => actions::ActionId::IsolateHide,
+        };
+        self.edit_component_visibility(actions::metadata(action).label, |visibility| {
+            visibility.isolate(mode, targets);
+        });
     }
 
     fn hide_selected_components(&mut self) {
         let selected = self.renderable_selected_components();
-        self.component_visibility.hide(selected);
+        self.edit_component_visibility(
+            actions::metadata(actions::ActionId::HideSelection).label,
+            |visibility| visibility.hide(selected),
+        );
     }
 
     fn prepare_viewport_context_menu(&mut self, click: Option<ViewClick>) {
@@ -1217,8 +1258,13 @@ impl FramerApp {
         self.settle_history(false);
         let current = self.snapshot();
         if let Some(previous) = self.history.undo(current) {
+            let model_changed = self.model != previous.model;
             self.restore(previous);
-            self.rebuild();
+            if model_changed {
+                self.rebuild();
+            } else {
+                self.prune_component_presentation();
+            }
         }
     }
 
@@ -1226,8 +1272,13 @@ impl FramerApp {
         self.settle_history(false);
         let current = self.snapshot();
         if let Some(next) = self.history.redo(current) {
+            let model_changed = self.model != next.model;
             self.restore(next);
-            self.rebuild();
+            if model_changed {
+                self.rebuild();
+            } else {
+                self.prune_component_presentation();
+            }
         }
     }
 
@@ -1997,9 +2048,15 @@ impl FramerApp {
             actions::ActionId::IsolateHide => {
                 self.isolate_selected_components(IsolationMode::HideOthers);
             }
-            actions::ActionId::ExitIsolation => self.component_visibility.exit_isolation(),
+            actions::ActionId::ExitIsolation => self.edit_component_visibility(
+                actions::metadata(actions::ActionId::ExitIsolation).label,
+                ComponentVisibility::exit_isolation,
+            ),
             actions::ActionId::HideSelection => self.hide_selected_components(),
-            actions::ActionId::ShowAllComponents => self.component_visibility.show_all(),
+            actions::ActionId::ShowAllComponents => self.edit_component_visibility(
+                actions::metadata(actions::ActionId::ShowAllComponents).label,
+                ComponentVisibility::show_all,
+            ),
             actions::ActionId::AddDoor => self.add_opening(OpeningKind::Door),
             actions::ActionId::AddWindow => self.add_opening(OpeningKind::Window),
             actions::ActionId::AddGarageDoor => self.add_opening(OpeningKind::GarageDoor),
@@ -6010,6 +6067,7 @@ mod tests {
         app.viewport_mode = ViewportMode::Axonometric;
         app.handle_view_click_with_op(ViewClick::Wall(0), SelectionOp::Replace);
         app.execute_action(actions::ActionId::IsolateHide);
+        assert_eq!(app.history.undo_label(), Some("Isolate — Hide Others"));
 
         app.handle_view_click_with_op(ViewClick::Wall(1), SelectionOp::Replace);
 
@@ -6021,6 +6079,70 @@ mod tests {
             app.component_visibility.authored_appearance(&wall_b),
             ComponentAppearance::Hidden
         );
+    }
+
+    #[test]
+    fn component_visibility_commands_round_trip_through_history() {
+        let mut app = FramerApp {
+            viewport_mode: ViewportMode::Axonometric,
+            ..Default::default()
+        };
+        let selected = ComponentKey::authored(
+            AuthoredComponentKind::Wall,
+            app.model.walls[app.selected_wall].id.0.clone(),
+        );
+        let model_before = app.model.clone();
+        let plan_before = app.project_plan.clone();
+
+        app.execute_action(actions::ActionId::IsolateDim);
+        assert_eq!(
+            app.component_visibility.isolation_mode(),
+            Some(IsolationMode::DimOthers)
+        );
+        assert_eq!(app.history.undo_label(), Some("Isolate — Dim Others"));
+
+        // Reapplying an identical visibility state is a no-op, so one undo must
+        // still return directly to the ordinary view.
+        app.execute_action(actions::ActionId::IsolateDim);
+
+        app.undo();
+        assert_eq!(app.component_visibility.isolation_mode(), None);
+        assert_eq!(app.history.redo_label(), Some("Isolate — Dim Others"));
+        app.redo();
+        assert_eq!(
+            app.component_visibility.isolation_mode(),
+            Some(IsolationMode::DimOthers)
+        );
+
+        app.execute_action(actions::ActionId::ExitIsolation);
+        assert_eq!(app.component_visibility.isolation_mode(), None);
+        assert_eq!(app.history.undo_label(), Some("Exit Isolation"));
+        app.undo();
+        assert_eq!(
+            app.component_visibility.isolation_mode(),
+            Some(IsolationMode::DimOthers)
+        );
+        app.redo();
+        assert_eq!(app.component_visibility.isolation_mode(), None);
+
+        app.execute_action(actions::ActionId::HideSelection);
+        assert!(!app.component_visibility.is_explicitly_visible(&selected));
+        assert_eq!(app.history.undo_label(), Some("Hide Selected Components"));
+        app.undo();
+        assert!(app.component_visibility.is_explicitly_visible(&selected));
+        app.redo();
+        assert!(!app.component_visibility.is_explicitly_visible(&selected));
+
+        app.execute_action(actions::ActionId::ShowAllComponents);
+        assert!(app.component_visibility.is_explicitly_visible(&selected));
+        assert_eq!(app.history.undo_label(), Some("Show All Components"));
+        app.undo();
+        assert!(!app.component_visibility.is_explicitly_visible(&selected));
+        app.redo();
+        assert!(app.component_visibility.is_explicitly_visible(&selected));
+
+        assert_eq!(app.model, model_before);
+        assert_eq!(app.project_plan, plan_before);
     }
 
     #[test]

@@ -193,6 +193,9 @@ workbench, but purpose-built for wood-framed structures.
   ruler treatment, and visible authored-vs-generated semantics.
 - Every command that mutates authored intent goes through existing undo/redo
   transaction semantics and exposes a human-readable history label.
+- Explicit component visibility and isolation commands also enter the same
+  session-only undo/redo stream with human-readable labels, without becoming
+  authored-intent mutations.
 - Hidden or overflowed commands remain reachable through a discoverable alternate
   route: command search, menu, context menu, inspector action, catalog action, or
   keyboard shortcut.

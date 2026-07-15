@@ -318,7 +318,6 @@ fn authored_component_eye_is_accessible_reversible_and_keeps_hidden_row_selectab
     let key = ComponentKey::authored(AuthoredComponentKind::Wall, wall_id);
     let model_before = harness.state().model.clone();
     let plan_before = harness.state().project_plan.clone();
-    let undo_before = harness.state().history.undo_label().map(str::to_owned);
 
     let hide_label = format!("Hide {wall_name}");
     assert_accessible_button(&harness, &hide_label, "authored component eye");
@@ -337,9 +336,31 @@ fn authored_component_eye_is_accessible_reversible_and_keeps_hidden_row_selectab
     assert_eq!(harness.state().model, model_before);
     assert_eq!(harness.state().project_plan, plan_before);
     assert_eq!(
-        harness.state().history.undo_label().map(str::to_owned),
-        undo_before,
-        "visibility changes must not enter document history"
+        harness.state().history.undo_label(),
+        Some(hide_label.as_str()),
+        "the eye action should identify the hidden component in history"
+    );
+
+    harness.state_mut().execute_action(ActionId::Undo);
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "undo should recover an accidentally hidden component"
+    );
+    assert_eq!(harness.state().model, model_before);
+    assert_eq!(harness.state().project_plan, plan_before);
+
+    harness.state_mut().execute_action(ActionId::Redo);
+    harness.run();
+    assert!(
+        !harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "redo should reapply the component visibility action"
     );
 
     let show_label = format!("Show {wall_name}");
@@ -369,6 +390,10 @@ fn authored_component_eye_is_accessible_reversible_and_keeps_hidden_row_selectab
             .component_visibility
             .is_explicitly_visible(&key),
         "the hidden row eye should restore the component"
+    );
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some(show_label.as_str())
     );
     assert_accessible_button(
         &harness,
@@ -474,6 +499,30 @@ fn model_browser_show_all_restores_hidden_component_overrides() {
             .state()
             .component_visibility
             .is_explicitly_visible(&key)
+    );
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Show All Components")
+    );
+
+    harness.state_mut().execute_action(ActionId::Undo);
+    harness.run();
+    assert!(
+        !harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "undoing Show All should restore the hidden override set"
+    );
+
+    harness.state_mut().execute_action(ActionId::Redo);
+    harness.run();
+    assert!(
+        harness
+            .state()
+            .component_visibility
+            .is_explicitly_visible(&key),
+        "redoing Show All should clear the hidden override set again"
     );
     assert_accessible_button(
         &harness,
