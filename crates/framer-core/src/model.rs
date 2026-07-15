@@ -7221,6 +7221,12 @@ mod tests {
         );
 
         model.walls[0].dimensions.clear();
+        model.walls.push(placed_wall(
+            "wrong-level-continuation",
+            rp(10.0, 0.0),
+            rp(20.0, 0.0),
+            &code,
+        ));
         model
             .levels
             .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
@@ -7237,6 +7243,7 @@ mod tests {
             "only the requested level participates in continuation"
         );
         assert_eq!(model.walls[0].length, Length::from_feet(10.0));
+        assert_eq!(model.walls[1].length, Length::from_feet(10.0));
     }
 
     #[test]
