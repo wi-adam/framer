@@ -32,7 +32,9 @@ vision/scope (`docs/vision.md`), so this introduces a new authored primitive.
    rectilinear loops.
 4. **Walls:** the draw tool is **ortho + smart snapping** (H/V lock, grid snap,
    snap to existing wall endpoints and along wall lines). Snapping
-   **auto-creates the `WallJoin`** (`Corner` at an endpoint, `Tee` at mid-span).
+   **auto-creates the `WallJoin`** (`Corner` at a perpendicular endpoint, `Tee`
+   at mid-span); a compatible collinear endpoint continuation is absorbed into
+   the existing wall instead, as described in Decision 8.
    The axis-aligned invariant is kept for v1; free-angle walls are explicitly out
    of scope (but the data already stores arbitrary `Point2` endpoints).
 5. **Interior walls / joins:** make **Tee *and* Cross** join framing real in this
