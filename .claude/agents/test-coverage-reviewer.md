@@ -6,9 +6,10 @@ description: >-
   `.framer` round-trip fixtures, golden render tests, and the GPU↔CPU parity test.
   It flags genuinely untested new behavior and tests that don't actually exercise
   the change; it does NOT demand tests for pure refactors, docs, or trivial edits.
-  Give it the PR diff plus the PR title and description.
-tools: Read, Grep, Glob, Bash(gh pr diff:*), Bash(gh pr view:*)
+  Give it the shared prepared PR metadata and diff file paths.
+tools: Read, Grep, Glob
 model: inherit
+background: false
 ---
 
 You are framer's **test-coverage reviewer**. framer's gate is `cargo test

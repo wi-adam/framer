@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr comment:*), Bash(gh pr review:*), Bash(gh pr list:*), mcp__github_inline_comment__create_inline_comment
+allowed-tools: Agent, Read, Grep, Glob, Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr review:*), mcp__github_inline_comment__create_inline_comment
 description: Review a pull request in one pass — framer spec/doc consistency plus general correctness, Rust quality, and test coverage — and submit an approve / request-changes verdict
 ---
 
@@ -8,15 +8,20 @@ review subagents, validates their findings, and posts one consolidated, high-sig
 set of comments. This replaces running separate review tools.
 
 **Arguments: `$ARGUMENTS`** — parse the first token as the PR to review (a URL or a
-number; called `<PR>` below) and treat a trailing `--comment` as the write-enable
-flag. Without `--comment`, review and print findings only — make no GitHub writes,
-including no formal review verdict (safe to run locally).
+number; called `<PR>` below). Treat `--comment` anywhere in the arguments as the
+write-enable flag. CI also supplies `--metadata <path>` and `--diff <path>` pointing
+to one immutable context snapshot. When both paths are present, read them directly
+and do not re-fetch PR metadata or the diff. Without `--comment`, review and print
+findings only — make no GitHub writes, including no formal review verdict (safe to
+run locally).
 
 Follow these steps precisely:
 
-1. **Skip gate.** Look at the PR (`gh pr view <PR>`). Stop, doing nothing, ONLY if the
-   PR is closed, or it is a draft and you were not explicitly asked to review it, or
-   the change is *both* trivial in shape *and* introduces nothing new (a pure
+1. **Skip gate.** Read the supplied metadata file, or run one standalone
+   `gh pr view <PR>` call when no prepared context was supplied. Never pipe, redirect,
+   or chain that command. Stop, doing nothing, ONLY if the PR is closed, or it is a
+   draft and you were not explicitly asked to review it, or the change is *both*
+   trivial in shape *and* introduces nothing new (a pure
    dependency bump, a pure formatting pass, or a comment-only edit). **Never skip on
    surface shape alone.** A diff is NOT trivial — and MUST be reviewed — if it
    introduces or changes any of: a public API or re-export, an on-disk/serialization
@@ -28,31 +33,38 @@ Follow these steps precisely:
    Otherwise proceed — re-review on every push so the verdict reflects the current head
    and supersedes any earlier verdict. Still review PRs authored by Claude.
 
-2. **Gather context once.** Get the diff (`gh pr diff <PR>`) and the PR title + body
-   (`gh pr view <PR>`). You will pass this same context to every reviewer so they
-   don't each re-fetch it; the author's stated intent matters (a change framed as a
-   refactor isn't held to the new-feature spec rule, and needs no new tests).
+2. **Gather context once.** Use the supplied metadata and diff files. For a local
+   dry run without prepared paths, make exactly one standalone `gh pr diff <PR>` and
+   one standalone `gh pr view <PR>` call; do not pipe, redirect, or chain shell
+   commands. Give every reviewer the same two file paths (or the same captured
+   contents) so they never re-fetch the PR. The diff is authoritative; the checkout
+   may be the PR merge ref in automatic CI or trusted `main` in an on-demand run.
+   The author's stated intent matters (a change framed as a refactor isn't held to
+   the new-feature spec rule, and needs no new tests).
 
-3. **Fan out — launch these four subagents in parallel**, giving each the diff and
-   the PR title/description, and instructing each to return only noteworthy,
-   high-confidence findings (each with file:line, a one-line description, the reason,
-   a concrete fix, and a confidence):
+3. **Run all four reviewers to completion in the foreground.** CI disables
+   background tasks mechanically; do not request background execution. Sequential
+   execution is acceptable and preferred over an incomplete parallel fan-out. Give
+   each reviewer the shared metadata and diff paths, and instruct each to return only
+   noteworthy, high-confidence findings (each with file:line, a one-line description,
+   the reason, a concrete fix, and a confidence):
    - **spec-consistency-reviewer** — consistency with docs/specs, the `.framer`
      contract, and the architecture invariants (the framer-specific lens).
    - **correctness-reviewer** — real logic bugs, panics, and error-handling defects.
    - **rust-quality-reviewer** — Rust safety/idiom/API and hot-path performance.
    - **test-coverage-reviewer** — behavior changes missing adequate tests.
 
-   If for any reason a subagent cannot be dispatched or returns nothing usable, do NOT
-   abandon the review — perform the four-dimension analysis yourself directly from the
-   diff before proceeding. The fan-out is an optimization, not a precondition; the
-   review must complete and reach a verdict either way.
+   Do not consolidate or finish while any reviewer is still running. If a reviewer
+   cannot be dispatched or returns nothing usable, do NOT abandon the review — perform
+   that dimension yourself directly from the shared diff before proceeding. The four
+   completed dimensions are required; subagent dispatch itself is not.
 
-4. **Validate.** For each candidate finding, launch a subagent to confirm it with
-   high confidence before it can be posted — that the issue is real, in scope for the
-   changed lines, and not a false positive or an exempt refactor/trivial edit. Drop
-   anything not validated, and drop every `medium`- or lower-confidence finding.
-   **False positives erode trust — when in doubt, drop it.**
+4. **Validate directly.** The parent validates every candidate against the shared
+   diff and relevant repository files: the issue must be real, in scope for changed
+   lines, and not a false positive or exempt refactor/trivial edit. Do not spawn a
+   second wave of validation subagents. Drop anything not validated, and drop every
+   `medium`- or lower-confidence finding. **False positives erode trust — when in
+   doubt, drop it.**
 
 5. **Consolidate.** Merge findings across the four dimensions: collapse duplicates
    (e.g. a determinism issue flagged by both the spec and Rust reviewers) into one
@@ -67,9 +79,10 @@ Follow these steps precisely:
    changes** if at least one blocking finding survived, otherwise **approve** —
    advisory-only PRs are approved with the nits noted, never blocked.
 
-7. **Report and stamp.** Print a terminal summary split into Must-fix and Advisory
+7. **Report and stamp.** Prepare a terminal summary split into Must-fix and Advisory
    (or "No high-signal issues found across spec, correctness, Rust quality, and
-   tests").
+   tests"). A progress message or prepared summary is never a valid final response
+   while reviewers, comments, or the formal verdict remain outstanding.
 
    - If `--comment` was **not** provided, stop here — make no GitHub writes. This is
      the local dry-run path.
@@ -96,6 +109,19 @@ Follow these steps precisely:
    exactly one verdict before finishing — even if zero inline comments survive, submit
    `--approve` with a body noting "No high-signal issues found." Finishing with neither
    inline comments nor a verdict is a failure of this command, not a valid outcome.
+
+8. **Completion checklist.** Before producing the final response, verify all of the
+   following from actual tool results:
+   - all four reviewer dimensions returned usable results, or the parent completed
+     the missing dimension itself;
+   - every surviving finding was directly validated and duplicates were consolidated;
+   - every attempted inline comment succeeded;
+   - with `--comment`, exactly one `gh pr review` command succeeded.
+
+   If any item is incomplete, continue working or report a hard failure. Never finish
+   with "reviewers are running," "I'll wait," or another progress-only message. The
+   workflow independently verifies the fresh formal verdict and fails closed if this
+   contract is not met.
 
 Keep every comment concise and grounded. If you cannot justify a finding from the
 diff (or quote the spec/invariant it contradicts), do not post it — and never let an
