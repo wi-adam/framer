@@ -2814,10 +2814,11 @@ impl FramerApp {
         }
     }
 
-    /// Add a wall between two authored endpoints as one undo step, auto-creating
-    /// corner joins to any existing walls that share an endpoint. Endpoints are
-    /// expected to be ortho-snapped by the draw tool; a zero-length segment is a
-    /// no-op.
+    /// Commit a drawn wall segment as one undo step. A straight, non-overlapping
+    /// continuation extends the compatible existing wall so the drawing gesture
+    /// does not dictate a generated framing break; otherwise a new authored wall
+    /// is added with geometry-derived joins. Endpoints are expected to be
+    /// ortho-snapped by the draw tool; a zero-length segment is a no-op.
     fn add_wall(&mut self, start: Point2, end: Point2) {
         if !self.workspace_mode.allows_design_edits() {
             return;
@@ -2831,15 +2832,27 @@ impl FramerApp {
             return;
         }
         self.edit("Draw wall", |app| {
+            let level = app.active_level_id();
+            if let Some(extended_id) = app.model.extend_collinear_wall(&level, start, end) {
+                app.model.reconcile_joins();
+                app.selected_wall = app
+                    .model
+                    .walls
+                    .iter()
+                    .position(|wall| wall.id == extended_id)
+                    .expect("the extended wall remains in the authored model");
+                app.selected = Selection::Wall;
+                return;
+            }
+
             let (id, index) = next_wall_id(&app.model);
-            let level = app.active_level_id().0;
             let wall = Wall::new(
                 id,
                 format!("Wall {index}"),
                 Length::from_feet(1.0),
                 &app.model.framing_defaults(),
             )
-            .with_placement(level, start, end);
+            .with_placement(level.0, start, end);
             let joins = joins_for_new_wall(&app.model, &wall);
             app.model.walls.push(wall);
             app.model.wall_joins.extend(joins);

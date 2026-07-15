@@ -29,7 +29,7 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{ElementId, Length, OpeningKind};
+use framer_core::{ElementId, Length, OpeningKind, Point2};
 use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
@@ -183,6 +183,36 @@ fn prepare_geometry_overlap(harness: &mut Harness<'_, FramerApp>) {
     harness
         .state_mut()
         .focus_diagnostic(panels::DiagnosticAction::Geometry(violation));
+    harness.state_mut().layers.wall_display = WallDisplay::Full;
+    harness.ctx.request_repaint();
+    harness.run_steps(2);
+}
+
+/// Reproduce the adjacent-room authoring path that originally left the top and
+/// bottom perimeter as separate wall/framing sections. The two collinear draw
+/// gestures should now extend the existing demo-shell walls; only the new outer
+/// wall is added.
+fn prepare_adjacent_room(harness: &mut Harness<'_, FramerApp>) {
+    let point = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
+    let walls_before = harness.state().model.walls.len();
+    harness
+        .state_mut()
+        .add_wall(point(28.0, 20.0), point(40.0, 20.0));
+    harness
+        .state_mut()
+        .add_wall(point(40.0, 20.0), point(40.0, 0.0));
+    harness
+        .state_mut()
+        .add_wall(point(40.0, 0.0), point(28.0, 0.0));
+    harness.state_mut().add_room(point(34.0, 10.0));
+
+    assert_eq!(
+        harness.state().model.walls.len(),
+        walls_before + 1,
+        "only the new outer wall should be authored"
+    );
+    assert_eq!(framer_core::enclosed_room_count(&harness.state().model), 2);
+    harness.state_mut().selected = Selection::None;
     harness.state_mut().layers.wall_display = WallDisplay::Full;
     harness.ctx.request_repaint();
     harness.run_steps(2);
@@ -588,6 +618,33 @@ fn capture_ui_shot_deck() {
     harness.get_by_label("Project").click();
     shot(&mut harness, &dir, &mut index, "project-menu");
     drop(harness);
+
+    // Regression checkpoint for drawing a room beside an existing shell: the
+    // Plan body is one continuous perimeter, and generated 3-D framing does not
+    // restart at the former exterior corners.
+    let mut adjacent_room = shots_harness(design::studio_light());
+    adjacent_room.run_ok();
+    prepare_adjacent_room(&mut adjacent_room);
+    select_tab(&mut adjacent_room, actions::WorkflowTab::Design);
+    adjacent_room.state_mut().viewport_mode = ViewportMode::Plan;
+    shot(
+        &mut adjacent_room,
+        &dir,
+        &mut index,
+        "adjacent-room-continuous-plan",
+    );
+    select_tab(&mut adjacent_room, actions::WorkflowTab::Plan);
+    adjacent_room.state_mut().viewport_mode = ViewportMode::Axonometric;
+    adjacent_room.state_mut().layers.wall_display = WallDisplay::Outline;
+    adjacent_room.ctx.request_repaint();
+    adjacent_room.run_steps(2);
+    shot(
+        &mut adjacent_room,
+        &dir,
+        &mut index,
+        "adjacent-room-continuous-framing-3d",
+    );
+    drop(adjacent_room);
 
     let mut overlap_light = shots_harness(design::studio_light());
     overlap_light.run_ok();

@@ -48,6 +48,14 @@ vision/scope (`docs/vision.md`), so this introduces a new authored primitive.
    framing follows the same rule at its own layer faces, with a counter-lapped
    upper double top plate. This derived treatment is never serialized and never
    mutates authored dimensions. See [Wall corner laps](wall-corner-laps.md).
+8. **Straight drawing continues wall intent:** committing a non-overlapping
+   collinear segment at exactly one compatible wall endpoint extends that authored
+   wall instead of creating a second wall/framing section. Extending through a
+   former exterior corner re-derives that junction as a `Tee`, so drawing three
+   sides beside an existing shell adds one room while keeping the shared wall as
+   the partition. Existing openings and braced panels remain fixed in world space;
+   ambiguous continuations and extensions that would violate a driving dimension
+   remain separate authored segments.
 
 ## Out of scope for v1 (kept architecturally open)
 
@@ -144,10 +152,12 @@ existing `plan_inverse_point()` / camera `unapply()`.
   dimension preview) with a **live length readout**, ortho-lock to H/V, grid snap
   (reuse `OpeningDragConstraints.snap_step`), and snap to existing wall endpoints
   / along wall lines (snap target highlighted). Click commits the segment via
-  `add_wall()` inside `edit("Draw wall", …)`; the endpoint chains into the next
-  start (polyline mode) until Esc/right-click. On a snap, auto-create the right
-  `WallJoin` (`Corner` at an endpoint, `Tee` at mid-span). **One undo step per
-  committed segment.**
+  `add_wall()` inside `edit("Draw wall", …)`; an unambiguous straight continuation
+  extends the existing wall first, while other gestures author a new wall. The
+  endpoint chains into the next start (polyline mode) until Esc/right-click. On a
+  snap, auto-create or re-derive the right `WallJoin` (`Corner` at a perpendicular
+  endpoint, `Tee` at mid-span). **One undo step per committed segment or
+  continuation.**
 - **Room tool:** click inside an area → `topology` locates the same-level enclosing
   face → `add_room()` with `seed` = click point, auto-name ("Room N"), default usage.
   Click outside any closed loop → inline "no enclosed area here." Rooms render as
@@ -179,8 +189,9 @@ existing `plan_inverse_point()` / camera `unapply()`.
   diagnostic; demo-shell BOM regression unchanged.
 - **app:** undo = one step per drawn wall and per cascade delete, round-tripped
   (mirror `history_integration_tests.rs`); snap/auto-join geometry units
-  (mid-span → `Tee`, endpoint → `Corner`); canonical-JSON-stable-after-rebuild
-  guard.
+  (mid-span → `Tee`, perpendicular endpoint → `Corner`); collinear continuation
+  extends either local wall end, preserves nested authored content, and turns the
+  former room corner into a `Tee`; canonical-JSON-stable-after-rebuild guard.
 - **3D/render:** a corner-joined shell has no visual cavity in both the app's
   `Scene3d` wall envelope and `framer-render` scene extraction; render goldens
   cover the path-traced result when this derived geometry changes.
