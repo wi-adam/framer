@@ -1706,6 +1706,121 @@ fn tiled_viewport_builtins_expose_bounded_pane_chrome_at_narrow_size() {
 }
 
 #[test]
+fn render_workspace_applying_design_and_render_keeps_render_command_context() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+    assert_eq!(harness.state().command_tab, actions::WorkflowTab::Render);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, "Design + Render")
+        .click();
+    harness.run_steps(1);
+
+    let app = harness.state();
+    let modes = app
+        .viewport_workspace
+        .layout
+        .pane_ids()
+        .into_iter()
+        .map(|id| {
+            app.viewport_workspace
+                .layout
+                .pane(id)
+                .expect("layout pane ID should resolve")
+                .config()
+                .mode()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(modes, vec![ViewportMode::Axonometric, ViewportMode::Render]);
+    assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Render);
+    assert_eq!(app.viewport_mode, ViewportMode::Render);
+}
+
+#[test]
+fn render_workspace_applying_saved_authoring_layout_restores_it_on_exit() {
+    use eframe::egui::accesskit::Role;
+
+    const PRESET_NAME: &str = "Plan focus";
+
+    let mut harness = demo_harness();
+    harness.run();
+    assert_eq!(
+        harness.state().viewport_workspace.active_mode(),
+        ViewportMode::Plan
+    );
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Save current layout…")
+        .click();
+    harness.run_steps(1);
+
+    let dialog = harness.get_by_role_and_label(Role::Window, "Save viewport layout");
+    dialog.get_by_role(Role::TextInput).focus();
+    harness.run_steps(1);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.event(egui::Event::Text(PRESET_NAME.to_owned()));
+    harness.run_steps(1);
+    let dialog = harness.get_by_role_and_label(Role::Window, "Save viewport layout");
+    assert_eq!(
+        dialog.get_by_role(Role::TextInput).value().as_deref(),
+        Some(PRESET_NAME)
+    );
+    harness
+        .get_by_role_and_label(Role::Window, "Save viewport layout")
+        .get_by_role_and_label(Role::Button, "Save")
+        .click();
+    harness.run_steps(1);
+    assert!(
+        !harness.state().viewport_workspace.save_preset_open,
+        "Save should close the custom-preset dialog"
+    );
+
+    harness.get_by_label("Render").click();
+    harness.run_steps(1);
+    assert_eq!(harness.state().workspace_mode, WorkspaceMode::Render);
+
+    harness
+        .get_by_role_and_label(Role::Button, "Layouts")
+        .click();
+    harness.run_steps(1);
+    harness
+        .get_by_role_and_label(Role::Button, PRESET_NAME)
+        .click();
+    harness.run_steps(1);
+
+    let app = harness.state();
+    assert_eq!(app.viewport_workspace.layout.pane_count(), 1);
+    assert_eq!(app.workspace_mode, WorkspaceMode::Render);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Render);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Render);
+    assert_eq!(app.viewport_mode, ViewportMode::Render);
+
+    harness.get_by_label("Frame").click();
+    harness.run_steps(1);
+    let app = harness.state();
+    assert_eq!(app.workspace_mode, WorkspaceMode::Design);
+    assert_eq!(app.command_tab, actions::WorkflowTab::Frame);
+    assert_eq!(app.viewport_workspace.active_mode(), ViewportMode::Plan);
+    assert_eq!(app.viewport_mode, ViewportMode::Plan);
+}
+
+#[test]
 fn tiled_viewport_maximum_balanced_layout_keeps_compact_chrome_reachable() {
     use eframe::egui::accesskit::Role;
 

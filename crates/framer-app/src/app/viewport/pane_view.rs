@@ -5,6 +5,8 @@
 //! inputs plus one pane-owned runtime; all app/history work is returned as an
 //! owned, target-tagged event bundle.
 
+use std::sync::Arc;
+
 use eframe::egui::{Pos2, Rect, Response, Ui};
 use eframe::wgpu;
 use framer_core::{BuildingModel, DimensionAnchor, DimensionAxis, Length, Point2};
@@ -116,6 +118,11 @@ pub(super) struct PaneFrame<'a> {
 /// document revision. Modal tool state is intentionally omitted.
 #[derive(Clone)]
 pub(super) struct OwnedPaneFrame {
+    payload: Arc<OwnedPaneFramePayload>,
+    presentation_actions: Vec<PanePresentationAction>,
+}
+
+struct OwnedPaneFramePayload {
     model: BuildingModel,
     plan: Option<ProjectFramePlan>,
     physical_scene: Option<PhysicalScene>,
@@ -129,7 +136,6 @@ pub(super) struct OwnedPaneFrame {
     show_section: bool,
     render_settings: RenderSettings,
     gpu: PaneGpuInput,
-    presentation_actions: Vec<PanePresentationAction>,
 }
 
 #[derive(Clone)]
@@ -151,29 +157,30 @@ impl OwnedPaneFrame {
     /// Clone the immutable portion of a root-frame input for a deferred child.
     pub(super) fn from_frame(frame: &PaneFrame<'_>) -> Self {
         Self {
-            model: frame.model.clone(),
-            plan: frame.plan.cloned(),
-            physical_scene: frame.physical_scene.cloned(),
-            active_geometry_violation: frame.active_geometry_violation.cloned(),
-            selected_wall: frame.selected_wall,
-            selection: frame.selection.clone(),
-            selected_components: frame.selected_components.to_vec(),
-            component_visibility: frame.component_visibility.clone(),
-            workspace_mode: frame.workspace_mode,
-            layers: frame.layers,
-            show_section: frame.show_section,
-            render_settings: frame.render_settings,
-            gpu: frame.gpu,
+            payload: Arc::new(OwnedPaneFramePayload {
+                model: frame.model.clone(),
+                plan: frame.plan.cloned(),
+                physical_scene: frame.physical_scene.cloned(),
+                active_geometry_violation: frame.active_geometry_violation.cloned(),
+                selected_wall: frame.selected_wall,
+                selection: frame.selection.clone(),
+                selected_components: frame.selected_components.to_vec(),
+                component_visibility: frame.component_visibility.clone(),
+                workspace_mode: frame.workspace_mode,
+                layers: frame.layers,
+                show_section: frame.show_section,
+                render_settings: frame.render_settings,
+                gpu: frame.gpu,
+            }),
             presentation_actions: Vec::new(),
         }
     }
 
-    pub(super) fn with_presentation_actions(
-        mut self,
-        actions: Vec<PanePresentationAction>,
-    ) -> Self {
-        self.presentation_actions = actions;
-        self
+    pub(super) fn with_presentation_actions(&self, actions: Vec<PanePresentationAction>) -> Self {
+        Self {
+            payload: Arc::clone(&self.payload),
+            presentation_actions: actions,
+        }
     }
 
     pub(super) fn presentation_actions(&self) -> &[PanePresentationAction] {
@@ -183,21 +190,22 @@ impl OwnedPaneFrame {
     /// Borrow this owned snapshot as the same input consumed by a docked pane.
     /// Deferred snapshots never expose an in-progress modal authoring gesture.
     pub(super) fn as_frame(&self) -> PaneFrame<'_> {
+        let payload = self.payload.as_ref();
         PaneFrame {
-            model: &self.model,
-            plan: self.plan.as_ref(),
-            physical_scene: self.physical_scene.as_ref(),
-            active_geometry_violation: self.active_geometry_violation.as_ref(),
-            selected_wall: self.selected_wall,
-            selection: &self.selection,
-            selected_components: &self.selected_components,
-            component_visibility: &self.component_visibility,
-            workspace_mode: self.workspace_mode,
-            layers: self.layers,
-            show_section: self.show_section,
-            render_settings: self.render_settings,
+            model: &payload.model,
+            plan: payload.plan.as_ref(),
+            physical_scene: payload.physical_scene.as_ref(),
+            active_geometry_violation: payload.active_geometry_violation.as_ref(),
+            selected_wall: payload.selected_wall,
+            selection: &payload.selection,
+            selected_components: &payload.selected_components,
+            component_visibility: &payload.component_visibility,
+            workspace_mode: payload.workspace_mode,
+            layers: payload.layers,
+            show_section: payload.show_section,
+            render_settings: payload.render_settings,
             tools: PaneToolInput::disabled(),
-            gpu: self.gpu,
+            gpu: payload.gpu,
         }
     }
 }
@@ -548,7 +556,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owned_snapshot_bridge_clones_document_state_and_disables_tools() {
+    fn owned_snapshot_derivatives_share_payload_and_keep_actions_independent() {
         let model = BuildingModel::demo_wall();
         let selection = Selection::Wall;
         let selected_components = Vec::new();
@@ -575,12 +583,46 @@ mod tests {
         };
 
         let owned = OwnedPaneFrame::from_frame(&frame);
-        let cloned = owned.clone();
-        let borrowed = cloned.as_frame();
+        let enabled = owned.with_presentation_actions(vec![PanePresentationAction {
+            action: ActionId::HideSelection,
+            enabled: true,
+            disabled_reason: None,
+        }]);
+        let disabled = owned.with_presentation_actions(vec![PanePresentationAction {
+            action: ActionId::HideSelection,
+            enabled: false,
+            disabled_reason: Some("Unavailable in this viewport".to_owned()),
+        }]);
+        let borrowed = enabled.as_frame();
 
+        assert!(Arc::ptr_eq(&enabled.payload, &disabled.payload));
+        assert!(std::ptr::eq(
+            enabled.as_frame().model,
+            disabled.as_frame().model
+        ));
         assert_eq!(borrowed.model.walls, model.walls);
         assert_eq!(borrowed.selection, &Selection::Wall);
         assert_eq!(borrowed.tools, PaneToolInput::disabled());
+        assert_eq!(enabled.presentation_actions().len(), 1);
+        assert_eq!(
+            enabled.presentation_actions()[0].action,
+            ActionId::HideSelection
+        );
+        assert!(enabled.presentation_actions()[0].enabled);
+        assert!(enabled.presentation_actions()[0].disabled_reason.is_none());
+        assert_eq!(disabled.presentation_actions().len(), 1);
+        assert_eq!(
+            disabled.presentation_actions()[0].action,
+            ActionId::HideSelection
+        );
+        assert!(!disabled.presentation_actions()[0].enabled);
+        assert_eq!(
+            disabled.presentation_actions()[0]
+                .disabled_reason
+                .as_deref(),
+            Some("Unavailable in this viewport")
+        );
+        assert_eq!(disabled.as_frame().tools, PaneToolInput::disabled());
     }
 
     #[test]

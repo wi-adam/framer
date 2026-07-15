@@ -6,6 +6,8 @@ use eframe::egui::{
 };
 use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
+#[cfg(test)]
+use super::ViewClick;
 use super::WorkspaceMode;
 use super::actions::{self, ActionId};
 use super::context_menu;
@@ -136,6 +138,10 @@ enum PaneUiCommand {
     PopOut(PaneId),
     Remove(PaneId),
     SetRatio(Vec<SplitSide>, f32),
+}
+
+fn pointer_activation_command(active: PaneId, target: PaneId) -> Option<PaneUiCommand> {
+    (active != target).then_some(PaneUiCommand::Activate(target))
 }
 
 struct DockedPaneOutput {
@@ -410,11 +416,18 @@ impl FramerApp {
             crate::app::render::release_target(ui.painter(), id.get());
         }
         if self.viewport_workspace.has_deferred_panes() {
+            let document_snapshot = self.deferred_document_snapshot();
             let snapshots = self
                 .viewport_workspace
                 .deferred_pane_modes()
                 .into_iter()
-                .map(|(id, mode)| (id, self.deferred_pane_snapshot(mode)))
+                .map(|(id, mode)| {
+                    let actions = self.deferred_presentation_actions(mode);
+                    (
+                        id,
+                        Arc::new(document_snapshot.with_presentation_actions(actions)),
+                    )
+                })
                 .collect::<Vec<_>>();
             self.viewport_workspace.show_deferred(ui.ctx(), &snapshots);
         }
@@ -458,7 +471,7 @@ impl FramerApp {
         }
     }
 
-    fn deferred_pane_snapshot(&self, viewport_mode: ViewportMode) -> Arc<OwnedPaneFrame> {
+    fn deferred_document_snapshot(&self) -> OwnedPaneFrame {
         let selected_components = self.selected_components();
         let frame = PaneFrame {
             model: &self.model,
@@ -482,8 +495,14 @@ impl FramerApp {
                 ray_query_enabled: self.config.render.ray_query,
             },
         };
-        let snapshot = OwnedPaneFrame::from_frame(&frame);
-        let actions = PANE_PRESENTATION_ACTIONS
+        OwnedPaneFrame::from_frame(&frame)
+    }
+
+    fn deferred_presentation_actions(
+        &self,
+        viewport_mode: ViewportMode,
+    ) -> Vec<PanePresentationAction> {
+        PANE_PRESENTATION_ACTIONS
             .into_iter()
             .map(|action| PanePresentationAction {
                 action,
@@ -492,8 +511,7 @@ impl FramerApp {
                     .action_disabled_reason_for_viewport(action, viewport_mode)
                     .map(str::to_owned),
             })
-            .collect();
-        Arc::new(snapshot.with_presentation_actions(actions))
+            .collect()
     }
 
     fn draw_docked_pane(
@@ -503,17 +521,19 @@ impl FramerApp {
         commands: &mut Vec<PaneUiCommand>,
     ) -> Option<DockedPaneOutput> {
         let id = pane.id;
-        let active = self.viewport_workspace.active_id() == id;
+        let active_id = self.viewport_workspace.active_id();
+        let active = active_id == id;
         let mode = self.viewport_workspace.layout.pane(id)?.config().mode();
         let t = design::active();
 
-        if ui.ctx().input(|input| {
+        let pointer_pressed = ui.ctx().input(|input| {
             input
                 .pointer
                 .press_origin()
                 .is_some_and(|position| pane.rect.contains(position))
-        }) {
-            commands.push(PaneUiCommand::Activate(id));
+        });
+        if pointer_pressed && let Some(command) = pointer_activation_command(active_id, id) {
+            commands.push(command);
         }
 
         ui.painter().rect_filled(pane.rect, 2.0, t.canvas);
@@ -1179,7 +1199,14 @@ impl FramerApp {
         if let Err(error) = result {
             self.file_status = Some(error.to_string());
         } else if applied_built_in || applied_user {
-            self.viewport_mode = self.viewport_workspace.active_mode();
+            let active_id = self.viewport_workspace.active_id();
+            let active_mode = self.viewport_workspace.active_mode();
+            self.viewport_mode = active_mode;
+            if self.workspace_mode == WorkspaceMode::Render && active_mode != ViewportMode::Render {
+                self.last_authoring_viewport = active_mode;
+                self.last_authoring_pane = Some(active_id);
+                self.activate_render_viewport();
+            }
         }
         if let Some(name) = delete_preset {
             self.viewport_workspace.delete_preset(&name);
@@ -1626,6 +1653,34 @@ mod tests {
         };
         assert_eq!(*root_ratio, 0.25);
         assert_eq!(*nested_ratio, 0.75);
+    }
+
+    #[test]
+    fn active_pane_pointer_press_does_not_replay_stale_mode_after_wall_selection() {
+        let mut app = FramerApp::default();
+        app.set_workspace_mode(WorkspaceMode::Design);
+        app.viewport_mode = ViewportMode::Plan;
+        app.viewport_workspace.set_active_mode(ViewportMode::Plan);
+        let active = app.viewport_workspace.active_id();
+
+        app.handle_view_click(ViewClick::Wall(1));
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+
+        let command = pointer_activation_command(active, active);
+        assert!(
+            command.is_none(),
+            "the active pane must not queue reactivation"
+        );
+        if let Some(command) = command {
+            app.apply_pane_ui_command(command);
+        }
+        assert_eq!(app.viewport_mode, ViewportMode::Elevation);
+
+        app.viewport_workspace.set_active_mode(app.viewport_mode);
+        assert_eq!(
+            app.viewport_workspace.active_mode(),
+            ViewportMode::Elevation
+        );
     }
 
     #[test]
