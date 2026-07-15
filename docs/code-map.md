@@ -340,7 +340,7 @@ mirrors this exact math.
 | File | Contains |
 | --- | --- |
 | `src/app_config.rs` | App-only runtime configuration (`AppConfig`): TOML file loading via `--config`, `FRAMER__...` environment overrides, CLI flag overrides, and typed startup settings such as `render.ray_query` / `render.smoke_frames`. Durable policy lives in [app-configuration.md](specs/app-configuration.md). |
-| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. It owns the ordered stable component selection and session-only component visibility/isolation state, centralizes replace/toggle/clear selection paths, routes explicit visibility actions through session undo/redo snapshots, and prunes presentation keys after regeneration. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is presentation-only and reset/clamped with the current document; `RenderSettings` is also session-only presentation state for sun/exposure controls. `WorkflowTab`, `WorkspaceMode`, and `ViewportMode` coupling lives here: output workflow tabs enter Render/Plan workspaces, authoring tabs restore the Design workspace and apply soft default views. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. Standards authoring edit ops (project-local pack creation, starter-pack import, stack add/reorder/remove, and waive overlays) also live here so every mutation goes through undoable `edit()`. The derived compliance report is regenerated with each plan, lowered into plan diagnostics, and exported as a CSV sidecar. |
+| `mod.rs` | **`FramerApp`** struct + `impl eframe::App` + `ui_root` (panel layout) + project save/load/export + plan regeneration + selection/undo wiring + command-search execution dispatch. It owns the ordered stable component selection and session-only component visibility/isolation state, centralizes replace/toggle/clear selection paths, routes explicit visibility actions through session undo/redo snapshots, and prunes presentation keys after regeneration. Active drafting state (`active_level`, `ortho`, `snap_step`, `cursor_model`, `layers`) is shared presentation state and reset/clamped with the current document; `RenderSettings` is shared session-only state for sun/exposure controls. `ViewportWorkspaceState` owns the split topology, per-pane runtimes, deferred bridges, and app-local preset catalog. `WorkflowTab`, `WorkspaceMode`, and the active `ViewportMode` mirror couple global command context to the active pane: Render activates an existing Render pane or converts the active leaf, authoring restores a surviving authoring pane, and soft defaults target only the active leaf. `eframe::App::save` persists theme and validated layout presets; periodic autosave is suppressed because deferred eframe 0.35 frames can otherwise overwrite root-window geometry. Region-gated placement tools — room / ceiling / **vault** (`add_vault` + `scissor_halves`) / floor — are mutually exclusive (`deactivate_placement_tools`), route through `ViewClick::Place*`, and resolve enclosed loops through the active level's wall graph; the roof tool (`add_roof` + `footprint_roof_specs`) auto-generates gable, shed, rectangular hip planes, and simple L-footprint valley planes. Standards authoring edit ops (project-local pack creation, starter-pack import, stack add/reorder/remove, and waive overlays) also live here so every mutation goes through undoable `edit()`. The derived compliance report is regenerated with each plan, lowered into plan diagnostics, and exported as a CSV sidecar. |
 | `actions.rs` | UI-only command metadata (`ActionId`, `EnabledContext`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; enabled/disabled state is evaluated by `FramerApp`, and model mutations still live on `FramerApp`. |
 | `component_visibility.rs` | App-only stable `ComponentKey`, ordered `ComponentSelection`, per-component hidden overrides, frozen isolation targets/modes, and authored/generated/semantic-source appearance resolution. This is disposable presentation state; it never enters core, solver, or `.framer`. |
 | `context_menu.rs` | App-only typed context-menu surface/target context, section/item model, explicit surface builders, and one egui renderer that reads existing `ActionId` state. Interactive 3-D owns the first builder; the future Model Browser menu remains independently composed, and a later contribution registry can replace builder internals without changing the model/renderer/dispatch contract. |
@@ -351,7 +351,7 @@ mirrors this exact math.
 | `project_io.rs` | File-write + export-path helpers (orchestration lives in `mod.rs`). |
 | `render_job.rs` | Background-thread **CPU** render job (progressive accumulation, fallback path). |
 | `labels.rs`, `theme.rs` | Human-readable type labels; legacy theme shim. |
-| `ui_harness_tests.rs`, `ui_shots_tests.rs` | Headless `egui_kittest` behavior checks plus the off-screen visual-review deck, including component eyes, multi-selection, and dim/hide isolation states. |
+| `ui_harness_tests.rs`, `ui_shots_tests.rs` | Headless `egui_kittest` behavior checks plus the off-screen visual-review deck, including component eyes, multi-selection, dim/hide isolation, and tiled/repeated viewport layouts. |
 
 ### `src/app/design/` — design system
 
@@ -363,18 +363,23 @@ styling goes here, not inline; command routing policy belongs in
 
 ### `src/app/viewport/` — the viewports (layered modules)
 
-`workspace` (`viewport/mod.rs:94`) renders the workspace/view bar, contextual tool options
-strip, selection context toolbar, surface-scoped 3-D context menu, and one viewport per frame based on `ViewportMode`. Workflow
-tabs in `panels.rs` own Design/Render/Plan workspace switching; the workspace/view bar owns the
-authoring camera segmented control (`Shell`/`Plan`, `Wall`/`Elevation`, `Roof`, `3D`) and hides it
-in the Render workspace. The tool options strip owns active Wall/Room/Ceiling/Vault/Floor/Dimension
-placement context, including the active drafting level. The selection context toolbar remains a
-compact fallback, while secondary-clicking 3-D geometry opens the shared-rendered canvas menu for
-component isolate/hide/show commands.
+`workspace` (`viewport/mod.rs`) renders the workspace/view bar, a recursive docked split tree,
+per-pane headers/canvases, contextual tool options, the active pane's selection toolbar and
+surface-scoped 3-D menu, and deferred native panes. Workflow tabs in `panels.rs` remain the global
+Design/Render/Plan command context. The segmented authoring camera control and global view actions
+target the active pane; each pane header can independently select Plan, Roof, Elevation, 3D, or
+Render. The Layouts menu applies typed built-ins or validated app-local presets. Tool options and
+status readouts follow the active pane, while document selection, visibility/isolation, drafting
+level, layers, and render lighting are shared by every pane.
 
 | File | Contains |
 | --- | --- |
-| `mod.rs` | `workspace` dispatcher + shared viewport input/header, primary/secondary pick routing, and 3-D context-menu invocation. |
+| `mod.rs` | Recursive split-tree measurement/rendering, pane headers and splitters, active-pane routing, Layouts/preset UI, pane-tagged event reduction, deferred-event draining, shared workspace chrome, and active-pane 3-D context-menu/toolbar invocation. |
+| `layout.rs` | Monotonic session `PaneId`, bounded `LayoutNode` split tree, active-leaf lifecycle, typed built-in layouts, sanitized 3D pose snapshots, and versioned/adversarially validated user-preset RON DTOs under `framer.viewport-layout-presets.v1`. Runtime IDs are never restored from storage. |
+| `workspace_state.rs` | `ViewportWorkspaceState`: cohesive layout/preset registry, `PaneId` → runtime/deferred-handle maps, split/duplicate/apply reconciliation, camera-pose capture, retired-target cleanup queue, and eframe-storage dirty state. |
+| `pane.rs` | `ViewportPaneRuntime`: independent plan camera, per-wall elevation cameras, shared-within-pane 3D/Render camera, CPU/GPU Render state, cursor, and snap cache. |
+| `pane_view.rs` | Explicit immutable `PaneFrame`/owned deferred snapshot input, `PaneInteractionPolicy`, target-tagged `PaneCanvasEvents`, and view-mode dispatch over one mutable pane runtime. Deferred snapshots omit modal authoring state. |
+| `deferred.rs` | Stable `show_viewport_deferred` IDs, owned snapshot/runtime bridge, child header/mode/actions UI, native-close-to-dock handling, and typed events returned to root ownership. |
 | `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, the overhang-aware roof authoring overlay, and the wall display mode (outline/width/full) + layer-visibility guards. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
@@ -382,22 +387,25 @@ component isolate/hide/show commands.
 | `scene_build/mod.rs` | **`Scene3d::from_project_with_geometry`** runtime facade and `SceneBuilder` mesh sink. It consumes the app's cached physical scene plus stable selected-component and visibility state, owns the full emission recipe and alpha-classified opaque/transparent index partition, and delegates element-specific lowering to child modules. Hidden components omit geometry and picks; dimmed components retain picks in the transparent pass. The test-only `from_project` convenience builds its own scene. |
 | `scene_build/walls.rs`, `scene_build/members.rs`, `scene_build/surfaces.rs` | Interactive 3-D lowering by reason to change: derived wall envelopes/layers/openings; geometry-owned generated-member surfaces; authored roof/ceiling/floor surfaces. Emitters apply host, exact-leaf, and semantic `FrameMember.source` visibility, including dimmed outline opacity. New element families belong in the matching emitter rather than the facade. |
 | `scene_build/picking.rs`, `scene_build/style.rs`, `scene_build/tests.rs` | Pick shapes/depth; the emitters preserve wall/surface priority 1, opening 2, and member 3. Viewport color/material policy is shared with the view cube/elevation; focused scene fixtures and regressions live with the package. Every generated member uses the same `framer-geometry` indexed surface for rendering and picking. |
-| `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; overlap witness overlay and pair framing; 2D/3D cameras; view-cube widget; shared transforms/hit-tests. |
-| `gpu.rs` | `wgpu` pipeline wrapper for the 3D scene. |
-| `render.rs` | The path-traced **Render** view (orbit/dolly + progressive refinement). |
+| `axonometric.rs`, `camera_2d.rs`, `camera_3d.rs`, `view_cube.rs`, `view_common.rs`, `geom.rs` | Ortho 3D view; overlap witness overlay and pair framing; 2D/3D cameras; pane-qualified ViewCube; exact-tile sizing; shared transforms/hit-tests. |
+| `gpu.rs` | `wgpu` pipeline wrapper for interactive 3D. Callback frames are keyed by `(pane target, model/ViewCube role)` and retired pane targets schedule resource cleanup. |
+| `render.rs` | Explicit-input path-traced **Render** pane (orbit/dolly + progressive refinement) with pane-owned CPU fallback, GPU state, and motion cooldown. |
 
 ### `src/app/render/` — real-time GPU path tracer
 
-`mod.rs` holds **`GpuRenderState`** (the WGSL compute path tracer driving the Render view) and
-the shaders: `pathtrace.wgsl`, `blit.wgsl`, `denoise.wgsl`, `rng.wgsl`. **These mirror
+`mod.rs` holds **`GpuRenderState`** (one pane's WGSL compute path-tracer state), a
+target-keyed callback-resource store, and the shaders: `pathtrace.wgsl`, `blit.wgsl`,
+`denoise.wgsl`, `rng.wgsl`. **These mirror
 `framer-render`'s CPU math exactly** — the CPU path is the reference; `tests/gpu_parity.rs`
 validates equivalence. The default GPU backend traverses the uploaded flat BVH in WGSL; an
 experimental native `wgpu` ray-query backend can be enabled with app runtime config
 (`render.ray_query`, `FRAMER__RENDER__RAY_QUERY=true`, or `--render-ray-query`) when the device
 exposes `EXPERIMENTAL_RAY_QUERY`, building a BLAS/TLAS from the same triangle stream. Its
-accumulation key covers geometry, camera, render size, lighting, sky, and exposure so Render tab
-settings restart progressive refinement without rebuilding unchanged geometry. Edit render math
-in both CPU and WGSL paths together.
+accumulation key covers geometry, camera, render size, lighting, sky, and exposure so shared Render
+settings restart each visible pane's progressive refinement without rebuilding unchanged geometry.
+`paint_for_target` qualifies callback resources by stable pane identity, and a cleanup callback
+releases a retired target without disturbing sibling Render panes. Edit render math in both CPU and
+WGSL paths together.
 
 ---
 
@@ -427,7 +435,7 @@ the real symbols:
    (shared member mesh + pick triangles)   │
                │                           │
    ┌───────────▼───────────────────────────▼──────────────┐
-   │ PRESENTATION  viewports, drawings, SVG/CSV exports     │  ← disposable artifacts
+   │ PRESENTATION  pane tree/runtimes, drawings, exports    │  ← disposable project artifacts
    └────────────────────────────────────────────────────────┘
 ```
 
@@ -436,9 +444,11 @@ the real symbols:
 - **Solving** runs `generate_project_plan`, builds and audits its `PhysicalScene`, and caches all
   three disposable results on the app. Active geometry focus is retained only while its structured
   violation remains current.
-- **Presentation** never becomes the source of truth. A change to derived/presented state must
-  flow back into authored intent (or a future explicit override record), per the
-  [Mode Contract](architecture.md#mode-contract).
+- **Presentation** never becomes the source of truth. All panes consume one coherent root-owned
+  document/plan snapshot; deferred child events return to `FramerApp` before any authored mutation.
+  Named layout presets persist only a validated app-local subset, never project state. A change to
+  derived/presented state must flow back into authored intent (or a future explicit override
+  record), per the [Mode Contract](architecture.md#mode-contract).
 
 ---
 
@@ -451,7 +461,8 @@ the real symbols:
 | **New construction layer function / material** | `LayerFunction` / `Material` / `Appearance` in `model.rs`; seed it in `starter_library()` | per-layer BOM in `framer-solver` (`layer_bom`); appearance/material lowering in `framer-render/src/build.rs`; asset bytes via `framer-library` package/store helpers. |
 | **New library item kind** | typed collection + validation in `framer-core/src/model.rs` / `library.rs` | add closure/remap support in `framer-library`; add browser/import/placement UI in `framer-app/src/app/panels.rs`; add drawing/picking in the relevant viewport; update [libraries.md](specs/libraries.md) and [project-files.md](project-files.md). |
 | **New solver rule / member kind** | `MemberKind` + rule in `framer-solver/src/lib.rs`; the authoring-side family tag is `MemberFamily` on `FramingSpec` in `framer-core/src/model.rs` | the surface/wall generator passes the matching `MemberKind` explicitly (the solver does not dispatch on `member_family`); attach `RuleProvenance`; add a focused solver test; expect a diagnostic for unsupported cases. |
-| **New viewport mode** | `ViewportMode` + a `match` arm in `viewport/mod.rs::workspace` | add a `viewport/<mode>.rs` returning a `ViewClick`. |
+| **New viewport mode** | `ViewportMode`, its `pane_view.rs::draw_pane_canvas` dispatch arm, pane/deferred mode selectors, and preset DTO name mapping in `layout.rs` | add a `viewport/<mode>.rs` renderer over explicit `PaneFrame` input + mutable `ViewportPaneRuntime`; decide which camera/runtime it shares within one pane. |
+| **New viewport layout operation or built-in** | topology/invariants in `viewport/layout.rs`, runtime reconciliation in `workspace_state.rs`, and pane/header or Layouts UI in `viewport/mod.rs` | add bounded positive/negative tests, keep runtime IDs fresh, and update [viewport-layouts.md](specs/viewport-layouts.md). |
 | **New view layer / wall display mode** | `ViewLayers` / `WallDisplay` in `app/mod.rs`; toggle in the Layers popover (`panels.rs`) | gate the render in `viewport/plan.rs` (and `viewport/scene_build/walls.rs` for 3D); session-only, not persisted. See [view-layers.md](specs/view-layers.md). |
 | **Schema change** | bump `PROJECT_SCHEMA_VERSION` in `project.rs`; add types in `model.rs` | update the three `examples/projects/*.framer` (round-trip tests are byte-exact); update [project-files.md](project-files.md); add a rejection/round-trip test. |
 | **New UI control / styling** | `framer-app/src/app/design/` | use semantic tokens; don't hard-code colors inline. |
@@ -477,4 +488,6 @@ determinism + BOM (`framer-solver/src/lib.rs`), shared render fixtures
 (`framer-render/tests/golden.rs`, regen with `UPDATE_GOLDEN=1`), GPU↔CPU parity
 (`framer-app/tests/gpu_parity.rs`), interactive 3-D scene lowering and picking
 (`framer-app/src/app/viewport/scene_build/tests.rs`), and headless UI
-(`framer-app/src/app/ui_harness_tests.rs`).
+(`framer-app/src/app/ui_harness_tests.rs`). Tiled-workspace tests additionally cover bounded
+split/preset decoding, per-pane runtime identity, deferred bridge ownership, renderer target-key
+isolation/cleanup, and the off-screen multi-pane screenshot states.

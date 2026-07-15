@@ -17,6 +17,7 @@ framer-library.workspace = true
 framer-render = { workspace = true, features = ["parallel"] }
 framer-solver.workspace = true
 framer-standards.workspace = true
+ron.workspace = true
 serde.workspace = true
 
 # The headless UI smoke tests drive the app through the AccessKit tree only and

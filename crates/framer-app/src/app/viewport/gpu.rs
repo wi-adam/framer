@@ -123,12 +123,80 @@ impl GpuUniforms {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct Framer3dFrameKey(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Framer3dFrameRole {
+    Model,
+    ViewCube,
+}
+
+/// Stable callback identity for one target's model or view-cube draw.
+///
+/// egui-wgpu stores callback resources globally by Rust type, so the logical
+/// target must be part of the key even when two targets render identical
+/// content. The role is kept separate rather than packed into the target ID so
+/// every `u64` target remains valid without collision-prone bit reservations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Framer3dFrameKey {
+    target_id: u64,
+    role: Framer3dFrameRole,
+}
 
 impl Framer3dFrameKey {
-    pub(super) const MODEL: Self = Self(1);
-    pub(super) const VIEW_CUBE: Self = Self(2);
+    pub(super) const fn model(target_id: u64) -> Self {
+        Self {
+            target_id,
+            role: Framer3dFrameRole::Model,
+        }
+    }
+
+    pub(super) const fn view_cube(target_id: u64) -> Self {
+        Self {
+            target_id,
+            role: Framer3dFrameRole::ViewCube,
+        }
+    }
+
+    const fn belongs_to(self, target_id: u64) -> bool {
+        self.target_id == target_id
+    }
+}
+
+/// Schedule release of model and view-cube buffers for a closed logical pane.
+pub(super) fn release_target(painter: &egui::Painter, target_id: u64) {
+    painter.add(egui_wgpu::Callback::new_paint_callback(
+        painter.clip_rect(),
+        Framer3dCleanupCallback { target_id },
+    ));
+}
+
+struct Framer3dCleanupCallback {
+    target_id: u64,
+}
+
+impl egui_wgpu::CallbackTrait for Framer3dCleanupCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(store) = callback_resources.get_mut::<Framer3dFrameStore>() {
+            store
+                .frames
+                .retain(|key, _| !key.belongs_to(self.target_id));
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        _render_pass: &mut wgpu::RenderPass<'static>,
+        _callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+    }
 }
 
 pub(super) struct Framer3dCallback {
@@ -381,4 +449,38 @@ fn create_3d_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_keys_are_qualified_by_target_and_role() {
+        assert_eq!(Framer3dFrameKey::model(7), Framer3dFrameKey::model(7));
+        assert_ne!(Framer3dFrameKey::model(7), Framer3dFrameKey::model(8));
+        assert_ne!(
+            Framer3dFrameKey::view_cube(7),
+            Framer3dFrameKey::view_cube(8)
+        );
+        assert_ne!(Framer3dFrameKey::model(7), Framer3dFrameKey::view_cube(7));
+    }
+
+    #[test]
+    fn target_role_pairs_coexist_in_the_frame_key_map() {
+        let mut frames = HashMap::new();
+        frames.insert(Framer3dFrameKey::model(11), "model 11");
+        frames.insert(Framer3dFrameKey::view_cube(11), "cube 11");
+        frames.insert(Framer3dFrameKey::model(12), "model 12");
+        frames.insert(Framer3dFrameKey::view_cube(12), "cube 12");
+
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[&Framer3dFrameKey::model(11)], "model 11");
+        assert_eq!(frames[&Framer3dFrameKey::view_cube(12)], "cube 12");
+
+        frames.retain(|key, _| !key.belongs_to(11));
+        assert_eq!(frames.len(), 2);
+        assert!(frames.contains_key(&Framer3dFrameKey::model(12)));
+        assert!(frames.contains_key(&Framer3dFrameKey::view_cube(12)));
+    }
 }

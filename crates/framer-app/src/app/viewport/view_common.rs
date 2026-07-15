@@ -23,10 +23,11 @@ pub(super) const MIN_RENDER_DIM: u32 = 64;
 pub(super) const MAX_RENDER_DIM: u32 = 2048;
 
 pub(super) fn viewport_size(ui: &Ui) -> Vec2 {
-    // Fill the central panel so the drawing surface reaches the panel edges; the
-    // plan/3D projectors letterbox their content within this rect.
+    // Fill the pane allocated by the workspace. The historical single-view
+    // implementation forced a 420×360 minimum here, but doing so makes a child
+    // overflow its split tile; the layout owner now controls pane minimums.
     let available = ui.available_size();
-    Vec2::new(available.x.max(420.0), available.y.max(360.0))
+    Vec2::new(available.x.max(1.0), available.y.max(1.0))
 }
 
 pub(super) fn viewport_drawing_rect(rect: Rect, margin: f32) -> Rect {

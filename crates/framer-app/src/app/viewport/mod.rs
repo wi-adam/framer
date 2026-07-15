@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use eframe::egui::{
-    self, Align2, ComboBox, FontId, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
-    Ui, Vec2, containers::menu::MenuButton,
+    self, Align2, ComboBox, CursorIcon, FontId, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke,
+    StrokeKind, Ui, UiBuilder, Vec2, containers::menu::MenuButton,
 };
 use framer_core::{DimensionAxis, DimensionKind, Length, Point2, SystemKind};
 
@@ -11,12 +13,14 @@ use super::draw_wall::SnapResult;
 use super::labels::{dimension_axis_label, dimension_kind_label};
 #[cfg(test)]
 use super::model_edit::OpeningEditHandle;
-use super::{FramerApp, Selection, SelectionOp, ViewClick, ViewportMode, design, theme};
+use super::{FramerApp, Selection, ViewportMode, design, theme};
 
 mod camera_2d;
+#[cfg(test)]
 pub(super) use camera_2d::View2dState;
 
 mod camera_3d;
+#[cfg(test)]
 pub(super) use camera_3d::View3dState;
 #[cfg(test)]
 use camera_3d::{ViewCubeAction, ViewCubeOrientation};
@@ -40,6 +44,7 @@ mod geom;
 use geom::*;
 
 mod view_common;
+#[cfg(test)]
 use view_common::*;
 
 mod gpu;
@@ -55,13 +60,30 @@ mod view_cube;
 use view_cube::*;
 
 mod axonometric;
-use axonometric::*;
 
-// Adds an `impl FramerApp { draw_project_render }` block; no items to import.
 mod render;
 
+mod pane;
+pub(super) use pane::ViewportPaneRuntime;
+
+mod pane_view;
+use pane_view::{
+    OwnedPaneFrame, PANE_PRESENTATION_ACTIONS, PaneCanvasEvents, PaneCanvasOutput, PaneFrame,
+    PaneGpuInput, PaneInteractionPolicy, PanePresentationAction, PaneToolInput, draw_pane_canvas,
+};
+
+mod deferred;
+use deferred::DeferredPaneEvent;
+
+mod layout;
+#[cfg(test)]
+pub(super) use layout::PaneIdGenerator;
+pub(super) use layout::{BuiltInPreset, LayoutNode, PaneId, SplitAxis, SplitSide};
+
+mod workspace_state;
+pub(super) use workspace_state::{PaneRuntimeHandle, ViewportWorkspaceState};
+
 mod plan;
-use plan::{PlanView, draw_project_plan};
 // Re-exported to the parent `app` module (consumed by handle_wall_drag_event and
 // history_integration_tests) — preserves the existing `viewport::WallDragEvent` path.
 pub(super) use plan::WallDragEvent;
@@ -75,10 +97,8 @@ mod elevation_openings;
 use elevation_openings::*;
 
 mod elevation_framing;
-use elevation_framing::*;
 
 mod elevation_design;
-use elevation_design::*;
 
 /// Plan-view input for the draw-wall tool: whether it is active, the in-progress
 /// run's start point, the active grid snap increment, and the snap held from the
@@ -90,242 +110,647 @@ pub(super) struct DrawWallPlanInput {
     pub(super) previous_snap: Option<SnapResult>,
 }
 
+const PANE_HEADER_HEIGHT: f32 = 30.0;
+const SPLITTER_HIT_WIDTH: f32 = 7.0;
+
+#[derive(Clone)]
+struct DockedPaneRect {
+    id: PaneId,
+    rect: Rect,
+}
+
+#[derive(Clone)]
+struct DockedSplitter {
+    path: Vec<SplitSide>,
+    axis: SplitAxis,
+    ratio: f32,
+    bounds: Rect,
+    rect: Rect,
+}
+
+enum PaneUiCommand {
+    Activate(PaneId),
+    SetMode(PaneId, ViewportMode),
+    Split(PaneId, SplitAxis),
+    Duplicate(PaneId, SplitAxis),
+    PopOut(PaneId),
+    Remove(PaneId),
+    SetRatio(Vec<SplitSide>, f32),
+}
+
+struct DockedPaneOutput {
+    id: PaneId,
+    mode: ViewportMode,
+    canvas: Rect,
+    output: PaneCanvasOutput,
+}
+
+fn node_has_docked_pane(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Pane(pane) => !pane.config().is_popped_out(),
+        LayoutNode::Split { first, second, .. } => {
+            node_has_docked_pane(first) || node_has_docked_pane(second)
+        }
+    }
+}
+
+fn collect_docked_layout(
+    node: &LayoutNode,
+    bounds: Rect,
+    path: &mut Vec<SplitSide>,
+    panes: &mut Vec<DockedPaneRect>,
+    splitters: &mut Vec<DockedSplitter>,
+) {
+    match node {
+        LayoutNode::Pane(pane) => {
+            if !pane.config().is_popped_out() {
+                panes.push(DockedPaneRect {
+                    id: pane.id(),
+                    rect: bounds,
+                });
+            }
+        }
+        LayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let first_visible = node_has_docked_pane(first);
+            let second_visible = node_has_docked_pane(second);
+            match (first_visible, second_visible) {
+                (true, true) => {
+                    let (first_bounds, second_bounds, splitter_rect) = match axis {
+                        SplitAxis::Horizontal => {
+                            let split_x = bounds.left() + bounds.width() * *ratio;
+                            let half_gap = SPLITTER_HIT_WIDTH * 0.5;
+                            (
+                                Rect::from_min_max(
+                                    bounds.min,
+                                    Pos2::new(
+                                        (split_x - half_gap).max(bounds.left()),
+                                        bounds.bottom(),
+                                    ),
+                                ),
+                                Rect::from_min_max(
+                                    Pos2::new(
+                                        (split_x + half_gap).min(bounds.right()),
+                                        bounds.top(),
+                                    ),
+                                    bounds.max,
+                                ),
+                                Rect::from_min_max(
+                                    Pos2::new(split_x - half_gap, bounds.top()),
+                                    Pos2::new(split_x + half_gap, bounds.bottom()),
+                                ),
+                            )
+                        }
+                        SplitAxis::Vertical => {
+                            let split_y = bounds.top() + bounds.height() * *ratio;
+                            let half_gap = SPLITTER_HIT_WIDTH * 0.5;
+                            (
+                                Rect::from_min_max(
+                                    bounds.min,
+                                    Pos2::new(
+                                        bounds.right(),
+                                        (split_y - half_gap).max(bounds.top()),
+                                    ),
+                                ),
+                                Rect::from_min_max(
+                                    Pos2::new(
+                                        bounds.left(),
+                                        (split_y + half_gap).min(bounds.bottom()),
+                                    ),
+                                    bounds.max,
+                                ),
+                                Rect::from_min_max(
+                                    Pos2::new(bounds.left(), split_y - half_gap),
+                                    Pos2::new(bounds.right(), split_y + half_gap),
+                                ),
+                            )
+                        }
+                    };
+                    splitters.push(DockedSplitter {
+                        path: path.clone(),
+                        axis: *axis,
+                        ratio: *ratio,
+                        bounds,
+                        rect: splitter_rect,
+                    });
+                    path.push(SplitSide::First);
+                    collect_docked_layout(first, first_bounds, path, panes, splitters);
+                    path.pop();
+                    path.push(SplitSide::Second);
+                    collect_docked_layout(second, second_bounds, path, panes, splitters);
+                    path.pop();
+                }
+                (true, false) => {
+                    path.push(SplitSide::First);
+                    collect_docked_layout(first, bounds, path, panes, splitters);
+                    path.pop();
+                }
+                (false, true) => {
+                    path.push(SplitSide::Second);
+                    collect_docked_layout(second, bounds, path, panes, splitters);
+                    path.pop();
+                }
+                (false, false) => {}
+            }
+        }
+    }
+}
+
+fn viewport_mode_label(mode: ViewportMode) -> &'static str {
+    match mode {
+        ViewportMode::Plan => "Plan",
+        ViewportMode::RoofPlan => "Roof",
+        ViewportMode::Elevation => "Elevation",
+        ViewportMode::Axonometric => "3D",
+        ViewportMode::Render => "Render",
+    }
+}
+
 impl FramerApp {
     pub(super) fn workspace(&mut self, ui: &mut Ui) {
+        self.drain_deferred_pane_events();
+        // Keep legacy command/action surfaces wired to the active leaf while
+        // the layout remains the authoritative per-pane mode store.
+        if self.viewport_workspace.active_mode() != self.viewport_mode {
+            self.viewport_workspace.set_active_mode(self.viewport_mode);
+        }
+
         self.workspace_header(ui);
+        if self.viewport_workspace.active_mode() != self.viewport_mode {
+            self.viewport_workspace.set_active_mode(self.viewport_mode);
+        }
         if self.has_active_tool_options() {
             ui.add_space(4.0);
             self.tool_options_strip(ui);
         }
-        ui.add_space(8.0);
+        ui.add_space(6.0);
 
-        let canvas = Rect::from_min_size(ui.next_widget_position(), viewport_size(ui));
-        self.cursor_model = None;
-        let mut toolbar_anchor = None;
-        let mut axonometric_response = None;
-        let multiple_components_selected = self.selected_component_count() > 1;
-        let viewport_selection = if multiple_components_selected {
-            Selection::None
-        } else {
-            self.selected.clone()
-        };
-        // The draw tool's resolved snap for this frame, written back into tool
-        // state so the next frame can apply sticky hysteresis.
-        let mut snap_out: Option<SnapResult> = None;
-        // The active wall-endpoint drag (state owned here) and the event the plan
-        // emits for it this frame.
-        let active_wall_drag = if multiple_components_selected {
-            None
-        } else {
-            self.wall_drag.map(|drag| (drag.wall_index, drag.handle))
-        };
-        let mut wall_drag_out: Option<WallDragEvent> = None;
-        let click = match self.viewport_mode {
-            ViewportMode::Plan | ViewportMode::RoofPlan => {
-                let roof_plan_mode = self.viewport_mode == ViewportMode::RoofPlan;
-                let draw_tool = DrawWallPlanInput {
-                    active: self.draw_wall_tool.active,
-                    start: self.draw_wall_tool.start,
-                    snap_step: self.snap_step,
-                    previous_snap: self.draw_wall_tool.previous_snap,
-                };
-                draw_project_plan(
-                    ui,
-                    PlanView {
-                        model: &self.model,
-                        selected_wall: self.selected_wall,
-                        selection: &viewport_selection,
-                        layers: self.layers,
-                        draw_tool: &draw_tool,
-                        room_tool_active: self.room_tool_active,
-                        ceiling_tool_active: self.ceiling_tool_active,
-                        vault_tool_active: self.vault_tool_active,
-                        floor_tool_active: self.floor_tool_active,
-                        roof_plan_mode,
-                        active_wall_drag,
-                    },
-                    &mut self.plan_view,
-                    &mut self.cursor_model,
-                    &mut toolbar_anchor,
-                    &mut snap_out,
-                    &mut wall_drag_out,
-                )
-            }
-            ViewportMode::Elevation => {
-                let Some(wall) = self.model.walls.get(self.selected_wall) else {
-                    ui.label("No wall selected");
-                    return;
-                };
-                // Per-wall camera, shared across both elevation variants and
-                // remembered for the session (materializes on first view).
-                let camera = self.elevation_views.entry(wall.id.0.clone()).or_default();
-                if !self.workspace_mode.shows_generated_plan() {
-                    let selected_opening = match &viewport_selection {
-                        Selection::Opening(id) => Some(id.as_str()),
-                        _ => None,
-                    };
-                    let selected_dimension = match &viewport_selection {
-                        Selection::Dimension(id) => Some(id.as_str()),
-                        _ => None,
-                    };
-                    let first_anchor = self
-                        .dimension_tool
-                        .first_anchor
-                        .as_ref()
-                        .filter(|pick| pick.wall_index == self.selected_wall)
-                        .map(|pick| &pick.anchor);
-                    let second_anchor = self
-                        .dimension_tool
-                        .second_anchor
-                        .as_ref()
-                        .filter(|pick| pick.wall_index == self.selected_wall)
-                        .map(|pick| &pick.anchor);
-                    let active_opening_drag = self.opening_drag.as_ref().filter(|drag| {
-                        !multiple_components_selected && drag.wall_index == self.selected_wall
-                    });
-                    let wall_index = self.selected_wall;
-                    let elevation_response = draw_wall_design_elevation(
-                        ui,
-                        wall,
-                        DesignElevationView {
-                            selected_opening,
-                            selected_dimension,
-                            edit_handles_enabled: !multiple_components_selected,
-                            dimension_tool_active: self.dimension_tool.active,
-                            dimension_tool_axis: self.dimension_tool.axis,
-                            first_dimension_anchor: first_anchor,
-                            second_dimension_anchor: second_anchor,
-                            active_opening_drag,
-                        },
-                        camera,
-                    );
-                    if let Some(event) = elevation_response.opening_drag {
-                        self.handle_opening_drag_event(wall_index, event);
-                    }
-                    elevation_response.click.map(|click| match click {
-                        DesignElevationClick::Opening(opening_id) => ViewClick::Opening {
-                            wall_index,
-                            opening_id,
-                        },
-                        DesignElevationClick::Dimension(dimension_id) => ViewClick::Dimension {
-                            wall_index,
-                            dimension_id,
-                        },
-                        DesignElevationClick::DimensionAnchor(anchor) => {
-                            ViewClick::DimensionAnchor { wall_index, anchor }
-                        }
-                        DesignElevationClick::DimensionPlacement { axis, line_offset } => {
-                            ViewClick::DimensionPlacement {
-                                wall_index,
-                                axis,
-                                line_offset,
-                            }
-                        }
-                    })
-                } else {
-                    let Some(plan) = &self.project_plan else {
-                        ui.label("No valid framing plan");
-                        return;
-                    };
-                    let Some(wall_plan) = plan.wall_plan(&wall.id) else {
-                        ui.label("No generated framing for selected wall");
-                        return;
-                    };
-                    let selected_member = match &viewport_selection {
-                        Selection::Member {
-                            source_id,
-                            member_id,
-                        } if source_id == &wall.id.0 => Some(member_id.as_str()),
-                        _ => None,
-                    };
-                    let section_x = if self.show_section {
-                        section_position(wall, &viewport_selection)
+        let bounds = ui.available_rect_before_wrap();
+        ui.allocate_rect(bounds, Sense::hover());
+        let root = self.viewport_workspace.layout.root().clone();
+        let mut panes = Vec::new();
+        let mut splitters = Vec::new();
+        collect_docked_layout(&root, bounds, &mut Vec::new(), &mut panes, &mut splitters);
+
+        let t = design::active();
+        let mut commands = Vec::new();
+        for splitter in splitters {
+            let id = ui.id().with(("viewport-splitter", &splitter.path));
+            let response = ui.interact(splitter.rect, id, Sense::drag());
+            let cursor = match splitter.axis {
+                SplitAxis::Horizontal => CursorIcon::ResizeHorizontal,
+                SplitAxis::Vertical => CursorIcon::ResizeVertical,
+            };
+            let response = response.on_hover_cursor(cursor);
+            let divider_label = match splitter.axis {
+                SplitAxis::Horizontal => "Horizontal viewport split divider",
+                SplitAxis::Vertical => "Vertical viewport split divider",
+            };
+            response.widget_info(|| {
+                egui::WidgetInfo::slider(true, f64::from(splitter.ratio), divider_label)
+            });
+            let center = splitter.rect.center();
+            let line = match splitter.axis {
+                SplitAxis::Horizontal => [
+                    Pos2::new(center.x, splitter.bounds.top()),
+                    Pos2::new(center.x, splitter.bounds.bottom()),
+                ],
+                SplitAxis::Vertical => [
+                    Pos2::new(splitter.bounds.left(), center.y),
+                    Pos2::new(splitter.bounds.right(), center.y),
+                ],
+            };
+            ui.painter().line_segment(
+                line,
+                Stroke::new(
+                    if response.hovered() || response.dragged() {
+                        2.0
                     } else {
-                        None
-                    };
-                    let system = self.model.system_for(wall);
-                    draw_wall_elevation(
-                        ui,
-                        wall,
-                        &wall_plan.members,
-                        selected_member,
-                        section_x,
-                        BuildUpContext {
-                            system,
-                            materials: &self.model.materials,
-                        },
-                        camera,
-                    )
-                    .map(|member_id| ViewClick::Member {
-                        source_id: wall.id.0.clone(),
-                        member_id,
-                    })
-                }
-            }
-            ViewportMode::Axonometric => {
-                let (Some(plan), Some(physical_scene)) = (&self.project_plan, &self.physical_scene)
-                else {
-                    ui.label("No valid framing plan");
-                    return;
-                };
-                let selected_components = self.selected_components();
-                if !selected_components.is_empty()
-                    || self.component_visibility.isolation_mode().is_some()
-                    || self.component_visibility.has_hidden()
-                {
-                    toolbar_anchor = Some(Pos2::new(canvas.center().x, canvas.bottom() - 8.0));
-                }
-                let output = draw_project_axonometric(
-                    ui,
-                    AxonometricView {
-                        model: &self.model,
-                        plan,
-                        physical_scene,
-                        active_geometry_violation: self.active_geometry_violation.as_ref(),
-                        selected_components: &selected_components,
-                        component_visibility: &self.component_visibility,
-                        workspace_mode: self.workspace_mode,
-                        wall_display: self.layers.wall_display,
-                        gpu_target_format: self.gpu_target_format,
-                        gpu_depth_format: self.gpu_depth_format,
+                        1.0
                     },
-                    &mut self.view_3d,
-                );
-                let AxonometricResponse {
-                    response,
-                    primary_click,
-                    secondary_click,
-                } = output;
-                axonometric_response = Some((response, secondary_click));
-                primary_click
+                    if response.hovered() || response.dragged() {
+                        t.accent
+                    } else {
+                        t.divider
+                    },
+                ),
+            );
+            if response.dragged()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                let ratio = match splitter.axis {
+                    SplitAxis::Horizontal => {
+                        (pointer.x - splitter.bounds.left()) / splitter.bounds.width().max(1.0)
+                    }
+                    SplitAxis::Vertical => {
+                        (pointer.y - splitter.bounds.top()) / splitter.bounds.height().max(1.0)
+                    }
+                };
+                commands.push(PaneUiCommand::SetRatio(splitter.path, ratio));
+            } else if response.has_focus() {
+                let keyboard_delta = ui.input(|input| match splitter.axis {
+                    SplitAxis::Horizontal => {
+                        if input.key_pressed(egui::Key::ArrowLeft) {
+                            -0.05
+                        } else if input.key_pressed(egui::Key::ArrowRight) {
+                            0.05
+                        } else {
+                            0.0
+                        }
+                    }
+                    SplitAxis::Vertical => {
+                        if input.key_pressed(egui::Key::ArrowUp) {
+                            -0.05
+                        } else if input.key_pressed(egui::Key::ArrowDown) {
+                            0.05
+                        } else {
+                            0.0
+                        }
+                    }
+                });
+                if keyboard_delta != 0.0 {
+                    commands.push(PaneUiCommand::SetRatio(
+                        splitter.path,
+                        splitter.ratio + keyboard_delta,
+                    ));
+                }
             }
-            ViewportMode::Render => {
-                self.draw_project_render(ui);
-                None
-            }
-        };
-        self.draw_wall_tool.previous_snap = snap_out;
-        if let Some(event) = wall_drag_out {
-            self.handle_wall_drag_event(event);
         }
 
-        if let Some(click) = click {
-            self.context_menu_context = None;
-            let selection_op = ui.input(|input| {
-                if input.modifiers.command {
-                    SelectionOp::Toggle
-                } else {
-                    SelectionOp::Replace
+        let mut outputs = Vec::new();
+        if panes.is_empty() {
+            ui.painter().text(
+                bounds.center(),
+                Align2::CENTER_CENTER,
+                "All viewports are popped out",
+                FontId::proportional(design::text_size::HEADING),
+                t.text_muted,
+            );
+        } else {
+            for pane in panes {
+                if let Some(output) = self.draw_docked_pane(ui, pane, &mut commands) {
+                    outputs.push(output);
+                }
+            }
+        }
+
+        for output in outputs {
+            self.apply_docked_pane_output(ui, output);
+        }
+
+        for command in commands {
+            self.apply_pane_ui_command(command);
+        }
+        for id in self.viewport_workspace.take_retired_targets() {
+            gpu::release_target(ui.painter(), id.get());
+            crate::app::render::release_target(ui.painter(), id.get());
+        }
+        if self.viewport_workspace.has_deferred_panes() {
+            let snapshots = self
+                .viewport_workspace
+                .deferred_pane_modes()
+                .into_iter()
+                .map(|(id, mode)| (id, self.deferred_pane_snapshot(mode)))
+                .collect::<Vec<_>>();
+            self.viewport_workspace.show_deferred(ui.ctx(), &snapshots);
+        }
+        self.viewport_preset_dialog(ui.ctx());
+    }
+
+    fn drain_deferred_pane_events(&mut self) {
+        for event in self.viewport_workspace.drain_deferred_events() {
+            match event {
+                DeferredPaneEvent::Canvas(events) => {
+                    let id = self
+                        .viewport_workspace
+                        .layout
+                        .pane_ids()
+                        .into_iter()
+                        .find(|id| id.get() == events.target_id);
+                    if let Some(id) = id {
+                        self.apply_pane_canvas_events(id, *events);
+                    }
+                }
+                DeferredPaneEvent::Activate(id) => {
+                    self.apply_pane_ui_command(PaneUiCommand::Activate(id));
+                }
+                DeferredPaneEvent::Dock(id) => {
+                    if let Err(error) = self.viewport_workspace.set_popped_out(id, false) {
+                        self.file_status = Some(error.to_string());
+                    }
+                }
+                DeferredPaneEvent::SetMode { pane_id, mode } => {
+                    self.apply_pane_ui_command(PaneUiCommand::SetMode(pane_id, mode));
+                }
+                DeferredPaneEvent::Action { pane_id, action } => {
+                    self.apply_pane_ui_command(PaneUiCommand::Activate(pane_id));
+                    if self.action_enabled(action) {
+                        self.execute_action(action);
+                    } else if let Some(reason) = self.action_disabled_reason(action) {
+                        self.file_status = Some(reason.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    fn deferred_pane_snapshot(&self, viewport_mode: ViewportMode) -> Arc<OwnedPaneFrame> {
+        let selected_components = self.selected_components();
+        let frame = PaneFrame {
+            model: &self.model,
+            plan: self.project_plan.as_ref(),
+            physical_scene: self.physical_scene.as_ref(),
+            active_geometry_violation: self.active_geometry_violation.as_ref(),
+            selected_wall: self.selected_wall,
+            selection: &self.selected,
+            selected_components: &selected_components,
+            component_visibility: &self.component_visibility,
+            workspace_mode: self.workspace_mode,
+            layers: self.layers,
+            show_section: self.show_section,
+            render_settings: self.render_settings,
+            tools: PaneToolInput::disabled(),
+            gpu: PaneGpuInput {
+                target_format: self.gpu_target_format,
+                depth_format: self.gpu_depth_format,
+                compute_ok: self.gpu_compute_ok,
+                ray_query_ok: self.gpu_ray_query_ok,
+                ray_query_enabled: self.config.render.ray_query,
+            },
+        };
+        let snapshot = OwnedPaneFrame::from_frame(&frame);
+        let actions = PANE_PRESENTATION_ACTIONS
+            .into_iter()
+            .map(|action| PanePresentationAction {
+                action,
+                enabled: self.action_enabled_for_viewport(action, viewport_mode),
+                disabled_reason: self
+                    .action_disabled_reason_for_viewport(action, viewport_mode)
+                    .map(str::to_owned),
+            })
+            .collect();
+        Arc::new(snapshot.with_presentation_actions(actions))
+    }
+
+    fn draw_docked_pane(
+        &mut self,
+        ui: &mut Ui,
+        pane: DockedPaneRect,
+        commands: &mut Vec<PaneUiCommand>,
+    ) -> Option<DockedPaneOutput> {
+        let id = pane.id;
+        let active = self.viewport_workspace.active_id() == id;
+        let mode = self.viewport_workspace.layout.pane(id)?.config().mode();
+        let t = design::active();
+
+        if ui.ctx().input(|input| {
+            input
+                .pointer
+                .press_origin()
+                .is_some_and(|position| pane.rect.contains(position))
+        }) {
+            commands.push(PaneUiCommand::Activate(id));
+        }
+
+        ui.painter().rect_filled(pane.rect, 2.0, t.canvas);
+        ui.painter().rect_stroke(
+            pane.rect.shrink(0.5),
+            2.0,
+            if active {
+                Stroke::new(2.0, t.accent)
+            } else {
+                t.border_stroke()
+            },
+            StrokeKind::Inside,
+        );
+
+        let header = Rect::from_min_max(
+            pane.rect.min,
+            Pos2::new(
+                pane.rect.right(),
+                (pane.rect.top() + PANE_HEADER_HEIGHT).min(pane.rect.bottom()),
+            ),
+        );
+        ui.painter().rect_filled(
+            header,
+            2.0,
+            if active {
+                t.accent_soft
+            } else {
+                t.panel_header
+            },
+        );
+        ui.painter().line_segment(
+            [header.left_bottom(), header.right_bottom()],
+            t.soft_stroke(),
+        );
+
+        let mut header_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("viewport-pane-header", id.get()))
+                .max_rect(header.shrink2(Vec2::new(5.0, 3.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        header_ui.set_clip_rect(header);
+        header_ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let show_identity = header.width() >= 170.0;
+            if show_identity {
+                ui.label(
+                    RichText::new(format!("View {}", id.get()))
+                        .strong()
+                        .size(design::text_size::LABEL)
+                        .color(if active { t.text } else { t.text_secondary }),
+                );
+            }
+            let mut selected_mode = mode;
+            let mode_width = if show_identity {
+                72.0
+            } else {
+                (header.width() - 42.0).clamp(24.0, 72.0)
+            };
+            let mode_combo = ComboBox::from_id_salt(("viewport-pane-mode", id.get()))
+                .selected_text(viewport_mode_label(mode))
+                .width(mode_width)
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        ViewportMode::Plan,
+                        ViewportMode::RoofPlan,
+                        ViewportMode::Elevation,
+                        ViewportMode::Axonometric,
+                        ViewportMode::Render,
+                    ] {
+                        ui.selectable_value(
+                            &mut selected_mode,
+                            candidate,
+                            viewport_mode_label(candidate),
+                        );
+                    }
+                });
+            mode_combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ComboBox,
+                    true,
+                    format!("View {} mode", id.get()),
+                )
+            });
+            if selected_mode != mode {
+                commands.push(PaneUiCommand::SetMode(id, selected_mode));
+            }
+            let (actions, _) = MenuButton::new("•••").ui(ui, |ui| {
+                if ui.button("Split left / right").clicked() {
+                    commands.push(PaneUiCommand::Split(id, SplitAxis::Horizontal));
+                    ui.close();
+                }
+                if ui.button("Split top / bottom").clicked() {
+                    commands.push(PaneUiCommand::Split(id, SplitAxis::Vertical));
+                    ui.close();
+                }
+                if ui.button("Duplicate viewport").clicked() {
+                    commands.push(PaneUiCommand::Duplicate(id, SplitAxis::Horizontal));
+                    ui.close();
+                }
+                if ui.button("Pop out viewport").clicked() {
+                    commands.push(PaneUiCommand::PopOut(id));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Close viewport").clicked() {
+                    commands.push(PaneUiCommand::Remove(id));
+                    ui.close();
                 }
             });
-            self.handle_view_click_with_op(click, selection_op);
+            actions.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("View {} viewport actions", id.get()),
+                )
+            });
+            actions.on_hover_text("Split, duplicate, pop out, or close this viewport");
+        });
+
+        let canvas = Rect::from_min_max(
+            Pos2::new(
+                pane.rect.left() + 1.0,
+                (header.bottom() + 1.0).min(pane.rect.bottom()),
+            ),
+            Pos2::new(pane.rect.right() - 1.0, pane.rect.bottom() - 1.0),
+        );
+        if canvas.width() < 2.0 || canvas.height() < 2.0 {
+            return None;
         }
 
-        if let Some((response, secondary_click)) = axonometric_response {
+        let selected_components = self.selected_components();
+        let first_dimension_anchor = self
+            .dimension_tool
+            .first_anchor
+            .as_ref()
+            .filter(|pick| pick.wall_index == self.selected_wall)
+            .map(|pick| &pick.anchor);
+        let second_dimension_anchor = self
+            .dimension_tool
+            .second_anchor
+            .as_ref()
+            .filter(|pick| pick.wall_index == self.selected_wall)
+            .map(|pick| &pick.anchor);
+        let active_wall_drag = self.wall_drag.map(|drag| (drag.wall_index, drag.handle));
+        let frame = PaneFrame {
+            model: &self.model,
+            plan: self.project_plan.as_ref(),
+            physical_scene: self.physical_scene.as_ref(),
+            active_geometry_violation: self.active_geometry_violation.as_ref(),
+            selected_wall: self.selected_wall,
+            selection: &self.selected,
+            selected_components: &selected_components,
+            component_visibility: &self.component_visibility,
+            workspace_mode: self.workspace_mode,
+            layers: self.layers,
+            show_section: self.show_section,
+            render_settings: self.render_settings,
+            tools: PaneToolInput {
+                draw_wall_active: self.draw_wall_tool.active,
+                draw_wall_start: self.draw_wall_tool.start,
+                snap_step: self.snap_step,
+                room_tool_active: self.room_tool_active,
+                ceiling_tool_active: self.ceiling_tool_active,
+                vault_tool_active: self.vault_tool_active,
+                floor_tool_active: self.floor_tool_active,
+                dimension_tool_active: self.dimension_tool.active,
+                dimension_tool_axis: self.dimension_tool.axis,
+                first_dimension_anchor,
+                second_dimension_anchor,
+                active_opening_drag: self.opening_drag.as_ref(),
+                active_wall_drag,
+            },
+            gpu: PaneGpuInput {
+                target_format: self.gpu_target_format,
+                depth_format: self.gpu_depth_format,
+                compute_ok: self.gpu_compute_ok,
+                ray_query_ok: self.gpu_ray_query_ok,
+                ray_query_enabled: self.config.render.ray_query,
+            },
+        };
+        let runtime = self.viewport_workspace.runtime(id)?;
+        let mut runtime = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut canvas_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("viewport-pane-canvas", id.get()))
+                .max_rect(canvas)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        canvas_ui.set_clip_rect(canvas);
+        let output = draw_pane_canvas(
+            &mut canvas_ui,
+            id.get(),
+            mode,
+            frame,
+            if active {
+                PaneInteractionPolicy::DOCKED
+            } else {
+                PaneInteractionPolicy::DEFERRED
+            },
+            &mut runtime,
+        );
+        drop(runtime);
+
+        Some(DockedPaneOutput {
+            id,
+            mode,
+            canvas,
+            output,
+        })
+    }
+
+    fn apply_docked_pane_output(&mut self, ui: &mut Ui, output: DockedPaneOutput) {
+        let DockedPaneOutput {
+            id,
+            mode,
+            canvas,
+            output,
+        } = output;
+        let PaneCanvasOutput {
+            events,
+            axonometric_response,
+        } = output;
+        let toolbar_anchor = events.toolbar_anchor;
+        let secondary_click = events.secondary_click.clone();
+        self.apply_pane_canvas_events(id, events);
+
+        if let Some(response) = axonometric_response {
             if response.secondary_clicked() {
+                // Context composition reads the active view mode. Activate the
+                // source pane now (before the queued generic pointer activation)
+                // so an inactive 3D pane cannot inherit another pane's mode.
+                self.apply_pane_ui_command(PaneUiCommand::Activate(id));
                 self.prepare_viewport_context_menu(secondary_click);
             }
-
             let model = self
                 .context_menu_context
                 .as_ref()
@@ -337,42 +762,131 @@ impl FramerApp {
                     ui.close();
                     return;
                 };
-                chosen = context_menu::render_context_menu(ui, model, |id| {
+                chosen = context_menu::render_context_menu(ui, model, |action| {
                     context_menu::ContextActionState {
-                        enabled: self.action_enabled(id),
-                        disabled_reason: self.action_disabled_reason(id),
+                        enabled: self.action_enabled(action),
+                        disabled_reason: self.action_disabled_reason(action),
                     }
                 });
                 if chosen.is_some() {
                     ui.close();
                 }
             });
-            if let Some(id) = chosen {
-                self.execute_action(id);
+            if let Some(action) = chosen {
+                self.execute_action(action);
                 self.context_menu_context = None;
             } else if !response.context_menu_opened() {
                 self.context_menu_context = None;
             }
         }
 
-        if !matches!(
-            self.viewport_mode,
-            ViewportMode::Axonometric | ViewportMode::Render
-        ) {
-            self.canvas_view_controls(ui, canvas);
+        if self.viewport_workspace.active_id() == id {
+            if !matches!(mode, ViewportMode::Axonometric | ViewportMode::Render) {
+                self.canvas_view_controls(ui, canvas, id);
+            }
+            if let Some(anchor) = toolbar_anchor
+                && !self.command_search.open
+            {
+                self.canvas_context_toolbar(ui, anchor, canvas, id);
+            }
+            self.status_toast_overlay(ui, canvas.left_top() + Vec2::new(12.0, 12.0));
         }
-        if let Some(anchor) = toolbar_anchor
-            && !self.command_search.open
-        {
-            self.canvas_context_toolbar(ui, anchor, canvas);
-        }
-        self.status_toast_overlay(ui, canvas.left_top() + Vec2::new(12.0, 12.0));
     }
 
-    fn canvas_view_controls(&mut self, ui: &mut Ui, canvas: Rect) {
+    fn apply_pane_canvas_events(&mut self, id: PaneId, events: PaneCanvasEvents) {
+        debug_assert_eq!(events.target_id, id.get());
+        if self.viewport_workspace.active_id() == id {
+            self.cursor_model = events.cursor_model;
+            self.draw_wall_tool.previous_snap = events.snap;
+        }
+        if let Some(opening_drag) = events.opening_drag {
+            self.handle_opening_drag_event(opening_drag.wall_index, opening_drag.event);
+        }
+        if let Some(wall_drag) = events.wall_drag {
+            self.handle_wall_drag_event(wall_drag);
+        }
+        if let Some(click) = events.primary_click {
+            self.context_menu_context = None;
+            self.handle_view_click_with_op(click, events.selection_op);
+        }
+    }
+
+    fn apply_pane_ui_command(&mut self, command: PaneUiCommand) {
+        let result = match command {
+            PaneUiCommand::Activate(id) => {
+                let result = self.viewport_workspace.set_active(id);
+                if result.is_ok() {
+                    self.viewport_mode = self.viewport_workspace.active_mode();
+                    if self.viewport_mode != ViewportMode::Render {
+                        self.last_authoring_viewport = self.viewport_mode;
+                        self.last_authoring_pane = Some(id);
+                    }
+                }
+                result
+            }
+            PaneUiCommand::SetMode(id, mode) => {
+                let result = self.viewport_workspace.set_mode(id, mode);
+                if result.is_ok() {
+                    let _ = self.viewport_workspace.set_active(id);
+                    self.viewport_mode = mode;
+                    if mode != ViewportMode::Render {
+                        self.last_authoring_viewport = mode;
+                        self.last_authoring_pane = Some(id);
+                    }
+                }
+                result
+            }
+            PaneUiCommand::Split(id, axis) => {
+                self.viewport_workspace.split(id, axis).map(|new_id| {
+                    self.viewport_mode = self
+                        .viewport_workspace
+                        .layout
+                        .pane(new_id)
+                        .expect("new pane exists")
+                        .config()
+                        .mode();
+                })
+            }
+            PaneUiCommand::Duplicate(id, axis) => {
+                self.viewport_workspace.duplicate(id, axis).map(|new_id| {
+                    self.viewport_mode = self
+                        .viewport_workspace
+                        .layout
+                        .pane(new_id)
+                        .expect("duplicated pane exists")
+                        .config()
+                        .mode();
+                })
+            }
+            PaneUiCommand::PopOut(id) => self.viewport_workspace.set_popped_out(id, true),
+            PaneUiCommand::Remove(id) => {
+                let result = self.viewport_workspace.remove(id);
+                if result.is_ok() {
+                    // Removing the active leaf may select a sibling with a
+                    // different view type. Keep the legacy command-surface
+                    // mirror in sync so the next frame does not overwrite the
+                    // surviving pane's configuration.
+                    self.viewport_mode = self.viewport_workspace.active_mode();
+                    if self.viewport_mode != ViewportMode::Render {
+                        self.last_authoring_viewport = self.viewport_mode;
+                        self.last_authoring_pane = Some(self.viewport_workspace.active_id());
+                    }
+                }
+                result
+            }
+            PaneUiCommand::SetRatio(path, ratio) => {
+                self.viewport_workspace.layout.set_split_ratio(&path, ratio)
+            }
+        };
+        if let Err(error) = result {
+            self.file_status = Some(error.to_string());
+        }
+    }
+
+    fn canvas_view_controls(&mut self, ui: &mut Ui, canvas: Rect, pane_id: PaneId) {
         let t = design::active();
 
-        egui::Area::new(egui::Id::new("canvas-nav-cube"))
+        egui::Area::new(egui::Id::new(("canvas-nav-cube", pane_id.get())))
             .fixed_pos(Pos2::new(canvas.right() - 64.0, canvas.bottom() - 118.0))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
@@ -380,12 +894,15 @@ impl FramerApp {
                 draw_nav_cube(ui.painter(), rect, t);
                 let response = response.on_hover_text("View from the top — click for 3D");
                 if response.clicked() {
-                    self.viewport_mode = ViewportMode::Axonometric;
+                    self.apply_pane_ui_command(PaneUiCommand::SetMode(
+                        pane_id,
+                        ViewportMode::Axonometric,
+                    ));
                 }
             });
     }
 
-    fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2, canvas: Rect) {
+    fn canvas_context_toolbar(&mut self, ui: &mut Ui, anchor: Pos2, canvas: Rect, pane_id: PaneId) {
         let duplicate_opening = self.can_duplicate_selected_opening();
         let delete_selection = self.action_enabled(ActionId::DeleteSelection);
         let presentation_actions = !self.renderable_selected_components().is_empty()
@@ -417,7 +934,7 @@ impl FramerApp {
             anchor.y + 14.0
         };
         let y = preferred_y.clamp(min_y, max_y.max(min_y));
-        egui::Area::new(egui::Id::new("canvas-context-toolbar"))
+        egui::Area::new(egui::Id::new(("canvas-context-toolbar", pane_id.get())))
             .fixed_pos(Pos2::new(x, y))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
@@ -546,6 +1063,7 @@ impl FramerApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = design::space::SM;
                     self.viewport_tabs(ui);
+                    self.viewport_layout_menu(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(standards_name.as_str())
@@ -597,6 +1115,127 @@ impl FramerApp {
             };
             self.set_authoring_viewport_mode(mode);
         }
+    }
+
+    fn viewport_layout_menu(&mut self, ui: &mut Ui) {
+        let presets = self.viewport_workspace.presets.presets().to_vec();
+        let mut built_in = None;
+        let mut user_preset = None;
+        let mut delete_preset = None;
+        let mut save_current = false;
+
+        let (response, _) = MenuButton::new("Layouts").ui(ui, |ui| {
+            ui.set_min_width(210.0);
+            ui.strong("Built-in layouts");
+            for preset in BuiltInPreset::ALL {
+                if ui.button(preset.name()).clicked() {
+                    built_in = Some(preset);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.strong("My layouts");
+            if presets.is_empty() {
+                ui.label(
+                    RichText::new("No saved layouts")
+                        .italics()
+                        .color(design::active().text_muted),
+                );
+            } else {
+                for preset in &presets {
+                    ui.horizontal(|ui| {
+                        if ui.button(preset.name()).clicked() {
+                            user_preset = Some(preset.clone());
+                            ui.close();
+                        }
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Delete saved layout")
+                            .clicked()
+                        {
+                            delete_preset = Some(preset.name().to_owned());
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            ui.separator();
+            if ui.button("Save current layout…").clicked() {
+                save_current = true;
+                ui.close();
+            }
+        });
+        response.on_hover_text("Viewport tiling and saved layouts");
+
+        let applied_built_in = built_in.is_some();
+        let applied_user = user_preset.is_some();
+        let result = if let Some(preset) = built_in {
+            self.viewport_workspace.apply_builtin(preset)
+        } else if let Some(preset) = user_preset {
+            self.viewport_workspace.apply_user(&preset)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.file_status = Some(error.to_string());
+        } else if applied_built_in || applied_user {
+            self.viewport_mode = self.viewport_workspace.active_mode();
+        }
+        if let Some(name) = delete_preset {
+            self.viewport_workspace.delete_preset(&name);
+        }
+        if save_current {
+            self.viewport_workspace.save_preset_open = true;
+            if self.viewport_workspace.preset_name.is_empty() {
+                self.viewport_workspace.preset_name = "My layout".to_owned();
+            }
+        }
+    }
+
+    fn viewport_preset_dialog(&mut self, ctx: &egui::Context) {
+        if !self.viewport_workspace.save_preset_open {
+            return;
+        }
+        let mut open = true;
+        let mut name = self.viewport_workspace.preset_name.clone();
+        let mut save = false;
+        let mut cancel = false;
+        egui::Window::new("Save viewport layout")
+            .id(egui::Id::new("save-viewport-layout"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Name");
+                let response = ui.text_edit_singleline(&mut name);
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui
+                        .add_enabled(!name.trim().is_empty(), egui::Button::new("Save"))
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                });
+            });
+        open &= !cancel;
+        self.viewport_workspace.preset_name = name.clone();
+        if save {
+            match self.viewport_workspace.save_named_preset(&name) {
+                Ok(()) => {
+                    self.file_status = Some(format!("Saved viewport layout '{}'", name.trim()));
+                    open = false;
+                }
+                Err(error) => self.file_status = Some(error.to_string()),
+            }
+        }
+        self.viewport_workspace.save_preset_open = open;
     }
 
     fn has_active_tool_options(&self) -> bool {
@@ -865,6 +1504,129 @@ impl FramerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_up_layout_allocates_four_disjoint_exact_tile_rectangles() {
+        let mut ids = PaneIdGenerator::default();
+        let focus =
+            layout::ViewportLayout::focus(&mut ids, layout::PaneConfig::new(ViewportMode::Plan))
+                .unwrap();
+        let layout = BuiltInPreset::FourUp.instantiate(&focus, &mut ids).unwrap();
+        let bounds = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(800.0, 600.0));
+        let mut panes = Vec::new();
+        let mut splitters = Vec::new();
+
+        collect_docked_layout(
+            layout.root(),
+            bounds,
+            &mut Vec::new(),
+            &mut panes,
+            &mut splitters,
+        );
+
+        assert_eq!(panes.len(), 4);
+        assert_eq!(splitters.len(), 3);
+        for pane in &panes {
+            assert!(bounds.contains(pane.rect.left_top()));
+            assert!(bounds.contains(pane.rect.right_bottom()));
+            assert!(pane.rect.width() > 1.0);
+            assert!(pane.rect.height() > 1.0);
+        }
+        for (index, pane) in panes.iter().enumerate() {
+            for other in panes.iter().skip(index + 1) {
+                let overlap = pane.rect.intersect(other.rect);
+                assert!(overlap.width() <= 0.0 || overlap.height() <= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn popped_out_leaf_is_removed_from_docked_projection_without_losing_topology() {
+        let mut ids = PaneIdGenerator::default();
+        let focus =
+            layout::ViewportLayout::focus(&mut ids, layout::PaneConfig::new(ViewportMode::Plan))
+                .unwrap();
+        let mut layout = BuiltInPreset::PlanAnd3d
+            .instantiate(&focus, &mut ids)
+            .unwrap();
+        let popped = layout.pane_ids()[0];
+        layout
+            .pane_mut(popped)
+            .unwrap()
+            .config_mut()
+            .set_popped_out(true);
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 180.0));
+        let mut panes = Vec::new();
+        let mut splitters = Vec::new();
+
+        collect_docked_layout(
+            layout.root(),
+            bounds,
+            &mut Vec::new(),
+            &mut panes,
+            &mut splitters,
+        );
+
+        assert_eq!(layout.pane_count(), 2);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].rect, bounds);
+        assert!(splitters.is_empty());
+    }
+
+    #[test]
+    fn collapsed_popout_branch_preserves_nested_splitter_path() {
+        let mut ids = PaneIdGenerator::default();
+        let mut layout =
+            layout::ViewportLayout::focus(&mut ids, layout::PaneConfig::new(ViewportMode::Plan))
+                .unwrap();
+        let popped = layout.active_id();
+        let nested_first = layout
+            .duplicate(popped, SplitAxis::Horizontal, 0.25, &mut ids)
+            .unwrap();
+        layout
+            .duplicate(nested_first, SplitAxis::Vertical, 0.4, &mut ids)
+            .unwrap();
+        layout
+            .pane_mut(popped)
+            .unwrap()
+            .config_mut()
+            .set_popped_out(true);
+
+        let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 180.0));
+        let mut panes = Vec::new();
+        let mut splitters = Vec::new();
+        collect_docked_layout(
+            layout.root(),
+            bounds,
+            &mut Vec::new(),
+            &mut panes,
+            &mut splitters,
+        );
+
+        assert_eq!(panes.len(), 2);
+        assert_eq!(splitters.len(), 1);
+        assert_eq!(splitters[0].path, vec![SplitSide::Second]);
+        assert_eq!(splitters[0].axis, SplitAxis::Vertical);
+
+        layout.set_split_ratio(&splitters[0].path, 0.75).unwrap();
+        let LayoutNode::Split {
+            ratio: root_ratio,
+            second,
+            ..
+        } = layout.root()
+        else {
+            panic!("root should remain the collapsed horizontal split");
+        };
+        let LayoutNode::Split {
+            ratio: nested_ratio,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("second subtree should contain the visible vertical split");
+        };
+        assert_eq!(*root_ratio, 0.25);
+        assert_eq!(*nested_ratio, 0.75);
+    }
 
     #[test]
     fn view_3d_state_orbits_zooms_and_snaps() {

@@ -6,8 +6,9 @@
 >
 > **Status:** Implemented; in-app render settings landed 2026-07-09 ·
 > **Linked goal:** — · **Plan:** [2026-06-15-render-view-mode](../plans/2026-06-15-render-view-mode.md),
-> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md) ·
-> **Last reviewed:** 2026-07-10
+> [2026-07-08 view–workflow alignment](../plans/2026-07-08-view-workflow-alignment.md),
+> [2026-07-14 tiled viewport workspaces](../plans/2026-07-14-tiled-viewport-workspaces.md) ·
+> **Last reviewed:** 2026-07-14
 
 ## Goal
 
@@ -34,8 +35,8 @@ framer-core    (existing) — BuildingModel, walls, openings, materials, load_pr
 framer-solver  (existing) — framing generation (not required for the first slice)
 framer-render  (NEW, lib) — scene extraction + BVH + PBR materials + CPU path tracer
    └── bin: render (CLI, feature "cli", uses `image`) — headless PNG export
-framer-app     (existing) — ViewportMode::Render + WGSL compute path tracer that
-                            mirrors framer-render's math, fed by framer-render's Scene
+framer-app     (existing) — per-pane ViewportMode::Render + WGSL compute path tracer
+                            mirroring framer-render's math and consuming its Scene
 ```
 
 ### Single source of truth
@@ -120,10 +121,16 @@ to the existing 3D view's vantage.
 
 ## App integration (`framer-app`)
 
-1. `ViewportMode::Render` variant (mod.rs).
-2. Toolbar button in the VIEW group (panels.rs) — reuse `widgets::tool_button`.
-3. `draw_project_render()` (viewport.rs): build `framer_render::Scene`, derive
-   camera from `view_3d` + bounds, register a `PathTraceCallback`.
+1. `ViewportMode::Render` is a pane-selectable mode. The global Render workflow
+   action activates an existing Render pane or converts the active pane without
+   replacing the current split layout.
+2. `viewport::render::draw_project_render()` accepts explicit shared read-only
+   input plus the source pane's `View3dState` and `RenderPaneState`. Each pane owns
+   its CPU fallback, `GpuRenderState`, and motion cooldown; 3D and Render share a
+   camera only when they occupy the same pane.
+3. The renderer builds `framer_render::Scene`, derives the camera from the pane's
+   3D state + bounds, and registers a `PathTraceCallback` tagged with the stable
+   pane target id.
 4. `PathTraceCallback : egui_wgpu::CallbackTrait`:
    - `prepare`: upload/refresh scene storage buffers (triangles, BVH, materials)
      + per-frame uniforms (camera, sun, sky, frame index, exposure); record one
@@ -135,12 +142,15 @@ to the existing 3D view's vantage.
      target.
    - Progressive accumulation: `request_repaint()` until `frame == max_spp`;
      reset `frame = 0` when the camera/scene changes (orbit, zoom, model edit).
-5. Resources (compute pipeline, blit pipeline, scene buffers, accumulator,
-   sample counter) cached in `egui_wgpu::CallbackResources`, keyed and
-   invalidated on target-format change and scene-hash change.
+5. Pipelines, scene buffers, accumulator, and sample counter live in
+   `egui_wgpu::CallbackResources` inside a pane-keyed resource store. Repeated
+   Render panes cannot overwrite one another; target-local resources invalidate
+   on target-format/scene/resolution/camera changes and are removed when the pane
+   or layout is retired.
 
-GPU is an enhancement layer: if `gpu_target_format` is `None`, the Render tab
-shows a clear "renderer unavailable" message (matching existing 3D behavior).
+GPU is an enhancement layer: if compute or a GPU target is unavailable, each
+Render pane falls back to its own background-thread CPU renderer. Interactive 3D
+still reports unavailable when no GPU target exists.
 
 ## Headless CLI (`framer-render` bin `render`, feature `cli`)
 
@@ -236,8 +246,9 @@ What shipped:
 - **Integration** (`PathTraceCallback : egui_wgpu::CallbackTrait`): compute
   dispatch recorded into egui's encoder in `prepare` (scoped so the pass drops
   before `finish`), fullscreen blit in `paint`. Pipelines/buffers cached in
-  `CallbackResources`, rebuilt on target-format / scene-hash / resolution change;
-  progressive accumulation via `request_repaint`, reset on camera/model change.
+  `CallbackResources`; target-local buffers live in a pane-keyed map and rebuild
+  on target-format / scene-hash / resolution change. Progressive accumulation
+  uses `request_repaint` and resets on that pane's camera/model change.
 - **Experimental ray-query backend**: when
   [app runtime configuration](app-configuration.md) enables `render.ray_query`
   and the active native `wgpu` adapter exposes `EXPERIMENTAL_RAY_QUERY`, the app
@@ -273,7 +284,25 @@ today fills with `..RenderOptions::default()`:
   including golden images and the GPU↔CPU parity tests — is unchanged.
 - The CPU fallback and the GPU compute path receive **identical options**, and a
   settings change joins the existing camera/scene-change accumulation reset so
-  the progressive image restarts cleanly.
+  every visible Render pane's progressive image restarts cleanly. Lighting stays
+  shared workspace context rather than diverging per pane.
+
+## Tiled and deferred Render panes — shipped (2026-07-14)
+
+Render is no longer a singleton canvas even though it remains a global output
+workflow context. A split layout may contain multiple Render panes or mix Render
+with Plan/Elevation/3D. Every logical pane has a stable session id, independent
+camera/progressive runtime, pane-qualified egui/GPU callback identity, and exact
+allocated rectangle; two same-scene panes at different sizes or angles cannot
+share accumulation buffers accidentally.
+
+Popped-out Render panes use the same per-pane runtime through egui's deferred
+native-viewport bridge, so docking does not reset or redirect another pane's work.
+The child reads an owned document/presentation snapshot and returns typed events
+to the root app. Closing/replacing panes schedules cleanup for both interactive 3D
+and path-trace callback resources. User layout presets may snapshot a sanitized
+3D/Render pose, but never store live CPU workers, GPU buffers, accumulation, or 2D
+camera state. See [Tiled Viewport Workspaces](viewport-layouts.md).
 
 ## Risks & mitigations
 

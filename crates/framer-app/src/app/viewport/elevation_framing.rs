@@ -39,7 +39,7 @@ pub(super) fn draw_wall_elevation(
     camera: &mut View2dState,
 ) -> Option<String> {
     let available = ui.available_size();
-    let desired = Vec2::new(available.x.max(420.0), (available.y - 16.0).max(420.0));
+    let desired = Vec2::new(available.x.max(1.0), (available.y - 16.0).max(1.0));
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 

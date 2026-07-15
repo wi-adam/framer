@@ -10,8 +10,9 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented · **Linked goal:** G-003 (Viewport Interaction) ·
-> **Plan:** [2026-06-19-visual-layering.md](../plans/2026-06-19-visual-layering.md) ·
-> **Last reviewed:** 2026-07-10
+> **Plan:** [2026-06-19-visual-layering.md](../plans/2026-06-19-visual-layering.md),
+> [2026-07-14 tiled viewport workspaces](../plans/2026-07-14-tiled-viewport-workspaces.md) ·
+> **Last reviewed:** 2026-07-14
 
 ## Intent / Purpose
 
@@ -26,8 +27,8 @@ controllable presentation surfaces over the authored model.
 
 ## Requirements & behavior
 
-- A **wall display mode** with three mutually exclusive states, shared by the Plan
-  and 3D views (one setting, not per-view):
+- A **wall display mode** with three mutually exclusive states, shared by every Plan
+  and 3D pane (one workspace setting, not per-pane):
   - **Outline** — each wall is a single centerline (2D) / envelope edge outline
     (3D); no thickness fill, no color. **The default.**
   - **Width** — wall thickness without color: 2D draws two parallel **dashed** face
@@ -72,8 +73,8 @@ controllable presentation surfaces over the authored model.
 - **Wall display is a 3-state mode, not three independent toggles.** The three looks
   are alternatives for the same wall body, so a mode prevents nonsensical
   combinations.
-- **One shared mode for Plan + 3D**, not a per-view setting. Rationale: a single
-  mental model; the user picks "how walls look" once.
+- **One shared mode for all Plan + 3D panes**, not a per-pane setting. Rationale:
+  a single mental model; the user picks "how walls look" once.
 - **Session-only, never persisted.** Layer state is presentation, not authored
   intent — it is re-initialized to defaults each launch, like `grid`/`ortho`. It is
   never written to `.framer`. (Alternative — persisting view prefs — rejected for
@@ -90,9 +91,8 @@ controllable presentation surfaces over the authored model.
 
 - **State:** `WallDisplay` (enum) and `ViewLayers` (struct) in
   `framer-app/src/app/mod.rs`; `FramerApp.layers: ViewLayers` replaces the former
-  `grid: bool`. Threaded into the view bundles in
-  `framer-app/src/app/viewport/mod.rs` (`PlanView.layers`,
-  `AxonometricView.wall_display`).
+  `grid: bool`. `viewport/mod.rs` threads it into each frame's shared `PaneFrame`;
+  `pane_view.rs` then passes the same value to every Plan/3D renderer.
 - **UI:** the Layers popover is a `menu_button` in the status bar
   (`framer-app/src/app/panels.rs`), reusing `widgets::toggle_switch` and
   `ui.selectable_value`.
@@ -128,7 +128,7 @@ controllable presentation surfaces over the authored model.
 ## Out of scope (YAGNI)
 
 - Persisting view preferences across launches.
-- Per-view (independent Plan vs 3D) wall display modes.
+- Per-pane (or independent Plan vs 3D) wall display modes.
 - Breaking the 2D dashed faces / 3D outline edges at openings.
 - Toggling members, openings, dimensions, or the ground as separate layers.
 - A general user-defined layer system (named layers, per-element assignment).

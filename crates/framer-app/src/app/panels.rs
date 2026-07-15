@@ -3773,13 +3773,24 @@ impl FramerApp {
 
     fn status_zoom_percent(&self) -> Option<u32> {
         match self.viewport_mode {
-            ViewportMode::Plan | ViewportMode::RoofPlan => Some(self.plan_view.zoom_percent()),
+            ViewportMode::Plan | ViewportMode::RoofPlan => Some(
+                self.viewport_workspace
+                    .lock_active()
+                    .plan_view
+                    .zoom_percent(),
+            ),
             ViewportMode::Elevation => Some(
                 self.model
                     .walls
                     .get(self.selected_wall)
-                    .and_then(|wall| self.elevation_views.get(&wall.id.0))
-                    .map_or(100, |camera| camera.zoom_percent()),
+                    .and_then(|wall| {
+                        self.viewport_workspace
+                            .lock_active()
+                            .elevation_views
+                            .get(&wall.id.0)
+                            .map(|camera| camera.zoom_percent())
+                    })
+                    .unwrap_or(100),
             ),
             ViewportMode::Axonometric | ViewportMode::Render => None,
         }

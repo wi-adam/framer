@@ -33,7 +33,7 @@ small buildings, garages, decks, and wood framed BBQ islands.
   auditing.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
-- `crates/framer-app`: native desktop UI and viewport.
+- `crates/framer-app`: native desktop UI and tiled viewport workspace.
 
 The app may become visually rich over time, but core modeling and solving must
 stay independent of the GUI so it can be tested, exported, scripted, and reused
@@ -52,10 +52,12 @@ end-state interaction model.
 2. **Derived framing model**: studs, plates, headers, joists, rafters,
    sheathing zones, connector callouts, and blocking.
 3. **Presentation model**: drawings, annotations, schedules, BOM tables, exports,
-   and viewport geometry.
+   viewport geometry, split layouts, and per-pane camera/render runtimes.
 
 Only the first layer should be directly editable by users. The second and third
 layers are regenerated unless the product later adds explicit override records.
+Named viewport-layout presets are an app-local preference over presentation state,
+not project data; they never enter `.framer`.
 
 ## Mode Contract
 
@@ -79,6 +81,31 @@ deterministic generated state, equivalent to a slicer output derived from a 3D
 printing model. If Framer later allows manual plan adjustments, they should be
 stored as explicit intent constraints or override records that the solver can
 validate and explain.
+
+## Viewport Workspace Contract
+
+The desktop workspace presents the same authored model and regenerated plan through
+one to sixteen viewport panes. Docked panes form a resizable horizontal/vertical
+split tree. Every leaf has a monotonic session `PaneId`, a selected view type, and
+its own 2D/3D cameras plus CPU/GPU progressive-render runtime. Repeating Plan, 3D,
+or Render therefore creates another presentation of the project rather than an
+alias of one global camera or accumulator.
+
+One pane is active for global view commands, workflow soft defaults, diagnostic
+focus, tool routing, and status readouts. Authored intent, generated framing,
+selection, component visibility/isolation, active level, view layers, and render
+lighting remain shared. The split topology and live runtimes are disposable;
+explicitly named layout presets persist only their validated presentation subset
+through app-local eframe storage. See the durable
+[Tiled Viewport Workspaces spec](specs/viewport-layouts.md).
+
+A pane may be shown in an egui deferred native viewport. The child callback owns
+only an immutable document snapshot and the pane's shared presentation-runtime
+handle. Selection and view-scoped actions return as typed, pane-tagged events to
+the root `FramerApp`, which remains the sole owner of model/history mutation. A
+native close request docks the pane; deleting it remains an explicit root-window
+operation. Interactive 3D and path-trace callback caches are keyed by pane identity
+and released when a pane or layout is retired.
 
 Authored driving dimensions are checked through a generic linear constraint
 layer in `framer-core`. Walls currently adapt their local length and opening
@@ -155,13 +182,14 @@ multi-wall CAD shell:
 - `framer-solver` deterministically generates per-wall plates, common studs,
   king studs, jack studs, headers, rough sills, cripples, join corner posts,
   grouped whole-project BOM rows, diagnostics, and per-member rule provenance.
-- `framer-app` exposes a CAD-oriented shell with explicit Design and Plan
-  workspace modes; a model tree for levels, wall segments, openings, joins, and
+- `framer-app` exposes a CAD-oriented shell with explicit Design, Plan, and Render
+  command contexts; a model tree for levels, wall segments, openings, joins, and
   generated framing; an inspector for selectable objects; catalog placement for
   doors, windows, garage doors, furnishings, and MEP objects; diagnostics; a BOM
-  table; a whole-shell plan viewport; selected-wall elevation view; and a
-  WGPU-backed 3D viewport with
-  selectable wall, opening, and generated-member solids.
+  table; and a tiled viewport workspace that can mix or repeat Plan, Roof,
+  Elevation, WGPU-backed 3D, and path-traced Render panes. Panes have independent
+  cameras/render runtimes and may be deferred into native windows while sharing
+  project selection and presentation context.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
 
@@ -194,8 +222,10 @@ The current v13 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
 (including site context, standards packs, the material library, construction
 systems, furnishing/MEP families, and placed object instances); derived framing
-plans, cached view state, and exports remain disposable outputs that are
-regenerated from the project.
+plans, live viewport layouts/cameras/render accumulators, and exports remain
+disposable outputs that are regenerated from the project. Named viewport-layout
+presets are persisted separately as app-local preferences and contain no project
+selection, 2D camera, or authored-model state.
 
 Binary caches are acceptable only as disposable acceleration data. They must not
 be the only source of truth for a design.

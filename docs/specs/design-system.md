@@ -7,8 +7,9 @@
 > **Status:** Implemented (evolving) · **Linked goal:** G-011 (CAD Workspace UX) ·
 > **Plan:** [2026-07-07 UI/UX hardening](../plans/2026-07-07-ui-ux-hardening.md),
 > [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
-> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
-> **Last reviewed:** 2026-07-13
+> [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md),
+> [2026-07-14 tiled viewport workspaces](../plans/2026-07-14-tiled-viewport-workspaces.md) ·
+> **Last reviewed:** 2026-07-14
 
 ## Goal
 
@@ -144,6 +145,13 @@ a style preference:
   view's content under its own title.
 - **Stable chrome.** Chrome heights do not change when switching workflow tabs, and
   transient status (toasts/chips) overlays the canvas rather than reflowing panels.
+- **Tiled viewport hierarchy.** The workspace-level view shortcuts and Layouts menu
+  sit above the split tree. Each docked leaf has one compact fixed-height header with
+  its pane identity, view chooser, and split/duplicate/pop-out/close controls. The
+  active leaf uses the normal accent focus treatment; inactive leaves remain legible
+  without competing with selection color. Splitters use precise one-pixel rules with
+  a larger invisible drag target, and every pane draws inside its exact allocated
+  rectangle rather than enforcing a legacy single-canvas minimum.
 - **Opaque elevation.** Menus, popups, and the command palette render fully opaque
   with a shadow; underlying content never bleeds through. Escape dismisses the
   topmost transient surface first.
@@ -170,20 +178,22 @@ a style preference:
 - **App / quick-access bar:** dark strip — wordmark · project/document controls ·
   save/undo/redo · command search · profile/code/help/theme.
 - **Workflow command strip:** compact tabbed command panels (`Design`, `Frame`,
-  `Openings`, `Roofs`, `Annotate`, `Inspect`, `Plan`), small icon buttons,
+  `Openings`, `Roofs`, `Annotate`, `Inspect`, `Render`, `Plan`), small icon buttons,
   flyouts for variants, custom framing icons where Lucide is too generic, and
   contextual tabs/options while a tool is active.
-- **Workspace/view bar:** current workspace, view tabs, level selector, display
-  preset, and view-layout controls close to the viewport.
+- **Workspace/view bar:** active-pane authoring view shortcuts, Layouts menu, level
+  selector, and shared display controls above the split tree; compact pane headers
+  carry per-pane view and leaf-layout operations.
 - **Model Browser:** search + filter icon, dense disclosure tree, independent
   per-component visibility eyes, multi-selected authored/generated rows, Corners /
   Catalog sections, and compact footer icons.
 - **Property Manager / Inspector:** dense field rows, accept/cancel affordances for
   active tools, collapsible sections (Dimensions, Placement, Wall Type, Materials,
   Tags), and wall-type swatches.
-- **Canvas:** model-first drawing area; warm drawing-paper surface, rulers, major/
-  minor technical grid, authored construction highlights, marking menu / compact
-  context toolbar on selection, axis gizmo, ViewCube, scale bar, navigation widget.
+- **Canvas:** one or more model-first drawing panes; warm drawing-paper surface,
+  rulers, major/minor technical grid, authored construction highlights, marking
+  menu / compact context toolbar on the active selection source, axis gizmo,
+  pane-qualified ViewCube, scale bar, and navigation widget.
 - **Status / view-control bar:** `Level ▾` · X/Y live readout · `Snap ▾` ·
   Grid/Ortho toggles · layer/display controls · diagnostics counters that open the
   diagnostics popover · live zoom.

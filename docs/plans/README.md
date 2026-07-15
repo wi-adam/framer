@@ -20,3 +20,4 @@ New plan? Copy [`../templates/plan-template.md`](../templates/plan-template.md).
 | [2026-07-05 — Level-filtered regions](2026-07-05-level-filtered-regions.md) | [Design System](../specs/design-system.md) |
 | [2026-07-07 — UI/UX hardening](2026-07-07-ui-ux-hardening.md) | [Design System](../specs/design-system.md), [Command Surfaces](../specs/command-surfaces.md) |
 | [2026-07-08 — View–workflow alignment](2026-07-08-view-workflow-alignment.md) | [Command Surfaces](../specs/command-surfaces.md), [Render View Mode](../specs/render-view.md) |
+| [2026-07-14 — Tiled viewport workspaces](2026-07-14-tiled-viewport-workspaces.md) | [Tiled Viewport Workspaces](../specs/viewport-layouts.md) |
