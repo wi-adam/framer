@@ -8,7 +8,7 @@
 > (CAD Workspace UX) · **Plan:**
 > [2026-07-12 component visibility and isolation](../plans/2026-07-12-component-visibility-and-isolation.md),
 > [2026-07-13 viewport context menus](../plans/2026-07-13-viewport-context-menus.md) ·
-> **Last reviewed:** 2026-07-13
+> **Last reviewed:** 2026-07-14
 
 ## Intent / Purpose
 
@@ -88,20 +88,22 @@ workflow-strip chrome.
   generated Plan views. The path-traced Render workspace is not silently
   filtered and exposes no isolation commands in this slice.
 - These controls are presentation state. They do not mutate authored intent,
-  produce undo entries, change solver output, or change `.framer` schema v13.
-  The complete component selection does participate in existing undo snapshot
-  restoration alongside the primary selection.
+  change solver output, or change `.framer` schema v13. Explicit component
+  visibility and isolation actions do produce session-only undo entries. Undo
+  snapshots restore the complete visibility/isolation state and component
+  selection alongside authored intent without persisting either presentation
+  state.
 
 ## Command homes
 
 | Command | Primary surface | Secondary surface | Enabled context | Undo |
 | --- | --- | --- | --- | --- |
-| Toggle component visibility | Model Browser eye | — | Component rendered in active interactive 3-D workspace | No |
-| Isolate — Dim others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | No |
-| Isolate — Hide others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | No |
-| Exit Isolation | 3-D selection context menu | Context toolbar / command search | Active isolation | No |
-| Hide selected | 3-D selection context menu | Context toolbar / command search | Component selection | No |
-| Show all components | Model Browser / selection context menu | Command search | Any hidden override | No |
+| Toggle component visibility | Model Browser eye | — | Component rendered in active interactive 3-D workspace | Yes |
+| Isolate — Dim others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | Yes |
+| Isolate — Hide others | 3-D selection context menu | Context toolbar / command search | Interactive 3-D + component selection | Yes |
+| Exit Isolation | 3-D selection context menu | Context toolbar / command search | Active isolation | Yes |
+| Hide selected | 3-D selection context menu | Context toolbar / command search | Component selection | Yes |
+| Show all components | Model Browser / selection context menu | Command search | Any hidden override | Yes |
 
 ## Decisions (locked)
 
@@ -117,8 +119,10 @@ workflow-strip chrome.
 - **Hidden means absent from picking.** Invisible geometry cannot win hit tests.
 - **Isolation is a frozen snapshot.** Selection remains useful inside an
   isolated scene and does not make the scene composition jump after every click.
-- **Presentation-only state.** Visibility is not construction intent and does
-  not belong in `BuildingModel`, `ProjectFramePlan`, or `.framer`.
+- **Presentation-only but undoable state.** Visibility is not construction intent
+  and does not belong in `BuildingModel`, `ProjectFramePlan`, or `.framer`.
+  Recording explicit visibility actions in ephemeral app history does not make
+  the state persistent document data.
 - **Interactive 3-D first.** Path-traced Render needs separate component-aware
   scene/BVH and CPU/GPU material work; it is not approximated here.
 - **Selection-preserving secondary click.** Opening a menu on an already-selected
@@ -131,7 +135,8 @@ workflow-strip chrome.
 - `crates/framer-app/src/app/mod.rs` owns the ordered component selection and
   session visibility/isolation state. Selection mutation is centralized so
   viewport, browser, diagnostic, creation, and workspace-transition paths use
-  the same replace/toggle/clear rules.
+  the same replace/toggle/clear rules. Explicit visibility mutations share one
+  history wrapper and the app snapshot includes the complete visibility state.
 - `crates/framer-app/src/app/panels.rs` renders multi-selection state and the
   model-browser component rows. Shared row helpers expose separate selection and
   accessible `Show …` / `Hide …` eye responses.

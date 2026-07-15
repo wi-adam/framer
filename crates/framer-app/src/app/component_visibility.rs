@@ -188,7 +188,7 @@ impl IsolationMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IsolationState {
     mode: IsolationMode,
     targets: Vec<ComponentKey>,
@@ -201,7 +201,7 @@ pub(super) enum ComponentAppearance {
     Hidden,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ComponentVisibility {
     hidden: BTreeSet<ComponentKey>,
     isolation: Option<IsolationState>,

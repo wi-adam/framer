@@ -8,6 +8,7 @@
 use eframe::egui;
 use framer_core::{FramingDefaults, Length, OpeningKind, Point2, Wall};
 
+use super::actions::ActionId;
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
 use super::{FramerApp, RoofForm, Selection, ViewClick, ViewportMode};
@@ -112,6 +113,37 @@ fn undo_then_redo_round_trips_the_model() {
     app.redo();
 
     assert_eq!(app.model, edited, "redo should restore the post-edit model");
+}
+
+#[test]
+fn interleaved_visibility_and_model_undos_rebuild_only_the_model_step() {
+    let mut app = FramerApp::default();
+    let original = app.model.clone();
+
+    app.edit("Rename wall", rename_first_wall);
+    let edited = app.model.clone();
+    app.viewport_mode = ViewportMode::Axonometric;
+    app.execute_action(ActionId::IsolateDim);
+    assert!(app.component_visibility.isolation_mode().is_some());
+
+    // Make solver activity observable instead of relying on deterministic plan
+    // equality, which would pass whether or not `rebuild()` ran.
+    app.project_plan = None;
+
+    app.undo();
+    assert_eq!(app.model, edited);
+    assert_eq!(app.component_visibility.isolation_mode(), None);
+    assert!(
+        app.project_plan.is_none(),
+        "presentation-only undo must not invoke the solver"
+    );
+
+    app.undo();
+    assert_eq!(app.model, original);
+    assert!(
+        app.project_plan.is_some(),
+        "the interleaved model undo must regenerate derived state"
+    );
 }
 
 #[test]

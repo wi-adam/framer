@@ -4,27 +4,27 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Implemented · **Linked goal:** —
+> **Status:** Implemented · **Linked goal:** — · **Last reviewed:** 2026-07-14
 
 ## Goal
 
-Give Framer proper, sustainable undo/redo for authored design edits. Today the
-app has no history of any kind: every mutation writes straight into the live
-model and is irreversible. We want a single, explicit edit boundary that every
-mutation flows through, so that undo/redo is correct by construction and future
-edits inherit it for free — not a bolt-on that each new feature has to remember
-to wire up.
+Give Framer proper, sustainable undo/redo for authored design edits and explicit
+component visibility/isolation actions. A small set of app-owned edit boundaries
+must make both construction changes and reversible presentation commands correct
+by construction, without persisting transient view state in the project.
 
 ## Decisions (from product owner)
 
-- **Mechanism:** whole-document **snapshot** of `BuildingModel`, behind an
-  explicit `edit(label, |m| …)` transaction boundary. Not a command/inverse
-  system. (Snapshots are correct-by-construction here — no hand-written inverses,
+- **Mechanism:** whole-state **snapshots** containing `BuildingModel` and the
+  reversible app presentation fields, behind explicit authored-edit and
+  component-visibility transaction boundaries. Not a command/inverse system.
+  (Snapshots are correct-by-construction here — no hand-written inverses,
   solver-safe — and cheap at Framer's KB-scale documents.)
-- **Restore scope:** the document **model + complete component selection**
-  (`selected`, `selected_wall`, ordered `component_selection`). Per-component
-  visibility/isolation, camera, view mode, and workspace mode are *not* restored —
-  a stable viewpoint that re-focuses the edited object is the standard CAD feel.
+- **Restore scope:** the document **model + complete component selection +
+  component visibility/isolation** (`selected`, `selected_wall`, ordered
+  `component_selection`, `component_visibility`). Camera, view mode, and
+  workspace mode are *not* restored — a stable viewpoint that re-focuses the
+  affected object is the standard CAD feel.
 - **Load / New / Reset:** **clear** the history (Open/New/Reset start fresh; you
   cannot undo across a file load).
 - **UI surface:** keyboard shortcuts (`⌘Z` / `⌘⇧Z`, plus `Ctrl` variants and
@@ -68,10 +68,11 @@ free with a `model != before.model` guard.
 
 From `docs/architecture.md` and `docs/project-files.md`:
 
-- **Three-layer separation.** Undo/redo tracks **only** the authored
-  `BuildingModel`. It never snapshots or restores derived framing
-  (`project_plan`) or render/viewport caches — `rebuild()` regenerates those from
-  the model after every restore.
+- **Three-layer separation.** Undo/redo snapshots authored `BuildingModel` plus
+  explicitly reversible app presentation state. It never snapshots or restores
+  derived framing (`project_plan`) or render/viewport caches. `rebuild()`
+  regenerates derived state after a model restore; presentation-only restores do
+  not re-run the solver.
 - **History is presentation/ephemeral state.** It lives entirely in
   `framer-app`, never in `framer-core`, and is never written to `.framer`. (The
   on-disk schema rejects unknown top-level keys via `deny_unknown_fields`, so it
@@ -88,21 +89,22 @@ From `docs/architecture.md` and `docs/project-files.md`:
 ```
 crates/framer-core    (unchanged) — BuildingModel is the document; no history here
 crates/framer-app
-  └── app/history.rs  (NEW) — History, Snapshot, HistoryEntry: the undo/redo engine
-  └── app/mod.rs       — FramerApp gains `history: History`; edit()/undo()/redo();
-                         existing handlers route through edit(); rebuild() unchanged
-  └── app/panels.rs    — toolbar Undo/Redo buttons; inspector capture+settle
+  └── app/history.rs  — generic History and HistoryEntry undo/redo engine
+  └── app/mod.rs      — Snapshot; authored/visibility edit wrappers; undo()/redo()
+  └── app/panels.rs   — toolbar Undo/Redo, inspector capture, component eyes
 ```
 
 ### Data structures (`app/history.rs`)
 
 ```rust
-/// One restorable point: the authored document plus the transient selection
-/// we restore alongside it. NOT serialized; lives only in memory.
+/// One restorable point: the authored document plus reversible app presentation
+/// state. NOT serialized; lives only in memory.
 struct Snapshot {
     model: BuildingModel,
     selected: Selection,
     selected_wall: usize,
+    component_selection: ComponentSelection,
+    component_visibility: ComponentVisibility,
 }
 
 /// A prior Snapshot paired with the label of the action that moved *away* from
@@ -121,8 +123,8 @@ pub(super) struct History {
 }
 ```
 
-`FramerApp` gains exactly one field: `history: History`. `Selection` already
-derives `Clone`.
+`FramerApp` owns `history: History<Snapshot>`; the component selection and
+visibility values in each snapshot are app-only clones.
 
 **Label semantics.** An undo-stack entry holds the state *before* an action,
 tagged with that action's name. "Undo" restores `undo.last()` and the button
@@ -131,7 +133,7 @@ same label, so "Redo" reads symmetrically.
 
 ### Edit API surface
 
-Three entry patterns, matched to how each mutation actually arrives, all
+Four entry patterns, matched to how each mutation actually arrives, all
 funneling into `History`:
 
 **(a) Discrete actions — `edit()` wrapper.** For single-shot handlers
@@ -185,23 +187,37 @@ cost, not a per-frame hot path.)
 > pointer-*release* frame, when `any_down()` is already false. See
 > `should_capture_edit_base` in `panels.rs`.
 
+**(d) Explicit component visibility — `edit_component_visibility()` wrapper.**
+Model Browser eyes plus Isolate, Exit Isolation, Hide Selected, and Show All
+capture the full pre-action snapshot, mutate only `ComponentVisibility`, and
+record a human-readable label when that state actually changed. This keeps
+presentation actions in the same linear undo/redo stream without routing them
+through authored-model `edit()` or rebuilding solver output.
+
 ### Performing undo / redo
 
 ```rust
 fn undo(&mut self) {
-    self.history.settle_force();          // commit any open transaction first
-    if let Some(entry) = self.history.pop_undo(self.snapshot()) {
-        self.restore(entry.snapshot);     // swap model + selected + selected_wall
-        self.rebuild();                   // re-solve; regenerate derived state
+    self.settle_history(false);           // commit any open transaction first
+    let current = self.snapshot();
+    if let Some(previous) = self.history.undo(current) {
+        let model_changed = self.model != previous.model;
+        self.restore(previous);           // restore model + reversible app state
+        if model_changed {
+            self.rebuild();               // re-solve only authored-intent changes
+        } else {
+            self.prune_component_presentation();
+        }
     }
 }
 ```
 
-`pop_undo` pushes the *current* state onto `redo` (with the popped entry's
-label) and returns the entry. `redo()` is the mirror. `restore()` reassigns
-`model`, `selected`, `selected_wall` only — camera/view/workspace untouched.
-`rebuild()` already clamps `selected_wall` when out of range (`mod.rs:230`), so a
-restored selection that dangles is handled.
+`History::undo` pushes the *current* state onto `redo` (with the popped entry's
+label) and returns the previous snapshot. `redo()` is the mirror. `restore()`
+reassigns the model, complete component selection, and component visibility;
+camera/view/workspace remain untouched. `rebuild()` clamps and prunes restored
+state after model changes, while presentation-only restores use the existing
+component-pruning pass without invoking the solver.
 
 ### UI wiring
 
@@ -222,7 +238,8 @@ restored selection that dangles is handled.
   routed through `edit()`.
 - `save_project_file` records nothing (no model change).
 - View/workspace-mode switches, camera orbit, and render interaction make no
-  history — they are not document edits.
+  history. Explicit component visibility/isolation commands are the narrow
+  presentation-state exception.
 - A new `edit()`/commit truncates the redo branch (linear history).
 - Depth cap (200) evicts oldest undo entries.
 - No-op edits (`model == before.model`) record nothing.
@@ -239,9 +256,10 @@ restored selection that dangles is handled.
 - transaction coalescing: `begin` → N updates → `commit` yields exactly one entry;
 - `clear()` empties both stacks and any pending transaction.
 
-One integration-style test drives `FramerApp::edit` then `undo`/`redo` and
-asserts that `rebuild()` re-ran and `project_plan` regenerated, and that
-selection was restored.
+Integration tests drive both `FramerApp::edit` and component visibility actions
+through `undo`/`redo`. They assert that model restores regenerate the project
+plan, while visibility restores leave the byte-equivalent model and derived plan
+unchanged.
 
 ## Out of scope (YAGNI)
 

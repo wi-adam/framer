@@ -1,13 +1,14 @@
 //! In-memory undo/redo history for the desktop app.
 //!
 //! A pure, UI-agnostic engine generic over a snapshot/state type `S`. The app
-//! instantiates it with `Snapshot` (authored `BuildingModel` + selection). The
-//! engine knows nothing about the document, the solver, or egui, which keeps it
-//! exhaustively unit-testable with a trivial state type.
+//! instantiates it with `Snapshot` (authored `BuildingModel` + selection +
+//! component visibility). The engine knows nothing about the document, the
+//! solver, or egui, which keeps it exhaustively unit-testable with a trivial
+//! state type.
 //!
 //! History is ephemeral presentation state: it is never serialized and never
 //! written to a `.framer` file. See
-//! `docs/plans/2026-06-17-undo-redo-design.md`.
+//! `docs/specs/undo-redo.md`.
 
 /// A stored state paired with the label of the action that moved *away* from
 /// it (e.g. "Add opening"). The label drives the toolbar tooltip.

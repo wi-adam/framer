@@ -922,7 +922,7 @@ impl FramerApp {
                                     ),
                                 );
                                 if wall_eye.clicked() {
-                                    self.component_visibility.toggle(wall_key.clone());
+                                    self.toggle_component_visibility(wall_key.clone(), wall_name);
                                 }
                                 if wall_row.clicked() {
                                     self.apply_selection(
@@ -954,7 +954,10 @@ impl FramerApp {
                                             ),
                                         );
                                         if opening_eye.clicked() {
-                                            self.component_visibility.toggle(opening_key.clone());
+                                            self.toggle_component_visibility(
+                                                opening_key.clone(),
+                                                opening_name,
+                                            );
                                         }
                                         if opening_row.clicked() {
                                             self.apply_selection(
@@ -1034,7 +1037,7 @@ impl FramerApp {
                                     ),
                                 );
                                 if eye.clicked() {
-                                    self.component_visibility.toggle(key);
+                                    self.toggle_component_visibility(key, plane_name);
                                 }
                                 if row.clicked() {
                                     self.apply_selection(
@@ -1074,7 +1077,7 @@ impl FramerApp {
                                     ),
                                 );
                                 if eye.clicked() {
-                                    self.component_visibility.toggle(key);
+                                    self.toggle_component_visibility(key, ceiling_name);
                                 }
                                 if row.clicked() {
                                     self.apply_selection(
@@ -1107,7 +1110,7 @@ impl FramerApp {
                                     ),
                                 );
                                 if eye.clicked() {
-                                    self.component_visibility.toggle(key);
+                                    self.toggle_component_visibility(key, deck_name);
                                 }
                                 if row.clicked() {
                                     self.apply_selection(
@@ -1144,7 +1147,7 @@ impl FramerApp {
                                 ),
                             );
                             if eye.clicked() {
-                                self.component_visibility.toggle(key);
+                                self.toggle_component_visibility(key, &join_name);
                             }
                             if row.clicked() {
                                 self.apply_selection(
@@ -1286,7 +1289,7 @@ impl FramerApp {
                                             ),
                                         );
                                         if eye.clicked() {
-                                            self.component_visibility.toggle(key);
+                                            self.toggle_component_visibility(key, &name);
                                         }
                                         if row.clicked() {
                                             self.apply_selection(
