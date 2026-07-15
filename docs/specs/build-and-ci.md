@@ -5,7 +5,7 @@
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
 > **Status:** Implemented · **Linked goal:** — (engineering infrastructure; supports
-> G-010 Packaging later) · **Last reviewed:** 2026-06-19
+> G-010 Packaging later) · **Last reviewed:** 2026-07-15
 
 ## Intent / Purpose
 
@@ -41,6 +41,21 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
   if any relative link in tracked markdown points at a missing file (local links only;
   external URLs are not fetched). This is the mechanized version of a real failure mode — a
   link broke during the docs reorg when a spec moved between `docs/specs/` and `docs/plans/`.
+- **PR review fails closed.** After ordinary CI passes for an eligible same-repository PR,
+  the review job captures one immutable metadata/diff snapshot and runs the four specialized
+  reviewers synchronously against it. The job passes only when the PR head is unchanged and
+  exactly one new formal Claude verdict on that head is observed: `APPROVED` passes;
+  `CHANGES_REQUESTED`, a missing/stale/duplicate verdict, or a head change fails. Older-head
+  change requests are dismissed best-effort and never substitute for a fresh verdict.
+- **Review runs are serialized per PR.** Automatic and on-demand runs share one concurrency
+  group so each baseline-to-verdict interval has a single owner.
+- **Workflow changes fail closed by design.** The Claude GitHub App validates the executing
+  workflow against the default branch before issuing its token. A PR that changes that
+  workflow cannot self-authorize the new version; it requires trusted review and a privileged
+  bootstrap merge rather than a weaker token or a bypass in the verdict gate.
+- **Reviewers stay read-only.** Specialized reviewers receive prepared context paths and use
+  file read/search tools only. The parent review session alone receives the narrow GitHub
+  tools needed to post confirmed inline comments and one formal verdict.
 
 ## Decisions (locked)
 
@@ -62,10 +77,13 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 ## Architecture (grounded in the codebase)
 
-- CI: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — four jobs: `lint`
+- CI: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — six jobs: `lint`
   (rustfmt + clippy, Linux), `test` (build + test matrix on Linux/macOS/Windows), `gpu`
-  (lavapipe parity, Linux), and `docs` (markdown link check, no Rust toolchain). Triggers:
-  push to `main`, pull requests, `workflow_dispatch`.
+  (lavapipe parity, Linux), `docs` (markdown link check, no Rust toolchain), `zizmor`
+  (workflow security), and the CI-gated `pr-review`. The manual review escape hatch lives in
+  [`.github/workflows/claude-pr-review-command.yml`](../../.github/workflows/claude-pr-review-command.yml).
+  Triggers: push to `main`, pull requests, `workflow_dispatch`, plus collaborator comments for
+  the manual review.
 - Markdown link check: [`scripts/check-markdown-links.py`](../../scripts/check-markdown-links.py)
   (stdlib-only; runnable locally with the same command CI uses).
 - Toolchain: [`rust-toolchain.toml`](../../rust-toolchain.toml).
@@ -83,7 +101,7 @@ the GPU path tracer still matches its CPU reference. The exact commands live in
 
 - CI must mechanically enforce the [architecture invariants](../architecture.md): determinism
   (round-trip + golden + parity tests), UI-free core/solver/render (they build and test without
-  the app), and the v13 `.framer` round-trip fixtures.
+  the app), and the current `.framer` schema's round-trip fixtures.
 - The local gate, the commit skill, and CI must stay in lockstep — changing one means changing
   the others.
 
