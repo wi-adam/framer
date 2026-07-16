@@ -6,16 +6,18 @@ use eframe::egui::{
     containers::menu::{MenuButton, MenuConfig},
 };
 use framer_analysis::{
-    AnalysisError, AssertionSource, AssumptionEvidence, BooleanExpression, BooleanIntentRecord,
-    DiagnosticProvider, ExactValue, GraphTrace, IntentDomain, IntentEvidenceRef, IntentOutcome,
-    IntentRecord, IntentReport, IntentValue, ObjectiveObservation, ProjectGraph, ProjectNodeRef,
+    AnalysisError, AssertionRef, AssertionSource, AssumptionEvidence, BooleanExpression,
+    BooleanIntentRecord, DiagnosticProvider, ExactValue, GraphTrace, IntentDomain,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentValue,
+    ObjectiveObservation, ProjectGraph, ProjectNodeRef, WaiverRef,
 };
 use framer_core::{
-    AuthoredEntityRef, BuildingModel, CeilingSlope, DimensionAnchor, DimensionAxis,
-    DimensionConstraint, DimensionHorizontalReference, DimensionKind, DimensionVerticalReference,
-    ElementId, FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening,
-    OpeningKind, Point2, Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion,
-    Wall, WallJoin, WallJoinKind,
+    AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, BuildingModel, CeilingSlope,
+    ClearanceDatum, ClearanceDirection, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
+    FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
+    PreferencePriority, Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall,
+    WallJoin, WallJoinKind,
 };
 use framer_geometry::{GeometryAudit, GeometryViolation};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
@@ -32,12 +34,12 @@ use super::labels::{
     join_kind_label, kind_label, objective_direction_label, selection_attribute_label,
 };
 use super::model_edit::{
-    next_furnishing_instance_id, next_mep_instance_id, opening_max_bottom, opening_top_clearance,
-    set_wall_length_keep_direction,
+    intent_references_entity, next_furnishing_instance_id, next_mep_instance_id,
+    opening_max_bottom, opening_top_clearance, set_wall_length_keep_direction,
 };
 use super::{
-    DrawWallToolState, FramerApp, Selection, ViewportMode, WallDisplay, WorkspaceMode, design,
-    theme,
+    DrawWallToolState, FramerApp, IntentAssertionDraft, IntentAuthoringDraft,
+    IntentDraftExpression, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, theme,
 };
 
 impl FramerApp {
@@ -1984,6 +1986,9 @@ impl FramerApp {
         let mut deferred_resync_library: Option<framer_library::LibraryItem> = None;
         let mut deferred_detach_library: Option<framer_library::LibraryItem> = None;
         let mut deferred_standards = DeferredStandardsActions::default();
+        // Placed-object level changes require a whole-model intent guard, so defer them past the
+        // selected instance's mutable borrow and route accepted changes through one app edit.
+        let mut deferred_placed_object_level: Option<(AuthoredEntityRef, ElementId)> = None;
         // Connected roof fields must share overhang values so their fixed seam
         // edges intersect at identical endpoints. Apply an inspector change to
         // the whole exact-edge component after the selected-plane borrow ends.
@@ -1991,7 +1996,7 @@ impl FramerApp {
         // Capture a pre-edit baseline for the undo transaction, but only while
         // an interaction could open one (pointer down or a text field focused)
         // and none is already in flight — so idle frames never clone the model.
-        let edit_base = if should_capture_edit_base(
+        let mut edit_base = if should_capture_edit_base(
             self.history.is_pending(),
             ui.ctx().input(|input| input.pointer.any_down()),
             ui.ctx().input(|input| input.pointer.any_click()),
@@ -2003,6 +2008,17 @@ impl FramerApp {
         };
         let selection = self.selected.clone();
         let can_edit = self.workspace_mode.allows_design_edits();
+        let selected_level_locked_by_intent = match &selection {
+            Selection::FurnishingInstance(id) => intent_references_entity(
+                &self.model,
+                &AuthoredEntityRef::FurnishingInstance(ElementId::new(id.clone())),
+            ),
+            Selection::MepInstance(id) => intent_references_entity(
+                &self.model,
+                &AuthoredEntityRef::MepInstance(ElementId::new(id.clone())),
+            ),
+            _ => false,
+        };
         let level_options = self
             .model
             .levels
@@ -2854,7 +2870,20 @@ impl FramerApp {
                         changed |= text_edit(ui, "Name", &mut instance.name);
                         changed |=
                             family_picker(ui, "Family", &mut instance.family, &furnishing_options);
-                        changed |= level_picker(ui, &mut instance.level, &level_options);
+                        if selected_level_locked_by_intent {
+                            ui.add_enabled_ui(false, |ui| {
+                                let _ = level_picker(ui, &mut instance.level, &level_options);
+                            });
+                            intent_level_lock_message(ui);
+                        } else {
+                            let mut requested_level = instance.level.clone();
+                            if level_picker(ui, &mut requested_level, &level_options) {
+                                deferred_placed_object_level = Some((
+                                    AuthoredEntityRef::FurnishingInstance(instance.id.clone()),
+                                    requested_level,
+                                ));
+                            }
+                        }
                         changed |= coordinate_drag(ui, "X", &mut instance.position.x);
                         changed |= coordinate_drag(ui, "Y", &mut instance.position.y);
                         changed |= rotation_picker(ui, &mut instance.rotation);
@@ -2890,7 +2919,20 @@ impl FramerApp {
                     if can_edit {
                         changed |= text_edit(ui, "Name", &mut instance.name);
                         changed |= family_picker(ui, "Family", &mut instance.family, &mep_options);
-                        changed |= level_picker(ui, &mut instance.level, &level_options);
+                        if selected_level_locked_by_intent {
+                            ui.add_enabled_ui(false, |ui| {
+                                let _ = level_picker(ui, &mut instance.level, &level_options);
+                            });
+                            intent_level_lock_message(ui);
+                        } else {
+                            let mut requested_level = instance.level.clone();
+                            if level_picker(ui, &mut requested_level, &level_options) {
+                                deferred_placed_object_level = Some((
+                                    AuthoredEntityRef::MepInstance(instance.id.clone()),
+                                    requested_level,
+                                ));
+                            }
+                        }
                         changed |= coordinate_drag(ui, "X", &mut instance.position.x);
                         changed |= coordinate_drag(ui, "Y", &mut instance.position.y);
                         changed |= rotation_picker(ui, &mut instance.rotation);
@@ -3283,26 +3325,18 @@ impl FramerApp {
                 });
             }
             Some(DeferredRemove::FurnishingInstance(instance_id)) => {
-                self.edit("Remove furnishing", |app| {
-                    let before = app.model.furnishing_instances.len();
-                    app.model
-                        .furnishing_instances
-                        .retain(|instance| instance.id.0 != instance_id);
-                    if app.model.furnishing_instances.len() != before {
-                        app.selected = Selection::Wall;
-                    }
-                });
+                debug_assert!(matches!(
+                    &self.selected,
+                    Selection::FurnishingInstance(selected) if selected == &instance_id
+                ));
+                self.delete_selected_furnishing_instance();
             }
             Some(DeferredRemove::MepInstance(instance_id)) => {
-                self.edit("Remove MEP object", |app| {
-                    let before = app.model.mep_instances.len();
-                    app.model
-                        .mep_instances
-                        .retain(|instance| instance.id.0 != instance_id);
-                    if app.model.mep_instances.len() != before {
-                        app.selected = Selection::Wall;
-                    }
-                });
+                debug_assert!(matches!(
+                    &self.selected,
+                    Selection::MepInstance(selected) if selected == &instance_id
+                ));
+                self.delete_selected_mep_instance();
             }
             None => {}
         }
@@ -3344,6 +3378,16 @@ impl FramerApp {
         if let Some((rule, reason)) = deferred_standards.waive_rule {
             self.waive_standards_rule(rule, reason);
         }
+        if let Some((entity, level)) = deferred_placed_object_level {
+            // A level choice is a discrete edit, so finish any older coalesced
+            // inspector run first. The same frame can also mutate another
+            // inspector field before replaying this deferred action; rebuild
+            // and settle that field mutation now, then prevent the common
+            // `changed` block below from reopening it after the level edit.
+            let label = inspector_edit_label(&self.selected);
+            self.settle_inspector_history_before_discrete_edit(&mut changed, &mut edit_base, label);
+            self.change_placed_object_level(entity, level);
+        }
         if let Some(system_id) = deferred_select_system {
             self.apply_selection(Selection::System(system_id), None, SelectionOp::Replace);
         }
@@ -3368,26 +3412,42 @@ impl FramerApp {
     }
 
     fn project_relationships_panel(&mut self, ui: &mut Ui, multiple: bool) {
+        let mut row_action = None;
+        let can_mutate_intent = self.workspace_mode.allows_design_edits();
         ui.separator();
         widgets::section(ui, "project-relationships", "Intent", true, |ui| {
+            if !multiple {
+                self.intent_authoring_controls(ui);
+            }
             panel_subheader(ui, "Current status");
             if multiple {
-                ui.label(
-                    RichText::new("Intent status is available one object at a time.")
-                        .color(theme::text_secondary()),
+                focused_intent_current_status(
+                    ui,
+                    self.intent_report.as_ref(),
+                    self.focused_intent.as_ref(),
+                    self.error.as_deref(),
+                    can_mutate_intent,
+                    &mut row_action,
                 );
                 return;
             }
 
             let authored = self.selected_authored_entity_ref();
             let generated_selection = matches!(self.selected, Selection::Member { .. });
+            let status_selection = if matches!(self.selected, Selection::None) {
+                IntentStatusSelection::None
+            } else if generated_selection {
+                IntentStatusSelection::Generated
+            } else {
+                IntentStatusSelection::Authored(authored.as_ref())
+            };
             intent_current_status(
                 ui,
                 self.intent_report.as_ref(),
-                authored.as_ref(),
-                generated_selection,
-                matches!(self.selected, Selection::None),
+                status_selection,
                 self.error.as_deref(),
+                can_mutate_intent,
+                &mut row_action,
             );
             let selected_graph_node = self.selected_project_node_ref();
 
@@ -3495,6 +3555,138 @@ impl FramerApp {
                 &dependencies,
             );
         });
+        if let Some(action) = row_action {
+            self.handle_intent_row_action(action);
+        }
+    }
+
+    fn handle_intent_row_action(&mut self, action: IntentRowAction) {
+        match action {
+            IntentRowAction::Edit(id) => {
+                self.begin_edit_intent(&id);
+            }
+            IntentRowAction::Delete(id) => {
+                self.delete_intent(&id);
+            }
+            IntentRowAction::Waive(id) => {
+                self.begin_waive_intent(&id);
+            }
+            IntentRowAction::FocusAll(reference) => {
+                self.focus_all_intent_participants(&reference);
+            }
+        }
+    }
+
+    fn intent_authoring_controls(&mut self, ui: &mut Ui) {
+        let can_author = self.workspace_mode.allows_design_edits();
+        if self.selected_intent_subject().is_some() {
+            panel_subheader(ui, "Author cross-object intent");
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(can_author, egui::Button::new("Add containment"))
+                    .clicked()
+                {
+                    self.begin_intent_assertion(IntentDraftExpression::Containment);
+                }
+                if ui
+                    .add_enabled(can_author, egui::Button::new("Add clearance"))
+                    .clicked()
+                {
+                    self.begin_intent_assertion(IntentDraftExpression::Clearance {
+                        direction: ClearanceDirection::Front,
+                        datum: ClearanceDatum::FootprintFace,
+                        threshold: Length::from_whole_inches(36),
+                    });
+                }
+            });
+        }
+
+        let Some(draft) = self.intent_authoring_draft.as_ref() else {
+            return;
+        };
+        let subject = match draft {
+            IntentAuthoringDraft::Assertion(draft) => Some(draft.subject.clone()),
+            IntentAuthoringDraft::Waiver(draft) => self
+                .model
+                .intents
+                .iter()
+                .find(|intent| intent.id == draft.target)
+                .map(|intent| {
+                    let framer_core::ProjectIntentScope::Exact(scope) = &intent.scope;
+                    scope.subject.clone()
+                }),
+        };
+        let room_options = subject
+            .as_ref()
+            .and_then(|subject| self.authored_entity_level(subject))
+            .map(|level| {
+                self.model
+                    .rooms
+                    .iter()
+                    .filter(|room| room.level == level)
+                    .map(|room| (room.id.clone(), room.name.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut accept = false;
+        let mut cancel = false;
+        Frame::new()
+            .fill(design::active().panel)
+            .stroke(design::active().soft_stroke())
+            .corner_radius(design::radius::SM)
+            .inner_margin(Margin::same(8))
+            .show(ui, |ui| match self.intent_authoring_draft.as_mut() {
+                Some(IntentAuthoringDraft::Assertion(draft)) => {
+                    intent_assertion_draft_editor(ui, draft, &room_options);
+                    ui.horizontal(|ui| {
+                        let label = if draft.editing.is_some() {
+                            "Save intent"
+                        } else {
+                            "Create intent"
+                        };
+                        if ui
+                            .add_enabled(can_author, egui::Button::new(label))
+                            .clicked()
+                        {
+                            accept = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                Some(IntentAuthoringDraft::Waiver(draft)) => {
+                    ui.label(
+                        RichText::new(format!("Waive intent {}", draft.target.0.0))
+                            .strong()
+                            .color(theme::text_primary()),
+                    );
+                    ui.label(
+                        RichText::new("Source: User · Project waiver")
+                            .small()
+                            .color(theme::text_secondary()),
+                    );
+                    text_edit(ui, "Reason", &mut draft.reason);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(can_author, egui::Button::new("Apply waiver"))
+                            .clicked()
+                        {
+                            accept = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                None => {}
+            });
+        if cancel {
+            self.cancel_intent_authoring();
+        } else if accept {
+            self.accept_intent_authoring();
+        }
     }
 
     fn inspector_output_sections(&mut self, ui: &mut Ui) {
@@ -4568,34 +4760,220 @@ const INTENT_DOMAIN_ORDER: [IntentDomain; 10] = [
 
 const INTENT_OUTCOME_ORDER: [u8; 5] = [0, 1, 2, 3, 4];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IntentRowAction {
+    Edit(AuthoredIntentId),
+    Delete(AuthoredIntentId),
+    Waive(AuthoredIntentId),
+    FocusAll(AssertionRef),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IntentStatusSelection<'a> {
+    None,
+    Generated,
+    Authored(Option<&'a AuthoredEntityRef>),
+}
+
+fn focused_intent_current_status(
+    ui: &mut Ui,
+    report: Option<&Result<IntentReport, AnalysisError>>,
+    focused: Option<&AssertionRef>,
+    regeneration_error: Option<&str>,
+    can_mutate_intent: bool,
+    action: &mut Option<IntentRowAction>,
+) {
+    let Some(focused) = focused else {
+        ui.label(
+            RichText::new(
+                "Select Focus all on an intent row to retain its context during multi-selection.",
+            )
+            .color(theme::text_secondary()),
+        );
+        return;
+    };
+    let Some(report) = report else {
+        ui.label(
+            RichText::new(regeneration_error.map_or_else(
+                || "Intent analysis is unavailable.".to_owned(),
+                |error| format!("Intent analysis is unavailable: {error}"),
+            ))
+            .color(theme::danger()),
+        );
+        return;
+    };
+    let Ok(report) = report else {
+        ui.label(RichText::new("Intent analysis is unavailable.").color(theme::danger()));
+        return;
+    };
+    let Some(record) = report.record(focused) else {
+        ui.label(
+            RichText::new("The focused intent is no longer present in this analysis generation.")
+                .color(theme::text_secondary()),
+        );
+        return;
+    };
+    match record {
+        IntentRecord::Boolean(record) => boolean_intent_row(ui, record, can_mutate_intent, action),
+        IntentRecord::Objective(_) | IntentRecord::Assumption(_) => {
+            ui.label(
+                RichText::new("The focused non-boolean intent remains selected.")
+                    .color(theme::text_secondary()),
+            );
+        }
+    }
+}
+
+fn intent_assertion_draft_editor(
+    ui: &mut Ui,
+    draft: &mut IntentAssertionDraft,
+    room_options: &[(ElementId, String)],
+) {
+    let title = match draft.expression {
+        IntentDraftExpression::Containment => "Containment intent",
+        IntentDraftExpression::Clearance { .. } => "Clearance intent",
+    };
+    ui.label(RichText::new(title).strong().color(theme::text_primary()));
+    ui.label(
+        RichText::new(format!(
+            "Primary subject: {} {}",
+            authored_entity_kind_label(&draft.subject),
+            authored_entity_id_label(&draft.subject)
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    ui.label(
+        RichText::new("Source: User")
+            .small()
+            .color(theme::text_secondary()),
+    );
+
+    property_row(ui, "Room", |ui| {
+        let selected = draft
+            .room
+            .as_ref()
+            .and_then(|id| room_options.iter().find(|(candidate, _)| candidate == id))
+            .map_or_else(
+                || "Choose same-level room".to_owned(),
+                |(_, name)| name.clone(),
+            );
+        ComboBox::from_id_salt("intent-room")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (id, name) in room_options {
+                    ui.selectable_value(&mut draft.room, Some(id.clone()), name);
+                }
+            });
+    });
+
+    property_row(ui, "Mode", |ui| {
+        let preference = match draft.mode {
+            AuthoredIntentMode::Requirement => AuthoredIntentMode::Preference {
+                priority: PreferencePriority(1),
+            },
+            preference @ AuthoredIntentMode::Preference { .. } => preference,
+        };
+        ComboBox::from_id_salt("intent-mode")
+            .selected_text(boolean_intent_mode_label(draft.mode))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut draft.mode,
+                    AuthoredIntentMode::Requirement,
+                    "Requirement",
+                );
+                ui.selectable_value(&mut draft.mode, preference, "Preference");
+            });
+    });
+    if let AuthoredIntentMode::Preference { priority } = &mut draft.mode {
+        property_row(ui, "Priority", |ui| {
+            ui.add(egui::DragValue::new(&mut priority.0).range(1..=u16::MAX));
+        });
+    }
+
+    if let IntentDraftExpression::Clearance {
+        direction,
+        datum,
+        threshold,
+    } = &mut draft.expression
+    {
+        property_row(ui, "Direction", |ui| {
+            ComboBox::from_id_salt("intent-clearance-direction")
+                .selected_text(clearance_direction_label(*direction))
+                .show_ui(ui, |ui| {
+                    for option in [
+                        ClearanceDirection::Left,
+                        ClearanceDirection::Right,
+                        ClearanceDirection::Front,
+                        ClearanceDirection::Back,
+                        ClearanceDirection::Around,
+                    ] {
+                        ui.selectable_value(direction, option, clearance_direction_label(option));
+                    }
+                });
+        });
+        property_row(ui, "Datum", |ui| {
+            ComboBox::from_id_salt("intent-clearance-datum")
+                .selected_text(clearance_datum_label(*datum))
+                .show_ui(ui, |ui| {
+                    for option in [ClearanceDatum::Centerline, ClearanceDatum::FootprintFace] {
+                        ui.selectable_value(datum, option, clearance_datum_label(option));
+                    }
+                });
+        });
+        let _ = length_drag(ui, "Threshold", threshold, 0.0, 240.0, DisplayUnit::Inches);
+    }
+    let _ = text_edit(ui, "Rationale", &mut draft.rationale);
+}
+
+fn clearance_direction_label(direction: ClearanceDirection) -> &'static str {
+    match direction {
+        ClearanceDirection::Left => "Left",
+        ClearanceDirection::Right => "Right",
+        ClearanceDirection::Front => "Front",
+        ClearanceDirection::Back => "Back",
+        ClearanceDirection::Around => "Around",
+    }
+}
+
+fn clearance_datum_label(datum: ClearanceDatum) -> &'static str {
+    match datum {
+        ClearanceDatum::Centerline => "Object centerline",
+        ClearanceDatum::FootprintFace => "Footprint face",
+    }
+}
+
 fn intent_current_status(
     ui: &mut Ui,
     report: Option<&Result<IntentReport, AnalysisError>>,
-    authored: Option<&AuthoredEntityRef>,
-    generated_selection: bool,
-    no_selection: bool,
+    selection: IntentStatusSelection<'_>,
     regeneration_error: Option<&str>,
+    can_mutate_intent: bool,
+    action: &mut Option<IntentRowAction>,
 ) {
-    if no_selection {
-        ui.label(
-            RichText::new("Select an authored object to inspect current intent status.")
-                .color(theme::text_secondary()),
-        );
-        return;
-    }
-    if generated_selection {
-        ui.label(
-            RichText::new("Current status applies to authored selections.")
-                .color(theme::text_secondary()),
-        );
-        return;
-    }
-    let Some(authored) = authored else {
-        ui.label(
-            RichText::new("This selection is not present in the current analysis generation.")
-                .color(theme::text_secondary()),
-        );
-        return;
+    let authored = match selection {
+        IntentStatusSelection::None => {
+            ui.label(
+                RichText::new("Select an authored object to inspect current intent status.")
+                    .color(theme::text_secondary()),
+            );
+            return;
+        }
+        IntentStatusSelection::Generated => {
+            ui.label(
+                RichText::new("Current status applies to authored selections.")
+                    .color(theme::text_secondary()),
+            );
+            return;
+        }
+        IntentStatusSelection::Authored(Some(authored)) => authored,
+        IntentStatusSelection::Authored(None) => {
+            ui.label(
+                RichText::new("This selection is not present in the current analysis generation.")
+                    .color(theme::text_secondary()),
+            );
+            return;
+        }
     };
     let Some(report) = report else {
         let message = regeneration_error.map_or_else(
@@ -4691,7 +5069,7 @@ fn intent_current_status(
             .default_open(outcome_order <= 2)
             .show(ui, |ui| {
                 for record in outcome_records {
-                    boolean_intent_row(ui, record);
+                    boolean_intent_row(ui, record, can_mutate_intent, action);
                 }
             });
         }
@@ -4786,7 +5164,12 @@ fn intent_outcome_color(outcome: &IntentOutcome) -> Color32 {
     }
 }
 
-fn boolean_intent_row(ui: &mut Ui, record: &BooleanIntentRecord) {
+fn boolean_intent_row(
+    ui: &mut Ui,
+    record: &BooleanIntentRecord,
+    can_mutate_intent: bool,
+    action: &mut Option<IntentRowAction>,
+) {
     let title = boolean_intent_title(record);
     ui.label(RichText::new(&title).color(theme::text_primary()));
     ui.label(
@@ -4803,6 +5186,18 @@ fn boolean_intent_row(ui: &mut Ui, record: &BooleanIntentRecord) {
             RichText::new(format!("Rationale: {}", record.assertion.rationale))
                 .small()
                 .color(theme::text_secondary()),
+        );
+    }
+    for participant in &record.assertion.participants {
+        ui.label(
+            RichText::new(format!(
+                "{}: {} {}",
+                assertion_participant_role_label(participant.role),
+                authored_entity_kind_label(&participant.entity),
+                authored_entity_id_label(&participant.entity)
+            ))
+            .small()
+            .color(theme::text_secondary()),
         );
     }
     ui.label(
@@ -4825,16 +5220,80 @@ fn boolean_intent_row(ui: &mut Ui, record: &BooleanIntentRecord) {
                 .color(theme::text_secondary()),
             );
         }
-        IntentOutcome::Waived { reason, .. } => {
+        IntentOutcome::Waived { waiver, reason } => {
             ui.label(
-                RichText::new(format!("Waiver: {reason}"))
+                RichText::new(format!("{}: {reason}", waiver_provenance_label(waiver)))
                     .small()
                     .color(theme::text_secondary()),
             );
         }
         IntentOutcome::Satisfied | IntentOutcome::Violated | IntentOutcome::NotApplicable => {}
     }
+    ui.horizontal_wrapped(|ui| {
+        if let AssertionRef::Authored(id) = &record.assertion.reference {
+            if ui
+                .add_enabled(can_mutate_intent, egui::Button::new("Edit"))
+                .clicked()
+            {
+                *action = Some(IntentRowAction::Edit(id.clone()));
+            }
+            if ui
+                .add_enabled(can_mutate_intent, egui::Button::new("Delete"))
+                .clicked()
+            {
+                *action = Some(IntentRowAction::Delete(id.clone()));
+            }
+            if !matches!(record.outcome, IntentOutcome::Waived { .. })
+                && ui
+                    .add_enabled(can_mutate_intent, egui::Button::new("Waive"))
+                    .clicked()
+            {
+                *action = Some(IntentRowAction::Waive(id.clone()));
+            }
+        }
+        if ui.button("Focus all").clicked() {
+            *action = Some(IntentRowAction::FocusAll(
+                record.assertion.reference.clone(),
+            ));
+        }
+    });
     ui.add_space(3.0);
+}
+
+fn assertion_participant_role_label(
+    role: framer_analysis::AssertionParticipantRole,
+) -> &'static str {
+    match role {
+        framer_analysis::AssertionParticipantRole::Subject => "Subject",
+        framer_analysis::AssertionParticipantRole::Host => "Host",
+        framer_analysis::AssertionParticipantRole::Constraint => "Constraint",
+        framer_analysis::AssertionParticipantRole::SelectedSystem => "Selected system",
+        framer_analysis::AssertionParticipantRole::SitePremise => "Site premise",
+        framer_analysis::AssertionParticipantRole::EvaluatedEntity => "Evaluated entity",
+    }
+}
+
+fn authored_entity_id_label(reference: &AuthoredEntityRef) -> String {
+    match reference {
+        AuthoredEntityRef::Site => "project-site".to_owned(),
+        AuthoredEntityRef::LibraryVersion(reference) => {
+            format!("{}@{}", reference.uid, reference.version_id)
+        }
+        _ => reference
+            .element_id()
+            .map_or_else(|| "unknown".to_owned(), |id| id.0.clone()),
+    }
+}
+
+fn waiver_provenance_label(waiver: &WaiverRef) -> String {
+    match waiver {
+        WaiverRef::Project { override_id } => {
+            format!("Project waiver {}", override_id.0.0)
+        }
+        WaiverRef::Standards { overlay_pack, rule } => {
+            format!("Standards waiver {} / {rule}", overlay_pack.0)
+        }
+    }
 }
 
 fn boolean_intent_title(record: &BooleanIntentRecord) -> String {
@@ -4858,6 +5317,7 @@ fn boolean_intent_title(record: &BooleanIntentRecord) -> String {
 fn assertion_source_label(source: &AssertionSource) -> String {
     match source {
         AssertionSource::Project => "Project".to_owned(),
+        AssertionSource::User => "User".to_owned(),
         AssertionSource::Authored(reference) => {
             format!("Authored {}", authored_entity_kind_label(reference))
         }
@@ -4894,6 +5354,7 @@ fn authored_entity_kind_label(reference: &AuthoredEntityRef) -> &'static str {
         AuthoredEntityRef::MepInstance(_) => "MEP instance",
         AuthoredEntityRef::BracedWallLine(_) => "braced wall line",
         AuthoredEntityRef::BracedPanel(_) => "braced panel",
+        AuthoredEntityRef::IntentOverride(_) => "intent override",
     }
 }
 
@@ -7102,6 +7563,16 @@ fn level_picker(ui: &mut Ui, selected: &mut ElementId, options: &[(String, Strin
     })
 }
 
+fn intent_level_lock_message(ui: &mut Ui) {
+    ui.label(
+        RichText::new(
+            "Level is locked by scoped project intent. Edit or delete that intent before moving this placement.",
+        )
+        .small()
+        .color(theme::text_secondary()),
+    );
+}
+
 fn rotation_picker(ui: &mut Ui, selected: &mut QuarterTurn) -> bool {
     property_row(ui, "Rotation", |ui| {
         let before = *selected;
@@ -8630,7 +9101,7 @@ mod tests {
         });
         let waived = IntentOutcome::Waived {
             waiver: framer_analysis::WaiverRef::Project {
-                override_id: ElementId::new("fixture-waiver"),
+                override_id: framer_core::IntentOverrideId::new("fixture-waiver"),
             },
             reason: "fixture".to_owned(),
         };
@@ -8645,6 +9116,30 @@ mod tests {
         assert_eq!(
             outcomes.map(|outcome| intent_outcome_order(&outcome)),
             INTENT_OUTCOME_ORDER
+        );
+    }
+
+    #[test]
+    fn intent_waiver_labels_keep_project_and_standards_provenance_distinct() {
+        assert_eq!(
+            waiver_provenance_label(&WaiverRef::Project {
+                override_id: framer_core::IntentOverrideId::new("override-1"),
+            }),
+            "Project waiver override-1"
+        );
+        assert_eq!(
+            waiver_provenance_label(&WaiverRef::Standards {
+                overlay_pack: ElementId::new("standards-overlay"),
+                rule: "fixture.rule".to_owned(),
+            }),
+            "Standards waiver standards-overlay / fixture.rule"
+        );
+        assert_eq!(assertion_source_label(&AssertionSource::User), "User");
+        assert_eq!(
+            assertion_source_label(&AssertionSource::StandardsRule(
+                framer_analysis::StandardsRuleRef::resolved(ElementId::new("pack"), "fixture.rule")
+            )),
+            "Standards rule fixture.rule"
         );
     }
 

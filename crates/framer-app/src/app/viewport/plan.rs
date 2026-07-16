@@ -19,6 +19,7 @@ use super::view_common::{
     viewport_drawing_rect, viewport_size,
 };
 use super::{DrawWallPlanInput, theme};
+use crate::app::component_visibility::{AuthoredComponentKind, ComponentKey};
 use crate::app::design::text_size;
 use crate::app::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
 use crate::app::labels::join_kind_label;
@@ -59,6 +60,7 @@ pub(super) struct PlanView<'a> {
     pub(super) model: &'a BuildingModel,
     pub(super) selected_wall: usize,
     pub(super) selection: &'a Selection,
+    pub(super) selected_components: &'a [ComponentKey],
     pub(super) layers: ViewLayers,
     pub(super) draw_tool: &'a DrawWallPlanInput,
     pub(super) room_tool_active: bool,
@@ -173,6 +175,22 @@ fn selection_interactions_enabled(
     roof_empty: bool,
 ) -> bool {
     !draw_tool_active && !region_tool_active && !roof_empty
+}
+
+fn plan_component_selected(
+    selected_components: &[ComponentKey],
+    kind: AuthoredComponentKind,
+    id: &str,
+) -> bool {
+    selected_components.iter().any(|component| {
+        matches!(
+            component,
+            ComponentKey::Authored {
+                kind: selected_kind,
+                id: selected_id,
+            } if *selected_kind == kind && selected_id == id
+        )
+    })
 }
 
 fn draw_roof_empty_state(painter: &egui::Painter, drawing: Rect) {
@@ -498,6 +516,7 @@ pub(super) fn draw_project_plan(
         model,
         selected_wall,
         selection,
+        selected_components,
         layers,
         draw_tool,
         room_tool_active,
@@ -609,7 +628,12 @@ pub(super) fn draw_project_plan(
             .iter()
             .map(|vertex| plan_point(*vertex, bounds, drawing, camera))
             .collect();
-        let selected = !roof_empty && matches!(selection, Selection::Room(id) if id == &room.id.0);
+        let selected = !roof_empty
+            && plan_component_selected(
+                selected_components,
+                AuthoredComponentKind::Room,
+                &room.id.0,
+            );
         let fill = if selected {
             theme::active_blue().gamma_multiply(0.22)
         } else {
@@ -668,7 +692,11 @@ pub(super) fn draw_project_plan(
         let hovered = pointer.is_some_and(|position| rect.contains(position));
         over_element |= hovered;
         let selected = !roof_empty
-            && matches!(selection, Selection::FurnishingInstance(id) if id == &instance.id.0);
+            && plan_component_selected(
+                selected_components,
+                AuthoredComponentKind::FurnishingInstance,
+                &instance.id.0,
+            );
         draw_object_footprint(
             &painter,
             rect,
@@ -706,8 +734,12 @@ pub(super) fn draw_project_plan(
         );
         let hovered = pointer.is_some_and(|position| rect.contains(position));
         over_element |= hovered;
-        let selected =
-            !roof_empty && matches!(selection, Selection::MepInstance(id) if id == &instance.id.0);
+        let selected = !roof_empty
+            && plan_component_selected(
+                selected_components,
+                AuthoredComponentKind::MepInstance,
+                &instance.id.0,
+            );
         draw_object_footprint(
             &painter,
             rect,
@@ -1441,6 +1473,39 @@ fn room_boundaries_by_level(model: &BuildingModel) -> Vec<Option<framer_core::Ro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_selection_recognizes_every_focused_room_and_placed_object() {
+        let selected = vec![
+            ComponentKey::authored(AuthoredComponentKind::Room, "room-1"),
+            ComponentKey::authored(
+                AuthoredComponentKind::FurnishingInstance,
+                "furnishing-instance-1",
+            ),
+            ComponentKey::authored(AuthoredComponentKind::MepInstance, "mep-instance-1"),
+        ];
+
+        assert!(plan_component_selected(
+            &selected,
+            AuthoredComponentKind::Room,
+            "room-1"
+        ));
+        assert!(plan_component_selected(
+            &selected,
+            AuthoredComponentKind::FurnishingInstance,
+            "furnishing-instance-1"
+        ));
+        assert!(plan_component_selected(
+            &selected,
+            AuthoredComponentKind::MepInstance,
+            "mep-instance-1"
+        ));
+        assert!(!plan_component_selected(
+            &selected,
+            AuthoredComponentKind::Room,
+            "room-2"
+        ));
+    }
     use framer_core::{FramingDefaults, Level, RoofPlane, Room, RoomUsage, Slope};
 
     fn p(x_ft: f64, y_ft: f64) -> Point2 {

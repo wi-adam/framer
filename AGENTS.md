@@ -15,10 +15,10 @@ the reverse):
 
 | Crate | Responsibility |
 | --- | --- |
-| [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, standards packs, room topology, validation, `.framer` serialization. **No UI.** |
+| [`crates/framer-core`](crates/framer-core) | Domain model: authored building intent, explicit cross-object assertions and waivers, units, construction systems, materials, standards packs, room topology, validation, `.framer` serialization. **No UI.** |
 | [`crates/framer-library`](crates/framer-library) | Library resolution, exact content hashing, and vendor-on-use import/remap for reusable `.framerlib` content. **No UI.** |
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
-| [`crates/framer-standards`](crates/framer-standards) | UI-free compliance facts, evaluator, report CSV, and diagnostics lowering over resolved standards + solver output. **No UI.** |
+| [`crates/framer-standards`](crates/framer-standards) | UI-free shared fact measurement and predicate evaluation for standards + project intent, report CSV, and standards diagnostics lowering. **No UI.** |
 | [`crates/framer-geometry`](crates/framer-geometry) | UI-free physical solids for authored assemblies and generated members; stable body identity and convex-piece lowering. **No UI.** |
 | [`crates/framer-analysis`](crates/framer-analysis) | UI-free orchestration, common mode-specific intent outcomes/evidence, and a deterministic revision-bound project graph over authored intent, framing, standards, geometry, library lifecycle, and diagnostics; lazy directional explanation/impact queries. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
@@ -39,7 +39,8 @@ Docs index:
 1. **`framer-core`, `framer-library`, `framer-solver`, `framer-standards`,
    `framer-geometry`, `framer-analysis`, and `framer-render` carry no UI
    dependency.** They stay testable, scriptable, and exportable without the app.
-2. **Three layers, one source of truth:** authored *intent* (`BuildingModel`) →
+2. **Three layers, one source of truth:** authored *intent* (`BuildingModel`, including
+   explicit `IntentAssertion` and `IntentOverride` records) →
    derived *framing* (`ProjectFramePlan`, regenerated) → *presentation* (viewports,
    drawings, exports, disposable). Only authored intent is editable and persisted.
    The `framer-analysis` intent report and project graph are also derived,
@@ -50,7 +51,7 @@ Docs index:
 3. **Determinism.** Same model + standards stack → byte-identical `.framer` and
    identical framing/render. Lengths are integer **ticks** (16 = 1 inch), no floats
    in the model; `.framer` is ID-sorted + canonical; the renderer is seeded (PCG).
-4. **`.framer` is schema v13 and v13-only.** Bumping the schema means updating
+4. **`.framer` is schema v14 and v14-only.** Bumping the schema means updating
    `PROJECT_SCHEMA_VERSION`, the three `examples/projects/*.framer`, the round-trip
    tests, [project-files.md](docs/project-files.md), and the version references in
    [crates/framer-core/README.md](crates/framer-core/README.md),

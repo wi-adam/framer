@@ -18,7 +18,7 @@ Current coverage includes:
 - floor, flat/sloped ceiling, and overhung roof assembly envelopes, including
   roof-opening cavities.
 
-Geometry is derived only. It is never serialized into schema v13, and the crate
+Geometry is derived only. It is never serialized into schema v14, and the crate
 has no UI, renderer, material, or GPU dependency. Use
 `build_physical_scene(&model, &plan)` as the whole-project entry point.
 

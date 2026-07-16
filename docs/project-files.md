@@ -5,8 +5,10 @@ format is intentionally text-first so humans, Git, and coding agents can inspect
 and edit authored design intent without reverse-engineering an opaque binary
 container.
 
-The v13 format stores only the canonical intent model. Generated framing plans,
-the revision-bound project analysis graph and its query cache, typed room
+The v14 format stores only the canonical intent model, including typed
+project-authored cross-object assertions and explicit waiver records. Evaluated
+outcomes, fact observations, diagnostics, generated framing plans, the
+revision-bound project analysis graph and its query cache, typed room
 schedule/boundary consequences, current library-lifecycle status, cached viewport
 data, drawings, BOM exports, and other disposable artifacts are regenerated from
 the authored model and must not be written into the canonical file.
@@ -29,12 +31,12 @@ for the single-wall example.
 > is `crates/framer-core/src/project.rs`; the companion `.framerlib` library
 > format is implemented in `crates/framer-core/src/library.rs`.
 
-## V13 Shape
+## V14 Shape
 
 ```json
 {
   "format": "framer.project",
-  "schema_version": 13,
+  "schema_version": 14,
   "authored": {
     "site": { "jurisdiction": "" },
     "standards": [],
@@ -59,7 +61,7 @@ for the single-wall example.
 ```
 
 - `format` must be `framer.project`.
-- `schema_version` must be `13` when saving from the current app.
+- `schema_version` must be `14` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
   `generated`, `analysis`, `graph`, `cache`, `exports`, or presentation data to
@@ -70,7 +72,8 @@ for the single-wall example.
   both with the IRC 2021 starter pack.
 - `libraries`, `materials`, `systems`, `furnishings`, `mep_objects`, `rooms`,
   `furnishing_instances`, `mep_instances`, `roof_planes`, `ceilings`,
-  `floor_decks`, and `braced_wall_lines` are omitted when empty; `wall_joins`
+  `floor_decks`, `braced_wall_lines`, `intents`, and `intent_overrides` are
+  omitted when empty; `wall_joins`
   defaults to an empty list; `levels` defaults to a single `level-1`.
 - `levels` carry an optional `height` (the top plane is `elevation + height`);
   a zero height is omitted. `systems` carry a `kind` of `Wall`, `Floor`, `Roof`,
@@ -89,10 +92,10 @@ for the single-wall example.
   ceiling, which keeps the region's two forms. A sloped ceiling requires an
   explicit polygon region.
 
-### Schema versioning is v13-only
+### Schema versioning is v14-only
 
-The current build is **v13-only**. On load, Framer peeks the file header and
-**rejects** any `schema_version` other than `13` with an explicit
+The current build is **v14-only**. On load, Framer peeks the file header and
+**rejects** any `schema_version` other than `14` with an explicit
 `unsupported Framer project schema version N` error — older files are *not*
 migrated in place. Convert old files with an older Framer build, or re-author
 them.
@@ -165,7 +168,7 @@ self-contained.
 Portable project packages use the `.framerpkg` extension. A package is a
 deterministic ZIP with stored entries, sorted paths, and zeroed timestamps:
 
-- `project.framer`: the canonical v13 project JSON.
+- `project.framer`: the canonical v14 project JSON.
 - `manifest.json`: `{ "format": "framer.package", "schema_version": 1, ... }`.
 - `assets/blake3-<hex>`: optional content-addressed binary assets referenced by
   material appearances.
@@ -176,7 +179,7 @@ back to the material's authored color and the project still opens.
 
 ## Authored Model
 
-The v13 authored model holds:
+The v14 authored model holds:
 
 - `site`: project jurisdiction and environmental assumptions.
 - `standards`: ordered standards-pack stack. Later packs override earlier packs.
@@ -205,6 +208,10 @@ The v13 authored model holds:
   `span` direction.
 - `braced_wall_lines`: optional authored braced wall lines, used by standards
   checks.
+- `intents`: optional, id-sorted project-authored requirement/preference
+  assertions over exact furnishing/MEP instance and room participants.
+- `intent_overrides`: optional, id-sorted explicit waivers targeting authored
+  assertion ids; every waiver carries a non-empty reason.
 - Per wall: `openings` (wall openings), `dimensions` (wall-local dimension
   constraints), and `bracing` (optional braced panels).
 
@@ -430,6 +437,131 @@ family and level must both exist in this file.
 `Deg0` is omitted. MEP instances use the same shape in `mep_instances` and point
 their `family` at an id in `mep_objects`.
 
+Model plan coordinates are right-handed: `+X` points right and `+Y` points up.
+Family `width` is local left-to-right, `depth` is local back-to-front, and the
+instance position is the footprint center. `Deg0` front is local `+Y`, and
+positive `QuarterTurn` rotation is counterclockwise: `Deg90` maps front to
+model `-X`, `Deg180` to `-Y`, and `Deg270` to `+X`. Screen coordinates do not
+change this model convention.
+
+## Cross-Object Intent and Waivers
+
+Schema v14 adds two skip-empty authored collections. `intents` stores typed
+cross-object assertions; `intent_overrides` stores explicit exceptions to those
+assertions. Outcomes, measured facts, report rows, graph edges, and diagnostics
+are derived and never belong in either collection.
+
+The first persisted vertical slice intentionally accepts only:
+
+- `domain`: `SpatialProgram`, `Mep`, `Compliance`, or
+  `OperationalMaintenance`. The Rust enum contains the complete product domain
+  vocabulary, but the other domains are rejected until an end-to-end evaluator
+  exists.
+- `mode`: `Requirement` or `Preference { priority }`. Preference priority is a
+  nonzero `u16`; larger values are stronger. Objectives and assumptions remain
+  derived-protocol types and are not valid authored modes in v14.
+- `scope`: one exact furnishing or MEP instance as `subject` and exactly one
+  same-level room in `participants`. The references are kind-checked; strings
+  that exist under a different entity kind are rejected rather than coerced.
+- `expression`: a shared `FactPredicate` over
+  `PlacedObjectContainedInRoom` or parameterized `PlacedObjectClearance` facts.
+  `All`, `Any`, `Not`, and type-correct `Compare` trees are accepted; empty
+  groups, non-placed-object facts, invalid flag operators, type mismatches, and
+  negative clearance thresholds are rejected.
+- `source`: `User`. `rationale` is optional.
+
+A canonical example containing both fact forms and a project waiver is:
+
+```json
+{
+  "intents": [
+    {
+      "id": "intent-toilet-contained",
+      "domain": "SpatialProgram",
+      "mode": "Requirement",
+      "scope": {
+        "Exact": {
+          "subject": { "MepInstance": "mep-toilet-1" },
+          "participants": [{ "Room": "room-bath-1" }]
+        }
+      },
+      "expression": {
+        "FactPredicate": {
+          "Compare": {
+            "fact": "PlacedObjectContainedInRoom",
+            "op": "Eq",
+            "value": { "FlagLiteral": true }
+          }
+        }
+      },
+      "source": "User",
+      "rationale": "Keep the toilet footprint inside the bathroom"
+    },
+    {
+      "id": "intent-toilet-front-clearance",
+      "domain": "OperationalMaintenance",
+      "mode": { "Preference": { "priority": 200 } },
+      "scope": {
+        "Exact": {
+          "subject": { "MepInstance": "mep-toilet-1" },
+          "participants": [{ "Room": "room-bath-1" }]
+        }
+      },
+      "expression": {
+        "FactPredicate": {
+          "Compare": {
+            "fact": {
+              "PlacedObjectClearance": {
+                "direction": "Front",
+                "datum": "FootprintFace"
+              }
+            },
+            "op": "Ge",
+            "value": { "LengthLiteral": { "ticks": 480 } }
+          }
+        }
+      },
+      "source": "User",
+      "rationale": "Prefer 30 inches clear in front"
+    }
+  ],
+  "intent_overrides": [
+    {
+      "Waive": {
+        "id": "override-toilet-front-existing",
+        "target": "intent-toilet-front-clearance",
+        "reason": "Owner accepted the existing-condition approach",
+        "source": "User"
+      }
+    }
+  ]
+}
+```
+
+`PlacedObjectContainedInRoom` observes whether the complete rotated rectangular
+family footprint lies inside the exact derived room boundary.
+`PlacedObjectClearance` carries a `direction` (`Left`, `Right`, `Front`, `Back`,
+or `Around`) and `datum` (`Centerline` or `FootprintFace`). It measures in the
+rotated local direction across the target footprint's perpendicular span to the
+nearest finished room-wall face or other same-level furnishing/MEP footprint;
+`Around` is the minimum of all four cardinal results. A geometric containment
+miss is a known `false` and yields zero clearance. An open room boundary,
+unresolved family geometry, or missing wall-system input yields a derived
+unknown result instead of a pass. These observations come only from
+`framer-standards::FactSnapshot`, whether the predicate originated in a standards
+check or a project assertion.
+
+Reusable standards packs use selector scope rather than project ids. A
+`CheckScope::PlacedObjects` rule resolves an instance to an exact room only when
+its center lies in exactly one closed same-level authored room; zero closed
+matches are unresolved and multiple matches are ambiguous. Both cases remain explicit
+unknown fact subjects and are not silently skipped.
+
+An `IntentOverride::Waive` targets one known authored intent id and requires a
+non-whitespace reason. At most one project override may target an assertion.
+The override changes the derived outcome to `Waived`; it is not a second
+assertion and does not authorize editing generated geometry.
+
 ### Library provenance
 
 Using a library item copies the full definition into the project. The project
@@ -600,14 +732,16 @@ Each room stores:
 
 Standards pack, material, system, furnishing, MEP object, placed object
 instance, level, wall, join, opening, dimension, bracing panel, braced wall line,
-and room IDs are stable semantic identifiers. They must be non-empty and contain
-only lowercase letters, digits, or hyphens. Examples:
+room, authored intent, and intent override IDs are stable semantic identifiers.
+They share one global id pool, must be non-empty, and contain only lowercase
+letters, digits, or hyphens. Examples:
 
 - `mat-drywall`, `system-wall-exterior-1`
 - `furnishing-workbench`, `mep-load-center`, `furnishing-instance-1`
 - `level-1`, `wall-1`, `join-front-right`
 - `opening-door-1`, `opening-window-1`, `dimension-1`, `panel-front-1`,
   `bwl-front`, `room-bed-1`
+- `intent-toilet-front-clearance`, `override-toilet-front-existing`
 
 Do not rewrite existing IDs when changing properties or names. Add a new stable ID
 only when adding a new authored object.
@@ -627,17 +761,23 @@ Framer canonicalizes project files before saving:
 
 - Materials are sorted by `id`.
 - Standards packs, systems, furnishings, MEP objects, furnishing instances, MEP
-  instances, and braced wall lines are sorted by `id`; **layers within a system
+  instances, braced wall lines, intents, and intent overrides are sorted by
+  `id`; **layers within a system
   are not sorted** (layer order is semantic: interior → exterior), and the
   `standards` stack order is semantic.
 - Levels, walls, wall joins, and rooms are sorted by `id`.
 - Openings, dimensions, and bracing panels within each wall are sorted by `id`.
 - A material's `properties` map is ordered (a `BTreeMap`), so property insertion
   order does not affect output.
+- Exact-scope participant order and `All`/`Any` predicate-child order are
+  semantic and are not silently resorted. Schema v14 currently requires exactly
+  one room participant.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing, room schedule/boundary consequence nodes, library-lifecycle
-  status, and the derived project graph are deterministic output and are not
-  saved. `GraphRevision` fingerprints the analysis contract version, a
+- Measured fact observations, intent outcomes and compiled waiver records,
+  generated diagnostics and framing, room schedule/boundary consequence nodes,
+  library-lifecycle status,
+  and the derived project graph are deterministic output and are not saved.
+  `GraphRevision` fingerprints the analysis contract version, a
   length-delimited deterministic starter-library source input (availability plus
   content hash when available), and canonical project bytes; it is a
   cache/evidence boundary, not project data.
@@ -653,7 +793,7 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 
 1. Read this document and the project file before editing.
 2. Edit only `authored` design intent.
-3. Preserve `format` and `schema_version` (`13`). The build is v13-only; do not
+3. Preserve `format` and `schema_version` (`14`). The build is v14-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
 5. Keep authored intent separate from generated framing, room consequences,
@@ -667,16 +807,25 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
    references — every referenced `system`/`material`/`family`/standards pack must
    exist. Keep layer order interior → exterior and keep standards stack order
    semantic.
-8. Keep roof outlines as minimal implicit rings (no repeated closing point,
+8. Give every `IntentAssertion` and `IntentOverride` a new globally unique stable
+   id. Use an exact furnishing/MEP instance subject and one same-level room
+   participant; do not substitute labels or vector indices for typed references.
+   Keep the v14 allowlist, use only nonzero preference priorities, and keep fact
+   operands type-correct. A waiver must target a known authored assertion, have a
+   non-whitespace reason, and be the only project override for that target.
+9. Keep roof outlines as minimal implicit rings (no repeated closing point,
    consecutive duplicate, or redundant collinear vertex), keep overhangs
    nonnegative, and use matching eave/rake values across every same-level
    exact-edge-connected roof assembly.
-9. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
-10. Do not present the starter IRC 2021 standards pack as complete code
+10. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
+    Preserve semantic order inside construction layers, standards stacks, exact
+    participants, and predicate children.
+11. Do not present the starter IRC 2021 standards pack as complete code
    compliance.
-11. Represent plan adjustments as authored design changes or explicit override
-    records if the schema supports them; do not add generated members directly.
-12. Validate after edits.
+12. Represent plan adjustments as authored design changes. Use
+    `IntentOverride::Waive` only as an explicit exception to an authored
+    assertion; it does not permit adding or changing generated members directly.
+13. Validate after edits.
 
 Recommended validation:
 
@@ -703,7 +852,11 @@ Use:
 - `Open` and `Save` to load or persist the authored `.framer` file.
 - `Design` to edit authored levels, wall placement, openings, joins, construction
   systems, materials, furnishing/MEP families, and placed furnishing/MEP instances
-  through the model tree, inspector, catalog, and authored viewports.
+  through the model tree, inspector, catalog, and authored viewports. The
+  inspector's **Intent** section authors, edits, deletes, and waives schema-v14
+  project assertions through the ordinary validated edit/history path; it requires
+  a rationale while authoring even though the file schema keeps `rationale`
+  optional for agent-authored data.
 - `Shell` in Design Mode for top-down wall selection and `Wall` in Design Mode for
   laying out authored openings on the selected wall.
 - the Design-mode `Wall` (W) and `Room` (R) tools to draw walls and place rooms in
@@ -711,9 +864,12 @@ Use:
   and the `Dimension` tool in the wall view to create driving or reference dimensions.
 - `Plan` to inspect generated framing, diagnostics, BOM rows (including the
   fastening and per-layer material takeoffs), read-only authored summaries, and
-  selectable generated members. The inspector's read-only **Intent relationships**
-  section explains current dependencies and possible impact from the disposable
-  graph; it does not edit or persist relationships.
+  selectable generated members. The inspector's **Intent** section combines
+  read-only regenerated current status, dependencies, possible impact, and
+  generated provenance; it does not persist those derived views. Authored intent
+  mutation controls are disabled in Plan, while the read-only **Focus all** action
+  remains available to select every exact participant. Candidate resolution
+  options remain Slice 4.
 - `Export` in Plan Mode to write disposable sidecar artifacts next to the project
   path: `<project>.svg` for the shell plan plus wall elevations, `<project>.csv`
   for the grouped whole-project BOM/cut list plus fastener takeoff section, and

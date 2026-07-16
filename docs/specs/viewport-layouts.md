@@ -144,7 +144,8 @@ layout presets for reuse across projects and launches.
 ## Constraints & invariants
 
 - This is app-side presentation. `framer-core`, `framer-solver`, `framer-geometry`, and
-  `framer-render` gain no UI dependency, and `.framer` schema v13 is unchanged.
+  `framer-render` gain no UI dependency. The feature left then-current `.framer`
+  schema v13 unchanged, and layout state remains absent from current schema v14.
 - All panes in a frame consume one consistent authored/derived snapshot. Pane events apply only
   after drawing, so later panes cannot observe half-applied edits from an earlier pane.
 - CPU render math and WGSL are unchanged. GPU changes concern resource identity/lifetime only and

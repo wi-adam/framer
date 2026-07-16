@@ -6,12 +6,21 @@
 //! no-op edits, re-solves on restore, and is cleared by load/reset.
 
 use eframe::egui;
-use framer_core::{FramingDefaults, Length, OpeningKind, Point2, Wall};
+use framer_analysis::{AssertionParticipantRole, AssertionRef, AssertionSource};
+use framer_core::{
+    Applicability, AuthoredIntentMode, BuildingModel, CheckScope, CheckSeverity, ClearanceDatum,
+    ClearanceDirection, CompareOp, ComplianceCheck, ElementId, Fact, FactOperand, FramingDefaults,
+    Furnishing, FurnishingInstance, IntentDomain, Length, Level, MepInstance, MepObject,
+    MepObjectKind, OpeningKind, Point2, Predicate, PreferencePriority, Room, RoomUsage, Wall,
+};
 
 use super::actions::ActionId;
 use super::model_edit::WallEditHandle;
 use super::viewport::WallDragEvent;
-use super::{FramerApp, RoofForm, Selection, ViewClick, ViewportMode};
+use super::{
+    AuthoredComponentKind, ComponentKey, FramerApp, IntentAuthoringDraft, IntentDraftExpression,
+    RoofForm, Selection, SelectionOp, ViewClick, ViewportMode, WorkspaceMode,
+};
 
 /// Feed a single key-press through a real egui frame so `handle_keyboard_shortcuts`
 /// sees it via `consume_key` exactly as it would at runtime.
@@ -78,6 +87,538 @@ fn replace_walls_with_l_footprint(app: &mut FramerApp) {
         );
     }
     app.history.clear();
+}
+
+fn prepare_intent_fixture(app: &mut FramerApp) -> (ElementId, ElementId) {
+    let mut model = BuildingModel::demo_shell();
+    let room = Room::new(
+        "room-intent",
+        "Intent room",
+        RoomUsage::Living,
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    );
+    let subject_id = ElementId::new("furnishing-instance-intent");
+    model.rooms.push(room.clone());
+    model.furnishings.push(Furnishing::new(
+        "furnishing-intent",
+        "Intent furnishing",
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(30),
+    ));
+    model.furnishing_instances.push(FurnishingInstance::new(
+        subject_id.0.clone(),
+        "Placed intent furnishing",
+        "furnishing-intent",
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    ));
+    model.sort_deterministically();
+    model.validate().expect("intent fixture model");
+    app.model = model;
+    app.selected = Selection::FurnishingInstance(subject_id.0.clone());
+    app.component_selection.replace(Some(ComponentKey::authored(
+        AuthoredComponentKind::FurnishingInstance,
+        subject_id.0.clone(),
+    )));
+    app.history.clear();
+    app.rebuild();
+    (subject_id, room.id)
+}
+
+fn create_intent(
+    app: &mut FramerApp,
+    expression: IntentDraftExpression,
+) -> framer_core::AuthoredIntentId {
+    assert!(app.begin_intent_assertion(expression));
+    let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut() else {
+        panic!("assertion draft");
+    };
+    draft.rationale = "Keep the placement usable".to_owned();
+    assert!(app.accept_intent_authoring());
+    app.model.intents.last().expect("created intent").id.clone()
+}
+
+fn waive_intent(app: &mut FramerApp, id: &framer_core::AuthoredIntentId) {
+    assert!(app.begin_waive_intent(id));
+    let Some(IntentAuthoringDraft::Waiver(draft)) = app.intent_authoring_draft.as_mut() else {
+        panic!("waiver draft");
+    };
+    draft.reason = "Approved project exception".to_owned();
+    assert!(app.accept_intent_authoring());
+}
+
+#[test]
+fn cancelling_or_changing_selection_drops_intent_draft_without_history() {
+    let mut app = FramerApp::default();
+    let (_, room_id) = prepare_intent_fixture(&mut app);
+    let before = app.model.clone();
+
+    assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+    assert!(app.intent_authoring_draft.is_some());
+    app.cancel_intent_authoring();
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+
+    assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+    app.apply_selection(Selection::Room(room_id.0), None, SelectionOp::Replace);
+    assert!(app.intent_authoring_draft.is_none());
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+
+    app.apply_selection(
+        Selection::FurnishingInstance("furnishing-instance-intent".to_owned()),
+        None,
+        SelectionOp::Replace,
+    );
+    assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+    app.reset_demo();
+    assert!(app.intent_authoring_draft.is_none());
+    assert!(!app.history.can_undo());
+}
+
+#[test]
+fn create_edit_waive_and_delete_intent_each_round_trip_through_undo_redo() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    assert_eq!(app.history.undo_label(), Some("Add intent"));
+    app.undo();
+    assert!(app.model.intents.is_empty());
+    app.redo();
+    assert_eq!(app.model.intents.len(), 1);
+
+    assert!(app.begin_edit_intent(&id));
+    let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut() else {
+        panic!("edit draft");
+    };
+    draft.mode = AuthoredIntentMode::Preference {
+        priority: PreferencePriority(7),
+    };
+    draft.rationale = "Prefer this exact room".to_owned();
+    assert!(app.accept_intent_authoring());
+    assert_eq!(app.history.undo_label(), Some("Edit intent"));
+    app.undo();
+    assert_eq!(app.model.intents[0].mode, AuthoredIntentMode::Requirement);
+    app.redo();
+    assert_eq!(
+        app.model.intents[0].mode,
+        AuthoredIntentMode::Preference {
+            priority: PreferencePriority(7)
+        }
+    );
+
+    waive_intent(&mut app, &id);
+    assert_eq!(app.history.undo_label(), Some("Waive intent"));
+    app.undo();
+    assert!(app.model.intent_overrides.is_empty());
+    app.redo();
+    assert_eq!(app.model.intent_overrides.len(), 1);
+
+    assert!(app.delete_intent(&id));
+    assert_eq!(app.history.undo_label(), Some("Delete intent"));
+    assert!(app.model.intents.is_empty());
+    assert!(app.model.intent_overrides.is_empty());
+    app.undo();
+    assert_eq!(app.model.intents.len(), 1);
+    assert_eq!(app.model.intent_overrides.len(), 1);
+    app.redo();
+    assert!(app.model.intents.is_empty());
+    assert!(app.model.intent_overrides.is_empty());
+}
+
+#[test]
+fn plan_workspace_rejects_direct_intent_mutations_and_drops_live_drafts() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    app.history.clear();
+    let before = app.model.clone();
+
+    assert!(app.begin_edit_intent(&id));
+    let stale_draft = app
+        .intent_authoring_draft
+        .clone()
+        .expect("Design should open the edit draft");
+    app.set_workspace_mode(WorkspaceMode::Plan);
+    assert!(app.intent_authoring_draft.is_none());
+
+    // Even a stale draft injected by a direct caller cannot bypass the output-workspace guard.
+    app.intent_authoring_draft = Some(stale_draft);
+    assert!(!app.accept_intent_authoring());
+    assert!(app.intent_authoring_draft.is_none());
+    assert!(!app.begin_intent_assertion(IntentDraftExpression::Containment));
+    assert!(!app.begin_edit_intent(&id));
+    assert!(!app.begin_waive_intent(&id));
+    assert!(!app.delete_intent(&id));
+
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+    assert!(app.focus_all_intent_participants(&AssertionRef::Authored(id)));
+    assert_eq!(app.selected_component_count(), 2);
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+}
+
+#[test]
+fn editing_intent_preserves_its_valid_persisted_domain() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    app.model.intents[0].domain = IntentDomain::Compliance;
+    app.model.validate().expect("Compliance-domain fixture");
+    app.rebuild();
+    app.history.clear();
+
+    assert!(app.begin_edit_intent(&id));
+    let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut() else {
+        panic!("edit draft");
+    };
+    draft.rationale = "Retain the authored compliance classification".to_owned();
+    assert!(app.accept_intent_authoring());
+
+    assert_eq!(app.model.intents[0].domain, IntentDomain::Compliance);
+    framer_core::save_project(&app.model).expect("edited intent remains saveable");
+    app.undo();
+    assert_eq!(app.model.intents[0].domain, IntentDomain::Compliance);
+    app.redo();
+    assert_eq!(app.model.intents[0].domain, IntentDomain::Compliance);
+}
+
+#[test]
+fn scoped_placed_object_level_changes_reject_without_history_or_invalid_state() {
+    let mut app = FramerApp::default();
+    let (furnishing_id, _) = prepare_intent_fixture(&mut app);
+    let upper = Level::new("level-2", "Level 2", Length::from_feet(10.0));
+    app.model.levels.push(upper.clone());
+    app.model.sort_deterministically();
+    app.rebuild();
+    let intent_id = create_intent(&mut app, IntentDraftExpression::Containment);
+    app.history.clear();
+    let before = app.model.clone();
+    let furnishing_ref = framer_core::AuthoredEntityRef::FurnishingInstance(furnishing_id.clone());
+
+    assert!(!app.change_placed_object_level(furnishing_ref.clone(), upper.id.clone()));
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+    assert!(
+        app.file_status
+            .as_deref()
+            .is_some_and(|status| status.contains("participates in project intent"))
+    );
+    framer_core::save_project(&app.model).expect("rejected furnishing move remains saveable");
+
+    assert!(app.delete_intent(&intent_id));
+    app.history.clear();
+    assert!(app.change_placed_object_level(furnishing_ref, upper.id.clone()));
+    assert_eq!(
+        app.history.undo_label(),
+        Some("Change furnishing placement level")
+    );
+    assert_eq!(app.model.furnishing_instances[0].level, upper.id);
+    framer_core::save_project(&app.model).expect("accepted unscoped move remains saveable");
+    app.undo();
+    assert_eq!(app.model.furnishing_instances[0].level.0, "level-1");
+
+    app.model.mep_objects.push(MepObject::new(
+        "mep-intent-level",
+        "Intent level fixture",
+        MepObjectKind::Plumbing,
+        Length::from_whole_inches(18),
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(30),
+    ));
+    let mep_id = ElementId::new("mep-instance-intent-level");
+    app.model.mep_instances.push(MepInstance::new(
+        mep_id.0.clone(),
+        "Placed intent level fixture",
+        "mep-intent-level",
+        "level-1",
+        Point2::new(Length::from_feet(12.0), Length::from_feet(12.0)),
+    ));
+    app.model.sort_deterministically();
+    app.model.validate().expect("MEP fixture");
+    app.selected = Selection::MepInstance(mep_id.0.clone());
+    app.component_selection.replace(Some(ComponentKey::authored(
+        AuthoredComponentKind::MepInstance,
+        mep_id.0.clone(),
+    )));
+    app.rebuild();
+    create_intent(&mut app, IntentDraftExpression::Containment);
+    app.history.clear();
+    let before = app.model.clone();
+
+    assert!(!app.change_placed_object_level(
+        framer_core::AuthoredEntityRef::MepInstance(mep_id),
+        upper.id
+    ));
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+    framer_core::save_project(&app.model).expect("rejected MEP move remains saveable");
+}
+
+#[test]
+fn same_frame_placement_field_then_level_change_settles_in_order() {
+    const ORIGINAL_NAME: &str = "Placed intent furnishing";
+    const EDITED_NAME: &str = "Edited intent furnishing";
+
+    let mut app = FramerApp::default();
+    let (furnishing_id, _) = prepare_intent_fixture(&mut app);
+    let upper = Level::new("level-2", "Level 2", Length::from_feet(10.0));
+    app.model.levels.push(upper.clone());
+    app.model.sort_deterministically();
+    app.rebuild();
+    app.history.clear();
+
+    let base = app.snapshot();
+    app.model
+        .furnishing_instances
+        .iter_mut()
+        .find(|instance| instance.id == furnishing_id)
+        .expect("furnishing fixture")
+        .name = EDITED_NAME.to_owned();
+    let mut changed = true;
+    let mut edit_base = Some(base);
+
+    app.settle_inspector_history_before_discrete_edit(
+        &mut changed,
+        &mut edit_base,
+        "Edit furnishing placement",
+    );
+    assert!(!changed);
+    assert!(edit_base.is_none());
+    assert!(!app.history.is_pending());
+    assert_eq!(app.history.undo_label(), Some("Edit furnishing placement"));
+
+    assert!(app.change_placed_object_level(
+        framer_core::AuthoredEntityRef::FurnishingInstance(furnishing_id),
+        upper.id
+    ));
+    let assert_state = |app: &FramerApp, expected_name: &str, expected_level: &str| {
+        let instance = &app.model.furnishing_instances[0];
+        assert_eq!(instance.name, expected_name);
+        assert_eq!(instance.level.0, expected_level);
+        app.model.validate().expect("placement history model");
+        framer_core::save_project(&app.model).expect("placement history model remains saveable");
+    };
+
+    assert_state(&app, EDITED_NAME, "level-2");
+    assert_eq!(
+        app.history.undo_label(),
+        Some("Change furnishing placement level")
+    );
+
+    app.undo();
+    assert_state(&app, EDITED_NAME, "level-1");
+    assert_eq!(app.history.undo_label(), Some("Edit furnishing placement"));
+    assert_eq!(
+        app.history.redo_label(),
+        Some("Change furnishing placement level")
+    );
+
+    app.undo();
+    assert_state(&app, ORIGINAL_NAME, "level-1");
+    assert_eq!(app.history.undo_label(), None);
+    assert_eq!(app.history.redo_label(), Some("Edit furnishing placement"));
+
+    app.redo();
+    assert_state(&app, EDITED_NAME, "level-1");
+    assert_eq!(
+        app.history.redo_label(),
+        Some("Change furnishing placement level")
+    );
+    app.redo();
+    assert_state(&app, EDITED_NAME, "level-2");
+    assert_eq!(app.history.redo_label(), None);
+}
+
+#[test]
+fn invalid_intent_participant_never_mutates_model_or_history() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let before = app.model.clone();
+    assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+    let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut() else {
+        panic!("assertion draft");
+    };
+    draft.room = Some(ElementId::new("room-does-not-exist"));
+    draft.rationale = "Invalid participant fixture".to_owned();
+
+    assert!(!app.accept_intent_authoring());
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+    assert!(app.intent_authoring_draft.is_some());
+}
+
+#[test]
+fn save_load_recomputes_intent_and_clears_incomplete_draft() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    let document = framer_core::save_project(&app.model).expect("save intent project");
+    let path =
+        std::env::temp_dir().join(format!("framer-intent-load-{}.framer", std::process::id()));
+    std::fs::write(&path, document).expect("write project");
+
+    assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+    app.project_path = path.display().to_string();
+    app.load_project_file();
+    let _ = std::fs::remove_file(path);
+
+    assert!(app.intent_authoring_draft.is_none());
+    assert!(!app.history.can_undo());
+    let record = app
+        .intent_report
+        .as_ref()
+        .and_then(|report| report.as_ref().ok())
+        .and_then(|report| report.record(&AssertionRef::Authored(id)));
+    assert!(
+        record.is_some(),
+        "load must rebuild the compiled intent report"
+    );
+}
+
+#[test]
+fn focus_all_selects_object_and_room_while_keeping_object_primary() {
+    let mut app = FramerApp::default();
+    let (subject_id, room_id) = prepare_intent_fixture(&mut app);
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    let reference = AssertionRef::Authored(id);
+
+    assert!(app.focus_all_intent_participants(&reference));
+    assert_eq!(
+        app.selected,
+        Selection::FurnishingInstance(subject_id.0.clone())
+    );
+    assert_eq!(app.selected_component_count(), 2);
+    assert!(app.component_is_selected(&ComponentKey::authored(
+        AuthoredComponentKind::Room,
+        room_id.0
+    )));
+    assert!(app.component_is_selected(&ComponentKey::authored(
+        AuthoredComponentKind::FurnishingInstance,
+        subject_id.0
+    )));
+    assert_eq!(app.focused_intent, Some(reference));
+}
+
+#[test]
+fn focus_all_uses_evaluated_entity_for_standards_placement_records() {
+    let mut app = FramerApp::default();
+    let (subject_id, room_id) = prepare_intent_fixture(&mut app);
+    let rule = "fixture.standards-placement-focus";
+    app.model.standards_packs[0].checks.push(ComplianceCheck {
+        rule: rule.to_owned(),
+        citation: "Intent focus fixture".to_owned(),
+        title: "Placed object remains in its room".to_owned(),
+        severity: CheckSeverity::Required,
+        applies: Applicability::Always,
+        scope: CheckScope::PlacedObjects { tags: Vec::new() },
+        requirement: Predicate::Compare {
+            fact: Fact::PlacedObjectContainedInRoom,
+            op: CompareOp::Eq,
+            value: FactOperand::FlagLiteral(true),
+        },
+    });
+    app.model.sort_deterministically();
+    app.model.validate().expect("standards focus fixture");
+    app.rebuild();
+
+    let reference = app
+        .intent_report
+        .as_ref()
+        .and_then(|report| report.as_ref().ok())
+        .and_then(|report| {
+            report.records().iter().find_map(|record| {
+                let assertion = record.assertion();
+                match &assertion.source {
+                    AssertionSource::StandardsRule(source) if source.rule == rule => {
+                        assert!(assertion.participants.iter().all(|participant| {
+                            participant.role == AssertionParticipantRole::EvaluatedEntity
+                        }));
+                        Some(assertion.reference.clone())
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .expect("standards placement assertion");
+
+    assert!(app.focus_all_intent_participants(&reference));
+    assert_eq!(
+        app.selected,
+        Selection::FurnishingInstance(subject_id.0.clone())
+    );
+    assert_eq!(app.selected_component_count(), 2);
+    assert!(app.component_is_selected(&ComponentKey::authored(
+        AuthoredComponentKind::Room,
+        room_id.0
+    )));
+    assert_eq!(app.focused_intent, Some(reference));
+}
+
+#[test]
+fn intent_diagnostic_focus_selects_cross_object_primary_subject() {
+    let mut app = FramerApp::default();
+    let (subject_id, _) = prepare_intent_fixture(&mut app);
+    create_intent(
+        &mut app,
+        IntentDraftExpression::Clearance {
+            direction: ClearanceDirection::Front,
+            datum: ClearanceDatum::FootprintFace,
+            threshold: Length::from_feet(100.0),
+        },
+    );
+    let diagnostic = app
+        .project_plan
+        .as_ref()
+        .expect("plan")
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code.starts_with("intent.assertion"))
+        .expect("violated intent diagnostic");
+    assert_eq!(diagnostic.source.as_ref(), Some(&subject_id));
+
+    app.focus_diagnostic(super::panels::DiagnosticAction::Source(subject_id.clone()));
+    assert_eq!(app.selected, Selection::FurnishingInstance(subject_id.0));
+}
+
+#[test]
+fn deleting_subject_or_room_cascades_intent_and_override_atomically() {
+    let mut app = FramerApp::default();
+    let (subject_id, room_id) = prepare_intent_fixture(&mut app);
+    let id = create_intent(&mut app, IntentDraftExpression::Containment);
+    waive_intent(&mut app, &id);
+    app.history.clear();
+
+    app.apply_selection(
+        Selection::FurnishingInstance(subject_id.0.clone()),
+        None,
+        SelectionOp::Replace,
+    );
+    app.delete_selected_furnishing_instance();
+    assert!(app.model.furnishing_instances.is_empty());
+    assert!(app.model.intents.is_empty());
+    assert!(app.model.intent_overrides.is_empty());
+    assert_eq!(app.history.undo_label(), Some("Delete furnishing instance"));
+    app.undo();
+    assert_eq!(app.model.furnishing_instances.len(), 1);
+    assert_eq!(app.model.intents.len(), 1);
+    assert_eq!(app.model.intent_overrides.len(), 1);
+
+    app.history.clear();
+    app.apply_selection(Selection::Room(room_id.0), None, SelectionOp::Replace);
+    app.delete_selected_room();
+    assert!(app.model.rooms.is_empty());
+    assert!(app.model.intents.is_empty());
+    assert!(app.model.intent_overrides.is_empty());
+    assert_eq!(app.history.undo_label(), Some("Delete room"));
+    app.undo();
+    assert_eq!(app.model.rooms.len(), 1);
+    assert_eq!(app.model.intents.len(), 1);
+    assert_eq!(app.model.intent_overrides.len(), 1);
 }
 
 #[test]

@@ -29,17 +29,19 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use framer_analysis::AssertionRef;
 use framer_core::{
-    Applicability, CheckScope, CheckSeverity, CompareOp, ComplianceCheck, ElementId, Fact,
-    FactOperand, Length, OpeningKind, Point2, Predicate, RuleOverlay,
+    Applicability, BuildingModel, CheckScope, CheckSeverity, ClearanceDatum, ClearanceDirection,
+    CompareOp, ComplianceCheck, ElementId, Fact, FactOperand, Furnishing, FurnishingInstance,
+    Length, OpeningKind, Point2, Predicate, Room, RoomUsage, RuleOverlay,
 };
 use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
 use super::viewport::{BuiltInPreset, SplitAxis};
 use super::{
-    AuthoredComponentKind, ComponentKey, FramerApp, RoofForm, Selection, SelectionOp, ViewportMode,
-    WallDisplay, actions, design, panels,
+    AuthoredComponentKind, ComponentKey, FramerApp, IntentAuthoringDraft, IntentDraftExpression,
+    RoofForm, Selection, SelectionOp, ViewportMode, WallDisplay, actions, design, panels,
 };
 
 fn shots_dir() -> PathBuf {
@@ -208,6 +210,44 @@ fn prepare_mixed_intent_status(app: &mut FramerApp) {
     app.rebuild();
     app.selected_wall = 0;
     app.selected = Selection::Wall;
+}
+
+fn prepare_authored_intent_shot(app: &mut FramerApp) {
+    let mut model = BuildingModel::demo_shell();
+    model.rooms.push(Room::new(
+        "room-intent-shot",
+        "Service room",
+        RoomUsage::Utility,
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    ));
+    model.furnishings.push(Furnishing::new(
+        "furnishing-intent-shot",
+        "Mechanical cabinet",
+        Length::from_whole_inches(30),
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(72),
+    ));
+    model.furnishing_instances.push(FurnishingInstance::new(
+        "furnishing-instance-intent-shot",
+        "Mechanical cabinet A",
+        "furnishing-intent-shot",
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    ));
+    model.sort_deterministically();
+    install_authored_intent_shot_model(app, model);
+}
+
+fn install_authored_intent_shot_model(app: &mut FramerApp, model: BuildingModel) {
+    app.model = model;
+    app.selected = Selection::FurnishingInstance("furnishing-instance-intent-shot".to_owned());
+    app.component_selection.replace(Some(ComponentKey::authored(
+        AuthoredComponentKind::FurnishingInstance,
+        "furnishing-instance-intent-shot",
+    )));
+    app.history.clear();
+    app.rebuild();
 }
 
 fn open_3d_component_context_menu(harness: &mut Harness<'_, FramerApp>) {
@@ -822,7 +862,7 @@ fn capture_ui_shot_deck() {
         &mut intent,
         &dir,
         &mut index,
-        "intent-wall-unknown-and-waived",
+        "intent-standards-waiver-provenance",
     );
 
     let mut unused = intent.state().model.materials[0].clone();
@@ -838,6 +878,101 @@ fn capture_ui_shot_deck() {
     scroll_to_intent_relationships(&mut intent);
     shot(&mut intent, &dir, &mut index, "intent-no-selection");
     drop(intent);
+
+    // Schema-backed cross-object intent: the transient authoring card, one violated authored
+    // preference, project-waiver provenance, and the retained assertion context after Focus all.
+    let mut authored_intent = shots_harness(design::studio_light());
+    authored_intent.run_ok();
+    prepare_authored_intent_shot(authored_intent.state_mut());
+    assert!(
+        authored_intent
+            .state_mut()
+            .begin_intent_assertion(IntentDraftExpression::Clearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+                threshold: Length::from_feet(10.0),
+            })
+    );
+    let Some(IntentAuthoringDraft::Assertion(draft)) =
+        authored_intent.state_mut().intent_authoring_draft.as_mut()
+    else {
+        panic!("authored intent screenshot draft");
+    };
+    draft.mode = framer_core::AuthoredIntentMode::Preference {
+        priority: framer_core::PreferencePriority(4),
+    };
+    draft.rationale = "Keep the mechanical cabinet service zone clear".to_owned();
+    scroll_to_intent_relationships(&mut authored_intent);
+    authored_intent.get_by_label("Create intent").scroll_to_me();
+    authored_intent.ctx.request_repaint();
+    authored_intent.run_steps(2);
+    shot(
+        &mut authored_intent,
+        &dir,
+        &mut index,
+        "intent-authoring-clearance-draft",
+    );
+
+    assert!(authored_intent.state_mut().accept_intent_authoring());
+    let authored_id = authored_intent.state().model.intents[0].id.clone();
+    let violated_model = authored_intent.state().model.clone();
+    drop(authored_intent);
+
+    let mut violated_intent = shots_harness(design::studio_light());
+    violated_intent.run_ok();
+    install_authored_intent_shot_model(violated_intent.state_mut(), violated_model);
+    scroll_to_intent_relationships(&mut violated_intent);
+    shot(
+        &mut violated_intent,
+        &dir,
+        &mut index,
+        "intent-violated-assertion",
+    );
+
+    assert!(violated_intent.state_mut().begin_waive_intent(&authored_id));
+    let Some(IntentAuthoringDraft::Waiver(draft)) =
+        violated_intent.state_mut().intent_authoring_draft.as_mut()
+    else {
+        panic!("project waiver screenshot draft");
+    };
+    draft.reason = "Owner-approved equipment layout exception".to_owned();
+    assert!(violated_intent.state_mut().accept_intent_authoring());
+    let waived_model = violated_intent.state().model.clone();
+    drop(violated_intent);
+
+    // Start waiver provenance from a fresh render target. The transition from the
+    // tall waiver editor to the compact compiled row can otherwise leave uncovered
+    // dirty regions in egui_kittest's off-screen target even after a requested
+    // repaint; a fresh harness makes this visual checkpoint deterministic.
+    let mut waived_intent = shots_harness(design::studio_light());
+    waived_intent.run_ok();
+    install_authored_intent_shot_model(waived_intent.state_mut(), waived_model);
+    scroll_to_intent_relationships(&mut waived_intent);
+    shot(
+        &mut waived_intent,
+        &dir,
+        &mut index,
+        "intent-project-waiver-provenance",
+    );
+
+    let focused_model = waived_intent.state().model.clone();
+    drop(waived_intent);
+    let mut focused_intent = shots_harness(design::studio_light());
+    focused_intent.run_ok();
+    install_authored_intent_shot_model(focused_intent.state_mut(), focused_model);
+    assert!(
+        focused_intent
+            .state_mut()
+            .focus_all_intent_participants(&AssertionRef::Authored(authored_id))
+    );
+    scroll_to_intent_relationships(&mut focused_intent);
+    shot(
+        &mut focused_intent,
+        &dir,
+        &mut index,
+        "intent-focus-all-participants",
+    );
+    drop(focused_intent);
 
     let mut intent_error = shots_harness(design::studio_light());
     intent_error.run_ok();

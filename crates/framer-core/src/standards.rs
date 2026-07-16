@@ -224,6 +224,29 @@ pub enum Applicability {
     SiteFlag { key: String },
 }
 
+/// A direction in a placed object's local plan frame.
+///
+/// `Deg0` front is local `+Y`; [`crate::QuarterTurn`] rotates this frame
+/// counterclockwise in model coordinates. `Around` requests the minimum of the
+/// four cardinal clearances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ClearanceDirection {
+    Left,
+    Right,
+    Front,
+    Back,
+    Around,
+}
+
+/// The origin from which directional placed-object clearance is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ClearanceDatum {
+    Centerline,
+    FootprintFace,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Fact {
@@ -243,6 +266,11 @@ pub enum Fact {
     BracedLineLength,
     BracedLineRequiredLength,
     BracedLineProvidedLength,
+    PlacedObjectContainedInRoom,
+    PlacedObjectClearance {
+        direction: ClearanceDirection,
+        datum: ClearanceDatum,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +291,7 @@ pub enum FactSubjectKind {
     Opening,
     Room,
     BracedWallLine,
+    PlacedObject,
 }
 
 impl FactSubjectKind {
@@ -272,6 +301,7 @@ impl FactSubjectKind {
             Self::Opening => "Openings",
             Self::Room => "Rooms",
             Self::BracedWallLine => "BracedWallLines",
+            Self::PlacedObject => "PlacedObjects",
         }
     }
 }
@@ -290,11 +320,12 @@ impl Fact {
             | Self::RoomCeilingHeight
             | Self::BracedLineLength
             | Self::BracedLineRequiredLength
-            | Self::BracedLineProvidedLength => FactType::Length,
+            | Self::BracedLineProvidedLength
+            | Self::PlacedObjectClearance { .. } => FactType::Length,
             Self::WallSystemRValueMilli | Self::OpeningJackStuds | Self::RoomAreaSquareInches => {
                 FactType::Int
             }
-            Self::WallIsExterior => FactType::Flag,
+            Self::WallIsExterior | Self::PlacedObjectContainedInRoom => FactType::Flag,
         }
     }
 
@@ -315,6 +346,9 @@ impl Fact {
             Self::BracedLineLength
             | Self::BracedLineRequiredLength
             | Self::BracedLineProvidedLength => FactSubjectKind::BracedWallLine,
+            Self::PlacedObjectContainedInRoom | Self::PlacedObjectClearance { .. } => {
+                FactSubjectKind::PlacedObject
+            }
         }
     }
 }
@@ -353,7 +387,8 @@ pub enum FactOperand {
 }
 
 impl FactOperand {
-    const fn value_type(&self) -> FactType {
+    /// The closed value type produced by this operand.
+    pub const fn value_type(&self) -> FactType {
         match self {
             Self::LengthLiteral(_) => FactType::Length,
             Self::IntLiteral(_) => FactType::Int,
@@ -362,7 +397,8 @@ impl FactOperand {
         }
     }
 
-    const fn fact(&self) -> Option<Fact> {
+    /// The referenced fact, when this is not a literal operand.
+    pub const fn fact(&self) -> Option<Fact> {
         match self {
             Self::Fact(fact) => Some(*fact),
             Self::LengthLiteral(_) | Self::IntLiteral(_) | Self::FlagLiteral(_) => None,
@@ -401,6 +437,10 @@ pub enum CheckScope {
         tags: Vec<String>,
     },
     BracedWallLines,
+    PlacedObjects {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    },
 }
 
 impl CheckScope {
@@ -410,6 +450,7 @@ impl CheckScope {
             Self::Openings { .. } => FactSubjectKind::Opening,
             Self::Rooms { .. } => FactSubjectKind::Room,
             Self::BracedWallLines => FactSubjectKind::BracedWallLine,
+            Self::PlacedObjects { .. } => FactSubjectKind::PlacedObject,
         }
     }
 }
@@ -1232,6 +1273,27 @@ mod tests {
         ] {
             assert_eq!(fact.subject_kind(), FactSubjectKind::BracedWallLine);
         }
+        assert_eq!(
+            Fact::PlacedObjectContainedInRoom.subject_kind(),
+            FactSubjectKind::PlacedObject
+        );
+        assert_eq!(
+            Fact::PlacedObjectContainedInRoom.value_type(),
+            FactType::Flag
+        );
+        for direction in [
+            ClearanceDirection::Left,
+            ClearanceDirection::Right,
+            ClearanceDirection::Front,
+            ClearanceDirection::Back,
+            ClearanceDirection::Around,
+        ] {
+            for datum in [ClearanceDatum::Centerline, ClearanceDatum::FootprintFace] {
+                let fact = Fact::PlacedObjectClearance { direction, datum };
+                assert_eq!(fact.subject_kind(), FactSubjectKind::PlacedObject);
+                assert_eq!(fact.value_type(), FactType::Length);
+            }
+        }
 
         assert_eq!(
             CheckScope::Walls {
@@ -1253,6 +1315,48 @@ mod tests {
             CheckScope::BracedWallLines.subject_kind(),
             FactSubjectKind::BracedWallLine
         );
+        assert_eq!(
+            CheckScope::PlacedObjects { tags: Vec::new() }.subject_kind(),
+            FactSubjectKind::PlacedObject
+        );
+    }
+
+    #[test]
+    fn placed_object_fact_requests_round_trip_and_validate_against_their_scope() {
+        let mut pack = starter_pack();
+        let fact = Fact::PlacedObjectClearance {
+            direction: ClearanceDirection::Front,
+            datum: ClearanceDatum::FootprintFace,
+        };
+        pack.checks.push(ComplianceCheck {
+            rule: "test.fixture.front-clearance".to_owned(),
+            citation: "Test".to_owned(),
+            title: "Fixture front clearance".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::PlacedObjects {
+                tags: vec!["fixture".to_owned()],
+            },
+            requirement: Predicate::All(vec![
+                Predicate::Compare {
+                    fact: Fact::PlacedObjectContainedInRoom,
+                    op: CompareOp::Eq,
+                    value: FactOperand::FlagLiteral(true),
+                },
+                Predicate::Compare {
+                    fact,
+                    op: CompareOp::Ge,
+                    value: FactOperand::LengthLiteral(Length::from_whole_inches(24)),
+                },
+            ]),
+        });
+
+        pack.validate().unwrap();
+        let restored: StandardsPack =
+            serde_json::from_str(&serde_json::to_string(&pack).unwrap()).unwrap();
+        assert_eq!(restored, pack);
+        assert_eq!(FactOperand::Fact(fact).fact(), Some(fact));
+        assert_eq!(FactOperand::Fact(fact).value_type(), FactType::Length);
     }
 
     fn table_pack(id: &str, rule: &str, header_depth: Length) -> StandardsPack {

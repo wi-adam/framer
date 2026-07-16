@@ -360,6 +360,7 @@ pub(super) fn draw_pane_canvas(
                     model: frame.model,
                     selected_wall: frame.selected_wall,
                     selection,
+                    selected_components: frame.selected_components,
                     layers: frame.layers,
                     draw_tool: &draw_tool,
                     room_tool_active: tools.room_tool_active,

@@ -4,16 +4,17 @@ The domain model and single source of truth for Framer. UI-agnostic: **no GUI
 dependency** — it is testable, scriptable, and exportable on its own. Every other crate
 derives from a `BuildingModel`.
 
-Depends on: nothing in the workspace. Consumed by: `framer-solver`, `framer-render`,
-`framer-app`.
+Depends on: nothing in the workspace. Consumed by: `framer-library`, `framer-solver`,
+`framer-standards`, `framer-geometry`, `framer-analysis`, `framer-render`, and `framer-app`.
 
 ## Modules
 
 | File | Purpose |
 | --- | --- |
 | `src/lib.rs` | Module wiring + public API (the `pub use` list is the public surface). |
-| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, standards-stack references, `ModelError`. |
+| `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, walls, openings, joins, rooms, dimensions, standards-stack references, authored-intent validation, `ModelError`. |
 | `src/project.rs` | `.framer` serialization: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
+| `src/intent.rs` | Persisted typed authored assertions/waivers, exact authored references, domains, modes, scopes, sources, and stable intent identities. |
 | `src/standards.rs` | Standards Engine v1 data: site context, standards packs, framing defaults, prescriptive tables, compliance checks, and stack resolution. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2` — the basis of determinism. |
@@ -23,14 +24,18 @@ Depends on: nothing in the workspace. Consumed by: `framer-solver`, `framer-rend
 
 - **`BuildingModel`** — root authored container (`site`, `standards`,
   `standards_packs`, `materials`, `systems`, `levels`, `walls`, `wall_joins`,
-  `rooms`). The only thing persisted.
+  `rooms`, `intents`, `intent_overrides`). The only thing persisted.
+- **`IntentAssertion`** / **`IntentOverride`** — typed project-authored
+  requirement/preference fact predicates and explicit waivers. Their evaluated
+  outcomes, evidence, diagnostics, and graph relationships are derived elsewhere
+  and are never serialized by core.
 - **`Wall`** references a **`ConstructionSystem` by id** (`system: ElementId`); systems hold an
   ordered (interior→exterior) stack of **`ConstructionLayer`**s; **`Material`**s are
   open/extensible (`properties: BTreeMap<String, PropertyValue>`).
 - Construct: `BuildingModel::new()`, `demo_wall()`, `demo_shell()`, `demo_two_bedroom()`.
 - Validate: `BuildingModel::validate()`.
 - Serialize: `load_project(&str)` / `save_project(&BuildingModel)`;
-  `PROJECT_SCHEMA_VERSION` (currently **13**, v13-only).
+  `PROJECT_SCHEMA_VERSION` (currently **14**, v14-only).
 - Topology: `room_boundaries(model)`, `room_boundary(model, seed)`.
 
 See [`docs/code-map.md`](../../docs/code-map.md#framer-core--the-domain-model) for full detail

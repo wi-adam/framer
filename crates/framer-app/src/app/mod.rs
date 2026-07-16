@@ -25,12 +25,17 @@ use std::sync::Arc;
 
 use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
-use framer_analysis::{AnalysisError, GraphQueryCache, IntentReport, ProjectGraph, ProjectNodeRef};
+use framer_analysis::{
+    AnalysisError, AssertionRef, GraphQueryCache, IntentReport, ProjectGraph, ProjectNodeRef,
+};
 use framer_core::{
-    AuthoredEntityRef, BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint,
-    DimensionDirection, DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room,
-    RoomUsage, Wall, concave_polygon_corners, level_wall_loop_outline,
-    load_project as load_project_document, save_project as save_project_document,
+    AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, BuildingModel, ClearanceDatum,
+    ClearanceDirection, CompareOp, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionDirection, DimensionKind, ElementId, ExactIntentScope, Fact, FactOperand,
+    IntentAssertion, IntentDomain, IntentExpression, IntentOverride, IntentSource, Length, Opening,
+    OpeningKind, Point2, Predicate, ProjectIntentScope, Room, RoomUsage, Wall,
+    concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
+    save_project as save_project_document,
 };
 use framer_geometry::{
     Aabb, GeometryAudit, GeometryViolation, PhysicalScene, Point3 as PhysicalPoint3,
@@ -49,8 +54,9 @@ use history::History;
 use model_edit::{
     OpeningDragConstraints, OpeningDragState, OpeningEditHandle, WallDragState, WallEditHandle,
     apply_opening_drag, endpoint_move_keeps_ortho, endpoint_move_keeps_positive_length,
-    next_ceiling_id, next_dimension_id, next_floor_id, next_material_id, next_opening_id,
-    next_roof_id, next_room_id, next_standards_pack_id, next_system_id, next_wall_id,
+    intent_references_entity, next_ceiling_id, next_dimension_id, next_floor_id, next_intent_id,
+    next_intent_override_id, next_material_id, next_opening_id, next_roof_id, next_room_id,
+    next_standards_pack_id, next_system_id, next_wall_id, remove_dependent_intents,
     translate_keeps_ortho, translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, compliance_report_path, export_paths, write_text_file};
@@ -63,6 +69,12 @@ pub(crate) struct FramerApp {
     selected: Selection,
     component_selection: ComponentSelection,
     component_visibility: ComponentVisibility,
+    /// Incomplete cross-object intent authoring. This deliberately stays outside [`Snapshot`]:
+    /// cancelling or changing selection must never create history or persisted project state.
+    intent_authoring_draft: Option<IntentAuthoringDraft>,
+    /// Assertion retained while `Focus all` temporarily creates a heterogeneous multi-selection.
+    /// Disposable presentation context; rebuilt reports remain the canonical status source.
+    focused_intent: Option<AssertionRef>,
     /// Target/surface snapshot for the currently open canvas context menu.
     /// Presentation-only and never serialized; egui owns the popup's open state.
     context_menu_context: Option<ContextMenuContext>,
@@ -167,6 +179,133 @@ struct Snapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum IntentAuthoringDraft {
+    Assertion(IntentAssertionDraft),
+    Waiver(IntentWaiverDraft),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IntentAssertionDraft {
+    editing: Option<AuthoredIntentId>,
+    /// The placed furnishing/MEP instance captured when authoring begins. The UI never edits it.
+    subject: AuthoredEntityRef,
+    room: Option<ElementId>,
+    /// Retained exactly when editing a persisted assertion. The first authoring slice offers
+    /// expression-specific defaults for new rows but must not rewrite a valid authored domain.
+    domain: IntentDomain,
+    mode: AuthoredIntentMode,
+    expression: IntentDraftExpression,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IntentWaiverDraft {
+    target: AuthoredIntentId,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntentDraftExpression {
+    Containment,
+    Clearance {
+        direction: ClearanceDirection,
+        datum: ClearanceDatum,
+        threshold: Length,
+    },
+}
+
+impl IntentAssertionDraft {
+    fn new(
+        subject: AuthoredEntityRef,
+        room: Option<ElementId>,
+        expression: IntentDraftExpression,
+    ) -> Self {
+        let domain = match expression {
+            IntentDraftExpression::Containment => IntentDomain::SpatialProgram,
+            IntentDraftExpression::Clearance { .. } => IntentDomain::OperationalMaintenance,
+        };
+        Self {
+            editing: None,
+            subject,
+            room,
+            domain,
+            mode: AuthoredIntentMode::Requirement,
+            expression,
+            rationale: String::new(),
+        }
+    }
+
+    fn from_assertion(assertion: &IntentAssertion) -> Option<Self> {
+        let ProjectIntentScope::Exact(scope) = &assertion.scope;
+        let room = match scope.participants.as_slice() {
+            [AuthoredEntityRef::Room(id)] => Some(id.clone()),
+            _ => return None,
+        };
+        let IntentExpression::FactPredicate(Predicate::Compare { fact, op, value }) =
+            &assertion.expression
+        else {
+            return None;
+        };
+        let expression = match (fact, op, value) {
+            (Fact::PlacedObjectContainedInRoom, CompareOp::Eq, FactOperand::FlagLiteral(true)) => {
+                IntentDraftExpression::Containment
+            }
+            (
+                Fact::PlacedObjectClearance { direction, datum },
+                CompareOp::Ge,
+                FactOperand::LengthLiteral(threshold),
+            ) => IntentDraftExpression::Clearance {
+                direction: *direction,
+                datum: *datum,
+                threshold: *threshold,
+            },
+            _ => return None,
+        };
+        Some(Self {
+            editing: Some(assertion.id.clone()),
+            subject: scope.subject.clone(),
+            room,
+            domain: assertion.domain,
+            mode: assertion.mode,
+            expression,
+            rationale: assertion.rationale.clone().unwrap_or_default(),
+        })
+    }
+
+    fn assertion(&self, id: AuthoredIntentId) -> Option<IntentAssertion> {
+        let room = self.room.clone()?;
+        let predicate = match self.expression {
+            IntentDraftExpression::Containment => Predicate::Compare {
+                fact: Fact::PlacedObjectContainedInRoom,
+                op: CompareOp::Eq,
+                value: FactOperand::FlagLiteral(true),
+            },
+            IntentDraftExpression::Clearance {
+                direction,
+                datum,
+                threshold,
+            } => Predicate::Compare {
+                fact: Fact::PlacedObjectClearance { direction, datum },
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(threshold),
+            },
+        };
+        Some(IntentAssertion {
+            id,
+            domain: self.domain,
+            mode: self.mode,
+            scope: ProjectIntentScope::Exact(ExactIntentScope {
+                subject: self.subject.clone(),
+                participants: vec![AuthoredEntityRef::Room(room)],
+            }),
+            expression: IntentExpression::FactPredicate(predicate),
+            source: IntentSource::User,
+            rationale: Some(self.rationale.trim().to_owned()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
     /// No authored or generated object is selected. PR 7 wires this to canvas
     /// clears; PR 5 introduces the inspector state so it can be visually covered.
@@ -195,6 +334,36 @@ enum Selection {
     StandardsPack(String),
     FurnishingInstance(String),
     MepInstance(String),
+}
+
+fn component_key_for_authored_entity(entity: &AuthoredEntityRef) -> Option<ComponentKey> {
+    let (kind, id) = match entity {
+        AuthoredEntityRef::Wall(id) => (AuthoredComponentKind::Wall, id),
+        AuthoredEntityRef::Opening(id) => (AuthoredComponentKind::Opening, id),
+        AuthoredEntityRef::Dimension(id) => (AuthoredComponentKind::Dimension, id),
+        AuthoredEntityRef::WallJoin(id) => (AuthoredComponentKind::Join, id),
+        AuthoredEntityRef::Room(id) => (AuthoredComponentKind::Room, id),
+        AuthoredEntityRef::RoofPlane(id) => (AuthoredComponentKind::RoofPlane, id),
+        AuthoredEntityRef::Ceiling(id) => (AuthoredComponentKind::Ceiling, id),
+        AuthoredEntityRef::FloorDeck(id) => (AuthoredComponentKind::FloorDeck, id),
+        AuthoredEntityRef::FurnishingInstance(id) => {
+            (AuthoredComponentKind::FurnishingInstance, id)
+        }
+        AuthoredEntityRef::MepInstance(id) => (AuthoredComponentKind::MepInstance, id),
+        AuthoredEntityRef::Site
+        | AuthoredEntityRef::LibraryVersion(_)
+        | AuthoredEntityRef::StandardsPack(_)
+        | AuthoredEntityRef::Material(_)
+        | AuthoredEntityRef::ConstructionSystem(_)
+        | AuthoredEntityRef::Furnishing(_)
+        | AuthoredEntityRef::MepObject(_)
+        | AuthoredEntityRef::Level(_)
+        | AuthoredEntityRef::RoofOpening(_)
+        | AuthoredEntityRef::BracedWallLine(_)
+        | AuthoredEntityRef::BracedPanel(_)
+        | AuthoredEntityRef::IntentOverride(_) => return None,
+    };
+    Some(ComponentKey::authored(kind, id.0.clone()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,6 +899,8 @@ impl Default for FramerApp {
             selected: Selection::Wall,
             component_selection: ComponentSelection::default(),
             component_visibility: ComponentVisibility::default(),
+            intent_authoring_draft: None,
+            focused_intent: None,
             context_menu_context: None,
             project_plan: None,
             physical_scene: None,
@@ -891,6 +1062,39 @@ impl FramerApp {
             }
         }
         self.prune_component_presentation();
+        self.prune_intent_presentation();
+    }
+
+    fn prune_intent_presentation(&mut self) {
+        if self.focused_intent.as_ref().is_some_and(|reference| {
+            self.intent_report
+                .as_ref()
+                .and_then(|report| report.as_ref().ok())
+                .is_none_or(|report| report.record(reference).is_none())
+        }) {
+            self.focused_intent = None;
+        }
+
+        let selected_subject = self.selected_intent_subject();
+        let draft_is_current = match self.intent_authoring_draft.as_ref() {
+            None => true,
+            Some(IntentAuthoringDraft::Assertion(draft)) => {
+                selected_subject.as_ref() == Some(&draft.subject)
+                    && self.model.authored_entity_exists(&draft.subject)
+            }
+            Some(IntentAuthoringDraft::Waiver(draft)) => self
+                .model
+                .intents
+                .iter()
+                .find(|intent| intent.id == draft.target)
+                .is_some_and(|intent| {
+                    let ProjectIntentScope::Exact(scope) = &intent.scope;
+                    selected_subject.as_ref() == Some(&scope.subject)
+                }),
+        };
+        if !draft_is_current {
+            self.intent_authoring_draft = None;
+        }
     }
 
     fn selected_authored_entity_ref(&self) -> Option<AuthoredEntityRef> {
@@ -996,6 +1200,414 @@ impl FramerApp {
                 .any(|instance| instance.id.0 == *id)
                 .then(|| AuthoredEntityRef::MepInstance(ElementId::new(id.clone()))),
         }
+    }
+
+    fn selected_intent_subject(&self) -> Option<AuthoredEntityRef> {
+        match self.selected_authored_entity_ref()? {
+            subject @ (AuthoredEntityRef::FurnishingInstance(_)
+            | AuthoredEntityRef::MepInstance(_)) => Some(subject),
+            _ => None,
+        }
+    }
+
+    fn authored_entity_level(&self, entity: &AuthoredEntityRef) -> Option<ElementId> {
+        match entity {
+            AuthoredEntityRef::Room(id) => self
+                .model
+                .rooms
+                .iter()
+                .find(|room| room.id == *id)
+                .map(|room| room.level.clone()),
+            AuthoredEntityRef::FurnishingInstance(id) => self
+                .model
+                .furnishing_instances
+                .iter()
+                .find(|instance| instance.id == *id)
+                .map(|instance| instance.level.clone()),
+            AuthoredEntityRef::MepInstance(id) => self
+                .model
+                .mep_instances
+                .iter()
+                .find(|instance| instance.id == *id)
+                .map(|instance| instance.level.clone()),
+            _ => None,
+        }
+    }
+
+    fn first_same_level_room(&self, subject: &AuthoredEntityRef) -> Option<ElementId> {
+        let level = self.authored_entity_level(subject)?;
+        self.model
+            .rooms
+            .iter()
+            .find(|room| room.level == level)
+            .map(|room| room.id.clone())
+    }
+
+    fn change_placed_object_level(&mut self, entity: AuthoredEntityRef, level: ElementId) -> bool {
+        if !self.workspace_mode.allows_design_edits() {
+            self.file_status = Some("Placement editing is available only in Design".to_owned());
+            return false;
+        }
+        if !self.has_level(&level) {
+            self.file_status = Some(format!("Level '{}' no longer exists", level.0));
+            return false;
+        }
+        if intent_references_entity(&self.model, &entity) {
+            let id = entity
+                .element_id()
+                .map_or("placed object", |id| id.0.as_str());
+            self.file_status = Some(format!(
+                "Cannot change level for '{id}' while it participates in project intent; edit or delete that intent first"
+            ));
+            return false;
+        }
+
+        let mut candidate = self.model.clone();
+        let (label, kind) = match &entity {
+            AuthoredEntityRef::FurnishingInstance(id) => {
+                let Some(instance) = candidate
+                    .furnishing_instances
+                    .iter_mut()
+                    .find(|instance| instance.id == *id)
+                else {
+                    return false;
+                };
+                if instance.level == level {
+                    return false;
+                }
+                instance.level = level.clone();
+                ("Change furnishing placement level", "furnishing")
+            }
+            AuthoredEntityRef::MepInstance(id) => {
+                let Some(instance) = candidate
+                    .mep_instances
+                    .iter_mut()
+                    .find(|instance| instance.id == *id)
+                else {
+                    return false;
+                };
+                if instance.level == level {
+                    return false;
+                }
+                instance.level = level.clone();
+                ("Change MEP placement level", "MEP object")
+            }
+            _ => {
+                self.file_status = Some("Only placed objects can change level here".to_owned());
+                return false;
+            }
+        };
+        candidate.sort_deterministically();
+        if let Err(error) = candidate.validate() {
+            self.file_status = Some(format!("Placement level change rejected: {error}"));
+            return false;
+        }
+
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
+        self.edit(label, move |app| app.model = candidate);
+        self.file_status = Some(format!("Moved {kind} placement to level '{}'", level.0));
+        true
+    }
+
+    fn ensure_intent_edit_allowed(&mut self) -> bool {
+        if self.workspace_mode.allows_design_edits() {
+            return true;
+        }
+        self.intent_authoring_draft = None;
+        self.file_status = Some("Intent authoring is available only in Design".to_owned());
+        false
+    }
+
+    fn begin_intent_assertion(&mut self, expression: IntentDraftExpression) -> bool {
+        if !self.ensure_intent_edit_allowed() {
+            return false;
+        }
+        let Some(subject) = self.selected_intent_subject() else {
+            self.file_status = Some(
+                "Select one placed furnishing or MEP object before authoring intent".to_owned(),
+            );
+            return false;
+        };
+        let room = self.first_same_level_room(&subject);
+        self.focused_intent = None;
+        self.intent_authoring_draft = Some(IntentAuthoringDraft::Assertion(
+            IntentAssertionDraft::new(subject, room, expression),
+        ));
+        true
+    }
+
+    fn begin_edit_intent(&mut self, id: &AuthoredIntentId) -> bool {
+        if !self.ensure_intent_edit_allowed() {
+            return false;
+        }
+        let Some(draft) = self
+            .model
+            .intents
+            .iter()
+            .find(|intent| &intent.id == id)
+            .and_then(IntentAssertionDraft::from_assertion)
+        else {
+            self.file_status = Some(format!(
+                "Intent '{}' is not editable in this authoring surface",
+                id.0.0
+            ));
+            return false;
+        };
+        let subject = draft.subject.clone();
+        self.focus_authored_entity(&subject);
+        self.focused_intent = Some(AssertionRef::Authored(id.clone()));
+        self.intent_authoring_draft = Some(IntentAuthoringDraft::Assertion(draft));
+        true
+    }
+
+    fn begin_waive_intent(&mut self, id: &AuthoredIntentId) -> bool {
+        if !self.ensure_intent_edit_allowed() {
+            return false;
+        }
+        let Some(intent) = self.model.intents.iter().find(|intent| &intent.id == id) else {
+            self.file_status = Some(format!("Intent '{}' no longer exists", id.0.0));
+            return false;
+        };
+        if self
+            .model
+            .intent_overrides
+            .iter()
+            .any(|intent_override| intent_override.target() == id)
+        {
+            self.file_status = Some(format!("Intent '{}' is already waived", id.0.0));
+            return false;
+        }
+        let ProjectIntentScope::Exact(scope) = &intent.scope;
+        let subject = scope.subject.clone();
+        self.focus_authored_entity(&subject);
+        self.focused_intent = Some(AssertionRef::Authored(id.clone()));
+        self.intent_authoring_draft = Some(IntentAuthoringDraft::Waiver(IntentWaiverDraft {
+            target: id.clone(),
+            reason: String::new(),
+        }));
+        true
+    }
+
+    fn cancel_intent_authoring(&mut self) {
+        self.intent_authoring_draft = None;
+    }
+
+    fn accept_intent_authoring(&mut self) -> bool {
+        if !self.ensure_intent_edit_allowed() {
+            return false;
+        }
+        let Some(draft) = self.intent_authoring_draft.clone() else {
+            return false;
+        };
+        match draft {
+            IntentAuthoringDraft::Assertion(draft) => self.accept_intent_assertion(draft),
+            IntentAuthoringDraft::Waiver(draft) => self.accept_intent_waiver(draft),
+        }
+    }
+
+    fn accept_intent_assertion(&mut self, draft: IntentAssertionDraft) -> bool {
+        if draft.rationale.trim().is_empty() {
+            self.file_status = Some("Intent rationale is required".to_owned());
+            return false;
+        }
+        let id = draft
+            .editing
+            .clone()
+            .unwrap_or_else(|| next_intent_id(&self.model));
+        let Some(assertion) = draft.assertion(id.clone()) else {
+            self.file_status = Some("Choose an exact same-level room".to_owned());
+            return false;
+        };
+        let mut candidate = self.model.clone();
+        let label;
+        let status;
+        if let Some(editing) = draft.editing {
+            let Some(existing) = candidate
+                .intents
+                .iter_mut()
+                .find(|intent| intent.id == editing)
+            else {
+                self.file_status = Some(format!("Intent '{}' no longer exists", editing.0.0));
+                return false;
+            };
+            *existing = assertion;
+            label = "Edit intent";
+            status = format!("Updated intent '{}'", id.0.0);
+        } else {
+            candidate.intents.push(assertion);
+            label = "Add intent";
+            status = format!("Added intent '{}'", id.0.0);
+        }
+        if self.commit_validated_model(label, candidate, status) {
+            self.focused_intent = Some(AssertionRef::Authored(id));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn accept_intent_waiver(&mut self, draft: IntentWaiverDraft) -> bool {
+        let reason = draft.reason.trim();
+        if reason.is_empty() {
+            self.file_status = Some("Waiver reason is required".to_owned());
+            return false;
+        }
+        let mut candidate = self.model.clone();
+        if candidate
+            .intent_overrides
+            .iter()
+            .any(|intent_override| intent_override.target() == &draft.target)
+        {
+            self.file_status = Some(format!("Intent '{}' is already waived", draft.target.0.0));
+            return false;
+        }
+        candidate.intent_overrides.push(IntentOverride::Waive {
+            id: next_intent_override_id(&candidate),
+            target: draft.target.clone(),
+            reason: reason.to_owned(),
+            source: IntentSource::User,
+        });
+        if self.commit_validated_model(
+            "Waive intent",
+            candidate,
+            format!("Waived intent '{}'", draft.target.0.0),
+        ) {
+            self.focused_intent = Some(AssertionRef::Authored(draft.target));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn delete_intent(&mut self, id: &AuthoredIntentId) -> bool {
+        if !self.ensure_intent_edit_allowed() {
+            return false;
+        }
+        let mut candidate = self.model.clone();
+        let before = candidate.intents.len();
+        candidate.intents.retain(|intent| &intent.id != id);
+        if candidate.intents.len() == before {
+            self.file_status = Some(format!("Intent '{}' no longer exists", id.0.0));
+            return false;
+        }
+        candidate
+            .intent_overrides
+            .retain(|intent_override| intent_override.target() != id);
+        self.commit_validated_model(
+            "Delete intent",
+            candidate,
+            format!("Deleted intent '{}'", id.0.0),
+        )
+    }
+
+    fn commit_validated_model(
+        &mut self,
+        label: &str,
+        mut candidate: BuildingModel,
+        status: String,
+    ) -> bool {
+        candidate.sort_deterministically();
+        if let Err(error) = candidate.validate() {
+            self.file_status = Some(format!("Intent edit rejected: {error}"));
+            return false;
+        }
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
+        self.edit(label, move |app| app.model = candidate);
+        self.file_status = Some(status);
+        true
+    }
+
+    fn focus_authored_entity(&mut self, entity: &AuthoredEntityRef) -> bool {
+        let Some(key) = component_key_for_authored_entity(entity) else {
+            return entity
+                .element_id()
+                .is_some_and(|id| self.select_model_element(id));
+        };
+        if let Some(level) = self.authored_entity_level(entity) {
+            self.set_active_level(level);
+        }
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
+        if !self.select_component_key_as_primary(&key) {
+            return false;
+        }
+        self.component_selection.replace(Some(key));
+        true
+    }
+
+    fn focus_all_intent_participants(&mut self, reference: &AssertionRef) -> bool {
+        let Some(record) = self
+            .intent_report
+            .as_ref()
+            .and_then(|report| report.as_ref().ok())
+            .and_then(|report| report.record(reference))
+        else {
+            self.file_status = Some("Intent is not present in the current analysis".to_owned());
+            return false;
+        };
+        let participants = record.assertion().participants.clone();
+        let participant_order =
+            |left: &&framer_analysis::AssertionParticipant,
+             right: &&framer_analysis::AssertionParticipant| {
+                left.semantic_order
+                    .cmp(&right.semantic_order)
+                    .then_with(|| left.role.cmp(&right.role))
+                    .then_with(|| left.entity.cmp(&right.entity))
+            };
+        let selectable = |participant: &&framer_analysis::AssertionParticipant| {
+            component_key_for_authored_entity(&participant.entity).is_some()
+        };
+        let primary = participants
+            .iter()
+            .filter(|participant| {
+                participant.role == framer_analysis::AssertionParticipantRole::Subject
+            })
+            .filter(selectable)
+            .min_by(participant_order)
+            .or_else(|| {
+                participants
+                    .iter()
+                    .filter(selectable)
+                    .min_by(participant_order)
+            })
+            .map(|participant| participant.entity.clone());
+        let Some(primary) = primary else {
+            self.file_status = Some("Intent has no selectable participants".to_owned());
+            return false;
+        };
+        let Some(primary_key) = component_key_for_authored_entity(&primary) else {
+            self.file_status = Some("Intent primary subject is not selectable".to_owned());
+            return false;
+        };
+
+        let mut keys = participants
+            .iter()
+            .filter_map(|participant| component_key_for_authored_entity(&participant.entity))
+            .filter(|key| key != &primary_key)
+            .collect::<Vec<_>>();
+        keys.push(primary_key.clone());
+        if keys.len() != participants.len() {
+            self.file_status = Some("Some intent participants are not selectable".to_owned());
+            return false;
+        }
+
+        if let Some(level) = self.authored_entity_level(&primary) {
+            self.set_active_level(level);
+        }
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
+        if !self.select_component_key_as_primary(&primary_key) {
+            return false;
+        }
+        self.component_selection.set_items(keys);
+        self.focused_intent = Some(reference.clone());
+        self.file_status = Some(format!(
+            "Focused {} intent participants",
+            participants.len()
+        ));
+        true
     }
 
     fn selected_project_node_ref(&self) -> Option<ProjectNodeRef> {
@@ -1150,6 +1762,8 @@ impl FramerApp {
         wall_context: Option<usize>,
         op: SelectionOp,
     ) {
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
         let current_primary = self.primary_component_key();
         let target_wall_id = wall_context
             .and_then(|index| self.model.walls.get(index))
@@ -1180,6 +1794,8 @@ impl FramerApp {
     }
 
     fn clear_selection(&mut self) {
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
         self.selected = Selection::None;
         self.component_selection.replace(None);
     }
@@ -1394,8 +2010,30 @@ impl FramerApp {
         }
     }
 
+    /// Finalize inspector mutations before a deferred discrete action records
+    /// its own snapshot. This preserves chronological undo ordering both when
+    /// a transaction was already pending and when another field changed in the
+    /// same immediate-mode frame as the discrete action.
+    fn settle_inspector_history_before_discrete_edit(
+        &mut self,
+        changed: &mut bool,
+        edit_base: &mut Option<Snapshot>,
+        label: &str,
+    ) {
+        if *changed {
+            if let Some(base) = edit_base.take() {
+                self.begin_inspector_edit(base, label);
+            }
+            self.rebuild();
+            *changed = false;
+        }
+        self.settle_history(false);
+    }
+
     fn undo(&mut self) {
         self.settle_history(false);
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
         let current = self.snapshot();
         if let Some(previous) = self.history.undo(current) {
             let model_changed = self.model != previous.model;
@@ -1410,6 +2048,8 @@ impl FramerApp {
 
     fn redo(&mut self) {
         self.settle_history(false);
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
         let current = self.snapshot();
         if let Some(next) = self.history.redo(current) {
             let model_changed = self.model != next.model;
@@ -1490,6 +2130,8 @@ impl FramerApp {
         self.last_authoring_pane = Some(self.viewport_workspace.active_id());
         self.component_selection = ComponentSelection::default();
         self.component_visibility = ComponentVisibility::default();
+        self.intent_authoring_draft = None;
+        self.focused_intent = None;
         self.context_menu_context = None;
     }
 
@@ -1850,6 +2492,9 @@ impl FramerApp {
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
         self.context_menu_context = None;
+        if !mode.allows_design_edits() {
+            self.intent_authoring_draft = None;
+        }
         if mode != WorkspaceMode::Plan {
             self.active_geometry_violation = None;
         }
@@ -2734,15 +3379,25 @@ impl FramerApp {
         let Selection::FurnishingInstance(id) = self.selected.clone() else {
             return;
         };
-        self.edit("Delete furnishing instance", |app| {
-            let before = app.model.furnishing_instances.len();
-            app.model
-                .furnishing_instances
-                .retain(|instance| instance.id.0 != id);
-            if app.model.furnishing_instances.len() != before {
-                app.selected = Selection::Wall;
-            }
-        });
+        let mut candidate = self.model.clone();
+        let before = candidate.furnishing_instances.len();
+        candidate
+            .furnishing_instances
+            .retain(|instance| instance.id.0 != id);
+        if candidate.furnishing_instances.len() == before {
+            return;
+        }
+        remove_dependent_intents(
+            &mut candidate,
+            &AuthoredEntityRef::FurnishingInstance(ElementId::new(id.clone())),
+        );
+        if self.commit_validated_model(
+            "Delete furnishing instance",
+            candidate,
+            format!("Deleted furnishing instance '{id}' and its dependent intent"),
+        ) {
+            self.apply_selection(Selection::Wall, Some(0), SelectionOp::Replace);
+        }
     }
 
     fn delete_selected_mep_instance(&mut self) {
@@ -2752,15 +3407,25 @@ impl FramerApp {
         let Selection::MepInstance(id) = self.selected.clone() else {
             return;
         };
-        self.edit("Delete MEP instance", |app| {
-            let before = app.model.mep_instances.len();
-            app.model
-                .mep_instances
-                .retain(|instance| instance.id.0 != id);
-            if app.model.mep_instances.len() != before {
-                app.selected = Selection::Wall;
-            }
-        });
+        let mut candidate = self.model.clone();
+        let before = candidate.mep_instances.len();
+        candidate
+            .mep_instances
+            .retain(|instance| instance.id.0 != id);
+        if candidate.mep_instances.len() == before {
+            return;
+        }
+        remove_dependent_intents(
+            &mut candidate,
+            &AuthoredEntityRef::MepInstance(ElementId::new(id.clone())),
+        );
+        if self.commit_validated_model(
+            "Delete MEP instance",
+            candidate,
+            format!("Deleted MEP instance '{id}' and its dependent intent"),
+        ) {
+            self.apply_selection(Selection::Wall, Some(0), SelectionOp::Replace);
+        }
     }
 
     fn activate_dimension_tool(&mut self) {
@@ -3058,13 +3723,23 @@ impl FramerApp {
         let Selection::Room(id) = self.selected.clone() else {
             return;
         };
-        self.edit("Delete room", |app| {
-            let before = app.model.rooms.len();
-            app.model.rooms.retain(|room| room.id.0 != id);
-            if app.model.rooms.len() != before {
-                app.selected = Selection::Wall;
-            }
-        });
+        let mut candidate = self.model.clone();
+        let before = candidate.rooms.len();
+        candidate.rooms.retain(|room| room.id.0 != id);
+        if candidate.rooms.len() == before {
+            return;
+        }
+        remove_dependent_intents(
+            &mut candidate,
+            &AuthoredEntityRef::Room(ElementId::new(id.clone())),
+        );
+        if self.commit_validated_model(
+            "Delete room",
+            candidate,
+            format!("Deleted room '{id}' and its dependent intent"),
+        ) {
+            self.apply_selection(Selection::Wall, Some(0), SelectionOp::Replace);
+        }
     }
 
     /// Delete the selected roof plane as one undo step.

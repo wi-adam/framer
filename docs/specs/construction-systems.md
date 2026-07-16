@@ -87,8 +87,8 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - Derived corner geometry: `BuildingModel::wall_envelope_span`, `wall_framing_span`, and
   `wall_counter_lap_framing_span` keep finished assemblies, primary structural framing, and
   upper-plate counter-laps separate without persisted join-detail state.
-- Serialization: schema **v13** in [`project.rs`](../../crates/framer-core/src/project.rs)
-  (`systems`/`materials` are top-level authored keys; v13-only — older files are rejected). The
+- Serialization: schema **v14** in [`project.rs`](../../crates/framer-core/src/project.rs)
+  (`systems`/`materials` are top-level authored keys; v14-only — older files are rejected). The
   shape is documented in [project-files.md](../project-files.md).
 - Takeoff: `layer_bom()` / `LayerBomItem` and the layered rendering in
   [`framer-solver`](../../crates/framer-solver/src/lib.rs),
@@ -101,7 +101,7 @@ All in [`framer-core/src/model.rs`](../../crates/framer-core/src/model.rs) unles
 - `framer-core`/`framer-solver` stay UI-free; the model stays deterministic and `Eq`.
 - Authored layer stack is the source of truth; thickness/exposure/R-value/members/BOM are all
   regenerated, never stored.
-- `.framer` is v13-only and canonical (see [project-files.md](../project-files.md#determinism)).
+- `.framer` is v14-only and canonical (see [project-files.md](../project-files.md#determinism)).
 
 ## Out of scope (YAGNI)
 

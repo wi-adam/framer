@@ -1,29 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use framer_core::{AuthoredEntityRef, ElementId, Length, Predicate};
+use framer_core::{AuthoredEntityRef, ElementId, IntentOverrideId, Length, Predicate};
+pub use framer_core::{AuthoredIntentMode as BooleanIntentMode, IntentDomain, PreferencePriority};
 use framer_solver::PlanDiagnostic;
+use framer_standards::PredicateObservation;
 
 use crate::{
     AssertionRef, ComplianceEntryRef, DiagnosticRef, GeneratedMemberRef, GraphRevision,
     PhysicalBodyRef, StandardsRuleRef,
 };
-
-/// Product-wide classification for compiled intent. The vocabulary is deliberately broader than
-/// today's assertion sources so later slices do not need to overload "compliance" for every kind
-/// of design decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum IntentDomain {
-    SpatialProgram,
-    Construction,
-    StructuralPerformance,
-    EnvelopeBuildingScience,
-    Mep,
-    Compliance,
-    Resource,
-    FabricationInstallation,
-    OperationalMaintenance,
-    Aesthetic,
-}
 
 /// The semantic role an authored entity plays in one assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,6 +47,7 @@ impl AssertionParticipant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssertionSource {
     Project,
+    User,
     Authored(AuthoredEntityRef),
     StandardsRule(StandardsRuleRef),
     Diagnostic(DiagnosticRef),
@@ -86,15 +72,6 @@ pub struct CompiledAssertion {
     pub participants: Vec<AssertionParticipant>,
     pub source: AssertionSource,
     pub rationale: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PreferencePriority(pub u16);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BooleanIntentMode {
-    Requirement,
-    Preference { priority: PreferencePriority },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,7 +123,7 @@ pub struct IntentUnknown {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WaiverRef {
     Project {
-        override_id: ElementId,
+        override_id: IntentOverrideId,
     },
     Standards {
         overlay_pack: ElementId,
@@ -158,6 +135,9 @@ pub enum WaiverRef {
 pub struct WaiverRecord {
     pub reference: WaiverRef,
     pub targets: Vec<AssertionRef>,
+    /// The authority that accepted the waiver (for example the persisted project `User`).
+    pub authority: AssertionSource,
+    /// The typed authored record or standards pack that carries the waiver.
     pub source: AssertionSource,
     pub rationale: String,
     pub provenance: Vec<IntentEvidenceRef>,
@@ -236,6 +216,9 @@ pub struct BooleanIntentRecord {
     pub mode: BooleanIntentMode,
     pub expression: BooleanExpression,
     pub outcome: IntentOutcome,
+    /// Exact shared fact/predicate observation when this assertion was evaluated by
+    /// `framer-standards::FactSnapshot`; `None` for non-predicate findings and selections.
+    pub predicate_observation: Option<PredicateObservation>,
     pub evidence: Vec<IntentEvidenceRef>,
 }
 
@@ -476,6 +459,7 @@ mod tests {
                     code: "test".to_owned(),
                 },
                 outcome: IntentOutcome::Satisfied,
+                predicate_observation: None,
                 evidence: vec![IntentEvidenceRef::Authored(wall.clone())],
             })],
             Vec::new(),
