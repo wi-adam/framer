@@ -253,15 +253,19 @@ pub enum FactType {
     Flag,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FactScope {
+/// The authored subject family against which a standards fact can be observed.
+///
+/// This is a derived evaluation vocabulary, not part of the persisted project
+/// schema. `CheckScope` remains the selector syntax stored in standards packs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FactSubjectKind {
     Wall,
     Opening,
     Room,
     BracedWallLine,
 }
 
-impl FactScope {
+impl FactSubjectKind {
     const fn label(self) -> &'static str {
         match self {
             Self::Wall => "Walls",
@@ -294,23 +298,23 @@ impl Fact {
         }
     }
 
-    const fn scope(self) -> FactScope {
+    pub const fn subject_kind(self) -> FactSubjectKind {
         match self {
             Self::WallLength
             | Self::WallHeight
             | Self::WallIsExterior
             | Self::WallStudSpacing
             | Self::WallSystemRValueMilli
-            | Self::WallStudMaxHeight => FactScope::Wall,
+            | Self::WallStudMaxHeight => FactSubjectKind::Wall,
             Self::OpeningRoughWidth
             | Self::OpeningRoughHeight
             | Self::OpeningHeaderDepth
             | Self::OpeningJackStuds
-            | Self::OpeningHeaderMaxSpan => FactScope::Opening,
-            Self::RoomAreaSquareInches | Self::RoomCeilingHeight => FactScope::Room,
+            | Self::OpeningHeaderMaxSpan => FactSubjectKind::Opening,
+            Self::RoomAreaSquareInches | Self::RoomCeilingHeight => FactSubjectKind::Room,
             Self::BracedLineLength
             | Self::BracedLineRequiredLength
-            | Self::BracedLineProvidedLength => FactScope::BracedWallLine,
+            | Self::BracedLineProvidedLength => FactSubjectKind::BracedWallLine,
         }
     }
 }
@@ -400,12 +404,12 @@ pub enum CheckScope {
 }
 
 impl CheckScope {
-    const fn fact_scope(&self) -> FactScope {
+    pub const fn subject_kind(&self) -> FactSubjectKind {
         match self {
-            Self::Walls { .. } => FactScope::Wall,
-            Self::Openings { .. } => FactScope::Opening,
-            Self::Rooms { .. } => FactScope::Room,
-            Self::BracedWallLines => FactScope::BracedWallLine,
+            Self::Walls { .. } => FactSubjectKind::Wall,
+            Self::Openings { .. } => FactSubjectKind::Opening,
+            Self::Rooms { .. } => FactSubjectKind::Room,
+            Self::BracedWallLines => FactSubjectKind::BracedWallLine,
         }
     }
 }
@@ -490,7 +494,7 @@ impl StandardsPack {
         }
         for check in &self.checks {
             validate_rule_decl(&mut rules, &check.rule)?;
-            validate_predicate(&check.rule, &check.requirement, check.scope.fact_scope())?;
+            validate_predicate(&check.rule, &check.requirement, check.scope.subject_kind())?;
         }
         for overlay in &self.overlays {
             if let RuleOverlay::Waive { target, reason } = overlay
@@ -856,6 +860,13 @@ pub struct ResolvedStandards {
     pub bracing: Vec<(ElementId, BracingTable)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<(ElementId, ComplianceCheck)>,
+    /// Canonical winning check definitions, including waived checks.
+    ///
+    /// Definitions reflect shadowing and re-severity overlays. `checks`
+    /// intentionally remains the active, non-waived subset consumed by legacy
+    /// evaluation call sites.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_definitions: Vec<(ElementId, ComplianceCheck)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<ResolvedRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -936,9 +947,13 @@ pub fn resolve_standards(stack: &[&StandardsPack]) -> ResolvedStandards {
     let mut fastening = Vec::new();
     let mut bracing = Vec::new();
     let mut checks = Vec::new();
+    let mut check_definitions = Vec::new();
     let mut resolved_rules = Vec::new();
     for (rule, entry) in rules {
         resolved_rules.push(entry.resolved_rule(&rule));
+        if let RulePayload::Check(check) = &entry.payload {
+            check_definitions.push((entry.pack.clone(), check.clone()));
+        }
         if entry.waived.is_some() {
             continue;
         }
@@ -958,6 +973,7 @@ pub fn resolve_standards(stack: &[&StandardsPack]) -> ResolvedStandards {
         fastening,
         bracing,
         checks,
+        check_definitions,
         rules: resolved_rules,
         warnings,
     }
@@ -1093,7 +1109,7 @@ where
 fn validate_predicate(
     rule: &str,
     predicate: &Predicate,
-    scope: FactScope,
+    scope: FactSubjectKind,
 ) -> Result<(), ModelError> {
     match predicate {
         Predicate::All(children) | Predicate::Any(children) => {
@@ -1130,8 +1146,8 @@ fn validate_predicate(
     }
 }
 
-fn validate_fact_scope(rule: &str, fact: Fact, scope: FactScope) -> Result<(), ModelError> {
-    let fact_scope = fact.scope();
+fn validate_fact_scope(rule: &str, fact: Fact, scope: FactSubjectKind) -> Result<(), ModelError> {
+    let fact_scope = fact.subject_kind();
     if fact_scope == scope {
         Ok(())
     } else {
@@ -1176,6 +1192,60 @@ mod tests {
                 value: FactOperand::Fact(Fact::WallStudMaxHeight),
             },
         )
+    }
+
+    #[test]
+    fn facts_and_check_scopes_expose_the_same_subject_families() {
+        for fact in [
+            Fact::WallLength,
+            Fact::WallHeight,
+            Fact::WallIsExterior,
+            Fact::WallStudSpacing,
+            Fact::WallSystemRValueMilli,
+            Fact::WallStudMaxHeight,
+        ] {
+            assert_eq!(fact.subject_kind(), FactSubjectKind::Wall);
+        }
+        for fact in [
+            Fact::OpeningRoughWidth,
+            Fact::OpeningRoughHeight,
+            Fact::OpeningHeaderDepth,
+            Fact::OpeningJackStuds,
+            Fact::OpeningHeaderMaxSpan,
+        ] {
+            assert_eq!(fact.subject_kind(), FactSubjectKind::Opening);
+        }
+        for fact in [Fact::RoomAreaSquareInches, Fact::RoomCeilingHeight] {
+            assert_eq!(fact.subject_kind(), FactSubjectKind::Room);
+        }
+        for fact in [
+            Fact::BracedLineLength,
+            Fact::BracedLineRequiredLength,
+            Fact::BracedLineProvidedLength,
+        ] {
+            assert_eq!(fact.subject_kind(), FactSubjectKind::BracedWallLine);
+        }
+
+        assert_eq!(
+            CheckScope::Walls {
+                exterior_only: None,
+                tags: Vec::new(),
+            }
+            .subject_kind(),
+            FactSubjectKind::Wall
+        );
+        assert_eq!(
+            CheckScope::Openings { tags: Vec::new() }.subject_kind(),
+            FactSubjectKind::Opening
+        );
+        assert_eq!(
+            CheckScope::Rooms { tags: Vec::new() }.subject_kind(),
+            FactSubjectKind::Room
+        );
+        assert_eq!(
+            CheckScope::BracedWallLines.subject_kind(),
+            FactSubjectKind::BracedWallLine
+        );
     }
 
     fn table_pack(id: &str, rule: &str, header_depth: Length) -> StandardsPack {
@@ -1562,6 +1632,59 @@ mod tests {
             vec![
                 (ElementId::new("base-pack"), ResolutionAction::Introduced),
                 (ElementId::new("overlay-pack"), ResolutionAction::Reseverity),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolution_retains_waived_check_definition_after_reseverity() {
+        let mut base = table_pack("base-pack", "base.table", Length::from_whole_inches(9));
+        base.checks.push(wall_height_check("check.waived"));
+        let mut overlay = table_pack(
+            "overlay-pack",
+            "overlay.table",
+            Length::from_whole_inches(11),
+        );
+        overlay.overlays = vec![
+            RuleOverlay::Severity {
+                target: "check.waived".to_owned(),
+                severity: CheckSeverity::Advisory,
+            },
+            RuleOverlay::Waive {
+                target: "check.waived".to_owned(),
+                reason: "approved alternate".to_owned(),
+            },
+        ];
+
+        let resolved = resolve_standards(&[&base, &overlay]);
+        assert_eq!(resolved, resolve_standards(&[&base, &overlay]));
+        assert!(
+            resolved
+                .checks
+                .iter()
+                .all(|(_, check)| check.rule != "check.waived")
+        );
+        let (definition_pack, definition) = resolved
+            .check_definitions
+            .iter()
+            .find(|(_, check)| check.rule == "check.waived")
+            .expect("waived definition is retained");
+        assert_eq!(definition_pack, &ElementId::new("base-pack"));
+        assert_eq!(definition.severity, CheckSeverity::Advisory);
+
+        let rule = resolved
+            .rules
+            .iter()
+            .find(|rule| rule.rule == "check.waived")
+            .unwrap();
+        assert_eq!(rule.severity, Some(CheckSeverity::Advisory));
+        assert_eq!(rule.waived.as_deref(), Some("approved alternate"));
+        assert_eq!(
+            rule.chain,
+            vec![
+                (ElementId::new("base-pack"), ResolutionAction::Introduced),
+                (ElementId::new("overlay-pack"), ResolutionAction::Reseverity),
+                (ElementId::new("overlay-pack"), ResolutionAction::Waived),
             ]
         );
     }

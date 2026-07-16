@@ -32,10 +32,10 @@ pub use project::{
 pub use standards::{
     Applicability, BracedPanel, BracedWallLine, BracingMethod, BracingRow, BracingTable,
     CheckScope, CheckSeverity, CompareOp, ComplianceCheck, ConnectionKind, Fact, FactOperand,
-    FactType, FastenerSchedule, FasteningRow, FasteningSchedule, FramingDefaults, HeaderRow,
-    HeaderSpanTable, Predicate, ResolutionAction, ResolvedRule, ResolvedStandards, RuleOverlay,
-    SeismicDesignCategory, SiteContext, StandardsPack, StandardsTables, StudRow, StudTable,
-    resolve_standards,
+    FactSubjectKind, FactType, FastenerSchedule, FasteningRow, FasteningSchedule, FramingDefaults,
+    HeaderRow, HeaderSpanTable, Predicate, ResolutionAction, ResolvedRule, ResolvedStandards,
+    RuleOverlay, SeismicDesignCategory, SiteContext, StandardsPack, StandardsTables, StudRow,
+    StudTable, resolve_standards,
 };
 pub use topology::{
     PolygonTriangulation, RoomBoundary, concave_polygon_corners, enclosed_room_count,
