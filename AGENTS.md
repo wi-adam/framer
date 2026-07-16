@@ -20,7 +20,7 @@ the reverse):
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
 | [`crates/framer-standards`](crates/framer-standards) | UI-free compliance facts, evaluator, report CSV, and diagnostics lowering over resolved standards + solver output. **No UI.** |
 | [`crates/framer-geometry`](crates/framer-geometry) | UI-free physical solids for authored assemblies and generated members; stable body identity and convex-piece lowering. **No UI.** |
-| [`crates/framer-analysis`](crates/framer-analysis) | UI-free orchestration and a deterministic, revision-bound project graph over authored intent, framing, standards, geometry, library lifecycle, and diagnostics; lazy directional explanation/impact queries. **No UI.** |
+| [`crates/framer-analysis`](crates/framer-analysis) | UI-free orchestration, common mode-specific intent outcomes/evidence, and a deterministic revision-bound project graph over authored intent, framing, standards, geometry, library lifecycle, and diagnostics; lazy directional explanation/impact queries. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
 | [`crates/framer-app`](crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`). |
 
@@ -42,9 +42,10 @@ Docs index:
 2. **Three layers, one source of truth:** authored *intent* (`BuildingModel`) →
    derived *framing* (`ProjectFramePlan`, regenerated) → *presentation* (viewports,
    drawings, exports, disposable). Only authored intent is editable and persisted.
-   The `framer-analysis` project graph is also derived, disposable, and bound to
-   the exact authored-model, graph-contract, and starter-library source revision
-   that generated it; it is never written to `.framer`.
+   The `framer-analysis` intent report and project graph are also derived,
+   disposable, and bound to the exact authored-model, graph-contract, and
+   starter-library source revision that generated them; neither is written to
+   `.framer`.
    See [architecture.md](docs/architecture.md#modeling-layers).
 3. **Determinism.** Same model + standards stack → byte-identical `.framer` and
    identical framing/render. Lengths are integer **ticks** (16 = 1 inch), no floats

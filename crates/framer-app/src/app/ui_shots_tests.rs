@@ -29,7 +29,10 @@ use eframe::egui;
 use eframe::wgpu;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{ElementId, Length, OpeningKind, Point2};
+use framer_core::{
+    Applicability, CheckScope, CheckSeverity, CompareOp, ComplianceCheck, ElementId, Fact,
+    FactOperand, Length, OpeningKind, Point2, Predicate, RuleOverlay,
+};
 use framer_geometry::{BodyKind, GeometryViolation};
 use framer_solver::MemberKind;
 
@@ -138,8 +141,73 @@ fn sync_active_viewport_mode(harness: &mut Harness<'_, FramerApp>) {
 
 fn scroll_to_intent_relationships(harness: &mut Harness<'_, FramerApp>) {
     harness.run_ok();
-    harness.get_by_label("Intent relationships").scroll_to_me();
+    harness.get_by_label("Intent").scroll_to_me();
     harness.run_ok();
+}
+
+fn prepare_mixed_intent_status(app: &mut FramerApp) {
+    app.model.site.wind_speed_mph = Some(100);
+    app.model.walls[0].height = Length::from_feet(8.0);
+    let wall_check =
+        |rule: &str, title: &str, applies: Applicability, op: CompareOp, limit: Length| {
+            ComplianceCheck {
+                rule: rule.to_owned(),
+                citation: "Intent UI fixture".to_owned(),
+                title: title.to_owned(),
+                severity: CheckSeverity::Required,
+                applies,
+                scope: CheckScope::Walls {
+                    exterior_only: None,
+                    tags: Vec::new(),
+                },
+                requirement: Predicate::Compare {
+                    fact: Fact::WallHeight,
+                    op,
+                    value: FactOperand::LengthLiteral(limit),
+                },
+            }
+        };
+    let pack = &mut app.model.standards_packs[0];
+    pack.tables.studs.clear();
+    pack.checks.extend([
+        wall_check(
+            "fixture.intent.violated",
+            "Intent fixture violation",
+            Applicability::Always,
+            CompareOp::Gt,
+            Length::from_feet(20.0),
+        ),
+        wall_check(
+            "fixture.intent.unknown",
+            "Intent fixture unknown",
+            Applicability::SiteFlag {
+                key: "missing-intent-fixture-flag".to_owned(),
+            },
+            CompareOp::Gt,
+            Length::ZERO,
+        ),
+        wall_check(
+            "fixture.intent.not-applicable",
+            "Intent fixture not applicable",
+            Applicability::WindSpeedAtLeast(200),
+            CompareOp::Gt,
+            Length::ZERO,
+        ),
+        wall_check(
+            "fixture.intent.waived",
+            "Intent fixture waiver",
+            Applicability::Always,
+            CompareOp::Gt,
+            Length::from_feet(20.0),
+        ),
+    ]);
+    pack.overlays.push(RuleOverlay::Waive {
+        target: "fixture.intent.waived".to_owned(),
+        reason: "approved alternate intent fixture".to_owned(),
+    });
+    app.rebuild();
+    app.selected_wall = 0;
+    app.selected = Selection::Wall;
 }
 
 fn open_3d_component_context_menu(harness: &mut Harness<'_, FramerApp>) {
@@ -714,7 +782,14 @@ fn capture_ui_shot_deck() {
         SelectionOp::Replace,
     );
     scroll_to_intent_relationships(&mut intent);
-    shot(&mut intent, &dir, &mut index, "intent-opening-affected-by");
+    intent.get_by_label("Potential impact").scroll_to_me();
+    intent.run_ok();
+    shot(
+        &mut intent,
+        &dir,
+        &mut index,
+        "intent-opening-potential-impact",
+    );
     intent.state_mut().apply_selection(
         Selection::Member {
             source_id: host_id,
@@ -738,6 +813,18 @@ fn capture_ui_shot_deck() {
         "intent-wall-compliance-evidence",
     );
 
+    prepare_mixed_intent_status(intent.state_mut());
+    scroll_to_intent_relationships(&mut intent);
+    shot(&mut intent, &dir, &mut index, "intent-wall-mixed-status");
+    intent.get_by_label("Waived").scroll_to_me();
+    intent.run_ok();
+    shot(
+        &mut intent,
+        &dir,
+        &mut index,
+        "intent-wall-unknown-and-waived",
+    );
+
     let mut unused = intent.state().model.materials[0].clone();
     unused.id = ElementId::new("material-unused-relationship-shot");
     unused.name = "Unused relationship material".to_owned();
@@ -751,6 +838,21 @@ fn capture_ui_shot_deck() {
     scroll_to_intent_relationships(&mut intent);
     shot(&mut intent, &dir, &mut index, "intent-no-selection");
     drop(intent);
+
+    let mut intent_error = shots_harness(design::studio_light());
+    intent_error.run_ok();
+    intent_error.state_mut().selected_wall = 0;
+    intent_error.state_mut().selected = Selection::Wall;
+    intent_error.state_mut().project_graph = None;
+    intent_error.state_mut().project_graph_error = Some("fixture graph failure".to_owned());
+    scroll_to_intent_relationships(&mut intent_error);
+    shot(
+        &mut intent_error,
+        &dir,
+        &mut index,
+        "intent-status-graph-error",
+    );
+    drop(intent_error);
 
     // Dark palette spot-checks: default state + an inspector-heavy state.
     let mut dark = shots_harness(design::studio_dark());

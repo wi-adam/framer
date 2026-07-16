@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
-use framer_analysis::{GraphQueryCache, ProjectGraph, ProjectNodeRef};
+use framer_analysis::{AnalysisError, GraphQueryCache, IntentReport, ProjectGraph, ProjectNodeRef};
 use framer_core::{
     AuthoredEntityRef, BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint,
     DimensionDirection, DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room,
@@ -71,6 +71,9 @@ pub(crate) struct FramerApp {
     geometry_audit: GeometryAudit,
     active_geometry_violation: Option<GeometryViolation>,
     compliance_report: Option<ComplianceReport>,
+    /// Canonical current intent status for the regenerated authored model. This remains usable
+    /// when only graph compilation fails, so status never depends on relationship availability.
+    intent_report: Option<Result<IntentReport, AnalysisError>>,
     /// Deterministic, disposable cross-domain graph for the current successful rebuild.
     project_graph: Option<ProjectGraph>,
     project_graph_error: Option<String>,
@@ -733,6 +736,7 @@ impl Default for FramerApp {
             geometry_audit: GeometryAudit::default(),
             active_geometry_violation: None,
             compliance_report: None,
+            intent_report: None,
             project_graph: None,
             project_graph_error: None,
             graph_queries: GraphQueryCache::default(),
@@ -837,12 +841,13 @@ impl FramerApp {
                     geometry_audit,
                     standards_evaluation,
                     library_lifecycle,
-                    intent_report: _,
+                    intent_report,
                     graph,
                 } = analysis;
                 let report = standards_evaluation.report;
                 self.library_issues = library_lifecycle.issues;
                 self.library_issue_error = library_lifecycle.error;
+                self.intent_report = Some(intent_report);
                 self.graph_queries.clear();
                 match graph {
                     Ok(graph) => {
@@ -878,6 +883,7 @@ impl FramerApp {
                 self.geometry_audit = GeometryAudit::default();
                 self.active_geometry_violation = None;
                 self.compliance_report = None;
+                self.intent_report = None;
                 self.project_graph = None;
                 self.project_graph_error = None;
                 self.graph_queries.clear();
@@ -887,69 +893,126 @@ impl FramerApp {
         self.prune_component_presentation();
     }
 
-    fn selected_project_node_ref(&self) -> Option<ProjectNodeRef> {
-        let graph = self.project_graph.as_ref()?;
-        let authored = |reference: AuthoredEntityRef| {
-            let node = ProjectNodeRef::Authored(reference);
-            graph.node(&node).is_some().then_some(node)
-        };
+    fn selected_authored_entity_ref(&self) -> Option<AuthoredEntityRef> {
         match &self.selected {
             Selection::None => None,
-            Selection::Site => authored(AuthoredEntityRef::Site),
-            Selection::Level(id) => authored(AuthoredEntityRef::Level(ElementId::new(id.clone()))),
+            Selection::Site => Some(AuthoredEntityRef::Site),
+            Selection::Level(id) => self
+                .model
+                .levels
+                .iter()
+                .any(|level| level.id.0 == *id)
+                .then(|| AuthoredEntityRef::Level(ElementId::new(id.clone()))),
             Selection::Wall => self
                 .model
                 .walls
                 .get(self.selected_wall)
-                .and_then(|wall| authored(AuthoredEntityRef::Wall(wall.id.clone()))),
-            Selection::Opening(id) => {
-                authored(AuthoredEntityRef::Opening(ElementId::new(id.clone())))
-            }
-            Selection::Dimension(id) => {
-                authored(AuthoredEntityRef::Dimension(ElementId::new(id.clone())))
-            }
-            Selection::Join(id) => {
-                authored(AuthoredEntityRef::WallJoin(ElementId::new(id.clone())))
-            }
-            Selection::Room(id) => authored(AuthoredEntityRef::Room(ElementId::new(id.clone()))),
-            Selection::Member {
-                source_id: host_id,
-                member_id,
-            } => graph
+                .map(|wall| AuthoredEntityRef::Wall(wall.id.clone())),
+            Selection::Opening(id) => self
+                .model
+                .walls
+                .iter()
+                .flat_map(|wall| &wall.openings)
+                .any(|opening| opening.id.0 == *id)
+                .then(|| AuthoredEntityRef::Opening(ElementId::new(id.clone()))),
+            Selection::Dimension(id) => self
+                .model
+                .walls
+                .iter()
+                .flat_map(|wall| &wall.dimensions)
+                .any(|dimension| dimension.id.0 == *id)
+                .then(|| AuthoredEntityRef::Dimension(ElementId::new(id.clone()))),
+            Selection::Join(id) => self
+                .model
+                .wall_joins
+                .iter()
+                .any(|join| join.id.0 == *id)
+                .then(|| AuthoredEntityRef::WallJoin(ElementId::new(id.clone()))),
+            Selection::Room(id) => self
+                .model
+                .rooms
+                .iter()
+                .any(|room| room.id.0 == *id)
+                .then(|| AuthoredEntityRef::Room(ElementId::new(id.clone()))),
+            Selection::Member { .. } => None,
+            Selection::RoofPlane(id) => self
+                .model
+                .roof_planes
+                .iter()
+                .any(|plane| plane.id.0 == *id)
+                .then(|| AuthoredEntityRef::RoofPlane(ElementId::new(id.clone()))),
+            Selection::Ceiling(id) => self
+                .model
+                .ceilings
+                .iter()
+                .any(|ceiling| ceiling.id.0 == *id)
+                .then(|| AuthoredEntityRef::Ceiling(ElementId::new(id.clone()))),
+            Selection::FloorDeck(id) => self
+                .model
+                .floor_decks
+                .iter()
+                .any(|deck| deck.id.0 == *id)
+                .then(|| AuthoredEntityRef::FloorDeck(ElementId::new(id.clone()))),
+            Selection::System(id) => self
+                .model
+                .systems
+                .iter()
+                .any(|system| system.id.0 == *id)
+                .then(|| AuthoredEntityRef::ConstructionSystem(ElementId::new(id.clone()))),
+            Selection::Material(id) => self
+                .model
+                .materials
+                .iter()
+                .any(|material| material.id.0 == *id)
+                .then(|| AuthoredEntityRef::Material(ElementId::new(id.clone()))),
+            Selection::Furnishing(id) => self
+                .model
+                .furnishings
+                .iter()
+                .any(|furnishing| furnishing.id.0 == *id)
+                .then(|| AuthoredEntityRef::Furnishing(ElementId::new(id.clone()))),
+            Selection::MepObject(id) => self
+                .model
+                .mep_objects
+                .iter()
+                .any(|object| object.id.0 == *id)
+                .then(|| AuthoredEntityRef::MepObject(ElementId::new(id.clone()))),
+            Selection::StandardsPack(id) => self
+                .model
+                .standards_packs
+                .iter()
+                .any(|pack| pack.id.0 == *id)
+                .then(|| AuthoredEntityRef::StandardsPack(ElementId::new(id.clone()))),
+            Selection::FurnishingInstance(id) => self
+                .model
+                .furnishing_instances
+                .iter()
+                .any(|instance| instance.id.0 == *id)
+                .then(|| AuthoredEntityRef::FurnishingInstance(ElementId::new(id.clone()))),
+            Selection::MepInstance(id) => self
+                .model
+                .mep_instances
+                .iter()
+                .any(|instance| instance.id.0 == *id)
+                .then(|| AuthoredEntityRef::MepInstance(ElementId::new(id.clone()))),
+        }
+    }
+
+    fn selected_project_node_ref(&self) -> Option<ProjectNodeRef> {
+        let graph = self.project_graph.as_ref()?;
+        if let Selection::Member {
+            source_id: host_id,
+            member_id,
+        } = &self.selected
+        {
+            return graph
                 .generated_member(host_id, member_id)
                 .cloned()
-                .map(ProjectNodeRef::GeneratedMember),
-            Selection::RoofPlane(id) => {
-                authored(AuthoredEntityRef::RoofPlane(ElementId::new(id.clone())))
-            }
-            Selection::Ceiling(id) => {
-                authored(AuthoredEntityRef::Ceiling(ElementId::new(id.clone())))
-            }
-            Selection::FloorDeck(id) => {
-                authored(AuthoredEntityRef::FloorDeck(ElementId::new(id.clone())))
-            }
-            Selection::System(id) => authored(AuthoredEntityRef::ConstructionSystem(
-                ElementId::new(id.clone()),
-            )),
-            Selection::Material(id) => {
-                authored(AuthoredEntityRef::Material(ElementId::new(id.clone())))
-            }
-            Selection::Furnishing(id) => {
-                authored(AuthoredEntityRef::Furnishing(ElementId::new(id.clone())))
-            }
-            Selection::MepObject(id) => {
-                authored(AuthoredEntityRef::MepObject(ElementId::new(id.clone())))
-            }
-            Selection::StandardsPack(id) => {
-                authored(AuthoredEntityRef::StandardsPack(ElementId::new(id.clone())))
-            }
-            Selection::FurnishingInstance(id) => authored(AuthoredEntityRef::FurnishingInstance(
-                ElementId::new(id.clone()),
-            )),
-            Selection::MepInstance(id) => {
-                authored(AuthoredEntityRef::MepInstance(ElementId::new(id.clone())))
-            }
+                .map(ProjectNodeRef::GeneratedMember);
         }
+
+        let node = ProjectNodeRef::Authored(self.selected_authored_entity_ref()?);
+        graph.node(&node).is_some().then_some(node)
     }
 
     /// Capture the current restorable state (authored model + selection and
@@ -4792,6 +4855,10 @@ mod tests {
         let wall = ProjectNodeRef::Authored(AuthoredEntityRef::Wall(app.model.walls[0].id.clone()));
         app.graph_queries.dependencies(graph, &wall);
         assert_eq!(app.graph_queries.stats().entries, 1);
+        assert!(
+            app.intent_report.as_ref().is_some_and(Result::is_ok),
+            "the valid generation should install current intent status"
+        );
         app.model.walls[0].end = app.model.walls[0].start;
 
         app.rebuild();
@@ -4799,6 +4866,7 @@ mod tests {
         assert!(app.project_plan.is_none());
         assert!(app.physical_scene.is_none());
         assert!(app.geometry_audit.is_clean());
+        assert!(app.intent_report.is_none());
         assert!(app.project_graph.is_none());
         assert!(app.project_graph_error.is_none());
         assert_eq!(app.graph_queries.stats(), Default::default());
@@ -4808,6 +4876,13 @@ mod tests {
     fn rebuild_installs_matching_graph_and_invalidates_queries_on_authored_change() {
         let mut app = FramerApp::default();
         let first_revision = framer_analysis::GraphRevision::for_model(&app.model).unwrap();
+        assert_eq!(
+            app.intent_report
+                .as_ref()
+                .and_then(|report| report.as_ref().ok())
+                .map(IntentReport::revision),
+            Some(first_revision)
+        );
         assert_eq!(
             app.project_graph.as_ref().map(ProjectGraph::revision),
             Some(first_revision)

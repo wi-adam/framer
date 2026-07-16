@@ -6,17 +6,23 @@ on `framer-core`, `framer-library`, `framer-solver`, `framer-standards`, and
 regenerated outputs into one deterministic, disposable project analysis.
 
 `analyze_project(&BuildingModel)` returns a `ProjectAnalysis` containing the plan,
-resolved standards, compliance report, physical scene and audit,
-`LibraryLifecycleStatus`, and a fallible project graph. Starter-library lifecycle
-warnings are lowered into the plan before graph compilation, so the returned
-lifecycle status, plan diagnostics, and graph describe the same generation.
+resolved standards, detailed standards evaluation, physical scene and audit,
+`LibraryLifecycleStatus`, a fallible `IntentReport`, and a fallible project graph.
+An intent-report failure also makes the graph unavailable; graph endpoint
+finalization can fail after a valid report, leaving current status usable.
+Starter-library lifecycle warnings are lowered into the plan before intent and
+graph compilation, so the returned lifecycle status, plan diagnostics, intent
+outcomes, and graph describe the same generation.
 `library_lifecycle_status(&BuildingModel)` remains available when framing cannot
 solve.
 
-The crate owns cross-domain graph identity, revision fingerprints, graph
-compilation, and lazy explanation/impact query caching. It never mutates or
-serializes authored intent. Lower crates do not depend on it; `framer-app` is
-currently its only workspace consumer.
+The crate owns the non-persisted common intent protocol, normalization of current
+domain results, cross-domain graph identity, revision fingerprints, graph
+compilation, and lazy explanation/impact query caching. Boolean requirements and
+preferences use common outcomes; objectives retain exact scalar observations;
+assumptions retain typed premise evidence rather than receiving invented boolean
+states. It never mutates or serializes authored intent. Lower crates do not depend
+on it; `framer-app` is currently its only workspace consumer.
 
 `GraphRevision` is BLAKE3 over domain separation, `GRAPH_CONTRACT_VERSION`, a
 length-delimited deterministic starter-library source input (`available` plus
@@ -29,8 +35,9 @@ domain evidence should normally compile to an explicit `UnknownEvidence` node;
 if the compiler instead emits an edge with a missing endpoint,
 `GraphBuilder::finish` returns typed `GraphBuildError::MissingDependent` or
 `MissingDependency`. That error flows through `AnalysisError::Graph` in the
-independently fallible `ProjectAnalysis.graph` result rather than panicking or
-discarding the otherwise valid plan, report, geometry, and lifecycle status.
+fallible `ProjectAnalysis.graph` result rather than panicking or discarding the
+otherwise valid plan, intent report, standards evaluation, geometry, and
+lifecycle status.
 
 Generated-member hosting is an ownership relationship, while `derived_from` follows only
 derivation/evidence edges. `evidence_for` is directional: it walks from a consequence toward its
@@ -43,3 +50,29 @@ compliance entries are evaluated from it, so site impact reaches their downstrea
 Regenerated room schedules and topology boundaries are revision-scoped consequence nodes linked
 to their authored room and deterministic bounding walls; open or inconsistent inputs remain
 explicit unknown evidence.
+
+Current authored driving dimensions, explicit construction selections, site
+premises, standards checks, non-standards diagnostics, and geometry findings are
+lowered into one canonical `IntentReport`. Standards facts are measured only by
+`framer_standards::FactSnapshot`; analysis consumes its detailed observations
+instead of implementing a second fact calculator.
+`framer_standards::StandardsEvaluation::diagnostics()` owns detailed standards
+diagnostic lowering; analysis installs those rows once and links them as evidence,
+so normalized intent does not duplicate plan diagnostics.
+
+`GraphQueryCache::impact_of` returns only assertion traces and user-relevant
+generated consequences for an authored entity. It is dependency evidence, not a
+prediction that every returned value will change. `evidence_for` remains the
+directional query for explaining a generated selection.
+
+## Entry points
+
+- `analyze_project(model) -> Result<ProjectAnalysis, SolverError>` regenerates
+  one coherent derived generation and compiles its common intent report and
+  project graph.
+- `ProjectAnalysis.intent_report` exposes normalized current direct intent and
+  evaluator results without requiring graph finalization.
+- `GraphQueryCache::impact_of(graph, start)` returns cached, filtered
+  assertion and derived-result impact traces for one authored entity.
+- `library_lifecycle_status(model)` evaluates library lifecycle state even when
+  project regeneration fails.

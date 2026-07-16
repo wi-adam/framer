@@ -8,7 +8,7 @@
 > **Linked goal:** G-015 (Standards Engine; subsumes G-008 Code
 > Profile Data, advances G-006 Rule Explanations) ·
 > **Plan:** [2026-07-04 — Standards Engine](../plans/2026-07-04-standards-engine.md) ·
-> **Last reviewed:** 2026-07-05
+> **Last reviewed:** 2026-07-15
 
 ## Intent / Purpose
 
@@ -59,6 +59,11 @@ The observable contract (prefer testable statements):
 - Every resolved rule carries a **provenance chain** — the ordered list of (pack,
   action) that produced it — so the app can answer *"why 12″ o.c. here?"* with
   *"introduced by IRC 2021 R602.3(5); shadowed by Seattle Amendments 2024"*.
+- `ResolvedStandards.checks` remains the active non-waived check set used by
+  compatibility evaluators. A separate derived `check_definitions` catalog
+  retains each winning post-shadow/post-reseverity check definition, including
+  waived checks, so detailed evaluation can recover scope and predicate without
+  changing prescription behavior.
 - A waive/re-severity overlay whose target rule id matches nothing in the stack below emits
   a `standards.overlay.unmatched` **Warning** diagnostic and is skipped; it never blocks
   open or save (a jurisdiction pack may legitimately outlive the base edition it was
@@ -289,7 +294,9 @@ built-in seeded by `BuildingModel::new()` / `starter_library()`, carrying real (
 scoped) IRC 2021 rows with per-table citations. `validate()` gains: stack entries resolve
 to packs, no duplicate stack entries, pack ids pool into the global id set, rule ids unique
 within a pack, waive reasons non-empty, predicates type-check (fact type vs. operand type),
-table rows strictly ordered by natural key, panel spans inside their wall.
+table rows strictly ordered by natural key, panel spans inside their wall. Non-empty
+`CheckScope::Openings.tags` is rejected because authored openings do not currently carry tags;
+accepting that selector would silently produce an empty scope.
 
 **Resolution** (pure, in core): `resolve_standards(&BuildingModel) -> ResolvedStandards` —
 fold the stack; shadow by rule id; apply waive/re-severity; record per-rule provenance
@@ -310,22 +317,36 @@ no clock.
 ### Evaluator (new crate `crates/framer-standards`)
 
 ```
-evaluate(&BuildingModel, &ResolvedStandards, &ProjectFramePlan) -> ComplianceReport
+FactSnapshot::new(&BuildingModel, &ResolvedStandards, &ProjectFramePlan)
+evaluate_detailed(...) -> StandardsEvaluation
+evaluate(...) -> ComplianceReport
 ```
 
-- **Fact engine:** one module computes the closed `Fact` vocabulary from model + plan
-  (wall/opening/room/level/system facts from `BuildingModel`; spacing/member/header
-  facts from `ProjectFramePlan`; braced-line required/provided from the bracing tables +
-  panel association). Uncomputable ⇒ `Unknown`.
+- **Fact engine:** `FactSnapshot` is the sole calculator for the closed `Fact`
+  vocabulary from model + plan (wall/opening/room/level/system facts from
+  `BuildingModel`; spacing/member/header facts from `ProjectFramePlan`;
+  braced-line required/provided from the bracing tables + panel association).
+  It provides canonical sorted subject projection, exact observations, and
+  structured `MissingInput | UnresolvedSubject | WrongSubjectKind |
+  UnsupportedCondition` reasons. Compatibility `fact_value` delegates to the
+  same snapshot.
 - **Check evaluator:** 3-valued predicate evaluation (Kleene semantics for
   all/any/not) per scoped entity; outcome per rule instance:
   `Pass | Violation | Advisory | NeedsReview | Waived { reason }`.
+- **Detailed evaluation:** `StandardsEvaluation` pairs the unchanged legacy
+  report with canonically indexed detail records carrying effective severity,
+  resolved check definition, subject/scope, applicability and fact observations,
+  synthetic-entry kind, and exact waiver overlay provenance. A scoped waiver
+  keeps one legacy subjectless report entry while exposing one detail per current
+  subject.
 - **`ComplianceReport`:** every resolved rule instance with citation, outcome, elements,
   and pack provenance chain; ordered by rule id then element id; `to_csv()` export.
-- **Diagnostics lowering:** violations/advisories/needs-review become `PlanDiagnostic`s;
-  `DiagnosticSeverity` gains `Violation` and `NeedsReview` variants; `PlanDiagnostic`
-  gains `rule: Option<RuleRef { pack: ElementId, rule: String, citation: String }>`
-  (skip-if-none).
+- **Diagnostics lowering:** compatibility `diagnostics(&ComplianceReport)` is
+  preserved and cannot distinguish every missing fact from an unsupported fact.
+  `StandardsEvaluation::diagnostics()` is the canonical detailed lowering path,
+  so structured unsupported conditions lower to `Unsupported`; top-level analysis
+  appends those rows once without duplicating them. `PlanDiagnostic.rule` retains
+  the pack, rule, and citation payload.
 - Crate depends on `framer-core` + `framer-solver` only; UI-free, I/O-free.
 
 ### Distribution (`framer-library`)

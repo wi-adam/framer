@@ -4,7 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** In progress — Slice 1 complete; Slices 2-4 remain proposed · **Linked goal:** G-016
+> **Status:** In progress — Slices 1-2 complete; Slices 3-4 remain proposed · **Linked goal:** G-016
 > (Intent Model and Resolution) ·
 > **Plan:**
 > [2026-07-15 — Intent Model and Resolution](../plans/2026-07-15-intent-model-and-resolution.md) ·
@@ -340,27 +340,40 @@ solver:
   persisting duplicate boundaries.
 - `crates/framer-solver/src/lib.rs`: `ProjectFramePlan`, `FrameMember.source`,
   `RuleProvenance`, and `PlanDiagnostic` provide generated entities and partial evidence.
-- `crates/framer-standards/src/lib.rs`: `fact_value` is the current single implementation of the
-  core `Fact` vocabulary. It evolves into the shared fact provider used by standards checks and
-  project assertions; `ComplianceReport` outcomes adapt to the common protocol.
+- `crates/framer-standards/src/lib.rs`: `FactSnapshot` is the single measurement
+  and predicate-evaluation implementation for the core `Fact` vocabulary. Both
+  compatibility `fact_value` calls and detailed standards evaluation use it.
+  `StandardsEvaluation` pairs the unchanged deterministic `ComplianceReport`
+  with structured subject, severity, predicate, synthetic-entry, and waiver
+  provenance consumed by common intent analysis.
 - `crates/framer-geometry`: `BodyRef`, `PhysicalScene`, and structured geometry violations provide
   stable physical identity and post-generation evidence.
-- `crates/framer-analysis`: `analyze_project()` now generates the plan, resolved standards,
-  compliance report, physical scene/audit, starter-library lifecycle status, and fallible graph as
-  one coherent UI-free generation. Lifecycle diagnostics are installed before graph compilation,
-  so the returned status, plan, and graph match; `library_lifecycle_status()` remains available if
-  solving fails. `identity.rs`, `revision.rs`, `graph.rs`, `compile.rs`, and `query.rs` own the closed
-  cross-domain references, typed room consequences, canonical graph, explicit unknown evidence,
-  deterministic revision fingerprint, and lazy revision-bound directional closures. Graph
-  revision fingerprinting and endpoint validation fail independently through
-  `AnalysisError::Project` and `AnalysisError::Graph` without discarding valid
-  plan/report/geometry/lifecycle outputs.
-- `crates/framer-app/src/app/mod.rs`: `rebuild()` remains the authored orchestration seam, applying
-  driving dimensions before calling `framer_analysis::analyze_project()`. It installs or clears the
-  graph alongside the matching regenerated outputs and adapts app selection into graph references.
-- `crates/framer-app/src/app/panels.rs`: the existing inspector consumes dependency and dependent
-  traces as read-only "Depends on"/"Why generated" and "Affected by" sections; it does not author
-  graph state.
+- `crates/framer-analysis`: `analyze_project()` now generates the plan, resolved
+  standards, detailed standards evaluation, physical scene/audit,
+  starter-library lifecycle status, fallible common `IntentReport`, and fallible
+  graph as one coherent UI-free generation. `intent.rs` owns the closed common
+  assertion, mode-specific result, waiver, and evidence vocabulary; `lower.rs`
+  normalizes current dimensions, construction selections, site premises,
+  standards results, diagnostics, and geometry findings while preserving native
+  payloads. `framer-standards::StandardsEvaluation::diagnostics()` owns detailed
+  standards diagnostic lowering; `analyze_project()` appends those rows once
+  before intent and graph compilation.
+  `identity.rs`, `revision.rs`, `graph.rs`, `compile.rs`, and `query.rs` own the
+  closed cross-domain references, typed room consequences, canonical graph,
+  explicit unknown evidence, deterministic revision fingerprint, and lazy
+  revision-bound directional/impact closures. An intent-report failure also makes
+  the graph unavailable; graph endpoint failure can occur after a valid report,
+  without discarding valid plan, standards, geometry, or lifecycle outputs.
+- `crates/framer-app/src/app/mod.rs`: `rebuild()` remains the authored
+  orchestration seam, applying driving dimensions before calling
+  `framer_analysis::analyze_project()`. It installs or clears the common intent
+  report and graph independently alongside the matching regenerated outputs and
+  adapts authored selection without requiring graph availability.
+- `crates/framer-app/src/app/panels.rs`: the inspector consumes the common report
+  for domain/outcome-grouped current status, the filtered impact projection for
+  authored selections, and directional evidence traces for generated
+  selections. It reports unavailable, stale, empty, and multi-selection states
+  explicitly and does not author graph state.
 - `crates/framer-app/src/app/component_visibility.rs`: `ComponentKey` demonstrates the need for
   stable authored/generated identity, but remains app-only presentation state and is not the
   cross-crate semantic reference type.
@@ -370,10 +383,11 @@ solver:
   part of the first project assertion schema; existing `StandardsPack` is the reusable
   quantitative-policy path.
 
-### Proposed data shape
+### Proposed persisted Slice 3/4 data shape
 
-The precise enum variants will be locked by the first schema-affecting slice, but the common
-envelope is:
+Slice 2 locks the current non-persisted compiled protocol in `framer-analysis`.
+The precise persisted enum variants will be locked by the first schema-affecting
+slice, with this intended envelope:
 
 ```rust
 pub struct IntentAssertion {
@@ -469,11 +483,12 @@ than panicking.
 - Other domain crates keep their specialized solving/evaluation responsibilities and emit
   structured evidence through adapters or shared lower-level types.
 - The UI-free top-level `framer-analysis` crate depends on core, library, solver, standards, and
-  geometry to compile the whole graph and produce cross-domain queries. Later slices may add
-  outcomes and options there. No lower crate depends on it.
-- `framer-app` consumes the compiled graph for the current read-only inspector and remains the sole
-  owner of interactive mutation/history. Later diagnostic, status, and option UI must preserve that
-  direction.
+  geometry to compile the common current outcomes and whole graph and produce
+  cross-domain queries. Later slices add persisted cross-object assertions and
+  resolution options there. No lower crate depends on it.
+- `framer-app` consumes the common report and compiled graph for the current
+  read-only inspector and remains the sole owner of interactive mutation/history.
+  Later option UI must preserve that direction.
 
 ## Constraints & invariants
 

@@ -5,13 +5,17 @@ use eframe::egui::{
     RichText, ScrollArea, Stroke, Ui, Vec2,
     containers::menu::{MenuButton, MenuConfig},
 };
-use framer_analysis::{GraphTrace, ProjectGraph, ProjectNodeRef};
+use framer_analysis::{
+    AnalysisError, AssertionSource, AssumptionEvidence, BooleanExpression, BooleanIntentRecord,
+    DiagnosticProvider, ExactValue, GraphTrace, IntentDomain, IntentEvidenceRef, IntentOutcome,
+    IntentRecord, IntentReport, IntentValue, ObjectiveObservation, ProjectGraph, ProjectNodeRef,
+};
 use framer_core::{
-    BuildingModel, CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
-    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
-    FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
-    Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall, WallJoin,
-    WallJoinKind,
+    AuthoredEntityRef, BuildingModel, CeilingSlope, DimensionAnchor, DimensionAxis,
+    DimensionConstraint, DimensionHorizontalReference, DimensionKind, DimensionVerticalReference,
+    ElementId, FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening,
+    OpeningKind, Point2, Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion,
+    Wall, WallJoin, WallJoinKind,
 };
 use framer_geometry::{GeometryAudit, GeometryViolation};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
@@ -23,8 +27,9 @@ use super::component_visibility::{
 };
 use super::design::{Icon, widgets};
 use super::labels::{
-    diagnostic_code_prefix, dimension_axis_label, dimension_kind_label, geometry_body_label,
-    join_kind_label, kind_label,
+    boolean_intent_mode_label, diagnostic_code_prefix, dimension_axis_label, dimension_kind_label,
+    geometry_body_label, intent_domain_label, intent_outcome_label, intent_unknown_kind_label,
+    join_kind_label, kind_label, objective_direction_label, selection_attribute_label,
 };
 use super::model_edit::{
     next_furnishing_instance_id, next_mep_instance_id, opening_max_bottom, opening_top_clearance,
@@ -3364,77 +3369,132 @@ impl FramerApp {
 
     fn project_relationships_panel(&mut self, ui: &mut Ui, multiple: bool) {
         ui.separator();
-        widgets::section(
-            ui,
-            "project-relationships",
-            "Intent relationships",
-            true,
-            |ui| {
-                if multiple {
-                    ui.label(
-                        RichText::new("Relationships are available one object at a time.")
-                            .color(theme::text_secondary()),
-                    );
-                    return;
-                }
-                let Some(selected) = self.selected_project_node_ref() else {
-                    if matches!(self.selected, Selection::None) {
-                        ui.label(
-                            RichText::new(
-                                "Select an authored object or generated member to inspect relationships.",
-                            )
-                            .color(theme::text_secondary()),
-                        );
-                    } else if let Some(error) = self.project_graph_error.as_deref() {
-                        ui.label(
-                            RichText::new(format!("Relationships are unavailable: {error}"))
-                                .color(theme::danger()),
-                        );
+        widgets::section(ui, "project-relationships", "Intent", true, |ui| {
+            panel_subheader(ui, "Current status");
+            if multiple {
+                ui.label(
+                    RichText::new("Intent status is available one object at a time.")
+                        .color(theme::text_secondary()),
+                );
+                return;
+            }
+
+            let authored = self.selected_authored_entity_ref();
+            let generated_selection = matches!(self.selected, Selection::Member { .. });
+            intent_current_status(
+                ui,
+                self.intent_report.as_ref(),
+                authored.as_ref(),
+                generated_selection,
+                matches!(self.selected, Selection::None),
+                self.error.as_deref(),
+            );
+            let selected_graph_node = self.selected_project_node_ref();
+
+            ui.add_space(design::space::SM);
+            if matches!(self.selected, Selection::None) {
+                panel_subheader(ui, "Potential impact");
+                ui.label(
+                    RichText::new(
+                        "Select an authored object or generated member to inspect relationships.",
+                    )
+                    .color(theme::text_secondary()),
+                );
+                return;
+            }
+
+            if let Some(error) = self.project_graph_error.as_deref() {
+                panel_subheader(
+                    ui,
+                    if generated_selection {
+                        "Why generated"
                     } else {
-                        ui.label(
-                            RichText::new(
-                                "Relationships are unavailable until the project regenerates.",
-                            )
-                            .color(theme::text_secondary()),
-                        );
-                    }
-                    return;
-                };
-                let Some(graph) = self.project_graph.as_ref() else {
+                        "Potential impact"
+                    },
+                );
+                ui.label(
+                    RichText::new(format!("Relationship analysis is unavailable: {error}"))
+                        .color(theme::danger()),
+                );
+                return;
+            }
+
+            let Some(graph) = self.project_graph.as_ref() else {
+                panel_subheader(
+                    ui,
+                    if generated_selection {
+                        "Why generated"
+                    } else {
+                        "Potential impact"
+                    },
+                );
+                ui.label(
+                    RichText::new(
+                        "Relationship analysis is unavailable until the project regenerates.",
+                    )
+                    .color(theme::text_secondary()),
+                );
+                return;
+            };
+
+            if generated_selection {
+                let Some(selected @ ProjectNodeRef::GeneratedMember(_)) = selected_graph_node
+                else {
+                    panel_subheader(ui, "Why generated");
                     ui.label(
                         RichText::new(
-                            "Relationships are unavailable until the project regenerates.",
+                            "This selection is not present in the current analysis generation.",
                         )
                         .color(theme::text_secondary()),
                     );
                     return;
                 };
+                let evidence = self.graph_queries.evidence_for(graph, &selected);
+                graph_trace_group(
+                    ui,
+                    "Why generated",
+                    None,
+                    "No supporting evidence is recorded for this generated member.",
+                    graph,
+                    &evidence,
+                );
+                return;
+            }
 
-                let dependencies = self.graph_queries.dependencies(graph, &selected);
-                let dependents = self.graph_queries.dependents(graph, &selected);
-                if matches!(selected, ProjectNodeRef::GeneratedMember(_)) {
-                    graph_trace_group(ui, "Why generated", None, graph, &dependencies);
-                    ui.add_space(design::space::SM);
-                    graph_trace_group(
-                        ui,
-                        "Affected by",
-                        Some("These items may change when this object changes."),
-                        graph,
-                        &dependents,
-                    );
-                } else {
-                    graph_trace_group(
-                        ui,
-                        "Affected by",
-                        Some("These items may change when this object changes."),
-                        graph,
-                        &dependents,
-                    );
-                    ui.add_space(design::space::SM);
-                    graph_trace_group(ui, "Depends on", None, graph, &dependencies);
-                }
-            },
-        );
+            let Some(authored) = authored else {
+                panel_subheader(ui, "Potential impact");
+                ui.label(
+                    RichText::new(
+                        "This selection is not present in the current analysis generation.",
+                    )
+                    .color(theme::text_secondary()),
+                );
+                return;
+            };
+            let selected = ProjectNodeRef::Authored(authored);
+            if graph.node(&selected).is_none() {
+                panel_subheader(ui, "Potential impact");
+                ui.label(
+                    RichText::new(
+                        "This selection is not present in the current analysis generation.",
+                    )
+                    .color(theme::text_secondary()),
+                );
+                return;
+            }
+            let impact = self.graph_queries.impact_of(graph, &selected);
+            dependency_impact_group(ui, graph, &impact.assertions, &impact.derived_results);
+            ui.add_space(design::space::SM);
+            let dependencies = self.graph_queries.depends_on(graph, &selected);
+            graph_trace_group(
+                ui,
+                "Depends on",
+                None,
+                "No upstream dependencies are recorded for this selection.",
+                graph,
+                &dependencies,
+            );
+        });
     }
 
     fn inspector_output_sections(&mut self, ui: &mut Ui) {
@@ -3485,7 +3545,7 @@ impl FramerApp {
         let diagnostic_counts = diagnostic_counts(
             error.as_deref(),
             &diagnostics,
-            self.geometry_audit.violations.len(),
+            &self.geometry_audit.violations,
         );
         let zoom_percent = self.status_zoom_percent();
 
@@ -3885,6 +3945,10 @@ impl FramerApp {
                     .iter()
                     .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
             )
+            .filter(|diagnostic| {
+                framer_analysis::plan_diagnostic_provider(diagnostic)
+                    != DiagnosticProvider::Geometry
+            })
             .cloned()
             .collect()
     }
@@ -4489,10 +4553,450 @@ fn panel_subheader(ui: &mut Ui, title: &str) {
     ui.add_space(3.0);
 }
 
+const INTENT_DOMAIN_ORDER: [IntentDomain; 10] = [
+    IntentDomain::SpatialProgram,
+    IntentDomain::Construction,
+    IntentDomain::StructuralPerformance,
+    IntentDomain::EnvelopeBuildingScience,
+    IntentDomain::Mep,
+    IntentDomain::Compliance,
+    IntentDomain::Resource,
+    IntentDomain::FabricationInstallation,
+    IntentDomain::OperationalMaintenance,
+    IntentDomain::Aesthetic,
+];
+
+const INTENT_OUTCOME_ORDER: [u8; 5] = [0, 1, 2, 3, 4];
+
+fn intent_current_status(
+    ui: &mut Ui,
+    report: Option<&Result<IntentReport, AnalysisError>>,
+    authored: Option<&AuthoredEntityRef>,
+    generated_selection: bool,
+    no_selection: bool,
+    regeneration_error: Option<&str>,
+) {
+    if no_selection {
+        ui.label(
+            RichText::new("Select an authored object to inspect current intent status.")
+                .color(theme::text_secondary()),
+        );
+        return;
+    }
+    if generated_selection {
+        ui.label(
+            RichText::new("Current status applies to authored selections.")
+                .color(theme::text_secondary()),
+        );
+        return;
+    }
+    let Some(authored) = authored else {
+        ui.label(
+            RichText::new("This selection is not present in the current analysis generation.")
+                .color(theme::text_secondary()),
+        );
+        return;
+    };
+    let Some(report) = report else {
+        let message = regeneration_error.map_or_else(
+            || "Intent analysis is unavailable until the project regenerates.".to_owned(),
+            |error| {
+                format!(
+                    "Intent analysis is unavailable because project regeneration failed: {error}"
+                )
+            },
+        );
+        ui.label(RichText::new(message).color(theme::danger()));
+        return;
+    };
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            ui.label(
+                RichText::new(format!("Intent analysis is unavailable: {error}"))
+                    .color(theme::danger()),
+            );
+            return;
+        }
+    };
+
+    let records = report.assertions_for(authored);
+    if records.is_empty() {
+        ui.label(
+            RichText::new(
+                "No compiled assertions apply to this selection in the current resolution.",
+            )
+            .color(theme::text_secondary()),
+        );
+        return;
+    }
+
+    let mut boolean_records = Vec::new();
+    let mut objective_records = Vec::new();
+    let mut assumption_records = Vec::new();
+    for record in records {
+        match record {
+            IntentRecord::Boolean(record) => boolean_records.push(record),
+            IntentRecord::Objective(record) => objective_records.push(record),
+            IntentRecord::Assumption(record) => assumption_records.push(record),
+        }
+    }
+
+    for domain in INTENT_DOMAIN_ORDER {
+        let domain_booleans = boolean_records
+            .iter()
+            .copied()
+            .filter(|record| record.assertion.domain == domain)
+            .collect::<Vec<_>>();
+        let domain_objectives = objective_records
+            .iter()
+            .copied()
+            .filter(|record| record.assertion.domain == domain)
+            .collect::<Vec<_>>();
+        let domain_assumptions = assumption_records
+            .iter()
+            .copied()
+            .filter(|record| record.assertion.domain == domain)
+            .collect::<Vec<_>>();
+        if domain_booleans.is_empty()
+            && domain_objectives.is_empty()
+            && domain_assumptions.is_empty()
+        {
+            continue;
+        }
+        ui.add_space(design::space::SM);
+        ui.label(
+            RichText::new(intent_domain_label(domain))
+                .strong()
+                .color(theme::text_primary()),
+        );
+        for outcome_order in INTENT_OUTCOME_ORDER {
+            let outcome_records = domain_booleans
+                .iter()
+                .copied()
+                .filter(|record| intent_outcome_order(&record.outcome) == outcome_order)
+                .collect::<Vec<_>>();
+            if outcome_records.is_empty() {
+                continue;
+            }
+            let outcome = &outcome_records[0].outcome;
+            ui.add_space(3.0);
+            egui::CollapsingHeader::new(
+                RichText::new(intent_outcome_label(outcome))
+                    .small()
+                    .strong()
+                    .color(intent_outcome_color(outcome)),
+            )
+            .id_salt(("intent-outcome", domain, outcome_order))
+            .default_open(outcome_order <= 2)
+            .show(ui, |ui| {
+                for record in outcome_records {
+                    boolean_intent_row(ui, record);
+                }
+            });
+        }
+
+        if !domain_objectives.is_empty() {
+            ui.add_space(design::space::SM);
+            egui::CollapsingHeader::new(
+                RichText::new("Objectives")
+                    .small()
+                    .strong()
+                    .color(theme::text_muted()),
+            )
+            .id_salt(("intent-objectives", domain))
+            .default_open(false)
+            .show(ui, |ui| {
+                for record in domain_objectives {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            record.objective.component,
+                            objective_direction_label(record.objective.direction)
+                        ))
+                        .color(theme::text_primary()),
+                    );
+                    ui.label(
+                        RichText::new(objective_observation_label(&record.observation))
+                            .small()
+                            .color(theme::text_secondary()),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Source: {} · Evidence: {}",
+                            assertion_source_label(&record.assertion.source),
+                            intent_evidence_summary(&record.evidence)
+                        ))
+                        .small()
+                        .color(theme::text_secondary()),
+                    );
+                }
+            });
+        }
+
+        if !domain_assumptions.is_empty() {
+            ui.add_space(design::space::SM);
+            egui::CollapsingHeader::new(
+                RichText::new("Assumptions")
+                    .small()
+                    .strong()
+                    .color(theme::text_muted()),
+            )
+            .id_salt(("intent-assumptions", domain))
+            .default_open(false)
+            .show(ui, |ui| {
+                for record in domain_assumptions {
+                    ui.label(RichText::new(&record.premise.label).color(theme::text_primary()));
+                    ui.label(
+                        RichText::new(assumption_evidence_label(&record.evidence))
+                            .small()
+                            .color(theme::text_secondary()),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Source: {} · Provenance: {}",
+                            assertion_source_label(&record.assertion.source),
+                            intent_evidence_summary(&record.provenance)
+                        ))
+                        .small()
+                        .color(theme::text_secondary()),
+                    );
+                }
+            });
+        }
+    }
+}
+
+fn intent_outcome_order(outcome: &IntentOutcome) -> u8 {
+    match outcome {
+        IntentOutcome::Violated => 0,
+        IntentOutcome::Unknown(_) => 1,
+        IntentOutcome::Waived { .. } => 2,
+        IntentOutcome::Satisfied => 3,
+        IntentOutcome::NotApplicable => 4,
+    }
+}
+
+fn intent_outcome_color(outcome: &IntentOutcome) -> Color32 {
+    let t = design::active();
+    match outcome {
+        IntentOutcome::Violated => t.danger,
+        IntentOutcome::Unknown(_) | IntentOutcome::Waived { .. } => t.warning,
+        IntentOutcome::Satisfied | IntentOutcome::NotApplicable => t.text_secondary,
+    }
+}
+
+fn boolean_intent_row(ui: &mut Ui, record: &BooleanIntentRecord) {
+    let title = boolean_intent_title(record);
+    ui.label(RichText::new(&title).color(theme::text_primary()));
+    ui.label(
+        RichText::new(format!(
+            "{} · Source: {}",
+            boolean_intent_mode_label(record.mode),
+            assertion_source_label(&record.assertion.source)
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    if !record.assertion.rationale.is_empty() && record.assertion.rationale != title {
+        ui.label(
+            RichText::new(format!("Rationale: {}", record.assertion.rationale))
+                .small()
+                .color(theme::text_secondary()),
+        );
+    }
+    ui.label(
+        RichText::new(format!(
+            "Evidence: {}",
+            intent_evidence_summary(&record.evidence)
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    match &record.outcome {
+        IntentOutcome::Unknown(unknown) => {
+            ui.label(
+                RichText::new(format!(
+                    "{}: {}",
+                    intent_unknown_kind_label(unknown.kind),
+                    unknown.detail
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+        IntentOutcome::Waived { reason, .. } => {
+            ui.label(
+                RichText::new(format!("Waiver: {reason}"))
+                    .small()
+                    .color(theme::text_secondary()),
+            );
+        }
+        IntentOutcome::Satisfied | IntentOutcome::Violated | IntentOutcome::NotApplicable => {}
+    }
+    ui.add_space(3.0);
+}
+
+fn boolean_intent_title(record: &BooleanIntentRecord) -> String {
+    match &record.expression {
+        BooleanExpression::ExactLength { label, .. } => label.clone(),
+        BooleanExpression::SelectedEntity {
+            attribute,
+            selected,
+        } => format!("{}: {}", selection_attribute_label(*attribute), selected.0),
+        BooleanExpression::Predicate(_) => record.assertion.rationale.clone(),
+        BooleanExpression::Finding { code } => {
+            if record.assertion.rationale.is_empty() || record.assertion.rationale == *code {
+                code.clone()
+            } else {
+                format!("{code}: {}", record.assertion.rationale)
+            }
+        }
+    }
+}
+
+fn assertion_source_label(source: &AssertionSource) -> String {
+    match source {
+        AssertionSource::Project => "Project".to_owned(),
+        AssertionSource::Authored(reference) => {
+            format!("Authored {}", authored_entity_kind_label(reference))
+        }
+        AssertionSource::StandardsRule(reference) => {
+            format!("Standards rule {}", reference.rule)
+        }
+        AssertionSource::Diagnostic(reference) => format!("Diagnostic {}", reference.code),
+        AssertionSource::PhysicalBody(reference) => {
+            format!("Physical body {}", reference.body)
+        }
+    }
+}
+
+fn authored_entity_kind_label(reference: &AuthoredEntityRef) -> &'static str {
+    match reference {
+        AuthoredEntityRef::Site => "site",
+        AuthoredEntityRef::LibraryVersion(_) => "library version",
+        AuthoredEntityRef::Level(_) => "level",
+        AuthoredEntityRef::Wall(_) => "wall",
+        AuthoredEntityRef::Opening(_) => "opening",
+        AuthoredEntityRef::Dimension(_) => "dimension",
+        AuthoredEntityRef::WallJoin(_) => "wall join",
+        AuthoredEntityRef::Room(_) => "room",
+        AuthoredEntityRef::RoofPlane(_) => "roof plane",
+        AuthoredEntityRef::RoofOpening(_) => "roof opening",
+        AuthoredEntityRef::Ceiling(_) => "ceiling",
+        AuthoredEntityRef::FloorDeck(_) => "floor deck",
+        AuthoredEntityRef::ConstructionSystem(_) => "construction system",
+        AuthoredEntityRef::Material(_) => "material",
+        AuthoredEntityRef::Furnishing(_) => "furnishing",
+        AuthoredEntityRef::MepObject(_) => "MEP object",
+        AuthoredEntityRef::StandardsPack(_) => "standards pack",
+        AuthoredEntityRef::FurnishingInstance(_) => "furnishing instance",
+        AuthoredEntityRef::MepInstance(_) => "MEP instance",
+        AuthoredEntityRef::BracedWallLine(_) => "braced wall line",
+        AuthoredEntityRef::BracedPanel(_) => "braced panel",
+    }
+}
+
+fn intent_evidence_summary(evidence: &[IntentEvidenceRef]) -> String {
+    let mut kinds = Vec::new();
+    for reference in evidence {
+        let kind = match reference {
+            IntentEvidenceRef::Project => "project",
+            IntentEvidenceRef::Authored(_) => "authored object",
+            IntentEvidenceRef::Assertion(_) => "intent assertion",
+            IntentEvidenceRef::GeneratedMember(_) => "generated member",
+            IntentEvidenceRef::PhysicalBody(_) => "physical body",
+            IntentEvidenceRef::StandardsRule(_) => "standards rule",
+            IntentEvidenceRef::ComplianceEntry(_) => "compliance result",
+            IntentEvidenceRef::Diagnostic(_) => "diagnostic",
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
+        "none recorded".to_owned()
+    } else {
+        kinds.join(", ")
+    }
+}
+
+fn objective_observation_label(observation: &ObjectiveObservation) -> String {
+    match observation {
+        ObjectiveObservation::Known(value) => format!("Observed: {}", exact_value_label(value)),
+        ObjectiveObservation::Unknown(unknown) => format!(
+            "{}: {}",
+            intent_unknown_kind_label(unknown.kind),
+            unknown.detail
+        ),
+        ObjectiveObservation::NotApplicable => "Not applicable to this selection".to_owned(),
+    }
+}
+
+fn exact_value_label(value: &ExactValue) -> String {
+    match value {
+        ExactValue::Length(value) => value.to_string(),
+        ExactValue::Int(value) => value.to_string(),
+    }
+}
+
+fn assumption_evidence_label(evidence: &AssumptionEvidence) -> String {
+    match evidence {
+        AssumptionEvidence::Known(value) => format!("Premise: {}", intent_value_label(value)),
+        AssumptionEvidence::Unavailable(unknown) => format!(
+            "{}: {}",
+            intent_unknown_kind_label(unknown.kind),
+            unknown.detail
+        ),
+    }
+}
+
+fn intent_value_label(value: &IntentValue) -> String {
+    match value {
+        IntentValue::Length(value) => value.to_string(),
+        IntentValue::Int(value) => value.to_string(),
+        IntentValue::Text(value) => value.clone(),
+        IntentValue::Flag(value) => value.to_string(),
+        IntentValue::Entity(value) => value.0.clone(),
+    }
+}
+
+fn dependency_impact_group(
+    ui: &mut Ui,
+    graph: &ProjectGraph,
+    assertions: &[GraphTrace],
+    derived_results: &[GraphTrace],
+) {
+    panel_subheader(ui, "Potential impact");
+    ui.label(
+        RichText::new(
+            "Dependency only: editing this selection may cause these assertions and derived results to be reevaluated; it does not guarantee their values will change.",
+        )
+        .small()
+        .color(theme::text_secondary()),
+    );
+    if assertions.is_empty() && derived_results.is_empty() {
+        ui.label(
+            RichText::new(
+                "No dependent assertions or derived results are recorded for this selection.",
+            )
+            .color(theme::text_secondary()),
+        );
+        return;
+    }
+    if !assertions.is_empty() {
+        graph_trace_group(ui, "Assertions", None, "", graph, assertions);
+    }
+    if !derived_results.is_empty() {
+        graph_trace_group(ui, "Derived results", None, "", graph, derived_results);
+    }
+}
+
 fn graph_trace_group(
     ui: &mut Ui,
     title: &str,
     helper: Option<&str>,
+    empty_message: &str,
     graph: &ProjectGraph,
     traces: &[GraphTrace],
 ) {
@@ -4514,10 +5018,7 @@ fn graph_trace_group(
             .then_with(|| left.node.cmp(&right.node))
     });
     if visible.is_empty() {
-        ui.label(
-            RichText::new("No recorded relationships in the current resolution.")
-                .color(theme::text_secondary()),
-        );
+        ui.label(RichText::new(empty_message).color(theme::text_secondary()));
         return;
     }
 
@@ -5279,9 +5780,11 @@ fn member_tree_icon(kind: framer_solver::MemberKind) -> Icon {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct DiagnosticCounts {
     errors: usize,
+    violations: usize,
+    needs_review: usize,
     unsupported: usize,
     warnings: usize,
     info: usize,
@@ -5296,33 +5799,36 @@ pub(super) enum DiagnosticAction {
 const UNSUPPORTED_DIAGNOSTIC_TOOLTIP: &str =
     "Conditions outside the supported prescriptive scope — see diagnostics";
 
-fn count_diagnostics(diagnostics: &[PlanDiagnostic]) -> (usize, usize, usize) {
-    diagnostics.iter().fold(
-        (0, 0, 0),
-        |(unsupported, warnings, info), diagnostic| match diagnostic.severity {
-            DiagnosticSeverity::Unsupported | DiagnosticSeverity::Violation => {
-                (unsupported + 1, warnings, info)
-            }
-            DiagnosticSeverity::Warning | DiagnosticSeverity::NeedsReview => {
-                (unsupported, warnings + 1, info)
-            }
-            DiagnosticSeverity::Info => (unsupported, warnings, info + 1),
-        },
-    )
+fn count_diagnostics(diagnostics: &[PlanDiagnostic]) -> DiagnosticCounts {
+    let mut counts = DiagnosticCounts::default();
+    for diagnostic in diagnostics {
+        match diagnostic.severity {
+            DiagnosticSeverity::Violation => counts.violations += 1,
+            DiagnosticSeverity::NeedsReview => counts.needs_review += 1,
+            DiagnosticSeverity::Warning => counts.warnings += 1,
+            DiagnosticSeverity::Unsupported => counts.unsupported += 1,
+            DiagnosticSeverity::Info => counts.info += 1,
+        }
+    }
+    counts
 }
 
 fn diagnostic_counts(
     error: Option<&str>,
     diagnostics: &[PlanDiagnostic],
-    geometry_violations: usize,
+    geometry_violations: &[GeometryViolation],
 ) -> DiagnosticCounts {
-    let (unsupported, warnings, info) = count_diagnostics(diagnostics);
-    DiagnosticCounts {
-        errors: usize::from(error.is_some()) + geometry_violations,
-        unsupported,
-        warnings,
-        info,
+    let mut counts = count_diagnostics(diagnostics);
+    counts.errors += usize::from(error.is_some());
+    for violation in geometry_violations {
+        match violation {
+            GeometryViolation::BodyUnbuildable(_) | GeometryViolation::Overlap(_) => {
+                counts.violations += 1;
+            }
+            GeometryViolation::QueryUnsupported(_) => counts.unsupported += 1,
+        }
     }
+    counts
 }
 
 fn diagnostic_row_budget(
@@ -5338,8 +5844,13 @@ fn diagnostic_row_budget(
 
 fn diagnostics_status_label(counts: DiagnosticCounts) -> String {
     format!(
-        "{} errors   {} warnings   {} unsupported   {} info",
-        counts.errors, counts.warnings, counts.unsupported, counts.info
+        "{} errors   {} violations   {} needs review   {} warnings   {} unsupported   {} info",
+        counts.errors,
+        counts.violations,
+        counts.needs_review,
+        counts.warnings,
+        counts.unsupported,
+        counts.info
     )
 }
 
@@ -5352,9 +5863,9 @@ fn status_diagnostics_menu(
     counts: DiagnosticCounts,
 ) -> Option<DiagnosticAction> {
     let t = design::active();
-    let text_color = if counts.errors > 0 {
+    let text_color = if counts.errors > 0 || counts.violations > 0 {
         t.danger
-    } else if counts.unsupported > 0 || counts.warnings > 0 {
+    } else if counts.needs_review > 0 || counts.unsupported > 0 || counts.warnings > 0 {
         t.warning
     } else {
         t.text_secondary
@@ -5378,6 +5889,28 @@ fn status_diagnostics_menu(
                     t.text_muted
                 } else {
                     t.danger
+                },
+                None,
+            );
+            diagnostic_count_label(
+                ui,
+                Icon::Error,
+                &format!("{} violations", counts.violations),
+                if counts.violations == 0 {
+                    t.text_muted
+                } else {
+                    t.danger
+                },
+                None,
+            );
+            diagnostic_count_label(
+                ui,
+                Icon::Warning,
+                &format!("{} needs review", counts.needs_review),
+                if counts.needs_review == 0 {
+                    t.text_muted
+                } else {
+                    t.warning
                 },
                 None,
             );
@@ -6652,6 +7185,10 @@ fn diagnostics_panel(
                     .iter()
                     .flat_map(|wall_plan| wall_plan.diagnostics.iter()),
             )
+            .filter(|diagnostic| {
+                framer_analysis::plan_diagnostic_provider(diagnostic)
+                    != DiagnosticProvider::Geometry
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -6660,17 +7197,16 @@ fn diagnostics_panel(
             return focused;
         }
 
-        let (unsupported, warnings, info) = count_diagnostics(&diagnostics);
+        let counts = diagnostic_counts(error, &diagnostics, &geometry_audit.violations);
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "{} geometry violations",
-                geometry_audit.violations.len()
-            ));
-            ui.label(format!("{unsupported} unsupported"))
+            ui.label(format!("{} errors", counts.errors));
+            ui.label(format!("{} violations", counts.violations));
+            ui.label(format!("{} needs review", counts.needs_review));
+            ui.label(format!("{} warnings", counts.warnings));
+            ui.label(format!("{} unsupported", counts.unsupported))
                 .on_hover_text(UNSUPPORTED_DIAGNOSTIC_TOOLTIP);
-            ui.label(format!("{warnings} warnings"));
-            ui.label(format!("{info} info"));
+            ui.label(format!("{} info", counts.info));
         });
 
         let (shown_geometry, shown_plan, hidden) =
@@ -6721,12 +7257,18 @@ fn diagnostic_error_row(ui: &mut Ui, error: &str) {
 
 fn geometry_diagnostic_row(ui: &mut Ui, violation: &GeometryViolation) -> Option<DiagnosticAction> {
     let t = design::active();
+    let (icon, prefix, color) = match violation {
+        GeometryViolation::QueryUnsupported(_) => (Icon::Warning, "Unsupported", t.warning),
+        GeometryViolation::BodyUnbuildable(_) | GeometryViolation::Overlap(_) => {
+            (Icon::Error, "Violation", t.danger)
+        }
+    };
     let body_a = geometry_body_label(violation.body_a());
     let body_b = violation.body_b().map(geometry_body_label);
     let row = ui.vertical(|ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(design::icon_text(Icon::Error, 13.0).color(t.danger));
-            ui.label(RichText::new("Violation").strong().color(t.danger));
+            ui.label(design::icon_text(icon, 13.0).color(color));
+            ui.label(RichText::new(prefix).strong().color(color));
             ui.label(
                 RichText::new(violation.code())
                     .size(design::text_size::LABEL)
@@ -8075,16 +8617,98 @@ mod tests {
         DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
-    use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic, GeometryQueryViolation};
+    use framer_geometry::{
+        AssemblyKind, BodyRef, GeometryBuildDiagnostic, GeometryOverlapViolation,
+        GeometryQueryViolation, Point3,
+    };
 
     #[test]
-    fn geometry_violations_contribute_to_status_error_count() {
-        let counts = diagnostic_counts(None, &[], 3);
+    fn intent_boolean_outcome_order_matches_the_inspector_contract() {
+        let unknown = IntentOutcome::Unknown(framer_analysis::IntentUnknown {
+            kind: framer_analysis::IntentUnknownKind::MissingInput,
+            detail: "fixture".to_owned(),
+        });
+        let waived = IntentOutcome::Waived {
+            waiver: framer_analysis::WaiverRef::Project {
+                override_id: ElementId::new("fixture-waiver"),
+            },
+            reason: "fixture".to_owned(),
+        };
+        let outcomes = [
+            IntentOutcome::Violated,
+            unknown,
+            waived,
+            IntentOutcome::Satisfied,
+            IntentOutcome::NotApplicable,
+        ];
 
-        assert_eq!(counts.errors, 3);
+        assert_eq!(
+            outcomes.map(|outcome| intent_outcome_order(&outcome)),
+            INTENT_OUTCOME_ORDER
+        );
+    }
+
+    #[test]
+    fn objective_observations_keep_their_own_non_boolean_vocabulary() {
+        assert_eq!(
+            objective_observation_label(&ObjectiveObservation::Known(ExactValue::Int(3))),
+            "Observed: 3"
+        );
+        assert_eq!(
+            objective_observation_label(&ObjectiveObservation::NotApplicable),
+            "Not applicable to this selection"
+        );
+    }
+
+    #[test]
+    fn diagnostic_counts_keep_every_severity_and_geometry_family_distinct() {
+        let diagnostics = [
+            DiagnosticSeverity::Violation,
+            DiagnosticSeverity::NeedsReview,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Unsupported,
+            DiagnosticSeverity::Info,
+        ]
+        .into_iter()
+        .map(|severity| PlanDiagnostic {
+            severity,
+            code: format!("fixture.{severity:?}"),
+            source: None,
+            message: "fixture diagnostic".to_owned(),
+            rule: None,
+        })
+        .collect::<Vec<_>>();
+        let body_a = BodyRef::assembly(ElementId::new("body-a"), AssemblyKind::Wall);
+        let body_b = BodyRef::assembly(ElementId::new("body-b"), AssemblyKind::Wall);
+        let geometry = vec![
+            GeometryViolation::BodyUnbuildable(GeometryBuildDiagnostic::unbuildable(
+                body_a.clone(),
+                "fixture body is unbuildable",
+            )),
+            GeometryViolation::Overlap(GeometryOverlapViolation {
+                body_a: body_a.clone(),
+                body_b: body_b.clone(),
+                penetration_depth: 0.25,
+                witness: Point3::new(1.0, 2.0, 3.0),
+            }),
+            GeometryViolation::QueryUnsupported(GeometryQueryViolation {
+                body_a,
+                body_b,
+                message: "fixture query is unsupported".to_owned(),
+            }),
+        ];
+
+        let counts = diagnostic_counts(Some("fixture error"), &diagnostics, &geometry);
+
+        assert_eq!(counts.errors, 1);
+        assert_eq!(counts.violations, 3);
+        assert_eq!(counts.needs_review, 1);
+        assert_eq!(counts.warnings, 1);
+        assert_eq!(counts.unsupported, 2);
+        assert_eq!(counts.info, 1);
         assert_eq!(
             diagnostics_status_label(counts),
-            "3 errors   0 warnings   0 unsupported   0 info"
+            "1 errors   3 violations   1 needs review   1 warnings   2 unsupported   1 info"
         );
     }
 
