@@ -556,9 +556,401 @@ fn intent_authoring_draft_cancels_without_history_and_commits_through_ui() {
         "authored intent row",
     );
     assert_accessible_label(&harness, "Host: room room-intent-ui", "authored intent row");
-    for action in ["Edit", "Delete", "Waive", "Focus all"] {
+    for action in ["Generate options", "Edit", "Delete", "Waive", "Focus all"] {
         assert_accessible_button(&harness, action, "authored intent row");
     }
+
+    let mut bounded_predicates = Vec::new();
+    for direction in [
+        ClearanceDirection::Left,
+        ClearanceDirection::Right,
+        ClearanceDirection::Front,
+        ClearanceDirection::Back,
+        ClearanceDirection::Around,
+    ] {
+        for datum in [ClearanceDatum::Centerline, ClearanceDatum::FootprintFace] {
+            bounded_predicates.push(Predicate::Compare {
+                fact: Fact::PlacedObjectClearance { direction, datum },
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(Length::from_feet(1_000.0)),
+            });
+        }
+    }
+    harness.state_mut().model.intents[0].expression =
+        framer_core::IntentExpression::FactPredicate(Predicate::All(bounded_predicates));
+    harness.state_mut().model.validate().unwrap();
+    harness.state_mut().rebuild();
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+    let before_options = harness.state().model.clone();
+    harness.get_by_label("Generate options").click();
+    harness.run_ok();
+    harness
+        .get_by_label(
+            "No feasible placement option was found within the bounded deterministic search.",
+        )
+        .scroll_to_me();
+    harness.run_ok();
+    assert_accessible_label(
+        &harness,
+        "No feasible placement option was found within the bounded deterministic search.",
+        "bounded empty resolution state",
+    );
+    assert_accessible_label(
+        &harness,
+        "This is not proof that no layout solution exists.",
+        "bounded empty resolution state",
+    );
+    let empty_search = harness
+        .state()
+        .resolution_ui
+        .as_ref()
+        .and_then(|state| state.options.as_ref())
+        .map(|options| options.search())
+        .expect("bounded empty option set");
+    assert!(empty_search.fact_measurement_truncated);
+    let measurement_note = format!(
+        "Measured {} fact requests at the bounded-search cap of {}; additional poses were not measured.",
+        empty_search.fact_measurements, empty_search.measurement_cap,
+    );
+    assert_accessible_label(
+        &harness,
+        &measurement_note,
+        "bounded empty resolution state",
+    );
+    assert_accessible_button(
+        &harness,
+        "Regenerate options",
+        "bounded empty resolution state",
+    );
+    assert_accessible_button(&harness, "Dismiss", "bounded empty resolution state");
+    harness.get_by_label("Regenerate options").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Regenerate options").click();
+    harness.run_ok();
+    assert!(
+        harness
+            .state()
+            .resolution_ui
+            .as_ref()
+            .and_then(|state| state.options.as_ref())
+            .is_some_and(|options| options.options().is_empty()),
+        "regenerating the bounded empty state should run the provider again without inventing an option"
+    );
+    harness.get_by_label("Dismiss").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Dismiss").click();
+    harness.run_ok();
+    assert!(harness.state().resolution_ui.is_none());
+    assert_eq!(harness.state().model, before_options);
+    assert_eq!(harness.state().history.undo_label(), Some("Add intent"));
+}
+
+#[test]
+fn placement_resolution_options_preview_explicitly_and_accept_as_one_edit() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    let target = {
+        let app = harness.state_mut();
+        assert!(
+            app.begin_intent_assertion(IntentDraftExpression::Clearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+                threshold: Length::from_feet(10.0),
+            })
+        );
+        let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+        else {
+            panic!("clearance draft");
+        };
+        draft.rationale = "Keep the service approach clear".to_owned();
+        assert!(app.accept_intent_authoring());
+        app.history.clear();
+        app.model.intents[0].id.clone()
+    };
+    let before = harness.state().model.clone();
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+
+    assert_accessible_button(&harness, "Generate options", "violated placement intent");
+    harness.get_by_label("Generate options").click();
+    harness.run_ok();
+    assert_eq!(harness.state().model, before);
+    assert!(!harness.state().history.can_undo());
+    assert_accessible_label(&harness, "Resolution options", "resolution panel");
+    assert_accessible_button(&harness, "Preview in Plan", "resolution panel");
+    assert_accessible_button(&harness, "Accept option", "resolution panel");
+    assert_accessible_button(&harness, "Dismiss", "resolution panel");
+    assert_accessible_label(
+        &harness,
+        framer_analysis::STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON,
+        "resolution scope",
+    );
+
+    let stale_revision = harness.state().document_revision;
+    harness.state_mut().rebuild();
+    assert_ne!(harness.state().document_revision, stale_revision);
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "These options are stale because the authored document rebuilt.",
+        "stale resolution state",
+    );
+    assert_accessible_button(&harness, "Regenerate options", "stale resolution state");
+    let regenerated_revision = harness.state().document_revision;
+    harness.get_by_label("Regenerate options").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Regenerate options").click();
+    harness.run_ok();
+    assert_eq!(harness.state().document_revision, regenerated_revision);
+    let regenerated_state = harness.state().resolution_ui.as_ref();
+    assert!(
+        regenerated_state.is_some_and(|state| !state.stale && state.options.is_some()),
+        "Regenerate options should replace the stale result at the current revision; stale={}, has_options={}, error={:?}, status={:?}",
+        regenerated_state.is_some_and(|state| state.stale),
+        regenerated_state.is_some_and(|state| state.options.is_some()),
+        regenerated_state.and_then(|state| state.error.as_deref()),
+        harness.state().file_status,
+    );
+
+    let (before_clearance, after_clearance) = {
+        let state = harness.state().resolution_ui.as_ref().unwrap();
+        let option = &state.options.as_ref().unwrap().options()[state.selected];
+        let clearance = |effects: &[framer_analysis::ResolutionIntentEffect]| {
+            effects
+                .iter()
+                .find(|effect| {
+                    effect.assertion
+                        == framer_analysis::AssertionSemanticKey::Authored(target.clone())
+                })
+                .and_then(|effect| effect.predicate_observation.as_ref())
+                .and_then(|observation| {
+                    observation.observed_facts.iter().find_map(|observed| {
+                        if !matches!(
+                            observed.fact,
+                            Fact::PlacedObjectClearance {
+                                direction: ClearanceDirection::Front,
+                                datum: ClearanceDatum::FootprintFace,
+                            }
+                        ) {
+                            return None;
+                        }
+                        match &observed.observation {
+                            framer_standards::FactObservation::Known(
+                                framer_standards::FactValue::Length(value),
+                            ) => Some(*value),
+                            _ => None,
+                        }
+                    })
+                })
+                .expect("target option should retain an exact clearance observation")
+        };
+        (
+            clearance(&option.effects().before_intents),
+            clearance(&option.effects().after_intents),
+        )
+    };
+    assert_ne!(before_clearance, after_clearance);
+    let before_facts =
+        format!("Before facts: Front clearance from footprint face = {before_clearance}");
+    let after_facts =
+        format!("After facts: Front clearance from footprint face = {after_clearance}");
+    harness.get_by_label(&after_facts).scroll_to_me();
+    harness.run_ok();
+    assert_accessible_label(&harness, &before_facts, "resolution tradeoff facts");
+    assert_accessible_label(&harness, &after_facts, "resolution tradeoff facts");
+
+    let preview_revision = harness.state().document_revision;
+    harness.get_by_label("Preview in Plan").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Preview in Plan").click();
+    harness.run_ok();
+    assert!(
+        harness.state().placement_resolution_preview.is_some(),
+        "a paint-only frame must retain the preview; document revision {} -> {}, stale={}, status={:?}",
+        preview_revision,
+        harness.state().document_revision,
+        harness
+            .state()
+            .resolution_ui
+            .as_ref()
+            .is_some_and(|state| state.stale),
+        harness.state().file_status,
+    );
+    assert_eq!(harness.state().model, before);
+    assert!(!harness.state().history.can_undo());
+
+    // Preview changes only presentation; acceptance is the first authored mutation.
+    harness.get_by_label("Accept option").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Accept option").click();
+    harness.run_ok();
+    assert_ne!(harness.state().model, before);
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Apply resolution option")
+    );
+    assert!(harness.state().resolution_ui.is_none());
+    assert!(harness.state().placement_resolution_preview.is_none());
+    harness.state_mut().undo();
+    assert_eq!(harness.state().model, before);
+    assert!(
+        harness
+            .state()
+            .model
+            .intents
+            .iter()
+            .any(|intent| intent.id == target)
+    );
+}
+
+#[test]
+fn resolution_error_controls_regenerate_and_dismiss_without_mutation() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    {
+        let app = harness.state_mut();
+        assert!(
+            app.begin_intent_assertion(IntentDraftExpression::Clearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+                threshold: Length::from_feet(10.0),
+            })
+        );
+        let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+        else {
+            panic!("clearance draft");
+        };
+        draft.rationale = "Keep the service approach clear".to_owned();
+        assert!(app.accept_intent_authoring());
+        app.history.clear();
+    }
+    let before = harness.state().model.clone();
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+    let current_graph = harness
+        .state_mut()
+        .project_graph
+        .take()
+        .expect("fixture graph");
+
+    harness.get_by_label("Generate options").click();
+    harness.run_ok();
+    let error_label = "Resolution options are unavailable: Resolution analysis is unavailable until the current intent report and project graph agree.";
+    harness.get_by_label(error_label).scroll_to_me();
+    harness.run_ok();
+    assert_accessible_label(&harness, error_label, "resolution error state");
+    assert_accessible_button(&harness, "Regenerate options", "resolution error state");
+    assert_accessible_button(&harness, "Dismiss", "resolution error state");
+
+    harness.get_by_label("Regenerate options").scroll_to_me();
+    harness.run_ok();
+    harness.get_by_label("Regenerate options").click();
+    harness.run_ok();
+    assert!(
+        harness
+            .state()
+            .resolution_ui
+            .as_ref()
+            .is_some_and(|state| state.error.is_some()),
+        "regeneration should retry and retain an honest error while analysis remains unavailable"
+    );
+    harness.state_mut().project_graph = Some(current_graph);
+    harness.get_by_label("Dismiss").click();
+    harness.run_ok();
+    assert!(harness.state().resolution_ui.is_none());
+    assert_eq!(harness.state().model, before);
+    assert!(!harness.state().history.can_undo());
+}
+
+#[test]
+fn focusing_another_intent_dismisses_target_specific_resolution_options() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    let intent_ids = {
+        let app = harness.state_mut();
+        for (threshold, rationale) in [
+            (Length::from_feet(10.0), "Keep the first approach clear"),
+            (Length::from_feet(12.0), "Keep the second approach clear"),
+        ] {
+            assert!(
+                app.begin_intent_assertion(IntentDraftExpression::Clearance {
+                    direction: ClearanceDirection::Front,
+                    datum: ClearanceDatum::FootprintFace,
+                    threshold,
+                })
+            );
+            let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+            else {
+                panic!("clearance draft");
+            };
+            draft.rationale = rationale.to_owned();
+            assert!(app.accept_intent_authoring());
+        }
+        app.history.clear();
+        app.focused_intent = None;
+        app.model
+            .intents
+            .iter()
+            .map(|intent| intent.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(intent_ids.len(), 2);
+    let before = harness.state().model.clone();
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+
+    harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Generate options")
+        .next()
+        .expect("first intent Generate options button")
+        .click();
+    harness.run_ok();
+    assert_eq!(
+        harness
+            .state()
+            .resolution_ui
+            .as_ref()
+            .map(|state| &state.target),
+        Some(&intent_ids[0]),
+    );
+    assert!(harness.state().focused_intent.is_none());
+
+    harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Focus all")
+        .nth(1)
+        .expect("second intent Focus all button")
+        .scroll_to_me();
+    harness.run_ok();
+    harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Focus all")
+        .nth(1)
+        .expect("second intent Focus all button after scrolling")
+        .click();
+    harness.run_ok();
+    assert_eq!(
+        harness.state().focused_intent,
+        Some(framer_analysis::AssertionRef::Authored(
+            intent_ids[1].clone()
+        )),
+    );
+    assert!(
+        harness.state().resolution_ui.is_none(),
+        "focusing another intent should dismiss options targeted at {:?}; remaining target={:?}",
+        intent_ids[0],
+        harness
+            .state()
+            .resolution_ui
+            .as_ref()
+            .map(|state| &state.target),
+    );
+    assert!(harness.state().placement_resolution_preview.is_none());
+    assert_eq!(harness.state().model, before);
+    assert!(!harness.state().history.can_undo());
 }
 
 #[test]
@@ -609,6 +1001,7 @@ fn plan_disables_intent_mutations_but_keeps_focus_all_enabled() {
         assert!(!harness.state().history.can_undo());
     }
 
+    assert_accessible_button_enabled(&harness, "Generate options", true, "Plan intent inspector");
     assert_accessible_button_enabled(&harness, "Focus all", true, "Plan intent inspector");
     harness.get_by_label("Focus all").click();
     harness.run_ok();

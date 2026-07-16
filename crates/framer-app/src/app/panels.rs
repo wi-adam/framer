@@ -8,20 +8,25 @@ use eframe::egui::{
 use framer_analysis::{
     AnalysisError, AssertionRef, AssertionSource, AssumptionEvidence, BooleanExpression,
     BooleanIntentRecord, DiagnosticProvider, ExactValue, GraphTrace, IntentDomain,
-    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentValue,
-    ObjectiveObservation, ProjectGraph, ProjectNodeRef, WaiverRef,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentValue, ObjectiveDefinition,
+    ObjectiveObservation, ProjectGraph, ProjectNodeRef, ResolutionAssumptionEffect,
+    ResolutionEffects, ResolutionObjectiveEffect, STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON,
+    WaiverRef,
 };
 use framer_core::{
     AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, BuildingModel, CeilingSlope,
     ClearanceDatum, ClearanceDirection, DimensionAnchor, DimensionAxis, DimensionConstraint,
-    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
+    DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId, Fact,
     FurnishingInstance, Length, Level, MaterialSource, MepInstance, Opening, OpeningKind, Point2,
-    PreferencePriority, Provenance, QuarterTurn, SeismicDesignCategory, Slope, SurfaceRegion, Wall,
-    WallJoin, WallJoinKind,
+    Predicate, PreferencePriority, Provenance, QuarterTurn, SeismicDesignCategory, Slope,
+    SurfaceRegion, Wall, WallJoin, WallJoinKind,
 };
 use framer_geometry::{GeometryAudit, GeometryViolation};
 use framer_solver::{DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan};
-use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
+use framer_standards::{
+    ComplianceEntry, ComplianceReport, FactObservation, FactUnknownKind, FactValue, Outcome,
+    PredicateObservation,
+};
 
 use super::actions::{self, ActionId, WorkflowTab};
 use super::component_visibility::{
@@ -3413,6 +3418,7 @@ impl FramerApp {
 
     fn project_relationships_panel(&mut self, ui: &mut Ui, multiple: bool) {
         let mut row_action = None;
+        let mut resolution_action = None;
         let can_mutate_intent = self.workspace_mode.allows_design_edits();
         ui.separator();
         widgets::section(ui, "project-relationships", "Intent", true, |ui| {
@@ -3428,6 +3434,12 @@ impl FramerApp {
                     self.error.as_deref(),
                     can_mutate_intent,
                     &mut row_action,
+                );
+                resolution_options_panel(
+                    ui,
+                    self.resolution_ui.as_ref(),
+                    can_mutate_intent,
+                    &mut resolution_action,
                 );
                 return;
             }
@@ -3448,6 +3460,12 @@ impl FramerApp {
                 self.error.as_deref(),
                 can_mutate_intent,
                 &mut row_action,
+            );
+            resolution_options_panel(
+                ui,
+                self.resolution_ui.as_ref(),
+                can_mutate_intent,
+                &mut resolution_action,
             );
             let selected_graph_node = self.selected_project_node_ref();
 
@@ -3558,6 +3576,9 @@ impl FramerApp {
         if let Some(action) = row_action {
             self.handle_intent_row_action(action);
         }
+        if let Some(action) = resolution_action {
+            self.handle_resolution_panel_action(action);
+        }
     }
 
     fn handle_intent_row_action(&mut self, action: IntentRowAction) {
@@ -3571,8 +3592,35 @@ impl FramerApp {
             IntentRowAction::Waive(id) => {
                 self.begin_waive_intent(&id);
             }
+            IntentRowAction::GenerateOptions(id) => {
+                self.request_resolution_options(id);
+            }
             IntentRowAction::FocusAll(reference) => {
+                // Resolution options are target- and selection-specific. Focus-all replaces the
+                // inspected selection, so use the same fail-closed dismissal policy as ordinary
+                // selection changes instead of leaving an unrelated option panel visible.
+                self.dismiss_resolution_options();
                 self.focus_all_intent_participants(&reference);
+            }
+        }
+    }
+
+    fn handle_resolution_panel_action(&mut self, action: ResolutionPanelAction) {
+        match action {
+            ResolutionPanelAction::Select(index) => {
+                self.select_resolution_option(index);
+            }
+            ResolutionPanelAction::Preview(index) => {
+                self.preview_resolution_option(index);
+            }
+            ResolutionPanelAction::Accept(index) => {
+                self.accept_resolution_option(index);
+            }
+            ResolutionPanelAction::Regenerate(target) => {
+                self.request_resolution_options(target);
+            }
+            ResolutionPanelAction::Dismiss => {
+                self.dismiss_resolution_options();
             }
         }
     }
@@ -4765,7 +4813,17 @@ enum IntentRowAction {
     Edit(AuthoredIntentId),
     Delete(AuthoredIntentId),
     Waive(AuthoredIntentId),
+    GenerateOptions(AuthoredIntentId),
     FocusAll(AssertionRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolutionPanelAction {
+    Select(usize),
+    Preview(usize),
+    Accept(usize),
+    Regenerate(AuthoredIntentId),
+    Dismiss,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4822,6 +4880,629 @@ fn focused_intent_current_status(
             );
         }
     }
+}
+
+fn resolution_options_panel(
+    ui: &mut Ui,
+    state: Option<&super::ResolutionUiState>,
+    can_accept: bool,
+    action: &mut Option<ResolutionPanelAction>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    ui.add_space(design::space::SM);
+    panel_subheader(ui, "Resolution options");
+
+    if state.stale {
+        ui.label(
+            RichText::new("These options are stale because the authored document rebuilt.")
+                .color(theme::warning()),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Regenerate options").clicked() {
+                *action = Some(ResolutionPanelAction::Regenerate(state.target.clone()));
+            }
+            if ui.button("Dismiss").clicked() {
+                *action = Some(ResolutionPanelAction::Dismiss);
+            }
+        });
+        resolution_scope_note(ui);
+        return;
+    }
+
+    if let Some(error) = state.error.as_deref() {
+        ui.label(
+            RichText::new(format!("Resolution options are unavailable: {error}"))
+                .color(theme::danger()),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Regenerate options").clicked() {
+                *action = Some(ResolutionPanelAction::Regenerate(state.target.clone()));
+            }
+            if ui.button("Dismiss").clicked() {
+                *action = Some(ResolutionPanelAction::Dismiss);
+            }
+        });
+        resolution_scope_note(ui);
+        return;
+    }
+
+    let Some(options) = state.options.as_ref() else {
+        ui.label(
+            RichText::new("Resolution options are unavailable.").color(theme::text_secondary()),
+        );
+        resolution_scope_note(ui);
+        return;
+    };
+    if options.options().is_empty() {
+        ui.label(
+            RichText::new(
+                "No feasible placement option was found within the bounded deterministic search.",
+            )
+            .color(theme::warning()),
+        );
+        ui.label(
+            RichText::new("This is not proof that no layout solution exists.")
+                .small()
+                .color(theme::text_secondary()),
+        );
+        if let Some(note) = resolution_search_summary_note(options.search()) {
+            ui.label(RichText::new(note).small().color(theme::warning()));
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Regenerate options").clicked() {
+                *action = Some(ResolutionPanelAction::Regenerate(state.target.clone()));
+            }
+            if ui.button("Dismiss").clicked() {
+                *action = Some(ResolutionPanelAction::Dismiss);
+            }
+        });
+        resolution_scope_note(ui);
+        return;
+    }
+
+    let mut selected = state.selected.min(options.options().len() - 1);
+    ComboBox::from_id_salt("resolution-option-rank")
+        .selected_text(format!(
+            "Option {} of {}",
+            selected + 1,
+            options.options().len()
+        ))
+        .show_ui(ui, |ui| {
+            for index in 0..options.options().len() {
+                ui.selectable_value(
+                    &mut selected,
+                    index,
+                    format!("Option {} of {}", index + 1, options.options().len()),
+                );
+            }
+        });
+    if selected != state.selected {
+        *action = Some(ResolutionPanelAction::Select(selected));
+    }
+    if let Some(note) = resolution_search_summary_note(options.search()) {
+        ui.label(RichText::new(note).small().color(theme::warning()));
+    }
+
+    let option = &options.options()[selected];
+    let patch = option.patch();
+    ui.label(
+        RichText::new(format!(
+            "Move {} {}",
+            authored_entity_kind_label(&patch.target.authored()),
+            patch.target.element().0
+        ))
+        .strong()
+        .color(theme::text_primary()),
+    );
+    property_row(ui, "Before", |ui| {
+        ui.label(placement_pose_label(patch.expected));
+    });
+    property_row(ui, "After", |ui| {
+        ui.label(placement_pose_label(patch.replacement));
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Preview in Plan").clicked() {
+            *action = Some(ResolutionPanelAction::Preview(selected));
+        }
+        if ui
+            .add_enabled(can_accept, egui::Button::new("Accept option"))
+            .on_disabled_hover_text("Switch to Design workspace to accept this authored edit")
+            .clicked()
+        {
+            *action = Some(ResolutionPanelAction::Accept(selected));
+        }
+        if ui.button("Dismiss").clicked() {
+            *action = Some(ResolutionPanelAction::Dismiss);
+        }
+    });
+    ui.label(
+        RichText::new(format!(
+            "Evidence: {}",
+            intent_evidence_summary(option.evidence())
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    resolution_tradeoffs(ui, option);
+    resolution_scope_note(ui);
+}
+
+fn placement_pose_label(pose: framer_analysis::PlacementPose) -> String {
+    format!(
+        "({}, {}) · {}",
+        pose.position.x,
+        pose.position.y,
+        pose.rotation.label()
+    )
+}
+
+fn resolution_tradeoffs(ui: &mut Ui, option: &framer_analysis::ResolutionOption) {
+    let effects = option.effects();
+    panel_subheader(ui, "Intent tradeoffs");
+    ui.label(
+        RichText::new(format!(
+            "Satisfied {} · Violated {} · Waived {} · Unknown {} · Not applicable {}",
+            effects.after.satisfied.len(),
+            effects.after.violated.len(),
+            effects.after.waived.len(),
+            effects.after.unknown.len(),
+            effects.after.not_applicable.len(),
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    let changed = effects
+        .transitions
+        .iter()
+        .filter(|transition| transition.before != transition.after)
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        ui.label(
+            RichText::new("No intent outcome changes are advertised.")
+                .small()
+                .color(theme::text_secondary()),
+        );
+    } else {
+        for transition in changed.iter().take(6) {
+            let before_effect = effects
+                .before_intents
+                .iter()
+                .find(|effect| effect.assertion == transition.assertion);
+            let after_effect = effects
+                .after_intents
+                .iter()
+                .find(|effect| effect.assertion == transition.assertion);
+            let evidence = after_effect
+                .map(|effect| intent_evidence_summary(&effect.evidence))
+                .unwrap_or_else(|| "none".to_owned());
+            ui.label(
+                RichText::new(format!(
+                    "{}: {} -> {} · Evidence: {}",
+                    resolution_assertion_key_label(&transition.assertion),
+                    resolution_category_label(transition.before),
+                    resolution_category_label(transition.after),
+                    evidence,
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Before facts: {}",
+                    resolution_predicate_observation_label(
+                        before_effect.and_then(|effect| effect.predicate_observation.as_ref())
+                    ),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "After facts: {}",
+                    resolution_predicate_observation_label(
+                        after_effect.and_then(|effect| effect.predicate_observation.as_ref())
+                    ),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+        if changed.len() > 6 {
+            ui.label(
+                RichText::new(format!("+ {} more changed outcomes", changed.len() - 6))
+                    .small()
+                    .color(theme::text_secondary()),
+            );
+        }
+    }
+
+    let objective_changes = changed_resolution_objective_effects(effects);
+    if !objective_changes.is_empty() {
+        panel_subheader(ui, "Changed objectives");
+        for change in objective_changes.iter().take(6) {
+            let Some(definition) = change
+                .after
+                .or(change.before)
+                .map(|effect| &effect.definition)
+            else {
+                continue;
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    resolution_assertion_key_label(&change.assertion),
+                    resolution_objective_definition_label(definition),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Before objective: {}",
+                    resolution_objective_effect_label(change.before),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "After objective: {}",
+                    resolution_objective_effect_label(change.after),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+        if objective_changes.len() > 6 {
+            ui.label(
+                RichText::new(format!(
+                    "+ {} more changed objectives",
+                    objective_changes.len() - 6
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+    }
+
+    let assumption_changes = changed_resolution_assumption_effects(effects);
+    if !assumption_changes.is_empty() {
+        panel_subheader(ui, "Changed assumptions");
+        for change in assumption_changes.iter().take(6) {
+            let Some(premise) = change
+                .after
+                .or(change.before)
+                .map(|effect| effect.premise.label.as_str())
+            else {
+                continue;
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{} · {premise}",
+                    resolution_assertion_key_label(&change.assertion),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Before assumption: {}",
+                    resolution_assumption_effect_label(change.before),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "After assumption: {}",
+                    resolution_assumption_effect_label(change.after),
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+        if assumption_changes.len() > 6 {
+            ui.label(
+                RichText::new(format!(
+                    "+ {} more changed assumptions",
+                    assumption_changes.len() - 6
+                ))
+                .small()
+                .color(theme::text_secondary()),
+            );
+        }
+    }
+
+    let objective = option.objective();
+    panel_subheader(ui, "Objective vector");
+    ui.label(
+        RichText::new("Lexicographic cost · lower is better")
+            .small()
+            .color(theme::text_secondary()),
+    );
+    ui.label(
+        RichText::new(format!(
+            "Required unresolved {} (unknown {})",
+            objective.required_violated_or_unknown(),
+            objective.required_unknown(),
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+    for tier in objective.preference_tiers() {
+        ui.label(
+            RichText::new(format!(
+                "Preference priority {}: unresolved {} (unknown {})",
+                tier.priority.0, tier.violated_or_unknown, tier.unknown,
+            ))
+            .small()
+            .color(theme::text_secondary()),
+        );
+    }
+    for component in objective.objective_components() {
+        ui.label(
+            RichText::new(resolution_objective_component_label(
+                component.assertion(),
+                component.definition(),
+                component.observation(),
+            ))
+            .small()
+            .color(theme::text_secondary()),
+        );
+    }
+    ui.label(
+        RichText::new(format!(
+            "Movement {} ticks · Rotation {} quarter-turn(s)",
+            objective.manhattan_movement_ticks(),
+            objective.quarter_turn_distance(),
+        ))
+        .small()
+        .color(theme::text_secondary()),
+    );
+}
+
+struct ResolutionObjectiveChange<'a> {
+    assertion: framer_analysis::AssertionSemanticKey,
+    before: Option<&'a ResolutionObjectiveEffect>,
+    after: Option<&'a ResolutionObjectiveEffect>,
+}
+
+fn changed_resolution_objective_effects(
+    effects: &ResolutionEffects,
+) -> Vec<ResolutionObjectiveChange<'_>> {
+    effects
+        .before_objectives
+        .iter()
+        .map(|effect| effect.assertion.clone())
+        .chain(
+            effects
+                .after_objectives
+                .iter()
+                .map(|effect| effect.assertion.clone()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|assertion| {
+            let before = effects
+                .before_objectives
+                .iter()
+                .find(|effect| effect.assertion == assertion);
+            let after = effects
+                .after_objectives
+                .iter()
+                .find(|effect| effect.assertion == assertion);
+            (before != after).then_some(ResolutionObjectiveChange {
+                assertion,
+                before,
+                after,
+            })
+        })
+        .collect()
+}
+
+struct ResolutionAssumptionChange<'a> {
+    assertion: framer_analysis::AssertionSemanticKey,
+    before: Option<&'a ResolutionAssumptionEffect>,
+    after: Option<&'a ResolutionAssumptionEffect>,
+}
+
+fn changed_resolution_assumption_effects(
+    effects: &ResolutionEffects,
+) -> Vec<ResolutionAssumptionChange<'_>> {
+    effects
+        .before_assumptions
+        .iter()
+        .map(|effect| effect.assertion.clone())
+        .chain(
+            effects
+                .after_assumptions
+                .iter()
+                .map(|effect| effect.assertion.clone()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|assertion| {
+            let before = effects
+                .before_assumptions
+                .iter()
+                .find(|effect| effect.assertion == assertion);
+            let after = effects
+                .after_assumptions
+                .iter()
+                .find(|effect| effect.assertion == assertion);
+            (before != after).then_some(ResolutionAssumptionChange {
+                assertion,
+                before,
+                after,
+            })
+        })
+        .collect()
+}
+
+fn resolution_objective_definition_label(definition: &ObjectiveDefinition) -> String {
+    format!(
+        "{} · Priority {} · {}",
+        definition.component,
+        definition.priority.get(),
+        objective_direction_label(definition.direction),
+    )
+}
+
+fn resolution_objective_component_label(
+    assertion: &framer_analysis::AssertionSemanticKey,
+    definition: &ObjectiveDefinition,
+    observation: &ObjectiveObservation,
+) -> String {
+    format!(
+        "{} · {} · {}",
+        resolution_assertion_key_label(assertion),
+        resolution_objective_definition_label(definition),
+        objective_observation_label(observation),
+    )
+}
+
+fn resolution_objective_effect_label(effect: Option<&ResolutionObjectiveEffect>) -> String {
+    effect.map_or_else(
+        || "not present".to_owned(),
+        |effect| {
+            format!(
+                "{} · Evidence: {}",
+                objective_observation_label(&effect.observation),
+                intent_evidence_summary(&effect.evidence),
+            )
+        },
+    )
+}
+
+fn resolution_assumption_effect_label(effect: Option<&ResolutionAssumptionEffect>) -> String {
+    effect.map_or_else(
+        || "not present".to_owned(),
+        |effect| {
+            format!(
+                "{} · Provenance: {}",
+                assumption_evidence_label(&effect.evidence),
+                intent_evidence_summary(&effect.provenance),
+            )
+        },
+    )
+}
+
+fn resolution_predicate_observation_label(observation: Option<&PredicateObservation>) -> String {
+    let Some(observation) = observation else {
+        return "no exact fact observation recorded".to_owned();
+    };
+    if observation.observed_facts.is_empty() {
+        return "no measured facts recorded".to_owned();
+    }
+    observation
+        .observed_facts
+        .iter()
+        .map(|observed| {
+            format!(
+                "{} = {}",
+                resolution_fact_label(observed.fact),
+                resolution_fact_observation_label(&observed.observation),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn resolution_fact_label(fact: Fact) -> String {
+    match fact {
+        Fact::WallLength => "Wall length".to_owned(),
+        Fact::WallHeight => "Wall height".to_owned(),
+        Fact::WallIsExterior => "Wall is exterior".to_owned(),
+        Fact::WallStudSpacing => "Wall stud spacing".to_owned(),
+        Fact::WallSystemRValueMilli => "Wall system R-value".to_owned(),
+        Fact::WallStudMaxHeight => "Wall stud maximum height".to_owned(),
+        Fact::OpeningRoughWidth => "Opening rough width".to_owned(),
+        Fact::OpeningRoughHeight => "Opening rough height".to_owned(),
+        Fact::OpeningHeaderDepth => "Opening header depth".to_owned(),
+        Fact::OpeningJackStuds => "Opening jack studs".to_owned(),
+        Fact::OpeningHeaderMaxSpan => "Opening header maximum span".to_owned(),
+        Fact::RoomAreaSquareInches => "Room area (square inches)".to_owned(),
+        Fact::RoomCeilingHeight => "Room ceiling height".to_owned(),
+        Fact::BracedLineLength => "Braced line length".to_owned(),
+        Fact::BracedLineRequiredLength => "Required braced-line length".to_owned(),
+        Fact::BracedLineProvidedLength => "Provided braced-line length".to_owned(),
+        Fact::PlacedObjectContainedInRoom => "Placed object contained in room".to_owned(),
+        Fact::PlacedObjectClearance { direction, datum } => format!(
+            "{} clearance from {}",
+            clearance_direction_label(direction),
+            clearance_datum_label(datum).to_lowercase(),
+        ),
+    }
+}
+
+fn resolution_fact_observation_label(observation: &FactObservation) -> String {
+    match observation {
+        FactObservation::Known(FactValue::Length(value)) => value.to_string(),
+        FactObservation::Known(FactValue::Int(value)) => value.to_string(),
+        FactObservation::Known(FactValue::Flag(value)) => {
+            if *value { "yes" } else { "no" }.to_owned()
+        }
+        FactObservation::Unknown(unknown) => format!(
+            "unknown ({})",
+            match unknown.kind {
+                FactUnknownKind::MissingInput => "missing input",
+                FactUnknownKind::UnresolvedSubject => "unresolved subject",
+                FactUnknownKind::WrongSubjectKind => "wrong subject kind",
+                FactUnknownKind::UnsupportedCondition => "unsupported condition",
+            }
+        ),
+    }
+}
+
+fn resolution_assertion_key_label(key: &framer_analysis::AssertionSemanticKey) -> String {
+    match key {
+        framer_analysis::AssertionSemanticKey::Authored(id) => id.0.0.clone(),
+        framer_analysis::AssertionSemanticKey::Derived(derived) => {
+            format!("derived {:?} {:?}", derived.provider, derived.role)
+        }
+    }
+}
+
+fn resolution_category_label(
+    category: Option<framer_analysis::IntentOutcomeCategory>,
+) -> &'static str {
+    match category {
+        Some(framer_analysis::IntentOutcomeCategory::Satisfied) => "satisfied",
+        Some(framer_analysis::IntentOutcomeCategory::Violated) => "violated",
+        Some(framer_analysis::IntentOutcomeCategory::Waived) => "waived",
+        Some(framer_analysis::IntentOutcomeCategory::Unknown) => "unknown",
+        Some(framer_analysis::IntentOutcomeCategory::NotApplicable) => "not applicable",
+        None => "absent",
+    }
+}
+
+fn resolution_scope_note(ui: &mut Ui) {
+    ui.label(
+        RichText::new(STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON)
+            .small()
+            .color(theme::text_secondary()),
+    );
+}
+
+fn resolution_search_summary_note(
+    search: framer_analysis::ResolutionSearchSummary,
+) -> Option<String> {
+    let mut notes = Vec::new();
+    if search.fact_measurement_truncated {
+        notes.push(format!(
+            "Measured {} fact requests at the bounded-search cap of {}; additional poses were not measured.",
+            search.fact_measurements, search.measurement_cap,
+        ));
+    }
+    if search.candidate_analysis_truncated {
+        notes.push(format!(
+            "Ranked from {} of {} feasible candidates within the bounded search; additional candidates were not fully analyzed.",
+            search.fully_analyzed_candidates, search.feasible_candidates,
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join(" "))
 }
 
 fn intent_assertion_draft_editor(
@@ -5231,6 +5912,9 @@ fn boolean_intent_row(
     }
     ui.horizontal_wrapped(|ui| {
         if let AssertionRef::Authored(id) = &record.assertion.reference {
+            if placement_resolution_supported(record) && ui.button("Generate options").clicked() {
+                *action = Some(IntentRowAction::GenerateOptions(id.clone()));
+            }
             if ui
                 .add_enabled(can_mutate_intent, egui::Button::new("Edit"))
                 .clicked()
@@ -5257,7 +5941,51 @@ fn boolean_intent_row(
             ));
         }
     });
+    if record.assertion.domain == IntentDomain::StructuralPerformance {
+        ui.label(
+            RichText::new(STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON)
+                .small()
+                .color(theme::text_secondary()),
+        );
+    }
     ui.add_space(3.0);
+}
+
+fn placement_resolution_supported(record: &BooleanIntentRecord) -> bool {
+    if !matches!(record.outcome, IntentOutcome::Violated)
+        || !matches!(record.assertion.reference, AssertionRef::Authored(_))
+    {
+        return false;
+    }
+    let supported_subject = record.assertion.participants.iter().any(|participant| {
+        participant.role == framer_analysis::AssertionParticipantRole::Subject
+            && matches!(
+                participant.entity,
+                AuthoredEntityRef::FurnishingInstance(_) | AuthoredEntityRef::MepInstance(_)
+            )
+    });
+    supported_subject
+        && matches!(
+            &record.expression,
+            BooleanExpression::Predicate(predicate)
+                if predicate_contains_placement_clearance(predicate)
+        )
+}
+
+fn predicate_contains_placement_clearance(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(children) | Predicate::Any(children) => {
+            children.iter().any(predicate_contains_placement_clearance)
+        }
+        Predicate::Not(child) => predicate_contains_placement_clearance(child),
+        Predicate::Compare { fact, value, .. } => {
+            matches!(fact, Fact::PlacedObjectClearance { .. })
+                || matches!(
+                    value,
+                    framer_core::FactOperand::Fact(Fact::PlacedObjectClearance { .. })
+                )
+        }
+    }
 }
 
 fn assertion_participant_role_label(
@@ -9085,7 +9813,7 @@ fn sync_connected_roof_overhangs(
 mod tests {
     use super::*;
     use framer_core::{
-        DimensionAxis, DimensionDirection, DimensionHorizontalReference,
+        CompareOp, DimensionAxis, DimensionDirection, DimensionHorizontalReference,
         DimensionVerticalReference, FramingDefaults, RoofPlane,
     };
     use framer_geometry::{
@@ -9153,6 +9881,178 @@ mod tests {
             objective_observation_label(&ObjectiveObservation::NotApplicable),
             "Not applicable to this selection"
         );
+    }
+
+    #[test]
+    fn resolution_mode_tradeoffs_keep_exact_objective_and_assumption_evidence() {
+        let objective_assertion = framer_analysis::AssertionSemanticKey::Authored(
+            framer_core::AuthoredIntentId::new("objective-route"),
+        );
+        let objective_definition = ObjectiveDefinition {
+            component: "Travel distance".to_owned(),
+            direction: framer_analysis::ObjectiveDirection::Minimize,
+            priority: framer_analysis::ObjectivePriority::new(9).unwrap(),
+            value_kind: framer_analysis::ExactValueKind::Length,
+        };
+        let before_objective = ResolutionObjectiveEffect {
+            assertion: objective_assertion.clone(),
+            definition: objective_definition.clone(),
+            observation: ObjectiveObservation::Known(ExactValue::Length(Length::from_feet(12.0))),
+            evidence: vec![IntentEvidenceRef::Project],
+        };
+        let after_objective = ResolutionObjectiveEffect {
+            observation: ObjectiveObservation::Known(ExactValue::Length(Length::from_feet(8.0))),
+            ..before_objective.clone()
+        };
+
+        let assumption_assertion = framer_analysis::AssertionSemanticKey::Authored(
+            framer_core::AuthoredIntentId::new("assumption-occupancy"),
+        );
+        let before_assumption = ResolutionAssumptionEffect {
+            assertion: assumption_assertion,
+            premise: framer_analysis::AssumptionPremise {
+                label: "Occupancy basis".to_owned(),
+            },
+            evidence: AssumptionEvidence::Known(IntentValue::Text("concept".to_owned())),
+            provenance: vec![IntentEvidenceRef::Authored(AuthoredEntityRef::Site)],
+        };
+        let after_assumption = ResolutionAssumptionEffect {
+            evidence: AssumptionEvidence::Known(IntentValue::Text("verified".to_owned())),
+            ..before_assumption.clone()
+        };
+
+        let effects = ResolutionEffects {
+            before: framer_analysis::CategorizedIntentOutcomes::default(),
+            after: framer_analysis::CategorizedIntentOutcomes::default(),
+            transitions: Vec::new(),
+            before_intents: Vec::new(),
+            after_intents: Vec::new(),
+            before_objectives: vec![before_objective],
+            after_objectives: vec![after_objective],
+            before_assumptions: vec![before_assumption],
+            after_assumptions: vec![after_assumption],
+        };
+
+        let objective_changes = changed_resolution_objective_effects(&effects);
+        assert_eq!(objective_changes.len(), 1);
+        let objective = &objective_changes[0];
+        assert_eq!(
+            resolution_objective_component_label(
+                &objective.assertion,
+                &objective.after.unwrap().definition,
+                &objective.after.unwrap().observation,
+            ),
+            "objective-route · Travel distance · Priority 9 · Minimize · Observed: 8' 0\""
+        );
+        let before_objective_label = resolution_objective_effect_label(objective.before);
+        let after_objective_label = resolution_objective_effect_label(objective.after);
+        assert_eq!(
+            before_objective_label,
+            "Observed: 12' 0\" · Evidence: project"
+        );
+        assert_eq!(
+            after_objective_label,
+            "Observed: 8' 0\" · Evidence: project"
+        );
+
+        let assumption_changes = changed_resolution_assumption_effects(&effects);
+        assert_eq!(assumption_changes.len(), 1);
+        let assumption = &assumption_changes[0];
+        let before_assumption_label = resolution_assumption_effect_label(assumption.before);
+        let after_assumption_label = resolution_assumption_effect_label(assumption.after);
+        assert_eq!(
+            before_assumption_label,
+            "Premise: concept · Provenance: authored object"
+        );
+        assert_eq!(
+            after_assumption_label,
+            "Premise: verified · Provenance: authored object"
+        );
+
+        for label in [
+            before_objective_label,
+            after_objective_label,
+            before_assumption_label,
+            after_assumption_label,
+        ] {
+            assert!(!label.contains("satisfied"));
+            assert!(!label.contains("violated"));
+        }
+    }
+
+    #[test]
+    fn resolution_search_note_discloses_both_bounded_search_caps() {
+        let complete = framer_analysis::ResolutionSearchSummary {
+            outcome: framer_analysis::ResolutionSearchOutcome::OptionsFound,
+            fact_measurements: 64,
+            measurement_cap: 2_048,
+            fact_measurement_truncated: false,
+            feasible_candidates: 12,
+            fully_analyzed_candidates: 12,
+            candidate_analysis_cap: 128,
+            candidate_analysis_truncated: false,
+        };
+        assert_eq!(resolution_search_summary_note(complete), None);
+
+        let measurement_truncated = framer_analysis::ResolutionSearchSummary {
+            fact_measurements: 2_048,
+            fact_measurement_truncated: true,
+            ..complete
+        };
+        assert_eq!(
+            resolution_search_summary_note(measurement_truncated).as_deref(),
+            Some(
+                "Measured 2048 fact requests at the bounded-search cap of 2048; additional poses were not measured."
+            )
+        );
+
+        let truncated = framer_analysis::ResolutionSearchSummary {
+            feasible_candidates: 200,
+            fully_analyzed_candidates: 128,
+            candidate_analysis_truncated: true,
+            ..complete
+        };
+        assert_eq!(
+            resolution_search_summary_note(truncated).as_deref(),
+            Some(
+                "Ranked from 128 of 200 feasible candidates within the bounded search; additional candidates were not fully analyzed."
+            )
+        );
+
+        let both = framer_analysis::ResolutionSearchSummary {
+            fact_measurements: 2_048,
+            fact_measurement_truncated: true,
+            ..truncated
+        };
+        assert_eq!(
+            resolution_search_summary_note(both).as_deref(),
+            Some(
+                "Measured 2048 fact requests at the bounded-search cap of 2048; additional poses were not measured. Ranked from 128 of 200 feasible candidates within the bounded search; additional candidates were not fully analyzed."
+            )
+        );
+    }
+
+    #[test]
+    fn placement_resolution_eligibility_recognizes_nested_clearance_predicates() {
+        let clearance = Predicate::Compare {
+            fact: Fact::PlacedObjectClearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+            },
+            op: CompareOp::Ge,
+            value: framer_core::FactOperand::LengthLiteral(Length::from_whole_inches(30)),
+        };
+        assert!(predicate_contains_placement_clearance(&clearance));
+        assert!(predicate_contains_placement_clearance(&Predicate::All(
+            vec![Predicate::Not(Box::new(clearance)),]
+        )));
+        assert!(!predicate_contains_placement_clearance(
+            &Predicate::Compare {
+                fact: Fact::PlacedObjectContainedInRoom,
+                op: CompareOp::Eq,
+                value: framer_core::FactOperand::FlagLiteral(true),
+            }
+        ));
     }
 
     #[test]

@@ -10,7 +10,6 @@ pub enum GraphFamily {
     OwnershipReference,
     ConstraintAssertion,
     DerivationEvidence,
-    ConflictAlternative,
 }
 
 /// A dependency-oriented graph relationship: `ProjectEdge::dependent` consumes or derives from

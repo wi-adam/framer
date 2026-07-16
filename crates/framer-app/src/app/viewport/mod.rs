@@ -70,6 +70,7 @@ pub(super) use pane::ViewportPaneRuntime;
 
 mod pane_view;
 pub(super) use pane_view::OwnedPaneDocument;
+pub(in crate::app) use pane_view::PlacementResolutionPreview;
 use pane_view::{
     OwnedPaneFrame, PANE_PRESENTATION_ACTIONS, PaneCanvasEvents, PaneCanvasOutput, PaneFrame,
     PaneGpuInput, PaneInteractionPolicy, PanePresentationAction, PaneToolInput, draw_pane_canvas,
@@ -554,6 +555,7 @@ impl FramerApp {
             layers: self.layers,
             show_section: self.show_section,
             render_settings: self.render_settings,
+            placement_resolution_preview: self.placement_resolution_preview.as_ref(),
             tools: PaneToolInput::disabled(),
             gpu: PaneGpuInput {
                 target_format: self.gpu_target_format,
@@ -755,6 +757,7 @@ impl FramerApp {
             layers: self.layers,
             show_section: self.show_section,
             render_settings: self.render_settings,
+            placement_resolution_preview: self.placement_resolution_preview.as_ref(),
             tools: PaneToolInput {
                 draw_wall_active: self.draw_wall_tool.active,
                 draw_wall_start: self.draw_wall_tool.start,

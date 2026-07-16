@@ -2,7 +2,10 @@
 //!
 //! [`BuildingModel`](framer_core::BuildingModel) remains the only persisted source of truth.
 //! This crate compiles a deterministic, disposable graph and serves revision-bound explanation
-//! and impact queries without introducing a dependency from any lower domain crate.
+//! and impact queries without introducing a dependency from any lower domain crate. Explicit
+//! placement-conflict requests use a separate bounded resolution path that returns immutable,
+//! revision-authorized typed patches and exact before/after intent evidence; generation and
+//! staging never mutate the source model, while application is an explicit caller-owned edit.
 
 #![forbid(unsafe_code)]
 

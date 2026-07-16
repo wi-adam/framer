@@ -39,8 +39,10 @@ small buildings, garages, decks, and wood framed BBQ islands.
   geometry, and library-lifecycle outputs; evaluation/lowering of persisted
   assertions and waivers through the shared standards facts; and a common
   non-persisted intent report plus deterministic, revision-bound project graph.
-  Outcomes, diagnostics, reports, graph records, and query caches are disposable;
-  no second clearance or containment calculator lives here.
+  It also owns typed placement patches and an explicitly requested, bounded,
+  revision-cached placement-clearance candidate provider. Outcomes, diagnostics,
+  reports, graph records, patches, options, and query caches are disposable; no
+  second clearance or containment calculator lives here.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and tiled viewport workspace.
@@ -90,9 +92,23 @@ canonical serialization. `framer-standards::FactSnapshot` alone resolves the
 placed-object footprint, room binding, finished wall faces, and other-object
 obstacles. `framer-analysis` maps that observation to the common outcome,
 waiver, evidence, graph, and existing diagnostics protocols. `framer-app`
-continues to own all interactive mutation and undo/redo; Slice 3 assertion
-author/edit/delete/waive and multi-participant focus controls route through that
-existing app ownership. Candidate resolution remains a later slice.
+continues to own all interactive mutation and undo/redo. Assertion
+author/edit/delete/waive, multi-participant focus, and explicitly accepted
+placement options route through that existing app ownership. Candidate
+generation stays outside `analyze_project()` and app rebuild/paint paths; every
+option is bound to both its deterministic `GraphRevision` and the app's monotonic
+document revision. Preview is presentation-only, while acceptance stages a
+sorted, validated typed patch as one ordinary undoable authored edit. Structural
+alternatives remain unavailable until their support/load-path, capacity, and
+engineered-member prerequisites exist.
+
+`GraphRevision` is the option provider's evaluation and cache identity;
+`document_revision` is a separate process-local authorization guard. A displayed
+set becomes stale on every rebuild. If an explicit regeneration request observes
+the same graph bytes, analysis may reauthorize its immutable cached evaluation for
+the new document generation; a graph change always discards it. Bounded search
+metadata reports both fact-measurement and full-candidate analysis caps and whether
+pose measurement or candidate ranking was truncated.
 
 Regenerated room schedules and topology boundaries are typed consequence nodes
 in that graph. They depend on the authored room and the walls that bound it; an
@@ -246,6 +262,9 @@ multi-wall CAD shell:
   edits, deletes, and waives supported containment/clearance assertions through
   ordinary validated history and can focus the exact instance-plus-room
   participant set; candidate movement/rotation options are not part of Slice 3.
+  Violated authored placed-object clearances can explicitly request deterministic
+  movement/rotation options, preview a non-pickable Plan ghost, inspect outcome
+  tradeoffs, and accept exactly one validated authored edit through undo/redo.
 - `framer-analysis` generates the coherent plan, detailed standards evaluation,
   physical scene, geometry audit, starter-library lifecycle status, common
   non-persisted intent report, and canonically ordered project graph for each
@@ -268,6 +287,12 @@ multi-wall CAD shell:
   finalization validates that every edge endpoint exists; an internal missed
   endpoint returns a typed `GraphBuildError` through `AnalysisError` rather than
   panicking the rebuild.
+- Placement candidate synthesis is a separate lazy analysis entry point. It
+  searches a fixed bounded room lattice, measures containment and clearance only
+  through `FactSnapshot`, rejects any required-intent regression before ranking
+  preference tiers and named direction-aware objective observations, and returns
+  typed expected-value patches with boolean, objective, and assumption evidence
+  plus lexicographic costs. It does not add walls, routes, framing, or graph nodes.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
 

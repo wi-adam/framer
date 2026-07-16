@@ -4,8 +4,9 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** In progress — Slices 1-2 merged; Slice 3 implementation in progress; Slice 4
-> remains proposed · **Linked goal:** G-016
+> **Status:** Implemented (evolving; effective with final PR #132) — Slices 1-4 delivered
+> sequentially in PRs #129, #130, #131, and #132 ·
+> **Linked goal:** G-016
 > (Intent Model and Resolution) ·
 > **Plan:**
 > [2026-07-15 — Intent Model and Resolution](../plans/2026-07-15-intent-model-and-resolution.md) ·
@@ -87,19 +88,24 @@ intent" from becoming an untyped property bag.
 - Persisted assertions may target authored entities, stable rules, or typed deterministic scopes.
   They do not target disposable render meshes or opaque cache identities.
 
-### Graph families
+### Relationship families
 
-The project graph exposes related subgraphs with different invariants rather than flattening all
-relationships into one untyped adjacency list:
+The project graph exposes three related subgraphs with different invariants rather than flattening
+all relationships into one untyped adjacency list:
 
 - **Ownership/reference:** hosts, contains, belongs-to, uses-system, uses-material, family-of,
   and standards-stack relationships.
 - **Constraint/assertion:** assertions and the entities, parameters, conditions, and scopes they
   govern. Cycles are valid in this subgraph.
 - **Derivation/evidence:** generated-from, justified-by, evaluated-from, and lowered-to
-  relationships. This subgraph is regenerated and acyclic for one resolution run.
-- **Conflict/alternative:** incompatible assertions, candidate authored changes, and the intents
-  each candidate satisfies, violates, or leaves unknown.
+  relationships. This subgraph is regenerated and acyclic for one analysis generation.
+
+Conflict alternatives are deliberately a separate lazy surface in the implemented placement
+slice. An explicit violated-assertion request returns a revision-bound `ResolutionOptionSet` whose
+typed patches and before/after evidence identify the intents each candidate satisfies, violates,
+waives, or leaves unknown. Options are not `ProjectGraph` nodes or edges. A future graph projection
+for broader cross-provider conflict discovery requires its own durable contract before adding a
+fourth `GraphFamily`.
 
 The graph may be projected as ordinary binary edges for queries or visualization, but an assertion
 is logically a typed hyperedge: it may relate multiple entities and also carry a threshold,
@@ -129,7 +135,11 @@ condition, strength, source, rationale, applicability, and waiver state.
   weight. Waiving an assertion requires an explicit, attributable override with a non-empty
   reason.
 - Preferences and objectives have deterministic priority tiers. Ordering is lexicographic by tier
-  with stable tie-breaking; iteration or hash-map order never decides a design.
+  with stable tie-breaking; iteration or hash-map order never decides a design. An objective
+  definition has a non-whitespace component name, a nonzero `u16` priority (larger is stronger),
+  a minimize/maximize direction, and a declared exact scalar kind (`Length` or `Int`). Component
+  names are unique within one objective vector, and scalar kinds are never converted into one
+  another for ranking.
 - Source/authority and rationale are separate from the assertion body. User intent, imported
   library policy, standards rules, and generated evidence remain distinguishable.
 
@@ -262,19 +272,34 @@ solver:
   dependencies rather than an uncontrolled global fixed-point loop.
 - A candidate resolution is a typed authored-model patch plus the intents it would satisfy,
   violate, waive, or leave unknown and an ordered objective-cost vector.
-- Candidate ordering is deterministic. Equal objective vectors use a documented stable semantic
-  tie-breaker.
+- Candidate ordering is deterministic and fail-closed. The current ranking compares required
+  violated-or-unknown count, required unknown count, preference tiers from stronger to weaker,
+  then named objective components from stronger to weaker, followed by Manhattan movement and
+  quarter-turn distance. A known objective value compares in its declared direction;
+  `Known < NotApplicable < Unknown`. Unknown diagnostic detail remains visible in the public
+  observation but does not affect rank. Before/after objective assertion sets, definitions, and
+  declared/observed scalar kinds must agree; missing, unexpected, renamed, duplicated, or
+  mistyped components reject the candidate. Equal cost vectors use target kind/id, replacement
+  rotation, X, then Y as the stable semantic patch tie-breaker.
 - Candidate patches are disposable. Accepting one routes through ordinary validated app edits and
   undo/redo, then reruns the complete resolution pipeline.
-- Every candidate carries the exact graph/document revision from which it was evaluated. Applying
-  it after any authored rebuild fails as stale and requires regeneration; generated node ids are
-  never used as cross-revision authority.
+- Every candidate carries the exact graph/document revision from which it was evaluated. Every
+  authored rebuild marks the displayed set stale, so preview or acceptance requires a fresh
+  explicit request. When the graph revision is unchanged, that request may reauthorize the
+  immutable cached evaluation for the new document generation without rerunning synthesis;
+  otherwise the cache is discarded and options are regenerated. Generated node ids are never used
+  as cross-revision authority.
 - A candidate that changes topology, functional layout, material family, construction method, or
   an authoritative waiver always requires explicit acceptance.
 - The staged work does not add inequalities, soft strengths, or project-global anchors to
   `ConstraintSystem`. Existing driving dimensions continue to use linear equality propagation;
   clearances are facts evaluated by `framer-standards`, and nontrivial movement is synthesized as
   an explicit candidate authored edit.
+- The initial placement provider has finite measurement and full-analysis budgets. An empty result
+  means only that no option was found within that disclosed bounded search; it is never presented
+  as proof of mathematical infeasibility. If the fact-measurement budget leaves poses unmeasured,
+  or the full-candidate budget leaves feasible candidates unanalyzed, the option set and UI
+  explicitly report the corresponding truncation.
 
 ### Validity versus unresolved design
 
@@ -290,7 +315,8 @@ solver:
 ### Explanation and impact queries
 
 - Given an authored or generated entity, callers can query incoming intent, outgoing consequences,
-  supporting evidence, current outcomes, conflicts, and alternatives.
+  supporting evidence, current outcomes, and potential impact. Given an eligible violated authored
+  placement-clearance assertion, callers can separately request its current explicit alternatives.
 - Supporting-evidence traversal is directional: it walks from a consequence only toward
   whitelisted dependencies that justify it. It does not cross into downstream bodies or
   diagnostics. The project ownership node is a valid endpoint but never a transitive bridge between
@@ -407,6 +433,18 @@ solver:
   revision-bound directional/impact closures. An intent-report failure also makes
   the graph unavailable; graph endpoint failure can occur after a valid report,
   without discarding valid plan, standards, geometry, or lifecycle outputs.
+  `patch.rs` and `resolution.rs` own placement-only expected-value patches,
+  revision-neutral candidate comparison, explicit graph+document revision
+  authority, bounded `FactSnapshot`-measured candidate search, required-intent
+  non-regression, mode-specific before/after evidence, named direction-aware
+  objective observations, deterministic lexicographic ranking, and a lazy
+  resolution cache. The graph revision is the evaluation/cache identity; the
+  process-local document revision separately authorizes use in one app generation.
+  An explicit request after a same-graph rebuild may reauthorize immutable cached
+  results without re-running synthesis, while the previously displayed option set
+  remains stale. Search summaries disclose both fact-measurement and full-candidate
+  analysis bounds and whether either phase was truncated. Candidate generation is not called by
+  `analyze_project()`.
 - `crates/framer-app/src/app/mod.rs`: `rebuild()` remains the authored
   orchestration seam, applying driving dimensions before calling
   `framer_analysis::analyze_project()`. It installs or clears the common intent
@@ -414,14 +452,20 @@ solver:
   adapts authored selection without requiring graph availability. Transient
   authoring drafts never enter history or `.framer`; create/edit/delete/waive
   commits a sorted, validated candidate through ordinary `edit()` history, and
-  participant deletion removes dependent assertions and waivers.
+  participant deletion removes dependent assertions and waivers. App-only
+  resolution state and its Plan ghost preview also stay outside history; every
+  rebuild makes existing options stale, while explicit acceptance rechecks graph
+  and document revisions and commits one staged model through `edit()`.
 - `crates/framer-app/src/app/panels.rs`: the inspector consumes the common report
   for domain/outcome-grouped current status, the filtered impact projection for
   authored selections, and directional evidence traces for generated
   selections. It reports unavailable, stale, empty, and multi-selection states
   explicitly and does not author graph state.
-  Slice 3 adds project assertion author/edit/delete/waive and all-participant
-  focus controls; candidate resolution remains Slice 4.
+  Project assertion author/edit/delete/waive and all-participant focus controls
+  share the section with explicit placement-resolution generation, typed
+  before/after preview, categorized tradeoffs/evidence, ranking, acceptance, and
+  honest empty/stale/unavailable states. Structural alternatives are labeled
+  unavailable until their prerequisites are modeled.
 - `crates/framer-app/src/app/component_visibility.rs`: `ComponentKey` demonstrates the need for
   stable authored/generated identity, but remains app-only presentation state and is not the
   cross-crate semantic reference type.
@@ -527,8 +571,8 @@ remain independent of solver or geometry types; `framer-analysis` combines all n
 `GraphRevision` is a deterministic, disposable BLAKE3 fingerprint over domain separation,
 `GRAPH_CONTRACT_VERSION`, a length-delimited deterministic starter-library source input
 (`available` plus content hash, or `unavailable`), and the canonical post-propagation project bytes.
-It is not the app's process-local `document_revision` and is never serialized; future candidate
-application will also check current app revision before editing. `GraphBuilder::finish` separately
+It is not the app's process-local `document_revision` and is never serialized; candidate
+application also checks the current app revision before editing. `GraphBuilder::finish` separately
 validates that every edge's dependent and dependency nodes exist; a missed endpoint returns typed
 `GraphBuildError::MissingDependent` or `MissingDependency` through `AnalysisError::Graph` rather
 than panicking.
@@ -545,10 +589,11 @@ than panicking.
 - The UI-free top-level `framer-analysis` crate depends on core, library, solver, standards, and
   geometry to compile the common current outcomes and whole graph and produce
   cross-domain queries. It evaluates persisted assertions through the standards-owned snapshot;
-  later slices add resolution options there. No lower crate depends on it.
+  its explicit bounded placement provider produces disposable resolution options there. No lower
+  crate depends on it.
 - `framer-app` consumes the common report and compiled graph for the derived
   current-status/evidence inspector and remains the sole owner of interactive mutation/history.
-  Slice 3 assertion authoring/focus and later Slice 4 option UI preserve that direction.
+  Assertion authoring/focus and explicit option preview/acceptance preserve that direction.
 
 ## Constraints & invariants
 

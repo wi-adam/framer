@@ -26,7 +26,7 @@ use crate::{
 const COARSE_LATTICE_INTERVALS: i64 = 8;
 const SEARCH_BEAM_WIDTH: usize = 8;
 const MAX_FACT_MEASUREMENTS: u32 = 2_048;
-const MAX_FULL_CANDIDATE_ANALYSES: usize = 128;
+const MAX_FULL_CANDIDATE_ANALYSES: u32 = 128;
 const MAX_OPTIONS: usize = 8;
 
 /// Process-local authored-document generation. This value is deliberately opaque: only equality
@@ -94,6 +94,7 @@ pub enum DerivedAssertionSemanticSource {
     PhysicalBody(BodyRef),
 }
 
+/// Revision-neutral identity of a derived assertion used to compare candidate reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DerivedAssertionSemanticKey {
     pub provider: DerivedAssertionProvider,
@@ -148,6 +149,7 @@ impl AssertionSemanticKey {
     }
 }
 
+/// Stable public categories for intent outcomes across candidate revisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntentOutcomeCategory {
     Satisfied,
@@ -191,6 +193,7 @@ impl CategorizedIntentOutcomes {
     }
 }
 
+/// Before/after category change for one semantic assertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssertionTransition {
     pub assertion: AssertionSemanticKey,
@@ -229,6 +232,7 @@ pub struct ResolutionAssumptionEffect {
     pub provenance: Vec<IntentEvidenceRef>,
 }
 
+/// Exact categorized and mode-specific before/after evidence for one candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionEffects {
     pub before: CategorizedIntentOutcomes,
@@ -242,6 +246,7 @@ pub struct ResolutionEffects {
     pub after_assumptions: Vec<ResolutionAssumptionEffect>,
 }
 
+/// Cost row for one authored preference priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreferenceTierCost {
     pub priority: PreferencePriority,
@@ -384,6 +389,7 @@ enum RankingExactValue {
     MaximizeInt(Reverse<i64>),
 }
 
+/// Authored placed-object family named by a semantic patch key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlacementTargetKind {
     FurnishingInstance,
@@ -418,6 +424,7 @@ impl PlacementPatchSemanticKey {
     }
 }
 
+/// Immutable typed authored change, exact effects, rank inputs, and target evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionOption {
     origin: ResolutionRevision,
@@ -464,6 +471,7 @@ impl ResolutionOption {
     }
 }
 
+/// Whether a bounded request found at least one option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionSearchOutcome {
     OptionsFound,
@@ -484,6 +492,7 @@ pub struct ResolutionSearchSummary {
     pub candidate_analysis_truncated: bool,
 }
 
+/// Canonically ranked immutable options and the disclosed finite-search summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionOptionSet {
     origin: ResolutionRevision,
@@ -518,6 +527,7 @@ impl ResolutionOptionSet {
     }
 }
 
+/// Observable cache activity for focused tests and operational diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResolutionCacheStats {
     pub hits: u64,
@@ -568,20 +578,24 @@ impl ResolutionCache {
     }
 }
 
+/// Closed set of resolution capabilities callers may probe explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResolutionCapability {
     PlacementClearance,
     StructuralAlternatives,
 }
 
+/// Honest availability result for a resolution capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionCapabilityAvailability {
     Available,
     Unavailable { reason: &'static str },
 }
 
+/// Explanation returned while structural synthesis prerequisites remain unimplemented.
 pub const STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON: &str = "Structural alternatives require authored supports and load paths, member capacity and deflection evaluation, and engineered member families; this slice supports placement-clearance moves only.";
 
+/// Report whether the requested candidate family is currently supported.
 pub const fn resolution_capability(
     capability: ResolutionCapability,
 ) -> ResolutionCapabilityAvailability {
@@ -595,6 +609,7 @@ pub const fn resolution_capability(
     }
 }
 
+/// Fail-closed request, revision, candidate-contract, and patch errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResolutionError {
     #[error("resolution graph revision is stale (expected {expected}, supplied {supplied})")]
@@ -768,9 +783,13 @@ fn generate_uncached(
     }
 
     match request {
-        ResolutionRequest::PlacementClearance { target } => {
-            generate_placement_clearance_options(model, current_report, revision, target)
-        }
+        ResolutionRequest::PlacementClearance { target } => generate_placement_clearance_options(
+            model,
+            current_report,
+            revision,
+            target,
+            MAX_FULL_CANDIDATE_ANALYSES,
+        ),
     }
 }
 
@@ -886,6 +905,7 @@ fn generate_placement_clearance_options(
     current_report: &IntentReport,
     revision: ResolutionRevision,
     target_id: &AuthoredIntentId,
+    candidate_analysis_cap: u32,
 ) -> Result<ResolutionOptionSet, ResolutionError> {
     let target = placement_clearance_target(model, current_report, target_id)?;
     let current_pose = current_placement_pose(model, &target.placement)?;
@@ -1008,7 +1028,7 @@ fn generate_placement_clearance_options(
     let mut candidate_analysis_truncated = false;
     let mut feasible = feasible.into_iter().peekable();
     while let Some(candidate) = feasible.next() {
-        if fully_analyzed_candidates as usize >= MAX_FULL_CANDIDATE_ANALYSES {
+        if fully_analyzed_candidates >= candidate_analysis_cap {
             candidate_analysis_truncated = true;
             break;
         }
@@ -1085,7 +1105,7 @@ fn generate_placement_clearance_options(
             fact_measurement_truncated: measurement_budget.truncated,
             feasible_candidates,
             fully_analyzed_candidates,
-            candidate_analysis_cap: MAX_FULL_CANDIDATE_ANALYSES as u32,
+            candidate_analysis_cap,
             candidate_analysis_truncated,
         },
     })
@@ -2317,6 +2337,7 @@ mod tests {
                 &report,
                 ResolutionRevision::new(report.revision(), DocumentRevision::new(1)),
                 &AuthoredIntentId::new(TARGET_INTENT),
+                MAX_FULL_CANDIDATE_ANALYSES,
             ),
             Err(ResolutionError::MissingRoomBoundary(id))
                 if id == AuthoredIntentId::new(TARGET_INTENT)
@@ -2480,6 +2501,8 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.search.fact_measurements <= MAX_FACT_MEASUREMENTS);
         assert!(first.search.fully_analyzed_candidates <= first.search.candidate_analysis_cap);
+        assert!(first.search.fully_analyzed_candidates <= first.search.feasible_candidates);
+        assert!(!first.search.candidate_analysis_truncated);
         let ordering = first
             .options()
             .iter()
@@ -2524,6 +2547,34 @@ mod tests {
                     && !effect.evidence.is_empty()
             }));
         }
+    }
+
+    #[test]
+    fn candidate_analysis_summary_reports_cap_truncation() {
+        let model = clearance_model(
+            AuthoredIntentMode::Requirement,
+            Length::from_feet(5.0),
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+        );
+        let revision = resolution_revision(&model, 8);
+        let report = analyze_project(&model).unwrap().intent_report.unwrap();
+        let options = generate_placement_clearance_options(
+            &model,
+            &report,
+            revision,
+            &AuthoredIntentId::new(TARGET_INTENT),
+            1,
+        )
+        .unwrap();
+
+        assert!(
+            options.search.feasible_candidates > 1,
+            "{:#?}",
+            options.search
+        );
+        assert_eq!(options.search.fully_analyzed_candidates, 1);
+        assert_eq!(options.search.candidate_analysis_cap, 1);
+        assert!(options.search.candidate_analysis_truncated);
     }
 
     #[test]
@@ -2598,6 +2649,54 @@ mod tests {
         assert!(matches!(
             stage_resolution_option(&model, &forged_patch, revision),
             Err(ResolutionError::CandidateRevisionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn graph_change_invalidates_cached_options_instead_of_rebinding_them() {
+        let model = unique_option_model();
+        let revision = resolution_revision(&model, 51);
+        let mut cache = ResolutionCache::default();
+        let first = generate_resolution_options(&model, revision, &request(), &mut cache).unwrap();
+        let old_option = first.options()[0].clone();
+
+        let mut changed = model.clone();
+        changed
+            .furnishing_instances
+            .iter_mut()
+            .find(|instance| instance.id == ElementId::new("target"))
+            .unwrap()
+            .position
+            .x += Length::from_ticks(1);
+        changed.sort_deterministically();
+        changed.validate().unwrap();
+        let changed_revision = resolution_revision(&changed, 52);
+        let regenerated =
+            generate_resolution_options(&changed, changed_revision, &request(), &mut cache)
+                .unwrap();
+
+        assert_eq!(cache.stats().misses, 2);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().rebinds, 1);
+        assert_eq!(regenerated.origin(), changed_revision);
+        assert!(
+            !regenerated.options().is_empty(),
+            "{:#?}",
+            regenerated.search()
+        );
+        assert!(
+            regenerated
+                .options()
+                .iter()
+                .all(|option| option.origin() == changed_revision)
+        );
+        assert_ne!(
+            regenerated.options()[0].patch().before(),
+            old_option.patch().before()
+        );
+        assert!(matches!(
+            stage_resolution_option(&changed, &old_option, changed_revision),
+            Err(ResolutionError::StaleGraphRevision { .. })
         ));
     }
 

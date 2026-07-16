@@ -140,6 +140,17 @@ fn create_intent(
     app.model.intents.last().expect("created intent").id.clone()
 }
 
+fn create_violated_clearance_intent(app: &mut FramerApp) -> framer_core::AuthoredIntentId {
+    create_intent(
+        app,
+        IntentDraftExpression::Clearance {
+            direction: ClearanceDirection::Front,
+            datum: ClearanceDatum::FootprintFace,
+            threshold: Length::from_feet(10.0),
+        },
+    )
+}
+
 fn waive_intent(app: &mut FramerApp, id: &framer_core::AuthoredIntentId) {
     assert!(app.begin_waive_intent(id));
     let Some(IntentAuthoringDraft::Waiver(draft)) = app.intent_authoring_draft.as_mut() else {
@@ -227,6 +238,159 @@ fn create_edit_waive_and_delete_intent_each_round_trip_through_undo_redo() {
     app.redo();
     assert!(app.model.intents.is_empty());
     assert!(app.model.intent_overrides.is_empty());
+}
+
+#[test]
+fn placement_resolution_request_preview_dismiss_and_accept_obey_history_boundary() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let intent = create_violated_clearance_intent(&mut app);
+    app.history.clear();
+    let authored_before = app.model.clone();
+
+    assert!(app.request_resolution_options(intent.clone()));
+    let option_count = app
+        .resolution_ui
+        .as_ref()
+        .and_then(|state| state.options.as_ref())
+        .map(|options| options.options().len())
+        .unwrap_or_default();
+    assert!(
+        option_count > 0,
+        "fixture should have a bounded placement option"
+    );
+    assert_eq!(app.model, authored_before);
+    assert!(!app.history.can_undo());
+
+    assert!(app.preview_resolution_option(0));
+    assert!(app.placement_resolution_preview.is_some());
+    assert_eq!(app.model, authored_before);
+    assert!(!app.history.can_undo());
+    assert!(app.dismiss_resolution_options());
+    assert!(app.resolution_ui.is_none());
+    assert!(app.placement_resolution_preview.is_none());
+    assert_eq!(app.model, authored_before);
+    assert!(!app.history.can_undo());
+
+    assert!(app.request_resolution_options(intent));
+    assert!(app.accept_resolution_option(0));
+    let authored_after = app.model.clone();
+    assert_ne!(authored_after, authored_before);
+    assert_eq!(app.history.undo_label(), Some("Apply resolution option"));
+    assert!(app.resolution_ui.is_none());
+    assert!(app.placement_resolution_preview.is_none());
+
+    app.undo();
+    assert_eq!(app.model, authored_before);
+    app.redo();
+    assert_eq!(app.model, authored_after);
+}
+
+#[test]
+fn placement_resolution_rejects_same_model_rebuild_and_non_design_acceptance() {
+    let mut app = FramerApp::default();
+    prepare_intent_fixture(&mut app);
+    let intent = create_violated_clearance_intent(&mut app);
+    app.history.clear();
+    let before = app.model.clone();
+
+    assert!(app.request_resolution_options(intent.clone()));
+    let origin = app
+        .resolution_ui
+        .as_ref()
+        .and_then(|state| state.origin)
+        .expect("resolution origin");
+    app.rebuild();
+    assert_eq!(
+        app.project_graph.as_ref().unwrap().revision(),
+        origin.graph,
+        "same-model rebuild deliberately preserves the graph hash",
+    );
+    assert!(app.resolution_ui.as_ref().is_some_and(|state| state.stale));
+    assert!(!app.accept_resolution_option(0));
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+
+    app.set_workspace_mode(WorkspaceMode::Plan);
+    assert!(app.request_resolution_options(intent));
+    let current = app
+        .current_resolution_revision()
+        .expect("Plan should retain current analysis revisions");
+    let state = app
+        .resolution_ui
+        .as_ref()
+        .expect("Plan should generate a current option set");
+    assert!(!state.stale);
+    assert_eq!(state.origin, Some(current));
+    assert!(
+        state
+            .options
+            .as_ref()
+            .is_some_and(|options| !options.options().is_empty())
+    );
+    assert!(!app.accept_resolution_option(0));
+    assert!(
+        app.file_status
+            .as_deref()
+            .is_some_and(|status| status.contains("only in Design workspace"))
+    );
+    assert_eq!(app.model, before);
+    assert!(!app.history.can_undo());
+}
+
+#[test]
+fn placement_resolution_regenerates_after_a_graph_change() {
+    let mut app = FramerApp::default();
+    let (subject, _) = prepare_intent_fixture(&mut app);
+    let intent = create_violated_clearance_intent(&mut app);
+    app.history.clear();
+
+    assert!(app.request_resolution_options(intent.clone()));
+    let first = app
+        .resolution_ui
+        .as_ref()
+        .and_then(|state| state.options.as_ref())
+        .expect("initial options");
+    let first_origin = first.origin();
+    let first_expected = first.options()[0].patch().before();
+    assert_eq!(app.resolution_cache.stats().misses, 1);
+
+    let changed = app
+        .model
+        .furnishing_instances
+        .iter_mut()
+        .find(|instance| instance.id == subject)
+        .expect("resolution subject");
+    changed.position.x += Length::from_ticks(1);
+    let changed_pose = framer_analysis::PlacementPose::new(changed.position, changed.rotation);
+    app.model.sort_deterministically();
+    app.model.validate().expect("changed resolution fixture");
+    app.rebuild();
+    assert!(app.resolution_ui.as_ref().is_some_and(|state| state.stale));
+    assert_ne!(
+        app.project_graph.as_ref().unwrap().revision(),
+        first_origin.graph
+    );
+
+    assert!(app.request_resolution_options(intent));
+    let regenerated = app
+        .resolution_ui
+        .as_ref()
+        .and_then(|state| state.options.as_ref())
+        .expect("regenerated options");
+    assert_eq!(
+        regenerated.origin(),
+        app.current_resolution_revision().unwrap()
+    );
+    assert_ne!(regenerated.origin().graph, first_origin.graph);
+    assert_eq!(regenerated.options()[0].patch().before(), changed_pose);
+    assert_ne!(regenerated.options()[0].patch().before(), first_expected);
+    assert_eq!(app.resolution_cache.stats().misses, 2);
+    assert_eq!(app.resolution_cache.stats().hits, 0);
+    assert_eq!(app.resolution_cache.stats().rebinds, 1);
+    assert!(app.preview_resolution_option(0));
+    assert!(app.placement_resolution_preview.is_some());
+    assert!(!app.history.can_undo());
 }
 
 #[test]

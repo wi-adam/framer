@@ -20,7 +20,7 @@ the reverse):
 | [`crates/framer-solver`](crates/framer-solver) | Deterministic framing generation + per-layer BOM + room schedule + diagnostics; SVG/CSV exports. **No UI.** |
 | [`crates/framer-standards`](crates/framer-standards) | UI-free shared fact measurement and predicate evaluation for standards + project intent, report CSV, and standards diagnostics lowering. **No UI.** |
 | [`crates/framer-geometry`](crates/framer-geometry) | UI-free physical solids for authored assemblies and generated members; stable body identity and convex-piece lowering. **No UI.** |
-| [`crates/framer-analysis`](crates/framer-analysis) | UI-free orchestration, common mode-specific intent outcomes/evidence, and a deterministic revision-bound project graph over authored intent, framing, standards, geometry, library lifecycle, and diagnostics; lazy directional explanation/impact queries. **No UI.** |
+| [`crates/framer-analysis`](crates/framer-analysis) | UI-free orchestration, common mode-specific intent outcomes/evidence, deterministic revision-bound project graph and directional explanation/impact queries, plus typed placement patches and explicit bounded resolution options. **No UI.** |
 | [`crates/framer-render`](crates/framer-render) | UI-agnostic CPU path tracer (reference math for the app's GPU shader). **No UI.** |
 | [`crates/framer-app`](crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`). |
 

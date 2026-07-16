@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use eframe::egui::{Pos2, Rect, Response, Ui};
 use eframe::wgpu;
-use framer_core::{BuildingModel, DimensionAnchor, DimensionAxis, Length, Point2};
+use framer_core::{
+    AuthoredEntityRef, BuildingModel, DimensionAnchor, DimensionAxis, Length, Point2, QuarterTurn,
+};
 use framer_geometry::{GeometryViolation, PhysicalScene};
 use framer_solver::ProjectFramePlan;
 
@@ -92,6 +94,21 @@ impl Default for PaneToolInput<'_> {
     }
 }
 
+/// Disposable Plan-view presentation for one placed-object resolution candidate.
+///
+/// The authored model remains canonical and unchanged while this value is
+/// present. The typed target and exact before pose let the Plan renderer fail
+/// closed when a candidate no longer matches the document snapshot it is drawn
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct PlacementResolutionPreview {
+    pub(in crate::app) target: AuthoredEntityRef,
+    pub(in crate::app) before_position: Point2,
+    pub(in crate::app) before_rotation: QuarterTurn,
+    pub(in crate::app) after_position: Point2,
+    pub(in crate::app) after_rotation: QuarterTurn,
+}
+
 /// All read-only inputs used to paint one pane in one app frame.
 ///
 /// Keeping this free of `&mut FramerApp` lets the root render several panes from
@@ -111,6 +128,7 @@ pub(super) struct PaneFrame<'a> {
     pub(super) layers: ViewLayers,
     pub(super) show_section: bool,
     pub(super) render_settings: RenderSettings,
+    pub(super) placement_resolution_preview: Option<&'a PlacementResolutionPreview>,
     pub(super) tools: PaneToolInput<'a>,
     pub(super) gpu: PaneGpuInput,
 }
@@ -145,6 +163,7 @@ struct OwnedPaneFramePayload {
     layers: ViewLayers,
     show_section: bool,
     render_settings: RenderSettings,
+    placement_resolution_preview: Option<PlacementResolutionPreview>,
     gpu: PaneGpuInput,
 }
 
@@ -179,6 +198,7 @@ impl OwnedPaneFrame {
                 layers: frame.layers,
                 show_section: frame.show_section,
                 render_settings: frame.render_settings,
+                placement_resolution_preview: frame.placement_resolution_preview.cloned(),
                 gpu: frame.gpu,
             }),
             presentation_actions: Vec::new(),
@@ -214,6 +234,7 @@ impl OwnedPaneFrame {
             layers: payload.layers,
             show_section: payload.show_section,
             render_settings: payload.render_settings,
+            placement_resolution_preview: payload.placement_resolution_preview.as_ref(),
             tools: PaneToolInput::disabled(),
             gpu: payload.gpu,
         }
@@ -362,6 +383,7 @@ pub(super) fn draw_pane_canvas(
                     selection,
                     selected_components: frame.selected_components,
                     layers: frame.layers,
+                    placement_resolution_preview: frame.placement_resolution_preview,
                     draw_tool: &draw_tool,
                     room_tool_active: tools.room_tool_active,
                     ceiling_tool_active: tools.ceiling_tool_active,
@@ -645,6 +667,16 @@ mod tests {
         let selection = Selection::Wall;
         let selected_components = Vec::new();
         let visibility = ComponentVisibility::default();
+        let mut placement_resolution_preview = PlacementResolutionPreview {
+            target: AuthoredEntityRef::FurnishingInstance(framer_core::ElementId::new(
+                "furnishing-instance-1",
+            )),
+            before_position: Point2::new(Length::ZERO, Length::ZERO),
+            before_rotation: QuarterTurn::Deg0,
+            after_position: Point2::new(Length::from_feet(1.0), Length::from_feet(2.0)),
+            after_rotation: QuarterTurn::Deg90,
+        };
+        let expected_preview = placement_resolution_preview.clone();
         let frame = PaneFrame {
             model: &model,
             plan: None,
@@ -658,6 +690,7 @@ mod tests {
             layers: ViewLayers::default(),
             show_section: true,
             render_settings: RenderSettings::default(),
+            placement_resolution_preview: Some(&placement_resolution_preview),
             tools: PaneToolInput {
                 draw_wall_active: true,
                 room_tool_active: true,
@@ -668,6 +701,8 @@ mod tests {
 
         let document = Arc::new(OwnedPaneDocument::from_frame(&frame));
         let owned = OwnedPaneFrame::from_frame(document, &frame);
+        placement_resolution_preview.after_position =
+            Point2::new(Length::from_feet(9.0), Length::from_feet(9.0));
         let enabled = owned.with_presentation_actions(vec![PanePresentationAction {
             action: ActionId::HideSelection,
             enabled: true,
@@ -687,6 +722,16 @@ mod tests {
         ));
         assert_eq!(borrowed.model.walls, model.walls);
         assert_eq!(borrowed.selection, &Selection::Wall);
+        assert_eq!(
+            borrowed.placement_resolution_preview,
+            Some(&expected_preview),
+            "the deferred snapshot must own the preview from its source frame",
+        );
+        assert_ne!(
+            borrowed.placement_resolution_preview,
+            Some(&placement_resolution_preview),
+            "later root-frame preview changes must not mutate the deferred snapshot",
+        );
         assert_eq!(borrowed.tools, PaneToolInput::disabled());
         assert_eq!(enabled.presentation_actions().len(), 1);
         assert_eq!(

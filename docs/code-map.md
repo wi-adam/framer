@@ -26,7 +26,7 @@ framer-core   ─┬─→ framer-solver ─┬─→ framer-geometry ─┐
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
 | [`framer-standards`](../crates/framer-standards) | UI-free shared evaluator: one typed fact snapshot/predicate path for standards and project intent, Kleene logic, deterministic reports with detailed evidence, CSV export, and canonical detailed plus compatibility diagnostics lowering. | core, solver | No |
 | [`framer-geometry`](../crates/framer-geometry) | UI-free physical scene: stable body identity, exact generated-member solids, finished assembly envelopes, and convex-piece lowering. | core, solver | No |
-| [`framer-analysis`](../crates/framer-analysis) | UI-free coherent project generation, persisted-assertion evaluation adapters, common mode-specific intent outcomes/evidence, a deterministic revision-bound graph, and lazy directional explanation/impact queries over current authored and regenerated truth. | core, geometry, library, solver, standards | No |
+| [`framer-analysis`](../crates/framer-analysis) | UI-free coherent project generation, persisted-assertion evaluation adapters, common mode-specific intent outcomes/evidence, deterministic revision-bound graph and directional explanation/impact queries, plus typed placement patches and explicit bounded resolution synthesis over current authored and regenerated truth. | core, geometry, library, solver, standards | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
 | [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | analysis, core, geometry, library, render, solver, standards | Yes |
 
@@ -340,8 +340,9 @@ state or introduce a dependency from any lower crate. It evaluates current v14
 persisted cross-object assertions through `framer-standards::FactSnapshot`,
 compiles direct and explicit authored intent plus evaluator results into a common
 non-persisted report, then links assertions, waivers, evidence, relationships,
-and consequences in the project graph. Candidate authored edits remain a later
-slice.
+and consequences in the project graph. A separate explicit path produces bounded,
+disposable typed placement options without entering ordinary project analysis or
+rebuild work.
 
 | File | Contains |
 | --- | --- |
@@ -353,6 +354,8 @@ slice.
 | `src/lower.rs` | Evaluation adapters and normalization for persisted assertions/waivers, driving dimensions, explicit construction choices, site premises, detailed standards results, non-standards diagnostics, and geometry findings. Project predicates are observed only through `FactSnapshot`; analysis maps those observations to common outcomes/evidence and existing `PlanDiagnostic` severities without calculating the metric again. Original compliance, diagnostic, and geometry payloads remain recoverable. |
 | `src/compile.rs` | `library_lifecycle_status`, `analyze_project`, and graph compilation across the plan, resolved standards, detailed `StandardsEvaluation`, physical scene/audit, common `IntentReport`, room consequences, project assertion waivers, library lifecycle, and diagnostics. Intent-report failure also makes the graph unavailable; graph endpoint failure can occur after a valid report. Generated hosts/sources are kind-checked; site context feeds solver-provenance and compliance impact; and missing/inconsistent optional provenance or room facts lower to explicit `UnknownEvidence` nodes. It also provides exact evidence-payload recovery helpers. |
 | `src/query.rs` | Cycle-safe dependency, dependent, incoming-intent, derivation, and evidence closures plus `GraphQueryCache`; the cache binds to one `GraphRevision`, memoizes lazy queries, and clears on revision change. `impact_of` filters an authored entity's dependent closure to assertion traces and user-relevant generated results. Evidence traversal moves only from a consequence toward whitelisted supporting dependencies. `Project` is a result endpoint, never a transitive bridge between unrelated project-owned nodes. |
+| `src/patch.rs` | Placement-only typed expected-value patches for existing furnishing/MEP instances. Staging clones, canonicalizes, validates, and returns the candidate model; errors never partially mutate the source. |
+| `src/resolution.rs` | Explicit placement-clearance requests, graph evaluation/cache identity plus document authorization, revision-neutral assertion comparison, bounded `FactSnapshot`-measured room search with disclosed measurement/analysis truncation, required-intent non-regression, mode-specific boolean/objective/assumption effects, named direction-aware exact objective components, deterministic lexicographic ranking and semantic ties, plus `ResolutionCache`. Structural alternatives expose an honest unavailable capability until their durable domain prerequisites exist. |
 
 `analyze_project(&BuildingModel) -> Result<ProjectAnalysis, SolverError>` produces
 one coherent UI-free generation: `ProjectFramePlan`, `ResolvedStandards`,
@@ -406,12 +409,13 @@ mirrors this exact math.
 ## framer-app — desktop CAD shell
 
 `eframe`/`egui` + `wgpu`. Holds the authored model, caches one coherent
-`framer-analysis` generation and its revision-bound graph/query cache, and renders
+`framer-analysis` generation and its revision-bound graph/query and explicit
+resolution caches, and renders
 the 2D/3D/Render viewports. Entry: `src/main.rs` → `FramerApp` (`src/app/mod.rs`).
 `FramerApp::edit()` and app history remain the only interactive mutation path.
-Schema-v14 assertion author/edit/delete/waive and all-participant focus controls
-use that same path and consume regenerated report/graph state; candidate
-resolution options remain a later slice.
+Schema-v14 assertion author/edit/delete/waive, all-participant focus, and accepted
+typed placement options use that same path. Candidate generation is explicit and
+lazy; preview/dismissal remain presentation-only.
 
 ### `src/app/` top-level modules
 
@@ -422,7 +426,8 @@ resolution options remain a later slice.
 | `actions.rs` | UI-only command metadata (`ActionId`, `EnabledContext`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; enabled/disabled state is evaluated by `FramerApp`, and model mutations still live on `FramerApp`. |
 | `component_visibility.rs` | App-only stable `ComponentKey`, ordered `ComponentSelection`, per-component hidden overrides, frozen isolation targets/modes, and authored/generated/semantic-source appearance resolution. This is disposable presentation state; it never enters core, solver, or `.framer`. |
 | `context_menu.rs` | App-only typed context-menu surface/target context, section/item model, explicit surface builders, and one egui renderer that reads existing `ActionId` state. Interactive 3-D owns the first builder; the future Model Browser menu remains independently composed, and a later contribution registry can replace builder internals without changing the model/renderer/dispatch contract. |
-| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. Renderable authored/generated browser rows expose independent accessible visibility eyes and ordered multi-selection; the inspector renders a read-only summary for heterogeneous selections. Its **Intent** section authors containment/clearance assertions for a selected furnishing/MEP instance, selects a same-level room, mode/priority/direction/datum/threshold/rationale, and exposes edit/delete/waive/focus-all actions beside domain/outcome-grouped derived current status. Rows retain authored source plus typed participants and distinguish project override id/reason from standards overlay pack/rule provenance. Filtered **Potential impact**, **Depends on**, and generated **Why generated** remain derived graph views. Multiple-selection, no-selection, empty, stale, regeneration, graph-error, and intent-error states remain explicit. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
+| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. Renderable authored/generated browser rows expose independent accessible visibility eyes and ordered multi-selection; the inspector renders a read-only summary for heterogeneous selections. Its **Intent** section authors containment/clearance assertions for a selected furnishing/MEP instance, selects a same-level room, mode/priority/direction/datum/threshold/rationale, and exposes edit/delete/waive/focus-all actions beside domain/outcome-grouped derived current status. Violated supported clearance rows explicitly generate placement options; the option panel shows typed before/after poses, outcome tradeoffs/evidence, lexicographic costs, Preview/Accept/Dismiss, stale/empty/error states, and the structural-unavailable boundary. Rows retain authored source plus typed participants and distinguish project override id/reason from standards overlay pack/rule provenance. Filtered **Potential impact**, **Depends on**, and generated **Why generated** remain derived graph views. Multiple-selection, no-selection, empty, stale, regeneration, graph-error, and intent-error states remain explicit. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
+| `resolution.rs` | App-only binding from UI-free resolution options to process-local document revision, transient panel state, Plan preview state, stale rejection, and one validated `edit()` acceptance step. It is outside persisted/history snapshots until acceptance. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, globally free intent/override and standards-pack ids, and dependent-intent/waiver cleanup when a participant is removed). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + same-level auto-join derivation. |
 | `history.rs` | Generic `History<Snapshot>` undo/redo stack; the app snapshot combines authored intent, complete component selection, and session-only component visibility/isolation (+ `history_integration_tests.rs`). |
@@ -456,9 +461,9 @@ level, layers, and render lighting are shared by every pane.
 | `layout.rs` | Monotonic session `PaneId`, bounded `LayoutNode` split tree, active-leaf lifecycle, typed built-in layouts, sanitized 3D pose snapshots, and versioned/adversarially validated user-preset RON DTOs under `framer.viewport-layout-presets.v1`. Runtime IDs are never restored from storage. |
 | `workspace_state.rs` | `ViewportWorkspaceState`: cohesive layout/preset registry, `PaneId` → runtime/deferred-handle maps, split/duplicate/apply reconciliation, camera-pose capture, retired-target cleanup queue, and eframe-storage dirty state. |
 | `pane.rs` | `ViewportPaneRuntime`: independent plan camera, per-wall elevation cameras, shared-within-pane 3D/Render camera, CPU/GPU Render state, cursor, and snap cache. |
-| `pane_view.rs` | Explicit immutable `PaneFrame`/owned deferred snapshot input, `PaneInteractionPolicy`, target-tagged `PaneCanvasEvents`, and view-mode dispatch over one mutable pane runtime. Deferred snapshots omit modal authoring state. |
-| `deferred.rs` | Stable `show_viewport_deferred` IDs, owned snapshot/runtime bridge, child header/mode/actions UI, native-close-to-dock handling, and typed events returned to root ownership. |
-| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, the overhang-aware roof authoring overlay, and the wall display mode (outline/width/full) + layer-visibility guards. |
+| `pane_view.rs` | Explicit immutable `PaneFrame`/owned deferred snapshot input, including a cloned disposable placement preview, `PaneInteractionPolicy`, target-tagged `PaneCanvasEvents`, and view-mode dispatch over one mutable pane runtime. Deferred snapshots omit modal authoring state but preserve the current presentation-only ghost. |
+| `deferred.rs` | Stable `show_viewport_deferred` IDs, owned document/preview snapshot and runtime bridge, child header/mode/actions UI, native-close-to-dock handling, and typed events returned to root ownership. |
+| `plan.rs` | Top-down plan view: grid/rulers, walls, openings, placed furnishing/MEP footprints, selection context-toolbar anchors, draw-wall + room tools, endpoint drag, same-level room fills, the overhang-aware roof authoring overlay, and wall display/layer guards. Resolution previews resolve exact target family and before pose fail-closed, then paint a bounds-neutral, non-pickable before-to-after ghost after canonical hit-testing. |
 | `elevation_design.rs` | Single-wall elevation editor (openings + dimensions). |
 | `elevation_framing.rs` | Plan-mode elevation overlay drawing generated members. |
 | `elevation_openings.rs`, `elevation_dimensions.rs` | Opening edit handles; dimension drawing/anchors. |
@@ -515,6 +520,18 @@ the real symbols:
    └────────────────────────────────────────────────────────┘
 ```
 
+Placement-conflict resolution is an explicit lazy loop beside, not inside, the coherent rebuild:
+
+```
+violated authored clearance + current graph/document revision
+                              │  generate_resolution_options
+                              ▼
+revision-bound ResolutionOptionSet + exact before/after evidence
+                              │  preview, or explicit Design acceptance
+                              ▼
+validated BuildingModel edit + one History entry ──→ rebuild/analyze_project
+```
+
 - **Authoring** edits `FramerApp.model` only; geometry edits call `reconcile_joins`; edits are
   snapshotted into `History` on interaction end.
 - **Analysis** runs `analyze_project` after wall-local propagation. It generates the plan,
@@ -529,6 +546,14 @@ the real symbols:
   generated/evidence references and lazy cached closures have authority only for that revision.
   Evidence queries walk toward support, and stop rather than traversing through the project node.
   Active geometry focus is retained only while its structured violation remains current.
+- **Resolution** runs only after an explicit eligible assertion request. `framer-analysis` measures
+  a bounded room-placement search through `FactSnapshot`, fully analyzes candidates under a second
+  disclosed cap, and returns immutable expected-value patches plus mode-specific evidence.
+  `framer-app/src/app/resolution.rs` owns transient selection/preview state and document-generation
+  authorization. Preview never mutates the model; Design acceptance stages and validates the
+  current option, records one ordinary history edit, and performs a full rebuild. A graph change
+  clears cached synthesis, while an explicit same-graph request may reauthorize immutable cached
+  options for the new document revision.
 - **Presentation** never becomes the source of truth. All panes consume one coherent root-owned
   document/plan snapshot; deferred child events return to `FramerApp` before any authored mutation.
   The inspector adapts app selection to `ProjectNodeRef` and queries relationships lazily; neither

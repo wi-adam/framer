@@ -21,8 +21,10 @@ domain results, cross-domain graph identity, revision fingerprints, graph
 compilation, and lazy explanation/impact query caching. Boolean requirements and
 preferences use common outcomes; objectives retain exact scalar observations;
 assumptions retain typed premise evidence rather than receiving invented boolean
-states. It never mutates or serializes authored intent. Lower crates do not depend
-on it; `framer-app` is currently its only workspace consumer.
+states. Analysis, candidate generation, and staging never mutate or serialize the
+source model. The exported transactional apply helpers mutate only when a caller
+explicitly invokes them at its ordinary authored-edit boundary. Lower crates do
+not depend on this crate; `framer-app` is currently its only workspace consumer.
 
 Placement resolution is a separate explicit path, never part of
 `analyze_project()`. `generate_resolution_options` performs a bounded deterministic
