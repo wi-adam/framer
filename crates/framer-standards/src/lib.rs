@@ -1169,6 +1169,7 @@ fn placed_object_clearance(
     if !polygon_contains_footprint(&boundary.vertices, footprint) {
         return Ok(Length::ZERO);
     }
+    let inputs = prepare_placed_object_clearance_inputs(model, instance.level, &boundary)?;
 
     let directions: &[_] = match direction {
         ClearanceDirection::Left => &[ClearanceDirection::Left],
@@ -1185,15 +1186,8 @@ fn placed_object_clearance(
     let mut minimum = None;
     for direction in directions {
         let direction = local_clearance_vector(instance.rotation, *direction);
-        let distance = placed_object_cardinal_clearance(
-            model,
-            object,
-            instance.level,
-            footprint,
-            &boundary,
-            direction,
-            datum,
-        )?;
+        let distance =
+            placed_object_cardinal_clearance(model, object, footprint, &inputs, direction, datum)?;
         minimum = Some(minimum.map_or(distance, |current: Rational| current.min(distance)));
     }
     minimum
@@ -1411,9 +1405,8 @@ fn compare_positive_rationals(
 fn placed_object_cardinal_clearance(
     model: &BuildingModel,
     object: &PlacedObjectRef,
-    level: &ElementId,
     footprint: Footprint,
-    boundary: &RoomBoundary,
+    inputs: &PlacedObjectClearanceInputs<'_>,
     direction: (i8, i8),
     datum: ClearanceDatum,
 ) -> Result<Rational, FactUnknownKind> {
@@ -1425,9 +1418,8 @@ fn placed_object_cardinal_clearance(
         ClearanceDatum::FootprintFace => target_max,
     };
 
-    let wall_segments = matching_boundary_wall_segments(model, level, boundary)?;
     let mut minimum = None;
-    for segment in wall_segments {
+    for &segment in &inputs.wall_segments {
         let thickness = model
             .system_for(segment.wall)
             .map(|system| system.total_thickness())
@@ -1452,32 +1444,19 @@ fn placed_object_cardinal_clearance(
         minimum = Some(minimum.map_or(clearance, |current: Rational| current.min(clearance)));
     }
 
-    let mut other_objects = model
-        .furnishing_instances
-        .iter()
-        .map(|instance| PlacedObjectRef::FurnishingInstance(instance.id.clone()))
-        .chain(
-            model
-                .mep_instances
-                .iter()
-                .map(|instance| PlacedObjectRef::MepInstance(instance.id.clone())),
-        )
-        .collect::<Vec<_>>();
-    other_objects.sort();
-    other_objects.dedup();
-    for other in other_objects {
-        if &other == object {
+    for other in &inputs.other_objects {
+        if other == object {
             continue;
         }
-        let Some(other_instance) = placed_object_instance(model, &other) else {
+        let Some(other_instance) = placed_object_instance(model, other) else {
             continue;
         };
-        if other_instance.level != level {
+        if other_instance.level != inputs.level {
             continue;
         }
         // Resolve geometry before spatial filtering. A same-level participant
         // with no footprint makes the nearest-obstacle answer unknowable.
-        let (_, other_footprint) = placed_object_footprint(model, &other)?;
+        let (_, other_footprint) = placed_object_footprint(model, other)?;
         let (other_perpendicular_min, other_perpendicular_max) =
             other_footprint.perpendicular_interval(direction);
         if !intervals_overlap(
@@ -1501,6 +1480,38 @@ fn placed_object_cardinal_clearance(
     }
 
     minimum.ok_or(FactUnknownKind::MissingInput)
+}
+
+struct PlacedObjectClearanceInputs<'a> {
+    level: &'a ElementId,
+    wall_segments: Vec<BoundaryWallSegment<'a>>,
+    other_objects: Vec<PlacedObjectRef>,
+}
+
+fn prepare_placed_object_clearance_inputs<'a>(
+    model: &'a BuildingModel,
+    level: &'a ElementId,
+    boundary: &RoomBoundary,
+) -> Result<PlacedObjectClearanceInputs<'a>, FactUnknownKind> {
+    let wall_segments = matching_boundary_wall_segments(model, level, boundary)?;
+    let mut other_objects = model
+        .furnishing_instances
+        .iter()
+        .map(|instance| PlacedObjectRef::FurnishingInstance(instance.id.clone()))
+        .chain(
+            model
+                .mep_instances
+                .iter()
+                .map(|instance| PlacedObjectRef::MepInstance(instance.id.clone())),
+        )
+        .collect::<Vec<_>>();
+    other_objects.sort();
+    other_objects.dedup();
+    Ok(PlacedObjectClearanceInputs {
+        level,
+        wall_segments,
+        other_objects,
+    })
 }
 
 fn projected_coordinate(point: (i128, i128), direction: (i8, i8)) -> i128 {
@@ -3554,45 +3565,66 @@ mod tests {
         add_mep_object(&mut model, "south", "south-family", 120, 40, 120, 10);
 
         let cases = [
-            (QuarterTurn::Deg0, 65, 65, 75),
+            (QuarterTurn::Deg0, 65, 75, 65, 75),
             // Deg90 front is world -X; local left is world -Y and right is +Y.
-            (QuarterTurn::Deg90, 65, 75, 65),
-            (QuarterTurn::Deg180, 75, 75, 65),
-            (QuarterTurn::Deg270, 75, 65, 75),
+            (QuarterTurn::Deg90, 65, 75, 75, 65),
+            (QuarterTurn::Deg180, 75, 65, 75, 65),
+            (QuarterTurn::Deg270, 75, 65, 65, 75),
         ];
-        for (rotation, front, left, right) in cases {
+        for (rotation, front, back, left, right) in cases {
             model.furnishing_instances[0].rotation = rotation;
             let (subject, resolved, plan) = placed_inputs(&model);
             let snapshot = FactSnapshot::new(&model, &resolved, &plan);
+            let cardinals = [
+                (ClearanceDirection::Front, front),
+                (ClearanceDirection::Back, back),
+                (ClearanceDirection::Left, left),
+                (ClearanceDirection::Right, right),
+            ]
+            .map(|(direction, expected)| {
+                let observed =
+                    observed_clearance(&snapshot, &subject, direction, ClearanceDatum::Centerline);
+                assert_eq!(
+                    observed,
+                    Length::from_whole_inches(expected),
+                    "{direction:?} at {rotation:?}",
+                );
+                observed
+            });
             assert_eq!(
                 observed_clearance(
                     &snapshot,
                     &subject,
-                    ClearanceDirection::Front,
+                    ClearanceDirection::Around,
                     ClearanceDatum::Centerline,
                 ),
-                Length::from_whole_inches(front),
-                "front at {rotation:?}",
+                cardinals.into_iter().min().unwrap(),
+                "Around must be the minimum cardinal clearance at {rotation:?}",
             );
+
+            let face_cardinals = [
+                ClearanceDirection::Front,
+                ClearanceDirection::Back,
+                ClearanceDirection::Left,
+                ClearanceDirection::Right,
+            ]
+            .map(|direction| {
+                observed_clearance(
+                    &snapshot,
+                    &subject,
+                    direction,
+                    ClearanceDatum::FootprintFace,
+                )
+            });
             assert_eq!(
                 observed_clearance(
                     &snapshot,
                     &subject,
-                    ClearanceDirection::Left,
-                    ClearanceDatum::Centerline,
+                    ClearanceDirection::Around,
+                    ClearanceDatum::FootprintFace,
                 ),
-                Length::from_whole_inches(left),
-                "left at {rotation:?}",
-            );
-            assert_eq!(
-                observed_clearance(
-                    &snapshot,
-                    &subject,
-                    ClearanceDirection::Right,
-                    ClearanceDatum::Centerline,
-                ),
-                Length::from_whole_inches(right),
-                "right at {rotation:?}",
+                face_cardinals.into_iter().min().unwrap(),
+                "footprint-face Around must be the minimum cardinal clearance at {rotation:?}",
             );
         }
 
