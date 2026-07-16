@@ -4,8 +4,7 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** In progress — Slice 1 implemented and verified on its delivery branch;
-> draft-PR review/merge pending; Slices 2-4 proposed/not started · **Linked goal:** G-016
+> **Status:** In progress — Slice 1 complete; Slices 2-4 remain proposed · **Linked goal:** G-016
 > (Intent Model and Resolution) ·
 > **Plan:**
 > [2026-07-15 — Intent Model and Resolution](../plans/2026-07-15-intent-model-and-resolution.md) ·
@@ -325,58 +324,6 @@ solver:
     resolves an authored design. Automatic room-program layout is a separate future feature.
 
 ## Architecture (grounded in the codebase)
-
-### Slice 1 implementation status
-
-Slice 1 has established the read-only graph boundary without changing project
-schema or authored behavior:
-
-- [x] Add the eighth, UI-free `framer-analysis` crate above core, library,
-  solver, standards, and geometry and below the app.
-- [x] Add schema-neutral `AuthoredEntityRef`/`AuthoredIntentId` namespaces in
-  `framer-core`; no intent collection was added to `BuildingModel`.
-- [x] Compile current authored entities, generated members, physical bodies,
-  typed room schedule/boundary consequences, standards/report entries,
-  diagnostics, provenance, and explicit unknown evidence into canonically ordered
-  nodes and dependency-oriented edges. Missing or wrong-family generated hosts
-  and sources fail closed, and site impact reaches solver and compliance
-  consequences.
-- [x] Bind generated/evidence identity and lazy graph-query caches to a
-  deterministic `GraphRevision` over `GRAPH_CONTRACT_VERSION`, a length-delimited
-  starter-library availability/content-hash input, and canonical post-propagation
-  project bytes.
-- [x] Route `FramerApp::rebuild()` through one coherent `ProjectAnalysis` and
-  expose read-only dependency/impact traces in the existing inspector.
-- [x] Return matching starter-library lifecycle status, lower its warnings into
-  the plan before graph compilation, and retain the standalone status path when
-  framing cannot solve.
-- [x] Keep evidence traversal directional and treat the project ownership node as
-  a result endpoint rather than a bridge across unrelated entities.
-- [x] Validate both endpoints of every compiled edge and return typed
-  `GraphBuildError` through independently fallible `AnalysisError` rather than
-  panicking on an internal graph-builder invariant failure.
-- [x] Keep `.framer` schema v13 and the canonical authored document shape
-  unchanged; the graph, revision, and query cache are disposable.
-- [x] Add focused graph/query tests for matching lifecycle status/diagnostics,
-  typed room consequences, unknown room evidence, typed generated source/host
-  failures, site impact, directional support, and project-endpoint behavior, plus
-  app harness/screenshot-deck coverage for authored, generated, compliance,
-  graph-error, no-evidence, and no-selection inspector states.
-- [x] Execute and record all focused tests, full workspace gates, UI screenshot
-  review, and representative rebuild/first-query/cached-query timing for the Slice 1 PR.
-
-Slice 1 verification on 2026-07-15 passed format, strict all-target/all-feature
-workspace clippy, and the locked all-feature workspace suite (1,019 passed, 3
-manual probes ignored), including 8 GPU parity tests and checked-example geometry
-audits. The markdown checker passed 389 links. The final 54-frame deck passed and
-its five intent-relationship frames were visually reviewed. A release-mode
-40-sample probe measured rebuild median 3.266 ms / p95 5.054 ms, first-query
-median 21.458 us / p95 34.375 us, and cached-query median 1.334 us / p95 2.000 us.
-Schema remains v13 and no checked example changed.
-
-Slices 2-4 below remain proposed and have not started. In particular, Slice 1
-does not persist authored assertions, normalize the full common outcome protocol,
-evaluate new cross-object intent, or generate candidate authored changes.
 
 ### Existing seams
 

@@ -307,4 +307,26 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn missing_edge_dependency_is_a_typed_error_not_a_panic() {
+        let revision = GraphRevision::for_model(&framer_core::BuildingModel::new()).unwrap();
+        let wall = ProjectNodeRef::Authored(AuthoredEntityRef::Wall(ElementId::new("wall-a")));
+        let opening =
+            ProjectNodeRef::Authored(AuthoredEntityRef::Opening(ElementId::new("opening-a")));
+        let mut builder = GraphBuilder::new(revision);
+        builder.node(ProjectNode::new(opening.clone(), "Opening", None));
+        builder.edge(ProjectEdge::new(
+            opening,
+            wall.clone(),
+            RelationshipKind::BelongsTo,
+        ));
+
+        assert_eq!(
+            builder.finish(),
+            Err(GraphBuildError::MissingDependency {
+                reference: Box::new(wall)
+            })
+        );
+    }
 }
