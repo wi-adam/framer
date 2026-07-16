@@ -21,25 +21,26 @@ small buildings, garages, decks, and wood framed BBQ islands.
 
 - `crates/framer-core`: shared domain types, units, structure model, openings,
   construction systems, the material/object libraries, standards-stack data,
-  room topology, and validation.
+  typed project-authored cross-object assertions/waivers, room topology, and
+  validation.
 - `crates/framer-library`: library resolution, exact content hashing,
   cache-first remote URL fetching, and vendor-on-use import/remap for reusable
   `.framerlib` content.
 - `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
   and BOM generation.
-- `crates/framer-standards`: UI-free compliance fact measurement, predicate
-  evaluation, deterministic reporting, and diagnostics lowering over resolved
-  standards and solver output.
+- `crates/framer-standards`: the UI-free shared `FactSnapshot` measurement and
+  predicate-evaluation path used by standards checks and project-authored
+  assertions, plus deterministic standards reporting and diagnostics lowering.
 - `crates/framer-geometry`: UI-free physical-solid derivation over authored
   assemblies and generated framing, with stable semantic body identity and
   convex-piece lowering, spatial broad phase, and deterministic contact/overlap
   auditing.
 - `crates/framer-analysis`: UI-free orchestration of the solver, standards,
-  geometry, and library-lifecycle outputs plus a common non-persisted intent
-  report and deterministic, revision-bound project graph. Both are disposable;
-  the report provides current mode-specific outcomes/evidence and the graph
-  provides lazy explanation and impact queries without making lower crates
-  depend on the app.
+  geometry, and library-lifecycle outputs; evaluation/lowering of persisted
+  assertions and waivers through the shared standards facts; and a common
+  non-persisted intent report plus deterministic, revision-bound project graph.
+  Outcomes, diagnostics, reports, graph records, and query caches are disposable;
+  no second clearance or containment calculator lives here.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and tiled viewport workspace.
@@ -57,14 +58,18 @@ end-state interaction model.
 ## Modeling Layers
 
 1. **Intent model**: user-authored objects such as wall segments, openings,
-   levels, roof planes, floor systems, and standards/material assumptions.
+   levels, roof planes, floor systems, and standards/material assumptions, plus
+   explicit typed cross-object `IntentAssertion` and targeted
+   `IntentOverride::Waive` records.
 2. **Derived framing model**: studs, plates, headers, joists, rafters,
    sheathing zones, connector callouts, and blocking.
 3. **Presentation model**: drawings, annotations, schedules, BOM tables, exports,
    viewport geometry, split layouts, and per-pane camera/render runtimes.
 
 Only the first layer should be directly editable by users. The second and third
-layers are regenerated unless the product later adds explicit override records.
+layers are regenerated. A persisted intent waiver is an explicit exception to an
+authored assertion; it does not mutate generated framing or create a second design
+model.
 Named viewport-layout presets are an app-local preference over presentation state,
 not project data; they never enter `.framer`.
 
@@ -77,6 +82,17 @@ version, a length-delimited deterministic starter-library source input
 post-propagation project bytes. Reports, graph nodes/edges, and cached query
 closures are discarded and rebuilt after any of those inputs change; they are
 never persisted.
+
+Schema v14's placed-object containment and directional-clearance assertions
+exercise this boundary end to end. `framer-core` owns their exact furnishing/MEP
+instance and room references, supported domains and modes, validation, and
+canonical serialization. `framer-standards::FactSnapshot` alone resolves the
+placed-object footprint, room binding, finished wall faces, and other-object
+obstacles. `framer-analysis` maps that observation to the common outcome,
+waiver, evidence, graph, and existing diagnostics protocols. `framer-app`
+continues to own all interactive mutation and undo/redo; Slice 3 assertion
+author/edit/delete/waive and multi-participant focus controls route through that
+existing app ownership. Candidate resolution remains a later slice.
 
 Regenerated room schedules and topology boundaries are typed consequence nodes
 in that graph. They depend on the authored room and the walls that bound it; an
@@ -158,6 +174,13 @@ The current `IRC 2021 Prescriptive (starter)` pack stores defaults and a small
 starter table set needed by the first wall solver. It must not be represented as
 complete code compliance.
 
+The shared fact vocabulary also includes placed furnishing/MEP containment and
+parameterized directional clearances. Model `+X` is right and `+Y` is up;
+`QuarterTurn` is counterclockwise, with `Deg0` front at local `+Y`. Clearance
+requests distinguish left/right/front/back/around and centerline versus
+footprint-face datum. Missing or ambiguous room, family, or assembly input stays
+unknown rather than passing.
+
 ## Geometry Strategy
 
 Framer should start with robust rectilinear 2D/2.5D primitives rather than a full
@@ -204,7 +227,7 @@ multi-wall CAD shell:
   wall openings, rooms, a reusable material library, layered construction systems
   (applied to walls by reference), standards packs and project site assumptions,
   furnishing/MEP object families and placed instances, and deterministic project
-  ordering. The `.framer` format is schema **v13** and v13-only: older files are
+  ordering. The `.framer` format is schema **v14** and v14-only: older files are
   rejected with an explicit
   unsupported-schema error rather than migrated. See the
   [Construction Systems spec](specs/construction-systems.md) and
@@ -219,13 +242,17 @@ multi-wall CAD shell:
   table; and a tiled viewport workspace that can mix or repeat Plan, Roof,
   Elevation, WGPU-backed 3D, and path-traced Render panes. Panes have independent
   cameras/render runtimes and may be deferred into native windows while sharing
-  project selection and presentation context.
+  project selection and presentation context. The Intent inspector authors,
+  edits, deletes, and waives supported containment/clearance assertions through
+  ordinary validated history and can focus the exact instance-plus-room
+  participant set; candidate movement/rotation options are not part of Slice 3.
 - `framer-analysis` generates the coherent plan, detailed standards evaluation,
   physical scene, geometry audit, starter-library lifecycle status, common
   non-persisted intent report, and canonically ordered project graph for each
   successful app rebuild. Current driving dimensions, construction selections,
-  site premises, standards checks, diagnostics, and geometry findings lower into
-  one typed outcome/evidence protocol; standards measurements remain owned by
+  site premises, persisted project assertions/waivers, standards checks,
+  diagnostics, and geometry findings lower into one typed outcome/evidence
+  protocol; shared standards/project-intent fact measurements remain owned by
   `framer-standards::FactSnapshot`.
   `StandardsEvaluation::diagnostics()` lowers detailed standards rows; analysis
   appends those and lifecycle rows once before intent and graph compilation, so
@@ -269,15 +296,17 @@ framing, cached view data, and exports. Coding agents should be able to inspect 
 project, explain it, propose edits, and validate the result without needing to
 reverse-engineer an opaque binary format.
 
-The current v13 `.framer` format is documented in
+The current v14 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
 (including site context, standards packs, the material library, construction
-systems, furnishing/MEP families, and placed object instances); derived framing
-plans, analysis graphs and query caches, room consequences, library-lifecycle
-status, live viewport layouts/cameras/render accumulators, and exports remain
-disposable outputs that are regenerated from the project. Named viewport-layout
-presets are persisted separately as app-local preferences and contain no project
-selection, 2D camera, or authored-model state.
+systems, furnishing/MEP families and placed instances, typed cross-object
+assertions, and explicit project assertion waivers); derived outcomes,
+`FactSnapshot` observations, framing plans, analysis graphs and query caches,
+room consequences, library-lifecycle status, live viewport
+layouts/cameras/render accumulators, and exports remain disposable outputs that
+are regenerated from the project. Named viewport-layout presets are persisted
+separately as app-local preferences and contain no project selection, 2D camera,
+or authored-model state.
 
 Binary caches are acceptable only as disposable acceleration data. They must not
 be the only source of truth for a design.

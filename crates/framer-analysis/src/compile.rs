@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use framer_core::{
-    AuthoredEntityRef, BuildingModel, DimensionAnchor, ElementId, LibraryVersionRef,
-    MaterialSource, Point2, ProjectError, Provenance, ResolvedStandards, SurfaceRegion, Wall,
-    room_boundaries_for_rooms,
+    AuthoredEntityRef, BuildingModel, DimensionAnchor, ElementId, IntentOverride,
+    LibraryVersionRef, MaterialSource, Point2, ProjectError, Provenance, ResolvedStandards,
+    SurfaceRegion, Wall, room_boundaries_for_rooms,
 };
 use framer_geometry::{
     AssemblyKind, BodyKind, BodyRef, GeometryAudit, GeometryViolation, PhysicalScene,
@@ -186,12 +186,17 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
     let resolved_standards = model.resolved_standards();
     let standards_evaluation =
         framer_standards::evaluate_detailed(model, &resolved_standards, &plan);
+    let authored_intent = crate::lower::evaluate_authored_intent(model, &resolved_standards, &plan);
     plan.diagnostics.extend(standards_evaluation.diagnostics());
     append_library_diagnostics(&mut plan, &library_lifecycle);
     plan.diagnostics
         .extend(crate::lower::current_intent_plan_diagnostics(
             model,
             &geometry_audit,
+        ));
+    plan.diagnostics
+        .extend(crate::lower::authored_intent_plan_diagnostics(
+            &authored_intent,
         ));
     let intent_report = GraphRevision::for_model(model)
         .map_err(AnalysisError::from)
@@ -201,6 +206,7 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
                 &plan,
                 &geometry_audit,
                 &standards_evaluation,
+                &authored_intent,
                 revision,
             )
         });
@@ -524,6 +530,16 @@ impl Compiler<'_> {
                 AuthoredEntityRef::BracedWallLine(line.id.clone()),
                 line.name.clone(),
                 Some("Braced wall line".to_owned()),
+            );
+        }
+        for intent_override in &self.model.intent_overrides {
+            let IntentOverride::Waive {
+                id, target, reason, ..
+            } = intent_override;
+            self.add_authored(
+                AuthoredEntityRef::IntentOverride(id.clone()),
+                format!("Intent waiver {}", id.0.0),
+                Some(format!("Waives {}: {reason}", target.0.0)),
             );
         }
     }
@@ -1333,11 +1349,15 @@ impl Compiler<'_> {
 
             if let IntentRecord::Boolean(boolean) = &record
                 && let IntentOutcome::Waived { waiver, .. } = &boolean.outcome
-                && let crate::WaiverRef::Standards { overlay_pack, .. } = waiver
             {
-                let waiver_node = ProjectNodeRef::Authored(AuthoredEntityRef::StandardsPack(
-                    overlay_pack.clone(),
-                ));
+                let waiver_node = match waiver {
+                    crate::WaiverRef::Project { override_id } => ProjectNodeRef::Authored(
+                        AuthoredEntityRef::IntentOverride(override_id.clone()),
+                    ),
+                    crate::WaiverRef::Standards { overlay_pack, .. } => ProjectNodeRef::Authored(
+                        AuthoredEntityRef::StandardsPack(overlay_pack.clone()),
+                    ),
+                };
                 if self.graph.contains_node(&waiver_node) {
                     self.graph.edge(ProjectEdge::new(
                         assertion_node,
@@ -1658,7 +1678,8 @@ fn generated_source_matches(host: &AuthoredEntityRef, source: &AuthoredEntityRef
         | AuthoredEntityRef::MepInstance(_)
         | AuthoredEntityRef::RoofOpening(_)
         | AuthoredEntityRef::BracedWallLine(_)
-        | AuthoredEntityRef::BracedPanel(_) => false,
+        | AuthoredEntityRef::BracedPanel(_)
+        | AuthoredEntityRef::IntentOverride(_) => false,
     }
 }
 
@@ -1718,9 +1739,13 @@ fn intent_record_title(record: &IntentRecord) -> String {
 
 fn intent_record_detail(record: &IntentRecord) -> String {
     match record {
-        IntentRecord::Boolean(record) => {
-            format!("{:?} — {}", record.outcome, record.assertion.rationale)
-        }
+        IntentRecord::Boolean(record) => match &record.predicate_observation {
+            Some(observation) => format!(
+                "{:?} — {} — predicate observation: {observation:?}",
+                record.outcome, record.assertion.rationale
+            ),
+            None => format!("{:?} — {}", record.outcome, record.assertion.rationale),
+        },
         IntentRecord::Objective(record) => {
             format!("{:?} — {}", record.observation, record.assertion.rationale)
         }
@@ -2595,6 +2620,7 @@ mod tests {
                     kind: crate::IntentUnknownKind::EvaluationUnavailable,
                     detail: "evidence is absent".to_owned(),
                 }),
+                predicate_observation: None,
                 evidence: vec![
                     IntentEvidenceRef::Assertion(absent_assertion),
                     IntentEvidenceRef::ComplianceEntry(absent_compliance),

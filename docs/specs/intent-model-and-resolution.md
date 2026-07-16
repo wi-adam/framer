@@ -4,11 +4,12 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** In progress — Slices 1-2 complete; Slices 3-4 remain proposed · **Linked goal:** G-016
+> **Status:** In progress — Slices 1-2 merged; Slice 3 implementation in progress; Slice 4
+> remains proposed · **Linked goal:** G-016
 > (Intent Model and Resolution) ·
 > **Plan:**
 > [2026-07-15 — Intent Model and Resolution](../plans/2026-07-15-intent-model-and-resolution.md) ·
-> **Last reviewed:** 2026-07-15
+> **Last reviewed:** 2026-07-16
 
 ## Intent / Purpose
 
@@ -132,6 +133,12 @@ condition, strength, source, rationale, applicability, and waiver state.
 - Source/authority and rationale are separate from the assertion body. User intent, imported
   library policy, standards rules, and generated evidence remain distinguishable.
 
+Schema v14 persists only the exercised boolean subset: user-authored requirements and preferences
+in `SpatialProgram`, `Mep`, `Compliance`, or `OperationalMaintenance`. The domain enum remains
+complete, but other authored domains fail validation until an evaluator consumes them. Persisted
+preference priority is a nonzero `u16`; larger values are stronger. Objective and assumption
+records remain part of the non-persisted common protocol, not authored schema variants.
+
 ### Typed scopes, predicates, and values
 
 - An assertion scope is either the project, an exact set of typed authored references, or a closed
@@ -158,6 +165,11 @@ condition, strength, source, rationale, applicability, and waiver state.
 - Adding a new rule over an existing fact may be data-only. Adding a fact or relationship that the
   application must compute requires a typed implementation and tests.
 
+The first persisted exact scope is deliberately narrower than the general vocabulary: its subject
+is one furnishing or MEP instance, its sole participant is one same-level authored room, and both
+references are kind-checked. Empty, repeated, self, wrong-kind, unknown, multi-room, or cross-level
+scopes are invalid model data rather than inert assertions.
+
 For placed objects, the shared fact vocabulary must express directional clearances. Family-local
 `width` is left-to-right, `depth` is back-to-front, the family origin is its footprint center, and
 the initial `Deg0` convention defines front as local `+Y`; `QuarterTurn` rotates that frame in plan.
@@ -169,12 +181,27 @@ Clearance facts distinguish `Left`, `Right`, `Front`, `Back`, and `Around` and s
 datum is an object centerline or a footprint face. This can express, for example, side clearance
 from a toilet centerline separately from clear space in front of its footprint. The same rotated
 facts are used regardless of whether the threshold came from a standards rule or a user assertion.
+Containment tests the complete rotated rectangular family footprint. Directional clearance sweeps
+the target footprint's perpendicular span to the nearest finished room-wall face or other
+same-level furnishing/MEP footprint; `Around` is the minimum cardinal observation and overlapping
+footprints yield zero. Wall faces come from centerline geometry plus half the authored assembly
+thickness. The exact tick result conservatively floors a positive half tick.
+
+An exact project assertion names its room. A selector-scoped standards check infers a binding only
+when the instance center lies in exactly one closed same-level authored room; zero closed matches
+remain unresolved and multiple matches remain ambiguous. An open room, unresolved/ambiguous
+binding, missing family footprint, missing wall-system input, or unsupported cross-level input
+yields `Unknown`, never a pass. A closed geometric containment miss is known `false`, with zero
+clearance.
 
 ### Overrides, waivers, and accepted choices
 
 - `RuleOverlay::Waive` remains the persisted standards-pack representation for waiving a standards
   rule. A project-authored assertion uses a separate typed `IntentOverride::Waive { target,
   reason, ... }` record because it targets an `AuthoredIntentId`, not a standards rule string.
+- Schema v14 project overrides are user-authored, globally id-unique records. The target must be a
+  known authored assertion, the reason must contain non-whitespace text, and at most one project
+  override may target any assertion.
 - Both persisted forms lower into one compiled `WaiverRecord` shape with target, authority/source,
   rationale, and provenance. The target assertion then evaluates to `Waived { waiver, reason }`;
   no independent waiver assertion is evaluated. A standards rule overlay applies that same waiver
@@ -322,13 +349,23 @@ solver:
     Rust model with canonical project serialization; external graph formats may be exports later.
 15. **Evaluator/synthesizer before broad generative design.** The initial product explains and
     resolves an authored design. Automatic room-program layout is a separate future feature.
+16. **Persist the exercised boolean slice, not dormant variants.** Schema v14 accepts user-authored
+    requirement/preference fact predicates only in the four supported domains. Preferences carry
+    a nonzero numeric priority (larger is stronger); objective, assumption, relationship,
+    selection, and candidate-patch persistence wait for an end-to-end consumer.
 
 ## Architecture (grounded in the codebase)
 
 ### Existing seams
 
 - `crates/framer-core/src/model.rs`: `BuildingModel` and globally unique `ElementId`s are the
-  authored entity foundation. Direct references and nesting already define most ownership edges.
+  authored entity foundation. Schema v14 adds skip-empty, id-sorted `intents` and
+  `intent_overrides`; validation keeps their ids in the global authored pool and rejects invalid
+  exact scopes, predicates, priorities, and waiver targets/reasons. Direct references and nesting
+  continue to define most ownership edges.
+- `crates/framer-core/src/intent.rs`: owns the persisted assertion, waiver, exact reference,
+  domain, mode, scope, source, and stable id vocabulary. It depends on no solver, standards
+  evaluator, analysis, or app type.
 - `crates/framer-core/src/constraints.rs`: `ConstraintSystem` provides a generic linear equality
   layer for wall-local driving dimensions, but currently has no inequalities, soft strengths, or
   project-global anchors. This feature deliberately leaves it that way; clearance is fact
@@ -342,7 +379,10 @@ solver:
   `RuleProvenance`, and `PlanDiagnostic` provide generated entities and partial evidence.
 - `crates/framer-standards/src/lib.rs`: `FactSnapshot` is the single measurement
   and predicate-evaluation implementation for the core `Fact` vocabulary. Both
-  compatibility `fact_value` calls and detailed standards evaluation use it.
+  compatibility `fact_value` calls, detailed standards evaluation, and exact
+  project assertion evaluation use it. Its placed-object subjects retain exact,
+  unresolved, or ambiguous room binding; its containment/clearance provider owns
+  rotated family footprints, finished wall faces, and other-object obstacles.
   `StandardsEvaluation` pairs the unchanged deterministic `ComplianceReport`
   with structured subject, severity, predicate, synthetic-entry, and waiver
   provenance consumed by common intent analysis.
@@ -351,7 +391,10 @@ solver:
 - `crates/framer-analysis`: `analyze_project()` now generates the plan, resolved
   standards, detailed standards evaluation, physical scene/audit,
   starter-library lifecycle status, fallible common `IntentReport`, and fallible
-  graph as one coherent UI-free generation. `intent.rs` owns the closed common
+  graph as one coherent UI-free generation. Persisted assertions are evaluated
+  through `FactSnapshot` before report compilation; `lower.rs` adapts the one
+  observation to common outcomes, targeted project waivers, evidence, and the
+  existing diagnostics channel without remeasuring it. `intent.rs` owns the closed common
   assertion, mode-specific result, waiver, and evidence vocabulary; `lower.rs`
   normalizes current dimensions, construction selections, site premises,
   standards results, diagnostics, and geometry findings while preserving native
@@ -368,12 +411,17 @@ solver:
   orchestration seam, applying driving dimensions before calling
   `framer_analysis::analyze_project()`. It installs or clears the common intent
   report and graph independently alongside the matching regenerated outputs and
-  adapts authored selection without requiring graph availability.
+  adapts authored selection without requiring graph availability. Transient
+  authoring drafts never enter history or `.framer`; create/edit/delete/waive
+  commits a sorted, validated candidate through ordinary `edit()` history, and
+  participant deletion removes dependent assertions and waivers.
 - `crates/framer-app/src/app/panels.rs`: the inspector consumes the common report
   for domain/outcome-grouped current status, the filtered impact projection for
   authored selections, and directional evidence traces for generated
   selections. It reports unavailable, stale, empty, and multi-selection states
   explicitly and does not author graph state.
+  Slice 3 adds project assertion author/edit/delete/waive and all-participant
+  focus controls; candidate resolution remains Slice 4.
 - `crates/framer-app/src/app/component_visibility.rs`: `ComponentKey` demonstrates the need for
   stable authored/generated identity, but remains app-only presentation state and is not the
   cross-crate semantic reference type.
@@ -383,33 +431,41 @@ solver:
   part of the first project assertion schema; existing `StandardsPack` is the reusable
   quantitative-policy path.
 
-### Proposed persisted Slice 3/4 data shape
+### Persisted Slice 3 data shape
 
-Slice 2 locks the current non-persisted compiled protocol in `framer-analysis`.
-The precise persisted enum variants will be locked by the first schema-affecting
-slice, with this intended envelope:
+Schema v14 adds skip-empty `BuildingModel.intents` and
+`BuildingModel.intent_overrides`. The persisted core-owned contract is:
 
 ```rust
 pub struct IntentAssertion {
     pub id: AuthoredIntentId,
     pub domain: IntentDomain,
-    pub mode: IntentMode,
+    pub mode: AuthoredIntentMode,
     pub scope: ProjectIntentScope,
     pub expression: IntentExpression,
     pub source: IntentSource,
     pub rationale: Option<String>,
 }
 
-pub enum AssertionRef {
-    Authored(AuthoredIntentId),
-    Derived(DerivedAssertionId),
+pub enum AuthoredIntentMode {
+    Requirement,
+    Preference { priority: PreferencePriority }, // nonzero u16; larger is stronger
+}
+
+pub enum ProjectIntentScope {
+    Exact(ExactIntentScope),
+}
+
+pub struct ExactIntentScope {
+    pub subject: AuthoredEntityRef,              // furnishing or MEP instance
+    pub participants: Vec<AuthoredEntityRef>,    // exactly one same-level room in v14
 }
 
 pub enum IntentExpression {
     FactPredicate(Predicate),
-    Relationship(RelationshipRequirement),
-    Selection(SelectionRequirement),
 }
+
+pub enum IntentSource { User }
 
 pub enum IntentOverride {
     Waive {
@@ -419,45 +475,49 @@ pub enum IntentOverride {
         source: IntentSource,
     },
 }
+```
+
+`AuthoredIntentId` and `IntentOverrideId` are transparent stable `ElementId`
+wrappers and share the project's global authored id pool. `IntentDomain` carries
+the complete product vocabulary; schema v14 validation currently accepts only
+`SpatialProgram`, `Mep`, `Compliance`, and `OperationalMaintenance`. Only
+`PlacedObjectContainedInRoom` and parameterized `PlacedObjectClearance` facts may
+appear in persisted predicates, and both operate on an exact furnishing/MEP
+instance plus room. Unsupported domain, mode, expression, subject, participant,
+operator, operand, priority, or threshold combinations fail validation instead
+of becoming inert data.
+
+The common outcomes and graph identities remain non-persisted analysis types:
+
+```rust
+pub enum AssertionRef {
+    Authored(AuthoredIntentId),
+    Derived(DerivedAssertionId),
+}
 
 pub enum WaiverRef {
-    Project(IntentOverrideId),
+    Project { override_id: IntentOverrideId },
     Standards { overlay_pack: ElementId, rule: String },
 }
 
 pub enum IntentOutcome {
     Satisfied,
     Violated,
-    Unknown(UnknownReason),
+    Unknown(IntentUnknown),
     NotApplicable,
     Waived { waiver: WaiverRef, reason: String },
 }
 
-pub enum IntentEvaluation {
-    Assertion(IntentOutcome),
-    Objective(ObjectiveObservation),
-    Assumption(AssumptionEvidence),
-}
-
-pub struct ResolutionOption {
-    pub patch: AuthoredModelPatch,
-    pub based_on: GraphRevision,
-    pub satisfies: Vec<AssertionRef>,
-    pub violates: Vec<AssertionRef>,
-    pub waives: Vec<AssertionRef>,
-    pub leaves_unknown: Vec<AssertionRef>,
-    pub objective_cost: ObjectiveVector,
-    pub evidence: Vec<EvidenceRef>,
+pub enum IntentRecord {
+    Boolean(BooleanIntentRecord),
+    Objective(ObjectiveIntentRecord),
+    Assumption(AssumptionIntentRecord),
 }
 ```
 
-`IntentDomain` carries the complete domain vocabulary; `IntentExpression` describes the
-operation and is deliberately orthogonal to domain. Compliance, fabrication/installation, and
-operational/maintenance therefore do not need parallel payload enums merely to exist as domains.
-Slice 3 initially persists only requirement/preference fact-predicate containment and clearance
-assertions. Objective and assumption result shapes exist in the compiled protocol, but their
-authored schema waits for a later end-to-end ranking or premise-consumption feature. Unsupported
-domain/mode/expression combinations fail validation rather than becoming inert data.
+Objective and assumption result shapes therefore still exist without authored
+schema variants. `ResolutionOption` and typed authored patches also remain
+disposable Slice 4 analysis types; neither is part of v14.
 
 Slice 1 implements the compiled graph as a project-wide `ProjectNodeRef` capable of addressing
 authored entities, revision-scoped generated members/bodies and room schedule/boundary consequences,
@@ -476,7 +536,7 @@ than panicking.
 ### Crate direction
 
 - `framer-core` owns persisted assertion types, exact values, authored references, validation, and
-  deterministic canonical ordering when explicit assertions arrive. It continues to own the
+  deterministic canonical ordering for schema-v14 assertions and overrides. It continues to own the
   shared fact/predicate types already used by standards packs.
 - `framer-standards` owns the single quantitative fact-measurement and predicate-evaluation path
   for both standards and project intent.
@@ -484,11 +544,11 @@ than panicking.
   structured evidence through adapters or shared lower-level types.
 - The UI-free top-level `framer-analysis` crate depends on core, library, solver, standards, and
   geometry to compile the common current outcomes and whole graph and produce
-  cross-domain queries. Later slices add persisted cross-object assertions and
-  resolution options there. No lower crate depends on it.
-- `framer-app` consumes the common report and compiled graph for the current
-  read-only inspector and remains the sole owner of interactive mutation/history.
-  Later option UI must preserve that direction.
+  cross-domain queries. It evaluates persisted assertions through the standards-owned snapshot;
+  later slices add resolution options there. No lower crate depends on it.
+- `framer-app` consumes the common report and compiled graph for the derived
+  current-status/evidence inspector and remains the sole owner of interactive mutation/history.
+  Slice 3 assertion authoring/focus and later Slice 4 option UI preserve that direction.
 
 ## Constraints & invariants
 
@@ -497,13 +557,16 @@ than panicking.
 - Same `.framer`, starter-library availability/content hash, and evaluator/graph-contract versions
   produce identical graph ordering, outcomes, evidence, options, and ranking.
 - Persisted data is `Eq`, float-free, ID-sorted where order is not semantic, and agent-readable.
-- Semantic lists such as standards stacks, construction layers, priority tiers, and predicate
+- Semantic lists such as standards stacks, construction layers, exact participants, and predicate
   children retain documented stable order and are never accidentally canonicalized by sorting.
 - `framer-core`, `framer-library`, `framer-solver`, `framer-standards`, `framer-geometry`, and
   `framer-analysis` remain UI-free.
 - Schema changes follow the complete project-file ritual: version bump, checked examples,
   round-trip and explicit old-schema rejection tests, `project-files.md`, architecture/code map,
   and this spec.
+- The current project format is v14-only. `intents` and `intent_overrides` are omitted when empty,
+  while non-empty collections canonicalize by id. `.framerlib` remains v3 and does not distribute
+  project assertions or project ids.
 - Every new reference kind has positive round-trip coverage and negative unknown/wrong-kind tests.
 - Every new evaluator has satisfied, violated, unknown, and not-applicable/waived coverage where
   those outcomes are meaningful.
@@ -526,12 +589,11 @@ than panicking.
   before the necessary domain models and evaluators exist.
 - Persisting regenerated alternatives, outcomes, dependency closures, or graph visualization state.
 - Distributing general project `IntentAssertion`s in `.framerlib` during the initial slices.
-  Reusable quantitative policy continues to ship as selector-scoped `StandardsPack` content.
+  Reusable quantitative policy continues to ship as selector-scoped `StandardsPack` content;
+  `.framerlib` remains schema v3 for Slice 3.
 
 ## Open questions
 
-- Which deterministic preference tiers ship first: `Strong/Medium/Weak`, or one `Preferred` tier
-  widened only after a real conflict needs it? `Requirement` remains a mode, not a preference tier.
 - After the project assertion/evaluator contract is proven, should reusable non-compliance policy
   remain an expanded `StandardsPack` capability or become a separate selector-only intent-policy
   library item? Either way, `.framerlib` policy must not contain project `ElementId` references.

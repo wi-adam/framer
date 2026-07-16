@@ -8,7 +8,7 @@
 > **Linked goal:** G-015 (Standards Engine; subsumes G-008 Code
 > Profile Data, advances G-006 Rule Explanations) ·
 > **Plan:** [2026-07-04 — Standards Engine](../plans/2026-07-04-standards-engine.md) ·
-> **Last reviewed:** 2026-07-15
+> **Last reviewed:** 2026-07-16
 
 ## Intent / Purpose
 
@@ -107,12 +107,13 @@ The observable contract (prefer testable statements):
 
 - A **check** = rule id + citation + severity (**required** or **advisory**) +
   applicability + **scope** (an entity selector: walls, openings, rooms, levels, systems,
-  braced wall lines, generated members — with typed filters such as exposure, kind, and
-  tags) + **requirement** (a predicate over a closed vocabulary of engine-computed
+  braced wall lines, placed furnishing/MEP instances, generated members — with typed filters
+  such as exposure, kind, and tags) + **requirement** (a predicate over a closed vocabulary of engine-computed
   **facts**).
 - **Facts are typed values the engine computes** per scoped entity — wall length/height,
   actual stud spacing, header depth/plies, opening rough width, room area, ceiling height,
-  clear-wall R-value (milli), braced-line required vs. provided length, member counts.
+  clear-wall R-value (milli), braced-line required vs. provided length, member counts,
+  placed-object containment, and directional placed-object clearance.
   New *rules over existing facts* are pure data (user-authorable); new *fact kinds*
   require Rust (like adding a `LayerFunction` variant).
 - Predicates are a small, total, serializable tree: `all` / `any` / `not` /
@@ -124,6 +125,30 @@ The observable contract (prefer testable statements):
   **needs-review**, never a silent pass.
 - Per rule instance, the outcome is exactly one of **pass · violation (or advisory) ·
   needs-review · waived** (waived carries its reason).
+
+### Placed-object containment and clearance facts
+
+- `CheckScope::PlacedObjects { tags }` selects furnishing and MEP instances in one
+  canonical id order. Every requested tag may be supplied by either the instance or its
+  family. Each selected object remains one fact subject even when room binding is unresolved.
+- `PlacedObjectContainedInRoom` is a flag over a placed object plus room binding.
+  `PlacedObjectClearance { direction, datum }` is an exact tick length with direction
+  `Left`, `Right`, `Front`, `Back`, or `Around` and datum `Centerline` or
+  `FootprintFace`. Standards checks and project-authored intent use these same core-owned
+  `Fact` variants and the same `Predicate` evaluator.
+- A family footprint is the full width-by-depth rectangle centered on the instance position.
+  Model `+X` is right and `+Y` is up; `Deg0` front is local `+Y`, and `QuarterTurn` rotates
+  counterclockwise (`Deg90` front is `-X`). Screen-space orientation is irrelevant.
+- Directional clearance sweeps the target footprint's perpendicular span toward the nearest
+  finished room-wall face or other same-level furnishing/MEP footprint. Wall centerlines are
+  offset by half the authored assembly thickness; object overlap is zero clearance; `Around`
+  is the minimum of the four cardinal observations. `Centerline` measures from the target
+  object's centerline and `FootprintFace` from its directional footprint face.
+- Selector scope binds an object to an exact room only when its center lies in exactly one
+  closed same-level authored room. Zero closed matches remain unresolved; multiple matches remain
+  ambiguous. Either binding, an open exact room, unknown family geometry, missing wall-system
+  input, or unsupported cross-level input yields needs-review/unknown rather than pass. A closed
+  geometric containment miss is a known false observation and directional clearance is zero.
 
 ### Bracing & seismic (v1 domains alongside framing/openings/fastening)
 
@@ -209,7 +234,8 @@ The observable contract (prefer testable statements):
 - **Fact vocabulary is a closed, versioned enum in Rust.** Facts must be deterministic,
   typed, and computable from `BuildingModel` + `ProjectFramePlan`; an open fact namespace
   would make pack portability and evaluation semantics undefined. The enum is the widening
-  seam (add variants; never repurpose).
+  seam (add variants; never repurpose). Parameterized placed-object clearance lives in this
+  shared enum rather than in a project-intent-only threshold language.
 - **Check evaluation lives in a new `framer-standards` crate** (`core → solver →
   standards → app`). Core holds the data types and the pure stack resolution (mirroring
   `validate()`); the solver consumes resolved tables exactly as it consumed `CodeProfile`;
@@ -269,12 +295,24 @@ pub enum Predicate {
     Compare { fact: Fact, op: CompareOp, value: FactOperand }, // literal or second fact
 }
 
+pub enum Fact {
+    // existing wall/opening/room/bracing facts ...
+    PlacedObjectContainedInRoom,
+    PlacedObjectClearance {
+        direction: ClearanceDirection,
+        datum: ClearanceDatum,
+    },
+}
+
+pub enum ClearanceDirection { Left, Right, Front, Back, Around }
+pub enum ClearanceDatum { Centerline, FootprintFace }
+
 pub enum RuleOverlay {
     Waive { target: String, reason: String },        // reason must be non-empty
     Severity { target: String, severity: CheckSeverity },
 }
 
-// BuildingModel changes (schema v13):
+// Original standards-engine BuildingModel changes (introduced in schema v13):
 //   - code: CodeProfile                     REMOVED
 //   + site: SiteContext
 //   + standards: Vec<ElementId>             // stack order, semantic, never sorted
@@ -325,7 +363,9 @@ evaluate(...) -> ComplianceReport
 - **Fact engine:** `FactSnapshot` is the sole calculator for the closed `Fact`
   vocabulary from model + plan (wall/opening/room/level/system facts from
   `BuildingModel`; spacing/member/header facts from `ProjectFramePlan`;
-  braced-line required/provided from the bracing tables + panel association).
+  braced-line required/provided from the bracing tables + panel association;
+  placed furnishing/MEP containment and finished-face/object clearance from
+  authored room topology, family footprints, and wall systems).
   It provides canonical sorted subject projection, exact observations, and
   structured `MissingInput | UnresolvedSubject | WrongSubjectKind |
   UnsupportedCondition` reasons. Compatibility `fact_value` delegates to the
@@ -386,6 +426,9 @@ Every [architecture invariant](../architecture.md) holds; specifically:
   `PROJECT_SCHEMA_VERSION`, regenerate `examples/projects/*.framer`, round-trip +
   rejection tests, update [project-files.md](../project-files.md) and the version
   references. The `.framerlib` schema bumps independently.
+  The later intent slice moves projects to v14 while reusing these fact types;
+  `.framerlib` remains schema v3 because project assertions and overrides are not
+  library content.
 - **Compliance is explicit, never implied** (invariant #6). No aggregate "compliant"
   verdict exists anywhere in the API or UI — only per-rule outcomes, with needs-review and
   unsupported conditions labeled.
@@ -421,9 +464,9 @@ Every [architecture invariant](../architecture.md) holds; specifically:
   R602.3(5)/R602.7(1)/R602.3(1)/R602.10.3 transcriptions vs. the common-case subset)?
   Transcription is mechanical but licensing/fidelity review is prudent before shipping
   verbatim table content.
-- **Fact vocabulary v1 cut.** The frozen initial `Fact` list — proposal: wall
-  length/height/exposure/system-R/stud-spacing/stud-profile; opening rough width/height/
-  header-depth/plies/jack-count; room area/ceiling-height; braced-line length/required/
-  provided/spacing; member count-by-kind. To be finalized against the starter pack's
-  checks (every shipped check must evaluate green-or-honest on the example projects).
+- **Fact vocabulary growth.** The closed list now covers wall length/height/exposure/system-R/
+  stud facts; opening rough size/header/jack facts; room area/ceiling height; braced-line
+  length/required/provided facts; and placed-object containment/directional clearance. Add the
+  next fact family only when a real portable pack or authored-intent slice needs it, keeping one
+  `FactSnapshot` measurement path.
 - **Report format beyond CSV** — a printable (PDF/SVG) permit-support layout later?

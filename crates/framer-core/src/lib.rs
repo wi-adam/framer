@@ -8,7 +8,11 @@ mod topology;
 mod units;
 
 pub use constraints::{ConstraintSystem, ConstraintVariable, LinearConstraint, LinearExpression};
-pub use intent::{AuthoredEntityRef, AuthoredIntentId, LibraryVersionRef};
+pub use intent::{
+    AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, ExactIntentScope, IntentAssertion,
+    IntentDomain, IntentExpression, IntentOverride, IntentOverrideId, IntentSource,
+    LibraryVersionRef, PreferencePriority, ProjectIntentScope,
+};
 pub use library::{
     LIBRARY_FORMAT, LIBRARY_SCHEMA_VERSION, Library, LibraryDocument, LibraryError, load_library,
     save_library,
@@ -31,11 +35,11 @@ pub use project::{
 };
 pub use standards::{
     Applicability, BracedPanel, BracedWallLine, BracingMethod, BracingRow, BracingTable,
-    CheckScope, CheckSeverity, CompareOp, ComplianceCheck, ConnectionKind, Fact, FactOperand,
-    FactSubjectKind, FactType, FastenerSchedule, FasteningRow, FasteningSchedule, FramingDefaults,
-    HeaderRow, HeaderSpanTable, Predicate, ResolutionAction, ResolvedRule, ResolvedStandards,
-    RuleOverlay, SeismicDesignCategory, SiteContext, StandardsPack, StandardsTables, StudRow,
-    StudTable, resolve_standards,
+    CheckScope, CheckSeverity, ClearanceDatum, ClearanceDirection, CompareOp, ComplianceCheck,
+    ConnectionKind, Fact, FactOperand, FactSubjectKind, FactType, FastenerSchedule, FasteningRow,
+    FasteningSchedule, FramingDefaults, HeaderRow, HeaderSpanTable, Predicate, ResolutionAction,
+    ResolvedRule, ResolvedStandards, RuleOverlay, SeismicDesignCategory, SiteContext,
+    StandardsPack, StandardsTables, StudRow, StudTable, resolve_standards,
 };
 pub use topology::{
     PolygonTriangulation, RoomBoundary, concave_polygon_corners, enclosed_room_count,

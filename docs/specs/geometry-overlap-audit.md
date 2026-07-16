@@ -111,7 +111,7 @@ without turning Framer into a general solid modeler.
   enough to diagnose and gate this invariant; exact intersection volume would add a solid-Boolean
   subsystem without improving the pass/fail decision.
 - **No persisted audit state.** Bodies, overlap results, active highlights, and any future semantic
-  policy are derived from current intent and plan data; none is serialized in schema v13.
+  policy are derived from current intent and plan data; none is serialized in current schema v14.
 
 ## Architecture (grounded in the codebase)
 
@@ -158,7 +158,8 @@ without turning Framer into a general solid modeler.
 - The checked-in examples and historical regression fixtures define the initial supported shape and
   collision-policy surface. Adding a new solid element family requires positive, contact, overlap,
   and unsupported/fallback coverage in the same change.
-- This feature does not change schema v13 or require project fixture migration.
+- This feature introduced no project-schema change or fixture migration; its derived audit state
+  remains absent from current schema v14.
 
 ## Out of scope (YAGNI)
 

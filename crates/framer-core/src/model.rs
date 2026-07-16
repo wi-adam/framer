@@ -3,9 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::intent::{
+    AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, IntentAssertion, IntentDomain,
+    IntentExpression, IntentOverride, IntentOverrideId, ProjectIntentScope,
+};
 use crate::standards::{
-    BracedPanel, BracedWallLine, FramingDefaults, ResolvedStandards, SiteContext, StandardsPack,
-    resolve_standards,
+    BracedPanel, BracedWallLine, CompareOp, Fact, FactOperand, FactSubjectKind, FactType,
+    FramingDefaults, Predicate, ResolvedStandards, SiteContext, StandardsPack, resolve_standards,
 };
 use crate::{
     ConstraintSystem, ConstraintVariable, Length, LinearConstraint, LinearExpression, Point2,
@@ -86,6 +90,10 @@ pub struct BuildingModel {
     pub floor_decks: Vec<FloorDeck>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub braced_wall_lines: Vec<BracedWallLine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<IntentAssertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_overrides: Vec<IntentOverride>,
 }
 
 /// Derived local-x spans for one wall's physical corner laps. These values are
@@ -127,6 +135,8 @@ impl BuildingModel {
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
             braced_wall_lines: Vec::new(),
+            intents: Vec::new(),
+            intent_overrides: Vec::new(),
         }
     }
 
@@ -180,6 +190,8 @@ impl BuildingModel {
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
             braced_wall_lines: Vec::new(),
+            intents: Vec::new(),
+            intent_overrides: Vec::new(),
         }
     }
 
@@ -323,6 +335,8 @@ impl BuildingModel {
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
             braced_wall_lines: Vec::new(),
+            intents: Vec::new(),
+            intent_overrides: Vec::new(),
         }
         .into_deterministic()
     }
@@ -501,6 +515,8 @@ impl BuildingModel {
             ceilings: Vec::new(),
             floor_decks: Vec::new(),
             braced_wall_lines: Vec::new(),
+            intents: Vec::new(),
+            intent_overrides: Vec::new(),
         }
         .into_deterministic()
     }
@@ -529,6 +545,77 @@ impl BuildingModel {
             .iter()
             .find(|pack| pack.id == *base)
             .map(|pack| pack.name.as_str())
+    }
+
+    /// Return whether a typed authored reference resolves to an entity of exactly the requested
+    /// kind in this model. This deliberately does not coerce an id that exists under another
+    /// variant; callers validating persisted references can distinguish dangling from wrong-kind
+    /// references by combining this with the model's global id pool.
+    pub fn authored_entity_exists(&self, reference: &AuthoredEntityRef) -> bool {
+        match reference {
+            AuthoredEntityRef::Site => true,
+            AuthoredEntityRef::LibraryVersion(reference) => self.libraries.iter().any(|stamp| {
+                stamp.uid == reference.uid && stamp.version_id == reference.version_id
+            }),
+            AuthoredEntityRef::StandardsPack(id) => {
+                self.standards_packs.iter().any(|pack| pack.id == *id)
+            }
+            AuthoredEntityRef::Material(id) => {
+                self.materials.iter().any(|material| material.id == *id)
+            }
+            AuthoredEntityRef::ConstructionSystem(id) => {
+                self.systems.iter().any(|system| system.id == *id)
+            }
+            AuthoredEntityRef::Furnishing(id) => {
+                self.furnishings.iter().any(|family| family.id == *id)
+            }
+            AuthoredEntityRef::MepObject(id) => {
+                self.mep_objects.iter().any(|family| family.id == *id)
+            }
+            AuthoredEntityRef::Level(id) => self.levels.iter().any(|level| level.id == *id),
+            AuthoredEntityRef::Wall(id) => self.walls.iter().any(|wall| wall.id == *id),
+            AuthoredEntityRef::Opening(id) => self
+                .walls
+                .iter()
+                .flat_map(|wall| &wall.openings)
+                .any(|opening| opening.id == *id),
+            AuthoredEntityRef::Dimension(id) => self
+                .walls
+                .iter()
+                .flat_map(|wall| &wall.dimensions)
+                .any(|dimension| dimension.id == *id),
+            AuthoredEntityRef::WallJoin(id) => self.wall_joins.iter().any(|join| join.id == *id),
+            AuthoredEntityRef::Room(id) => self.rooms.iter().any(|room| room.id == *id),
+            AuthoredEntityRef::FurnishingInstance(id) => self
+                .furnishing_instances
+                .iter()
+                .any(|instance| instance.id == *id),
+            AuthoredEntityRef::MepInstance(id) => {
+                self.mep_instances.iter().any(|instance| instance.id == *id)
+            }
+            AuthoredEntityRef::RoofPlane(id) => {
+                self.roof_planes.iter().any(|plane| plane.id == *id)
+            }
+            AuthoredEntityRef::RoofOpening(id) => self
+                .roof_planes
+                .iter()
+                .flat_map(|plane| &plane.openings)
+                .any(|opening| opening.id == *id),
+            AuthoredEntityRef::Ceiling(id) => self.ceilings.iter().any(|ceiling| ceiling.id == *id),
+            AuthoredEntityRef::FloorDeck(id) => self.floor_decks.iter().any(|deck| deck.id == *id),
+            AuthoredEntityRef::BracedWallLine(id) => {
+                self.braced_wall_lines.iter().any(|line| line.id == *id)
+            }
+            AuthoredEntityRef::BracedPanel(id) => self
+                .walls
+                .iter()
+                .flat_map(|wall| &wall.bracing)
+                .any(|panel| panel.id == *id),
+            AuthoredEntityRef::IntentOverride(id) => self
+                .intent_overrides
+                .iter()
+                .any(|intent_override| intent_override.id() == id),
+        }
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -854,7 +941,199 @@ impl BuildingModel {
             validate_surface_region(&deck.region, &room_ids, &deck.id)?;
         }
 
+        // Assertion and override ids share the same global namespace as every other authored
+        // entity. Register every id before validating references so a forward reference to an id
+        // of the wrong kind is reported as wrong-kind rather than dangling.
+        let mut intent_ids = BTreeSet::new();
+        for intent in &self.intents {
+            validate_element_id(&intent.id.0)?;
+            insert_unique_id(&mut ids, &intent.id.0)?;
+            intent_ids.insert(intent.id.clone());
+        }
+        for intent_override in &self.intent_overrides {
+            validate_element_id(&intent_override.id().0)?;
+            insert_unique_id(&mut ids, &intent_override.id().0)?;
+        }
+
+        for intent in &self.intents {
+            self.validate_intent(intent, &ids)?;
+        }
+
+        let mut overridden_targets = BTreeSet::new();
+        for intent_override in &self.intent_overrides {
+            match intent_override {
+                IntentOverride::Waive {
+                    id, target, reason, ..
+                } => {
+                    if !intent_ids.contains(target) {
+                        return Err(ModelError::IntentOverrideReferencesUnknownTarget {
+                            intent_override: id.clone(),
+                            target: target.clone(),
+                        });
+                    }
+                    if reason.trim().is_empty() {
+                        return Err(ModelError::IntentOverrideMissingReason {
+                            intent_override: id.clone(),
+                        });
+                    }
+                    if !overridden_targets.insert(target.clone()) {
+                        return Err(ModelError::IntentOverrideDuplicateTarget {
+                            target: target.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    fn validate_intent(
+        &self,
+        intent: &IntentAssertion,
+        ids: &BTreeSet<ElementId>,
+    ) -> Result<(), ModelError> {
+        if !matches!(
+            intent.domain,
+            IntentDomain::SpatialProgram
+                | IntentDomain::Mep
+                | IntentDomain::Compliance
+                | IntentDomain::OperationalMaintenance
+        ) {
+            return Err(ModelError::IntentUnsupportedDomain {
+                intent: intent.id.clone(),
+                domain: intent.domain,
+            });
+        }
+
+        if matches!(
+            intent.mode,
+            AuthoredIntentMode::Preference { priority } if priority.0 == 0
+        ) {
+            return Err(ModelError::IntentInvalidPreferencePriority {
+                intent: intent.id.clone(),
+            });
+        }
+
+        let ProjectIntentScope::Exact(scope) = &intent.scope;
+        if scope.participants.is_empty() {
+            return Err(ModelError::IntentScopeHasNoParticipants {
+                intent: intent.id.clone(),
+            });
+        }
+        let mut unique_participants = BTreeSet::new();
+        for participant in &scope.participants {
+            if participant == &scope.subject {
+                return Err(ModelError::IntentScopeSelfRelation {
+                    intent: intent.id.clone(),
+                    entity: participant.clone(),
+                });
+            }
+            if !unique_participants.insert(participant) {
+                return Err(ModelError::IntentScopeDuplicateParticipant {
+                    intent: intent.id.clone(),
+                    participant: participant.clone(),
+                });
+            }
+        }
+        if scope.participants.len() != 1 {
+            return Err(ModelError::IntentScopeInvalidParticipantCount {
+                intent: intent.id.clone(),
+                found: scope.participants.len(),
+            });
+        }
+
+        self.validate_intent_reference(&intent.id, &scope.subject, ids)?;
+        for participant in &scope.participants {
+            self.validate_intent_reference(&intent.id, participant, ids)?;
+        }
+
+        let subject_level = match &scope.subject {
+            AuthoredEntityRef::FurnishingInstance(id) => self
+                .furnishing_instances
+                .iter()
+                .find(|instance| instance.id == *id)
+                .map(|instance| &instance.level)
+                .ok_or_else(|| ModelError::IntentReferenceUnknown {
+                    intent: intent.id.clone(),
+                    reference: scope.subject.clone(),
+                })?,
+            AuthoredEntityRef::MepInstance(id) => self
+                .mep_instances
+                .iter()
+                .find(|instance| instance.id == *id)
+                .map(|instance| &instance.level)
+                .ok_or_else(|| ModelError::IntentReferenceUnknown {
+                    intent: intent.id.clone(),
+                    reference: scope.subject.clone(),
+                })?,
+            subject => {
+                return Err(ModelError::IntentScopeUnsupportedSubject {
+                    intent: intent.id.clone(),
+                    subject: subject.clone(),
+                });
+            }
+        };
+
+        let participant = &scope.participants[0];
+        let participant_level = match participant {
+            AuthoredEntityRef::Room(id) => self
+                .rooms
+                .iter()
+                .find(|room| room.id == *id)
+                .map(|room| &room.level)
+                .ok_or_else(|| ModelError::IntentReferenceUnknown {
+                    intent: intent.id.clone(),
+                    reference: participant.clone(),
+                })?,
+            participant => {
+                return Err(ModelError::IntentScopeUnsupportedParticipant {
+                    intent: intent.id.clone(),
+                    participant: participant.clone(),
+                });
+            }
+        };
+
+        if subject_level != participant_level {
+            return Err(ModelError::IntentScopeLevelMismatch {
+                intent: intent.id.clone(),
+                subject: scope.subject.clone(),
+                participant: participant.clone(),
+            });
+        }
+
+        match &intent.expression {
+            IntentExpression::FactPredicate(predicate) => {
+                validate_intent_predicate(&intent.id, predicate)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_intent_reference(
+        &self,
+        intent: &AuthoredIntentId,
+        reference: &AuthoredEntityRef,
+        ids: &BTreeSet<ElementId>,
+    ) -> Result<(), ModelError> {
+        if let Some(id) = reference.element_id() {
+            validate_element_id(id)?;
+        }
+        if self.authored_entity_exists(reference) {
+            return Ok(());
+        }
+        if reference.element_id().is_some_and(|id| ids.contains(id)) {
+            Err(ModelError::IntentReferenceWrongKind {
+                intent: intent.clone(),
+                reference: reference.clone(),
+            })
+        } else {
+            Err(ModelError::IntentReferenceUnknown {
+                intent: intent.clone(),
+                reference: reference.clone(),
+            })
+        }
     }
 
     pub fn sort_deterministically(&mut self) {
@@ -897,6 +1176,9 @@ impl BuildingModel {
             .sort_by(|left, right| left.id.cmp(&right.id));
         self.braced_wall_lines
             .sort_by(|left, right| left.id.cmp(&right.id));
+        self.intents.sort_by(|left, right| left.id.cmp(&right.id));
+        self.intent_overrides
+            .sort_by(|left, right| left.id().cmp(right.id()));
     }
 
     pub fn into_deterministic(mut self) -> Self {
@@ -3589,6 +3871,19 @@ impl QuarterTurn {
     pub const fn is_zero(&self) -> bool {
         matches!(self, Self::Deg0)
     }
+
+    /// Rotate a local plan vector counterclockwise into model coordinates.
+    ///
+    /// Model `+X` points right and `+Y` points up. In particular, an object's local front is
+    /// `(0, 1)`, so a 90-degree quarter turn maps front to model `-X`.
+    pub const fn rotate_plan_vector(self, x: i8, y: i8) -> (i8, i8) {
+        match self {
+            Self::Deg0 => (x, y),
+            Self::Deg90 => (-y, x),
+            Self::Deg180 => (-x, -y),
+            Self::Deg270 => (y, -x),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -5028,6 +5323,105 @@ pub enum ModelError {
         instance: ElementId,
         family: ElementId,
     },
+    #[error("intent {intent:?} uses unsupported domain {domain:?} in the first persisted slice")]
+    IntentUnsupportedDomain {
+        intent: AuthoredIntentId,
+        domain: IntentDomain,
+    },
+    #[error("preference intent {intent:?} must use a non-zero priority")]
+    IntentInvalidPreferencePriority { intent: AuthoredIntentId },
+    #[error("intent {intent:?} exact scope must contain a participant")]
+    IntentScopeHasNoParticipants { intent: AuthoredIntentId },
+    #[error("intent {intent:?} exact scope repeats participant {participant:?}")]
+    IntentScopeDuplicateParticipant {
+        intent: AuthoredIntentId,
+        participant: AuthoredEntityRef,
+    },
+    #[error("intent {intent:?} exact scope relates {entity:?} to itself")]
+    IntentScopeSelfRelation {
+        intent: AuthoredIntentId,
+        entity: AuthoredEntityRef,
+    },
+    #[error(
+        "intent {intent:?} exact scope must contain exactly one room participant, found {found}"
+    )]
+    IntentScopeInvalidParticipantCount {
+        intent: AuthoredIntentId,
+        found: usize,
+    },
+    #[error("intent {intent:?} references unknown authored entity {reference:?}")]
+    IntentReferenceUnknown {
+        intent: AuthoredIntentId,
+        reference: AuthoredEntityRef,
+    },
+    #[error(
+        "intent {intent:?} reference {reference:?} uses an id owned by a different authored entity kind"
+    )]
+    IntentReferenceWrongKind {
+        intent: AuthoredIntentId,
+        reference: AuthoredEntityRef,
+    },
+    #[error(
+        "intent {intent:?} subject {subject:?} is not a furnishing or MEP instance supported by the first persisted slice"
+    )]
+    IntentScopeUnsupportedSubject {
+        intent: AuthoredIntentId,
+        subject: AuthoredEntityRef,
+    },
+    #[error(
+        "intent {intent:?} participant {participant:?} is not the room supported by the first persisted slice"
+    )]
+    IntentScopeUnsupportedParticipant {
+        intent: AuthoredIntentId,
+        participant: AuthoredEntityRef,
+    },
+    #[error(
+        "intent {intent:?} subject {subject:?} and participant {participant:?} must be on the same level"
+    )]
+    IntentScopeLevelMismatch {
+        intent: AuthoredIntentId,
+        subject: AuthoredEntityRef,
+        participant: AuthoredEntityRef,
+    },
+    #[error("intent {intent:?} predicate {group} group must not be empty")]
+    IntentPredicateEmptyGroup {
+        intent: AuthoredIntentId,
+        group: &'static str,
+    },
+    #[error(
+        "intent {intent:?} predicate fact {fact:?} has subject kind {found:?}, expected PlacedObject"
+    )]
+    IntentPredicateWrongSubject {
+        intent: AuthoredIntentId,
+        fact: Fact,
+        found: FactSubjectKind,
+    },
+    #[error(
+        "intent {intent:?} predicate compares fact {fact:?} as {expected:?} but operand is {found:?}"
+    )]
+    IntentPredicateTypeMismatch {
+        intent: AuthoredIntentId,
+        fact: Fact,
+        expected: FactType,
+        found: FactType,
+    },
+    #[error("intent {intent:?} predicate uses operator {op:?} with flag fact {fact:?}")]
+    IntentPredicateInvalidOperator {
+        intent: AuthoredIntentId,
+        fact: Fact,
+        op: CompareOp,
+    },
+    #[error("intent {intent:?} clearance threshold must be non-negative")]
+    IntentClearanceNegativeThreshold { intent: AuthoredIntentId },
+    #[error("intent override {intent_override:?} references unknown intent {target:?}")]
+    IntentOverrideReferencesUnknownTarget {
+        intent_override: IntentOverrideId,
+        target: AuthoredIntentId,
+    },
+    #[error("intent override {intent_override:?} waiver must include a non-empty reason")]
+    IntentOverrideMissingReason { intent_override: IntentOverrideId },
+    #[error("intent {target:?} is targeted by more than one authored override")]
+    IntentOverrideDuplicateTarget { target: AuthoredIntentId },
     #[error("roof plane {roof_plane:?} references unknown level {level:?}")]
     RoofPlaneReferencesUnknownLevel {
         roof_plane: ElementId,
@@ -5196,6 +5590,80 @@ pub(crate) fn insert_unique_id(
     }
 }
 
+fn validate_intent_predicate(
+    intent: &AuthoredIntentId,
+    predicate: &Predicate,
+) -> Result<(), ModelError> {
+    match predicate {
+        Predicate::All(children) | Predicate::Any(children) => {
+            if children.is_empty() {
+                return Err(ModelError::IntentPredicateEmptyGroup {
+                    intent: intent.clone(),
+                    group: if matches!(predicate, Predicate::All(_)) {
+                        "All"
+                    } else {
+                        "Any"
+                    },
+                });
+            }
+            for child in children {
+                validate_intent_predicate(intent, child)?;
+            }
+            Ok(())
+        }
+        Predicate::Not(child) => validate_intent_predicate(intent, child),
+        Predicate::Compare { fact, op, value } => {
+            validate_intent_fact_subject(intent, *fact)?;
+            if let Some(operand_fact) = value.fact() {
+                validate_intent_fact_subject(intent, operand_fact)?;
+            }
+
+            let expected = fact.value_type();
+            let found = value.value_type();
+            if expected != found {
+                return Err(ModelError::IntentPredicateTypeMismatch {
+                    intent: intent.clone(),
+                    fact: *fact,
+                    expected,
+                    found,
+                });
+            }
+            if expected == FactType::Flag && !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                return Err(ModelError::IntentPredicateInvalidOperator {
+                    intent: intent.clone(),
+                    fact: *fact,
+                    op: *op,
+                });
+            }
+            if matches!(fact, Fact::PlacedObjectClearance { .. })
+                && matches!(value, FactOperand::LengthLiteral(value) if *value < Length::ZERO)
+            {
+                return Err(ModelError::IntentClearanceNegativeThreshold {
+                    intent: intent.clone(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_intent_fact_subject(intent: &AuthoredIntentId, fact: Fact) -> Result<(), ModelError> {
+    if fact.subject_kind() == FactSubjectKind::PlacedObject
+        && matches!(
+            fact,
+            Fact::PlacedObjectContainedInRoom | Fact::PlacedObjectClearance { .. }
+        )
+    {
+        Ok(())
+    } else {
+        Err(ModelError::IntentPredicateWrongSubject {
+            intent: intent.clone(),
+            fact,
+            found: fact.subject_kind(),
+        })
+    }
+}
+
 fn validate_asset_scale(scale: Length) -> Result<(), ModelError> {
     if scale > Length::ZERO {
         Ok(())
@@ -5347,6 +5815,29 @@ mod tests {
         Left,
         Center,
         Right,
+    }
+
+    #[test]
+    fn quarter_turn_rotates_plan_vectors_counterclockwise() {
+        let local_front = (0, 1);
+
+        assert_eq!(
+            QuarterTurn::Deg0.rotate_plan_vector(local_front.0, local_front.1),
+            (0, 1)
+        );
+        assert_eq!(
+            QuarterTurn::Deg90.rotate_plan_vector(local_front.0, local_front.1),
+            (-1, 0),
+            "Deg90 local front +Y must become world -X"
+        );
+        assert_eq!(
+            QuarterTurn::Deg180.rotate_plan_vector(local_front.0, local_front.1),
+            (0, -1)
+        );
+        assert_eq!(
+            QuarterTurn::Deg270.rotate_plan_vector(local_front.0, local_front.1),
+            (1, 0)
+        );
     }
 
     /// A model carrying one framing-correct system of each surface kind (roof,

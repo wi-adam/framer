@@ -4,10 +4,10 @@
 > [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
 > is an archival record of how the work was sequenced; the spec is the durable source of truth.
 >
-> **Status:** In progress; Slice 1 merged in PR #129. Slice 2 is under review in
-> PR #130; review fixes are implemented and locally verified, with latest-head
-> CI/merge pending. Work started from `origin/main` at `cf8f2e0` on
-> 2026-07-15. Slices 3-4 remain proposed and have not started.
+> **Status:** In progress. Slice 1 merged in PR #129 and Slice 2 merged in PR
+> #130. Slice 3 implementation is in progress from the resulting `origin/main`
+> head; verification, review, and merge remain pending. Slice 4 remains proposed.
+> The initiative started from `origin/main` at `cf8f2e0` on 2026-07-15.
 
 ## Goal
 
@@ -47,8 +47,10 @@ The eighth workspace crate, `framer-analysis`, depends on core, library, solver,
 standards, and geometry to combine these outputs without creating a lower-crate
 dependency cycle. Core owns only persisted or lower-level semantic types required
 below the solver. Quantitative measurement remains in `framer-standards`:
-standards checks and future project assertions consume the same facts instead of
-implementing parallel clearance, span, or performance calculations.
+standards checks and schema-v14 project assertions consume the same
+`FactSnapshot` observations instead of implementing parallel clearance, span, or
+performance calculations. Analysis owns outcome/evidence/diagnostic adaptation;
+the app remains the sole interactive mutation and history owner.
 
 ## Risk and coverage ledger
 
@@ -196,9 +198,9 @@ Verification evidence recorded on 2026-07-15:
   median 21.458 us / p95 34.375 us, and cached-query median 1.334 us / p95 2.000 us.
 
 Slice 1's implementation exit criteria were satisfied and merged in PR #129 before Slice 2
-started. Slices 3-4 remain proposed/not started.
+started. At that merge point, Slices 3-4 were still proposed/not started.
 
-**Slice 1 exit criteria:** A current v13 project opens byte-identically; its plan/report/audit and
+**Slice 1 exit criteria:** A then-current v13 project opens byte-identically; its plan/report/audit and
 existing library-lifecycle diagnostic behavior are unchanged; and graph queries can explain at
 least a wall opening → header/member → rule/source chain, room schedule/boundary consequences, and
 one geometry or compliance issue.
@@ -348,6 +350,10 @@ candidate edit.
   - Add core-owned `IntentAssertion`, typed authored references, domain, mode/priority, exact
     project scope, shared fact-predicate expression, source, and rationale. Do not add a parallel
     `SpatialIntent` threshold language.
+  - Keep the complete `IntentDomain` vocabulary but initially validate only
+    `SpatialProgram`, `Mep`, `Compliance`, and `OperationalMaintenance`. Persist
+    `IntentSource::User`; use a nonzero `u16` preference priority, with larger values stronger.
+    The exact scope is one furnishing/MEP instance and exactly one same-level room.
   - Keep the first persisted vertical slice to requirement/preference assertions. Objective and
     assumption result shapes exist in the compiled protocol, but their authored schema waits for a
     feature that can exercise ranking or premise consumption end to end.
@@ -355,16 +361,16 @@ candidate edit.
     are invalid. `RuleOverlay::Waive` remains the standards rule storage form, and both compile to
     one graph waiver record/outcome. A standards overlay waiver is referenced by overlay pack +
     rule and applies to every scoped rule-instance assertion from that resolved rule.
-  - Add `BuildingModel.intents` and `intent_overrides` (or the final locked names) as id-sorted
-    collections. Do not duplicate existing direct field relationships.
+  - Add skip-empty `BuildingModel.intents` and `intent_overrides` as id-sorted collections. Their
+    ids share the global authored id pool. Do not duplicate existing direct field relationships.
   - Lock the placed-object local frame: model `+X` is right, `+Y` is up; width is left/right, depth
     is back/front, origin is the center, and Deg0 front is local `+Y`. `QuarterTurn` is
     counterclockwise, so Deg90 front is `-X`, Deg180 is `-Y`, and Deg270 is `+X`; screen coordinates
     do not change the mapping. Clearance fact requests carry `Left/Right/Front/Back/Around` and
     centerline-versus-footprint-face datum.
   - Project assertions may use exact typed refs; selector-scoped reusable policy stays in
-    `StandardsPack`. Do not bump `.framerlib` or distribute project assertions in this slice.
-  - Bump the then-current project schema (v13 → v14 if no intervening bump), update all example
+    `StandardsPack`. `.framerlib` stays v3 and does not distribute project assertions in this slice.
+  - Bump the then-current project schema from v13 to v14, update all example
     projects, explicit old-schema rejection, canonical round-trips, `project-files.md`,
     architecture, code map, and this spec.
   - Files: `crates/framer-core/src/model.rs`, a focused intent module, `src/project.rs`, public
@@ -382,9 +388,14 @@ candidate edit.
     directional nearest-obstacle clearance. Both standards checks and project assertions evaluate
     those exact observations through the common `Predicate` evaluator.
   - Measure side centerline clearance independently from front/back footprint-face clearance after
-    applying `QuarterTurn`; do not reduce the requirement to one radial bounding-box gap.
-  - An open room, unknown family geometry, or unsupported clearance participant yields `Unknown`,
-    not pass. A geometric miss yields `Violated` without making the project unserializable.
+    applying counterclockwise `QuarterTurn`; sweep the perpendicular footprint span against
+    finished room-wall faces and every other same-level furnishing/MEP footprint. Do not reduce the
+    requirement to one radial bounding-box gap. `Around` is the minimum cardinal observation.
+  - Standards `CheckScope::PlacedObjects { tags }` accepts required tags from the instance or
+    family and retains one subject with exact, unresolved, or ambiguous room binding.
+  - An open/ambiguous room, unknown family geometry, missing wall-system input, or unsupported
+    clearance participant yields `Unknown`, not pass. A closed geometric containment miss is known
+    false with zero clearance and may yield `Violated` without making the project unserializable.
   - Lower actionable results into `ProjectFramePlan.diagnostics` through the mapping locked in
     Slice 2. The intent inspector/report retains satisfied, not-applicable, and waived entries plus
     all cross-object participants.
@@ -401,8 +412,8 @@ candidate edit.
 
 - **Task 3.3 — Author and inspect cross-object intent**
   - Add inspector/catalog actions for declaring required versus preferred containment/clearance,
-    selecting participants, displaying rationale/source, waiving with reason where permitted, and
-    focusing all implicated entities.
+    selecting participants, displaying rationale/source, editing/deleting assertions, waiving with
+    reason where permitted, and focusing all implicated entities.
   - Waiving a project assertion writes `IntentOverride::Waive`; waiving a standards rule continues
     to write `RuleOverlay::Waive`. Both display the same compiled waived outcome with provenance.
   - All mutation uses `FramerApp::edit()` and ordinary undo/redo. Mid-authoring incomplete state is
@@ -414,9 +425,37 @@ candidate edit.
     its primary subject and the inspector can focus every participant; `scripts/ui-shots.sh`.
   - Commit: `feat(app): author cross-object intent`
 
-**Slice 3 exit criteria:** A user can persist, reopen, evaluate, inspect, and waive one real
-cross-object containment/clearance requirement; an unresolved requirement is saveable and clearly
-visible.
+#### Slice 3 implementation checklist
+
+- [x] Add the core-owned v14 assertion/override types, skip-empty model collections, complete
+  domain vocabulary with the four-domain allowlist, user requirement/preference modes, nonzero
+  priority validation, exact instance-plus-room scope validation, and global stable-id ownership.
+- [x] Bump `PROJECT_SCHEMA_VERSION` to 14 and restamp the three checked examples; keep
+  `.framerlib` at schema v3.
+- [x] Extend the one core `Fact` vocabulary with placed-object containment and parameterized
+  directional clearance, plus standards `PlacedObjects` selector scope.
+- [x] Implement placed-object room binding, rotated footprints, finished-wall/other-object
+  obstacles, containment, and directional clearance in `framer-standards::FactSnapshot` rather
+  than analysis or app.
+- [x] Adapt persisted assertions and project waivers into the common intent report, graph, and
+  existing plan-diagnostic channel while leaving those outputs derived.
+- [x] Add app author/edit/delete/waive controls, transient invalid-state guards,
+  all-participant focus, dependent-intent cleanup, and ordinary validated edit/history routing;
+  add the corresponding history, UI harness, and screenshot-deck cases.
+- [x] Run focused core/standards/analysis/app tests, the screenshot deck, and the complete format,
+  strict clippy, locked all-feature workspace test, and markdown-link gates on the final combined
+  diff.
+- [ ] Record final verification evidence, complete review, and merge the Slice 3 PR.
+
+Pre-PR verification on 2026-07-16 passed `cargo fmt --all -- --check`, strict workspace Clippy,
+the locked all-feature workspace test suite (including all eight GPU parity tests), the 61-frame
+off-screen UI deck with direct review of the new authoring/waiver/focus states, the 392-link local
+Markdown check, and `git diff --check`. Focused core, standards, analysis, app-history, UI-harness,
+and Plan multi-selection tests also passed. PR review, latest-head CI, and merge remain pending.
+
+**Slice 3 exit criteria:** A user can persist, reopen, evaluate, inspect, focus, edit/delete, and
+waive one real cross-object containment/clearance requirement or preference; an unresolved
+requirement is saveable and clearly visible.
 
 ### Slice 4 — Candidate authored changes and explicit resolution
 

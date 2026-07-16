@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{BuildingModel, ModelError};
 
 pub const PROJECT_FORMAT: &str = "framer.project";
-pub const PROJECT_SCHEMA_VERSION: u32 = 13;
-/// The model is v13-only — older on-disk shapes and pre-standards schemas are no
+pub const PROJECT_SCHEMA_VERSION: u32 = 14;
+/// The model is v14-only — older on-disk shapes and pre-intent schemas are no
 /// longer representable, so loading them must fail with a clear
 /// unsupported-schema error rather than confusing serde errors.
 const MIN_SUPPORTED_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
@@ -66,7 +66,7 @@ pub fn save_project(model: &BuildingModel) -> Result<String, ProjectError> {
 }
 
 pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
-    // Peek the format/version header before deserializing into the v13-only model,
+    // Peek the format/version header before deserializing into the v14-only model,
     // so an old schema fails with an explicit unsupported-schema error instead of
     // serde errors about fields that no longer exist in the current model shape.
     let header: SchemaHeader = serde_json::from_str(source)?;
@@ -89,7 +89,7 @@ pub fn load_project(source: &str) -> Result<BuildingModel, ProjectError> {
 }
 
 /// A minimal view of a project file's header, used to reject unsupported formats
-/// and schema versions before attempting the full (v13-only) deserialization.
+/// and schema versions before attempting the full (v14-only) deserialization.
 /// Deliberately omits `deny_unknown_fields` so it ignores `authored` and any
 /// other body fields, including ones from older schemas.
 #[derive(Deserialize)]
@@ -114,19 +114,89 @@ pub enum ProjectError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Appearance, AssetRef, BuildingModel, ElementId, FramingDefaults, Furnishing,
-        FurnishingInstance, Length, LibraryStamp, Material, MaterialSource, MepInstance, MepObject,
-        MepObjectKind, ModelError, Opening, Point2, Provenance, QuarterTurn, TextureRole, Wall,
+        Appearance, AssetRef, AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode,
+        BuildingModel, ClearanceDatum, ClearanceDirection, CompareOp, ElementId, ExactIntentScope,
+        Fact, FactOperand, FramingDefaults, Furnishing, FurnishingInstance, IntentAssertion,
+        IntentDomain, IntentExpression, IntentOverride, IntentOverrideId, IntentSource, Length,
+        Level, LibraryStamp, Material, MaterialSource, MepInstance, MepObject, MepObjectKind,
+        ModelError, Opening, Point2, Predicate, PreferencePriority, ProjectIntentScope, Provenance,
+        QuarterTurn, Room, RoomUsage, TextureRole, Wall,
     };
 
     use super::*;
+
+    fn sample_intent(id: &str, mode: AuthoredIntentMode, fact: Fact) -> IntentAssertion {
+        let (op, value) = match fact {
+            Fact::PlacedObjectContainedInRoom => (CompareOp::Eq, FactOperand::FlagLiteral(true)),
+            Fact::PlacedObjectClearance { .. } => (
+                CompareOp::Ge,
+                FactOperand::LengthLiteral(Length::from_whole_inches(30)),
+            ),
+            _ => panic!("sample_intent only builds first-slice placed-object facts"),
+        };
+        IntentAssertion {
+            id: AuthoredIntentId::new(id),
+            domain: IntentDomain::SpatialProgram,
+            mode,
+            scope: ProjectIntentScope::Exact(ExactIntentScope {
+                subject: AuthoredEntityRef::FurnishingInstance(ElementId::new(
+                    "furnishing-instance-intent",
+                )),
+                participants: vec![AuthoredEntityRef::Room(ElementId::new("room-intent"))],
+            }),
+            expression: IntentExpression::FactPredicate(Predicate::Compare { fact, op, value }),
+            source: IntentSource::User,
+            rationale: Some("Keep the fixture usable".to_owned()),
+        }
+    }
+
+    fn intent_test_model() -> BuildingModel {
+        let mut model = BuildingModel::new();
+        model.furnishings.push(Furnishing::new(
+            "furnishing-intent",
+            "Fixture",
+            Length::from_whole_inches(30),
+            Length::from_whole_inches(24),
+            Length::from_whole_inches(36),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "furnishing-instance-intent",
+            "Placed fixture",
+            "furnishing-intent",
+            "level-1",
+            Point2::new(Length::from_feet(4.0), Length::from_feet(4.0)),
+        ));
+        model.rooms.push(Room::new(
+            "room-intent",
+            "Fixture room",
+            RoomUsage::Bathroom,
+            "level-1",
+            Point2::new(Length::from_feet(4.0), Length::from_feet(4.0)),
+        ));
+        model.intents.push(sample_intent(
+            "intent-contained",
+            AuthoredIntentMode::Requirement,
+            Fact::PlacedObjectContainedInRoom,
+        ));
+        model
+    }
+
+    fn intent_scope_mut(model: &mut BuildingModel) -> &mut ExactIntentScope {
+        let ProjectIntentScope::Exact(scope) = &mut model.intents[0].scope;
+        scope
+    }
+
+    fn intent_predicate_mut(model: &mut BuildingModel) -> &mut Predicate {
+        let IntentExpression::FactPredicate(predicate) = &mut model.intents[0].expression;
+        predicate
+    }
 
     #[test]
     fn save_project_writes_schema_versioned_authored_model() {
         let json = save_project(&BuildingModel::demo_wall()).unwrap();
 
         assert!(json.starts_with("{\n  \"format\": \"framer.project\",\n"));
-        assert!(json.contains("  \"schema_version\": 13,\n"));
+        assert!(json.contains("  \"schema_version\": 14,\n"));
         assert!(json.contains("  \"authored\": {"));
         assert!(json.contains("    \"levels\": ["));
         assert!(json.contains("    \"wall_joins\": ["));
@@ -174,6 +244,401 @@ mod tests {
             save_project(&first).unwrap(),
             save_project(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn authored_intents_and_overrides_round_trip_canonically() {
+        let mut first = intent_test_model();
+        first.intents.push(sample_intent(
+            "intent-clearance",
+            AuthoredIntentMode::Preference {
+                priority: PreferencePriority(200),
+            },
+            Fact::PlacedObjectClearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+            },
+        ));
+        // Deliberately insert both collections in reverse id order.
+        first.intent_overrides = vec![
+            IntentOverride::Waive {
+                id: IntentOverrideId::new("override-z"),
+                target: AuthoredIntentId::new("intent-contained"),
+                reason: "Existing-condition exception".to_owned(),
+                source: IntentSource::User,
+            },
+            IntentOverride::Waive {
+                id: IntentOverrideId::new("override-a"),
+                target: AuthoredIntentId::new("intent-clearance"),
+                reason: "Owner-approved clearance".to_owned(),
+                source: IntentSource::User,
+            },
+        ];
+        let mut second = first.clone();
+        second.intents.reverse();
+        second.intent_overrides.reverse();
+
+        let saved = save_project(&first).unwrap();
+        assert_eq!(saved, save_project(&second).unwrap());
+        assert!(saved.contains("\"id\": \"intent-clearance\""));
+        assert!(saved.contains("\"target\": \"intent-clearance\""));
+        assert!(saved.contains("\"PlacedObjectContainedInRoom\""));
+        assert!(saved.contains("\"PlacedObjectClearance\""));
+
+        let loaded = load_project(&saved).unwrap();
+        assert_eq!(
+            loaded
+                .intents
+                .iter()
+                .map(|intent| intent.id.0.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["intent-clearance", "intent-contained"]
+        );
+        assert_eq!(
+            loaded
+                .intent_overrides
+                .iter()
+                .map(|intent_override| intent_override.id().0.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["override-a", "override-z"]
+        );
+        assert_eq!(save_project(&loaded).unwrap(), saved);
+    }
+
+    #[test]
+    fn unresolved_authored_facts_remain_valid_model_intent() {
+        // This fixture has no enclosing wall loop, so the containment fact cannot be satisfied
+        // by the later fact provider. Model validation checks the request, not its outcome.
+        let model = intent_test_model();
+
+        assert!(model.validate().is_ok());
+        assert!(save_project(&model).is_ok());
+    }
+
+    #[test]
+    fn intent_and_override_ids_share_the_global_authored_id_pool() {
+        let mut model = intent_test_model();
+        model.intents[0].id = AuthoredIntentId::new("level-1");
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { id }) if id == ElementId::new("level-1")
+        ));
+
+        let mut model = intent_test_model();
+        model.intents.push(sample_intent(
+            "intent-contained",
+            AuthoredIntentMode::Requirement,
+            Fact::PlacedObjectContainedInRoom,
+        ));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { id })
+                if id == ElementId::new("intent-contained")
+        ));
+
+        let mut model = intent_test_model();
+        model.intent_overrides.push(IntentOverride::Waive {
+            id: IntentOverrideId::new("level-1"),
+            target: AuthoredIntentId::new("intent-contained"),
+            reason: "Exception".to_owned(),
+            source: IntentSource::User,
+        });
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::DuplicateElementId { id }) if id == ElementId::new("level-1")
+        ));
+    }
+
+    #[test]
+    fn first_slice_intent_domains_and_priorities_validate() {
+        for domain in [
+            IntentDomain::SpatialProgram,
+            IntentDomain::Mep,
+            IntentDomain::Compliance,
+            IntentDomain::OperationalMaintenance,
+        ] {
+            let mut model = intent_test_model();
+            model.intents[0].domain = domain;
+            assert!(model.validate().is_ok(), "{domain:?}");
+        }
+
+        let mut mep_model = intent_test_model();
+        mep_model.mep_objects.push(MepObject::new(
+            "mep-intent",
+            "Fixture",
+            MepObjectKind::Plumbing,
+            Length::from_whole_inches(18),
+            Length::from_whole_inches(24),
+            Length::from_whole_inches(30),
+        ));
+        mep_model.mep_instances.push(MepInstance::new(
+            "mep-instance-intent",
+            "Placed MEP fixture",
+            "mep-intent",
+            "level-1",
+            Point2::new(Length::from_feet(4.0), Length::from_feet(4.0)),
+        ));
+        intent_scope_mut(&mut mep_model).subject =
+            AuthoredEntityRef::MepInstance(ElementId::new("mep-instance-intent"));
+        assert!(mep_model.validate().is_ok());
+
+        let mut model = intent_test_model();
+        model.intents[0].domain = IntentDomain::Construction;
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentUnsupportedDomain {
+                domain: IntentDomain::Construction,
+                ..
+            })
+        ));
+
+        let mut model = intent_test_model();
+        model.intents[0].mode = AuthoredIntentMode::Preference {
+            priority: PreferencePriority(0),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentInvalidPreferencePriority { .. })
+        ));
+
+        model.intents[0].mode = AuthoredIntentMode::Preference {
+            priority: PreferencePriority(1),
+        };
+        assert!(model.validate().is_ok());
+        assert!(PreferencePriority(2) > PreferencePriority(1));
+    }
+
+    #[test]
+    fn exact_intent_scope_rejects_invalid_relations() {
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).participants.clear();
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeHasNoParticipants { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model)
+            .participants
+            .push(AuthoredEntityRef::Room(ElementId::new("room-intent")));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeDuplicateParticipant { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).subject =
+            AuthoredEntityRef::Room(ElementId::new("room-intent"));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeSelfRelation { .. })
+        ));
+
+        let mut model = intent_test_model();
+        model.rooms.push(Room::new(
+            "room-second",
+            "Second room",
+            RoomUsage::Bathroom,
+            "level-1",
+            Point2::new(Length::from_feet(8.0), Length::from_feet(4.0)),
+        ));
+        intent_scope_mut(&mut model)
+            .participants
+            .push(AuthoredEntityRef::Room(ElementId::new("room-second")));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeInvalidParticipantCount { found: 2, .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).subject = AuthoredEntityRef::Level(ElementId::new("level-1"));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeUnsupportedSubject { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).participants =
+            vec![AuthoredEntityRef::Level(ElementId::new("level-1"))];
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeUnsupportedParticipant { .. })
+        ));
+
+        let mut model = intent_test_model();
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.rooms[0].level = ElementId::new("level-2");
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentScopeLevelMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_intent_scope_distinguishes_unknown_and_wrong_kind_references() {
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).subject =
+            AuthoredEntityRef::FurnishingInstance(ElementId::new("missing-instance"));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentReferenceUnknown { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).subject =
+            AuthoredEntityRef::FurnishingInstance(ElementId::new("room-intent"));
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentReferenceWrongKind { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).participants =
+            vec![AuthoredEntityRef::Room(ElementId::new("missing-room"))];
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentReferenceUnknown { .. })
+        ));
+
+        let mut model = intent_test_model();
+        intent_scope_mut(&mut model).participants = vec![AuthoredEntityRef::Room(ElementId::new(
+            "furnishing-instance-intent",
+        ))];
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentReferenceWrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn intent_predicates_reject_empty_wrong_typed_and_negative_requests() {
+        for predicate in [Predicate::All(Vec::new()), Predicate::Any(Vec::new())] {
+            let mut model = intent_test_model();
+            *intent_predicate_mut(&mut model) = predicate;
+            assert!(matches!(
+                model.validate(),
+                Err(ModelError::IntentPredicateEmptyGroup { .. })
+            ));
+        }
+
+        let mut model = intent_test_model();
+        *intent_predicate_mut(&mut model) = Predicate::Compare {
+            fact: Fact::WallLength,
+            op: CompareOp::Ge,
+            value: FactOperand::LengthLiteral(Length::from_feet(1.0)),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentPredicateWrongSubject { .. })
+        ));
+
+        let mut model = intent_test_model();
+        *intent_predicate_mut(&mut model) = Predicate::Compare {
+            fact: Fact::PlacedObjectContainedInRoom,
+            op: CompareOp::Eq,
+            value: FactOperand::Fact(Fact::WallIsExterior),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentPredicateWrongSubject { .. })
+        ));
+
+        let mut model = intent_test_model();
+        *intent_predicate_mut(&mut model) = Predicate::Compare {
+            fact: Fact::PlacedObjectContainedInRoom,
+            op: CompareOp::Eq,
+            value: FactOperand::LengthLiteral(Length::ZERO),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentPredicateTypeMismatch { .. })
+        ));
+
+        let mut model = intent_test_model();
+        *intent_predicate_mut(&mut model) = Predicate::Compare {
+            fact: Fact::PlacedObjectContainedInRoom,
+            op: CompareOp::Ge,
+            value: FactOperand::FlagLiteral(true),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentPredicateInvalidOperator { .. })
+        ));
+
+        let mut model = intent_test_model();
+        *intent_predicate_mut(&mut model) = Predicate::Compare {
+            fact: Fact::PlacedObjectClearance {
+                direction: ClearanceDirection::Left,
+                datum: ClearanceDatum::Centerline,
+            },
+            op: CompareOp::Ge,
+            value: FactOperand::LengthLiteral(Length::from_ticks(-1)),
+        };
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentClearanceNegativeThreshold { .. })
+        ));
+    }
+
+    #[test]
+    fn intent_overrides_require_one_known_target_and_nonempty_reason() {
+        let mut model = intent_test_model();
+        model.intent_overrides.push(IntentOverride::Waive {
+            id: IntentOverrideId::new("override-unknown"),
+            target: AuthoredIntentId::new("intent-missing"),
+            reason: "Exception".to_owned(),
+            source: IntentSource::User,
+        });
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentOverrideReferencesUnknownTarget { .. })
+        ));
+
+        let mut model = intent_test_model();
+        model.intent_overrides.push(IntentOverride::Waive {
+            id: IntentOverrideId::new("override-empty"),
+            target: AuthoredIntentId::new("intent-contained"),
+            reason: "  \n ".to_owned(),
+            source: IntentSource::User,
+        });
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentOverrideMissingReason { .. })
+        ));
+
+        let mut model = intent_test_model();
+        model.intent_overrides = vec![
+            IntentOverride::Waive {
+                id: IntentOverrideId::new("override-first"),
+                target: AuthoredIntentId::new("intent-contained"),
+                reason: "First".to_owned(),
+                source: IntentSource::User,
+            },
+            IntentOverride::Waive {
+                id: IntentOverrideId::new("override-second"),
+                target: AuthoredIntentId::new("intent-contained"),
+                reason: "Second".to_owned(),
+                source: IntentSource::User,
+            },
+        ];
+        assert!(matches!(
+            model.validate(),
+            Err(ModelError::IntentOverrideDuplicateTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn first_slice_rejects_unimplemented_authored_modes_and_expressions() {
+        let saved = save_project(&intent_test_model()).unwrap();
+        for unsupported_mode in ["Objective", "Assumption"] {
+            let source = saved.replacen("\"Requirement\"", &format!("\"{unsupported_mode}\""), 1);
+            assert!(matches!(load_project(&source), Err(ProjectError::Json(_))));
+        }
+
+        let source = saved.replacen("\"FactPredicate\"", "\"Relationship\"", 1);
+        assert!(matches!(load_project(&source), Err(ProjectError::Json(_))));
     }
 
     #[test]
@@ -383,7 +848,7 @@ mod tests {
     fn load_project_rejects_unknown_top_level_data() {
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 13,
+  "schema_version": 14,
   "authored": {
     "site": {"jurisdiction": ""},
     "standards": [],
@@ -399,8 +864,8 @@ mod tests {
     #[test]
     fn load_project_rejects_old_schema_with_unsupported_version_error() {
         // A v9 document must be rejected by the header peek with a clear
-        // unsupported-schema error, NOT serde errors from the current v13 model.
-        // The pre-v13 body remains self-contained, but schema support is v13-only.
+        // unsupported-schema error, NOT serde errors from the current v14 model.
+        // The pre-v14 body remains self-contained, but schema support is v14-only.
         let source = r#"{
   "format": "framer.project",
   "schema_version": 9,
@@ -430,12 +895,12 @@ mod tests {
 
     #[test]
     fn load_project_rejects_immediately_previous_schema_version() {
-        // The immediately-previous schema (v12) is no longer loadable: the bump
-        // to v13 is a hard cutover, not migrated in place. The header peek rejects
+        // The immediately-previous schema (v13) is no longer loadable: the bump
+        // to v14 is a hard cutover, not migrated in place. The header peek rejects
         // it before the body is deserialized, so a minimal body suffices.
         let source = r#"{
   "format": "framer.project",
-  "schema_version": 12,
+  "schema_version": 13,
   "authored": {
     "walls": []
   }
@@ -444,7 +909,7 @@ mod tests {
         assert!(matches!(
             load_project(source),
             Err(ProjectError::UnsupportedSchemaVersion {
-                found: 12,
+                found: 13,
                 supported: PROJECT_SCHEMA_VERSION
             })
         ));
@@ -789,7 +1254,7 @@ mod tests {
         ));
 
         let json = save_project(&model).unwrap();
-        assert!(json.contains("\"schema_version\": 13,"));
+        assert!(json.contains("\"schema_version\": 14,"));
         assert!(json.contains("\"rooms\": ["));
         assert!(json.contains("\"usage\": \"Living\""));
 

@@ -1,4 +1,7 @@
-use framer_core::{BuildingModel, FramingDefaults, Length, Opening, Point2, Wall, WallEnd};
+use framer_core::{
+    AuthoredEntityRef, AuthoredIntentId, BuildingModel, ElementId, FramingDefaults,
+    IntentOverrideId, Length, Opening, Point2, ProjectIntentScope, Wall, WallEnd,
+};
 
 const OPENING_MIN_SIZE: Length = Length::from_whole_inches(12);
 
@@ -543,6 +546,95 @@ pub(super) fn next_mep_instance_id(model: &BuildingModel) -> (String, usize) {
         }
         index += 1;
     }
+}
+
+/// Generate a globally free project-assertion id. Assertions share the authored element-id
+/// namespace even though they are not themselves `AuthoredEntityRef` nodes.
+pub(super) fn next_intent_id(model: &BuildingModel) -> AuthoredIntentId {
+    let mut index = model.intents.len() + 1;
+    loop {
+        let id = ElementId::new(format!("intent-{index}"));
+        if !element_id_in_use(model, &id) {
+            return AuthoredIntentId(id);
+        }
+        index += 1;
+    }
+}
+
+/// Generate a globally free project-intent override id.
+pub(super) fn next_intent_override_id(model: &BuildingModel) -> IntentOverrideId {
+    let mut index = model.intent_overrides.len() + 1;
+    loop {
+        let id = ElementId::new(format!("intent-override-{index}"));
+        if !element_id_in_use(model, &id) {
+            return IntentOverrideId(id);
+        }
+        index += 1;
+    }
+}
+
+/// Remove every assertion that names `entity`, then remove overrides targeting those assertions.
+/// Callers pair this with the entity deletion in the same `FramerApp::edit()` transaction.
+pub(super) fn intent_references_entity(model: &BuildingModel, entity: &AuthoredEntityRef) -> bool {
+    model.intents.iter().any(|intent| {
+        let ProjectIntentScope::Exact(scope) = &intent.scope;
+        &scope.subject == entity || scope.participants.iter().any(|item| item == entity)
+    })
+}
+
+pub(super) fn remove_dependent_intents(
+    model: &mut BuildingModel,
+    entity: &AuthoredEntityRef,
+) -> usize {
+    let removed = model
+        .intents
+        .iter()
+        .filter(|intent| {
+            let ProjectIntentScope::Exact(scope) = &intent.scope;
+            &scope.subject == entity || scope.participants.iter().any(|item| item == entity)
+        })
+        .map(|intent| intent.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if removed.is_empty() {
+        return 0;
+    }
+
+    model.intents.retain(|intent| !removed.contains(&intent.id));
+    model
+        .intent_overrides
+        .retain(|intent_override| !removed.contains(intent_override.target()));
+    removed.len()
+}
+
+fn element_id_in_use(model: &BuildingModel, id: &ElementId) -> bool {
+    if model.intents.iter().any(|intent| intent.id.0 == *id) {
+        return true;
+    }
+
+    [
+        AuthoredEntityRef::StandardsPack(id.clone()),
+        AuthoredEntityRef::Material(id.clone()),
+        AuthoredEntityRef::ConstructionSystem(id.clone()),
+        AuthoredEntityRef::Furnishing(id.clone()),
+        AuthoredEntityRef::MepObject(id.clone()),
+        AuthoredEntityRef::Level(id.clone()),
+        AuthoredEntityRef::Wall(id.clone()),
+        AuthoredEntityRef::Opening(id.clone()),
+        AuthoredEntityRef::Dimension(id.clone()),
+        AuthoredEntityRef::WallJoin(id.clone()),
+        AuthoredEntityRef::Room(id.clone()),
+        AuthoredEntityRef::FurnishingInstance(id.clone()),
+        AuthoredEntityRef::MepInstance(id.clone()),
+        AuthoredEntityRef::RoofPlane(id.clone()),
+        AuthoredEntityRef::RoofOpening(id.clone()),
+        AuthoredEntityRef::Ceiling(id.clone()),
+        AuthoredEntityRef::FloorDeck(id.clone()),
+        AuthoredEntityRef::BracedWallLine(id.clone()),
+        AuthoredEntityRef::BracedPanel(id.clone()),
+        AuthoredEntityRef::IntentOverride(IntentOverrideId(id.clone())),
+    ]
+    .iter()
+    .any(|reference| model.authored_entity_exists(reference))
 }
 
 pub(super) fn next_opening_id(wall: &Wall, prefix: &str) -> (String, usize) {

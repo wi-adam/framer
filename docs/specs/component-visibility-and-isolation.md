@@ -88,7 +88,8 @@ workflow-strip chrome.
   generated Plan views. The path-traced Render workspace is not silently
   filtered and exposes no isolation commands in this slice.
 - These controls are presentation state. They do not mutate authored intent,
-  change solver output, or change `.framer` schema v13. Explicit component
+  change solver output, or persist in `.framer`. The feature left then-current
+  schema v13 unchanged, and the state remains absent from current schema v14. Explicit component
   visibility and isolation actions do produce session-only undo entries. Undo
   snapshots restore the complete visibility/isolation state and component
   selection alongside authored intent without persisting either presentation

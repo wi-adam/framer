@@ -227,7 +227,7 @@ persisted intent or the `.framer` schema.
   roof keeps the plumb cuts but omits the birdsmouth rather than inventing a bearing. Ridge boards,
   blocking, hip/valley/jack members,
   rake plates, and roof systems tagged `Truss` keep their existing member geometry. This is derived
-  Plan-mode presentation only: authored roof intent, `.framer` schema v13, and BOM cut lengths do
+  Plan-mode presentation only: authored roof intent, current `.framer` schema v14, and BOM cut lengths do
   not change.
 
 ## Decisions (locked)
@@ -412,7 +412,8 @@ non-axis-aligned framing member**.
   collections are canonicalized.
 - **Closed enums for things the app reasons about** (`SystemKind`, `LayerFunction`,
   `MemberKind`, `MemberFamily`, `OpeningKind`); open data only for material substance.
-- **`.framer` is single-version (currently v13; v2 Slice A2 introduced v12 and v1 used v11); no
+- **`.framer` is single-version (currently v14; the intent-model Slice 3 introduced v14,
+  standards introduced v13, v2 Slice A2 introduced v12, and v1 used v11); no
   migration** — older files are rejected, not upgraded (current policy). New persisted structs use
   `#[serde(deny_unknown_fields)]` + serde defaults so empty projects/fixtures stay byte-stable
   (flat ceilings omit `slope`, so the v1 examples are byte-identical under v12).

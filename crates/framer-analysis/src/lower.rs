@@ -2,14 +2,16 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use framer_core::{
-    Applicability, AuthoredEntityRef, BuildingModel, CheckSeverity, DimensionKind, ElementId, Fact,
-    PropertyValue,
+    Applicability, AuthoredEntityRef, AuthoredIntentMode, BuildingModel, CheckSeverity,
+    DimensionKind, ElementId, ExactIntentScope, Fact, IntentAssertion, IntentExpression,
+    IntentOverride, IntentSource, ProjectIntentScope, PropertyValue, ResolvedStandards,
 };
 use framer_geometry::{GeometryAudit, GeometryViolation};
 use framer_solver::{DiagnosticSeverity, PlanDiagnostic, ProjectFramePlan, RuleRef};
 use framer_standards::{
-    ComplianceEntry, ComplianceReport, FactSubject, FactUnknownKind, Outcome, StandardsEvaluation,
-    StandardsEvaluationDetail, SyntheticEntryKind, Tri,
+    ComplianceEntry, ComplianceReport, FactSnapshot, FactSubject, FactUnknownKind, Outcome,
+    PlacedObjectRef, PredicateObservation, StandardsEvaluation, StandardsEvaluationDetail,
+    SyntheticEntryKind, Tri,
 };
 
 use crate::{
@@ -37,6 +39,107 @@ pub(crate) fn compile_current_intent(
 
 type DiagnosticEvidenceIndex =
     BTreeMap<(DiagnosticProvider, String, Option<AuthoredEntityRef>), Vec<DiagnosticRef>>;
+
+/// One exact, revision-neutral evaluation of a persisted authored assertion.
+///
+/// The predicate result is produced by `framer-standards::FactSnapshot`; analysis only adapts it
+/// to the common outcome/evidence and diagnostics protocols.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthoredIntentEvaluation {
+    assertion: IntentAssertion,
+    subject: FactSubject,
+    predicate: PredicateObservation,
+    outcome: IntentOutcome,
+    project_waiver: Option<(framer_core::IntentOverrideId, IntentSource, String)>,
+}
+
+pub(crate) fn evaluate_authored_intent(
+    model: &BuildingModel,
+    resolved: &ResolvedStandards,
+    plan: &ProjectFramePlan,
+) -> Vec<AuthoredIntentEvaluation> {
+    let snapshot = FactSnapshot::new(model, resolved, plan);
+    let mut evaluations = model
+        .intents
+        .iter()
+        .filter_map(|assertion| {
+            let ProjectIntentScope::Exact(ExactIntentScope {
+                subject,
+                participants,
+            }) = &assertion.scope;
+            let object = PlacedObjectRef::from_authored(subject)?;
+            let room = participants
+                .iter()
+                .find_map(|participant| match participant {
+                    AuthoredEntityRef::Room(room) => Some(room.clone()),
+                    _ => None,
+                })?;
+            let subject = FactSubject::placed_object_exact(object, room);
+            let IntentExpression::FactPredicate(expression) = &assertion.expression;
+            let predicate = snapshot.evaluate_predicate(expression, &subject);
+            let project_waiver = model.intent_overrides.iter().find_map(|intent_override| {
+                let IntentOverride::Waive {
+                    id,
+                    target,
+                    reason,
+                    source,
+                } = intent_override;
+                (target == &assertion.id).then(|| (id.clone(), *source, reason.clone()))
+            });
+            let outcome = if let Some((override_id, _, reason)) = &project_waiver {
+                IntentOutcome::Waived {
+                    waiver: WaiverRef::Project {
+                        override_id: override_id.clone(),
+                    },
+                    reason: reason.clone(),
+                }
+            } else {
+                match predicate.result {
+                    Tri::True => IntentOutcome::Satisfied,
+                    Tri::False => IntentOutcome::Violated,
+                    Tri::Unknown => IntentOutcome::Unknown(unknown_from_predicate(&predicate)),
+                }
+            };
+            Some(AuthoredIntentEvaluation {
+                assertion: assertion.clone(),
+                subject,
+                predicate,
+                outcome,
+                project_waiver,
+            })
+        })
+        .collect::<Vec<_>>();
+    evaluations.sort_by(|left, right| left.assertion.id.cmp(&right.assertion.id));
+    evaluations
+}
+
+fn unknown_from_predicate(predicate: &PredicateObservation) -> IntentUnknown {
+    let unknown = predicate.observed_facts.iter().find_map(|observed| {
+        let framer_standards::FactObservation::Unknown(unknown) = &observed.observation else {
+            return None;
+        };
+        Some(unknown)
+    });
+    let Some(unknown) = unknown else {
+        return IntentUnknown {
+            kind: IntentUnknownKind::EvaluationUnavailable,
+            detail: "The shared predicate evaluator returned unknown without an unavailable fact."
+                .to_owned(),
+        };
+    };
+    IntentUnknown {
+        kind: match unknown.kind {
+            FactUnknownKind::MissingInput => IntentUnknownKind::MissingInput,
+            FactUnknownKind::UnresolvedSubject => IntentUnknownKind::UnresolvedSubject,
+            FactUnknownKind::WrongSubjectKind => IntentUnknownKind::WrongSubjectKind,
+            FactUnknownKind::UnsupportedCondition => IntentUnknownKind::UnsupportedCondition,
+        },
+        detail: format!(
+            "Fact {:?} is unavailable for {:?} ({:?}).",
+            unknown.fact, unknown.subject, unknown.kind
+        ),
+    }
+}
 
 fn current_intent_records(
     model: &BuildingModel,
@@ -134,6 +237,7 @@ fn compile_driving_dimensions(
                 mode: BooleanIntentMode::Requirement,
                 expression,
                 outcome,
+                predicate_observation: None,
                 evidence,
             }));
         }
@@ -232,6 +336,7 @@ fn compile_construction_selection(
             selected: selected.clone(),
         },
         outcome,
+        predicate_observation: None,
         evidence: vec![
             IntentEvidenceRef::Authored(host),
             IntentEvidenceRef::Authored(system),
@@ -361,6 +466,7 @@ pub(crate) fn compile_project_intent(
     plan: &ProjectFramePlan,
     geometry_audit: &GeometryAudit,
     standards: &StandardsEvaluation,
+    authored_intent: &[AuthoredIntentEvaluation],
     revision: GraphRevision,
 ) -> IntentReport {
     let diagnostics = canonical_plan_diagnostic_records(model, plan, revision);
@@ -400,6 +506,13 @@ pub(crate) fn compile_project_intent(
             .push(reference.clone());
     }
 
+    lower_authored_intent_records(
+        authored_intent,
+        &diagnostics_by_key,
+        &mut records,
+        &mut waivers,
+    );
+
     lower_standards_records(
         model,
         standards,
@@ -412,6 +525,86 @@ pub(crate) fn compile_project_intent(
     lower_geometry_records(model, geometry_audit, revision, &mut records);
 
     IntentReport::from_parts_with_diagnostics(revision, records, waivers, diagnostic_payloads)
+}
+
+fn lower_authored_intent_records(
+    evaluations: &[AuthoredIntentEvaluation],
+    diagnostics_by_key: &BTreeMap<(String, Option<ElementId>, String), Vec<DiagnosticRef>>,
+    records: &mut Vec<IntentRecord>,
+    waivers: &mut Vec<WaiverRecord>,
+) {
+    for evaluation in evaluations {
+        let assertion = &evaluation.assertion;
+        let participants = evaluation.subject.authored_participants();
+        let mut qualified = Vec::with_capacity(participants.len());
+        for (semantic_order, participant) in participants.iter().cloned().enumerate() {
+            qualified.push(AssertionParticipant::new(
+                participant,
+                if semantic_order == 0 {
+                    AssertionParticipantRole::Subject
+                } else {
+                    AssertionParticipantRole::Host
+                },
+                semantic_order as u32,
+            ));
+        }
+        let diagnostic = authored_intent_plan_diagnostic(evaluation).and_then(|diagnostic| {
+            diagnostics_by_key
+                .get(&(diagnostic.code, diagnostic.source, diagnostic.message))
+                .and_then(|matches| matches.first())
+                .cloned()
+        });
+        let mut evidence = participants
+            .iter()
+            .cloned()
+            .map(IntentEvidenceRef::Authored)
+            .collect::<Vec<_>>();
+        if let Some(diagnostic) = diagnostic {
+            evidence.push(IntentEvidenceRef::Diagnostic(diagnostic));
+        }
+        let reference = AssertionRef::Authored(assertion.id.clone());
+        records.push(IntentRecord::Boolean(BooleanIntentRecord {
+            assertion: CompiledAssertion {
+                reference: reference.clone(),
+                domain: assertion.domain,
+                scope: AssertionScope::Exact(participants.clone()),
+                participants: qualified,
+                source: match assertion.source {
+                    IntentSource::User => AssertionSource::User,
+                },
+                rationale: assertion.rationale.clone().unwrap_or_else(|| {
+                    "Project-authored placed-object containment or clearance intent.".to_owned()
+                }),
+            },
+            mode: assertion.mode,
+            expression: match &assertion.expression {
+                IntentExpression::FactPredicate(predicate) => {
+                    BooleanExpression::Predicate(predicate.clone())
+                }
+            },
+            outcome: evaluation.outcome.clone(),
+            predicate_observation: Some(evaluation.predicate.clone()),
+            evidence: evidence.clone(),
+        }));
+
+        if let Some((override_id, source, reason)) = &evaluation.project_waiver {
+            let override_entity = AuthoredEntityRef::IntentOverride(override_id.clone());
+            let mut provenance = evidence;
+            provenance.push(IntentEvidenceRef::Authored(override_entity.clone()));
+            waivers.push(WaiverRecord {
+                reference: WaiverRef::Project {
+                    override_id: override_id.clone(),
+                },
+                targets: vec![reference],
+                authority: match source {
+                    IntentSource::User => AssertionSource::User,
+                },
+                source: AssertionSource::Authored(override_entity),
+                rationale: reason.clone(),
+                provenance,
+            });
+        }
+    }
 }
 
 /// Lower common current outcomes that do not already own a `PlanDiagnostic` payload.
@@ -473,6 +666,81 @@ pub(crate) fn current_intent_plan_diagnostics(
     diagnostics
 }
 
+pub(crate) fn authored_intent_plan_diagnostics(
+    evaluations: &[AuthoredIntentEvaluation],
+) -> Vec<PlanDiagnostic> {
+    evaluations
+        .iter()
+        .filter_map(authored_intent_plan_diagnostic)
+        .collect()
+}
+
+fn authored_intent_plan_diagnostic(
+    evaluation: &AuthoredIntentEvaluation,
+) -> Option<PlanDiagnostic> {
+    let assertion = &evaluation.assertion;
+    let rationale = assertion
+        .rationale
+        .as_deref()
+        .unwrap_or("Project-authored placed-object containment or clearance intent");
+    let (severity, code, message) = match &evaluation.outcome {
+        IntentOutcome::Violated => match assertion.mode {
+            AuthoredIntentMode::Requirement => (
+                DiagnosticSeverity::Violation,
+                "intent.assertion.violated",
+                format!(
+                    "Required intent '{}' is violated: {rationale}.",
+                    assertion.id.0.0
+                ),
+            ),
+            AuthoredIntentMode::Preference { .. } => (
+                DiagnosticSeverity::Warning,
+                "intent.assertion.preference-unmet",
+                format!(
+                    "Preferred intent '{}' is not met: {rationale}.",
+                    assertion.id.0.0
+                ),
+            ),
+        },
+        IntentOutcome::Unknown(unknown) => (
+            if matches!(
+                unknown.kind,
+                IntentUnknownKind::UnsupportedCondition
+                    | IntentUnknownKind::WrongSubjectKind
+                    | IntentUnknownKind::EvaluationUnavailable
+            ) {
+                DiagnosticSeverity::Unsupported
+            } else {
+                DiagnosticSeverity::NeedsReview
+            },
+            if matches!(
+                unknown.kind,
+                IntentUnknownKind::UnsupportedCondition
+                    | IntentUnknownKind::WrongSubjectKind
+                    | IntentUnknownKind::EvaluationUnavailable
+            ) {
+                "intent.assertion.unsupported"
+            } else {
+                "intent.assertion.unknown"
+            },
+            format!(
+                "Intent '{}' needs review: {}",
+                assertion.id.0.0, unknown.detail
+            ),
+        ),
+        IntentOutcome::Satisfied | IntentOutcome::Waived { .. } | IntentOutcome::NotApplicable => {
+            return None;
+        }
+    };
+    Some(PlanDiagnostic {
+        severity,
+        code: code.to_owned(),
+        source: Some(evaluation.subject.element().clone()),
+        message,
+        rule: None,
+    })
+}
+
 fn geometry_plan_diagnostic(violation: &GeometryViolation) -> PlanDiagnostic {
     let severity = match violation {
         GeometryViolation::BodyUnbuildable(_) | GeometryViolation::Overlap(_) => {
@@ -508,16 +776,25 @@ fn lower_standards_records(
         else {
             continue;
         };
-        let subject = detail
+        let mut subject_participants = detail
             .subject
             .as_ref()
-            .map(fact_subject_to_authored)
-            .or_else(|| {
-                entry
-                    .element
-                    .as_ref()
-                    .and_then(|id| authored_entity_for_element(model, id))
-            });
+            .map(FactSubject::authored_participants)
+            .unwrap_or_default();
+        if subject_participants.is_empty()
+            && let Some(subject) = entry
+                .element
+                .as_ref()
+                .and_then(|id| authored_entity_for_element(model, id))
+        {
+            subject_participants.push(subject);
+        }
+        let subject = subject_participants.first().cloned().or_else(|| {
+            entry
+                .element
+                .as_ref()
+                .and_then(|id| authored_entity_for_element(model, id))
+        });
         let rule_ref = StandardsRuleRef::resolved(entry.pack.clone(), entry.rule.clone());
         let assertion_ref = AssertionRef::Derived(DerivedAssertionId::new(
             revision,
@@ -529,23 +806,31 @@ fn lower_standards_records(
             },
         ));
         let (mode, outcome, waiver) = standards_outcome(entry, detail);
-        let participants = subject
+        let participants = subject_participants
             .iter()
             .cloned()
-            .map(|subject| {
-                AssertionParticipant::new(subject, AssertionParticipantRole::EvaluatedEntity, 0)
+            .enumerate()
+            .map(|(semantic_order, subject)| {
+                AssertionParticipant::new(
+                    subject,
+                    AssertionParticipantRole::EvaluatedEntity,
+                    semantic_order as u32,
+                )
             })
             .collect::<Vec<_>>();
-        let scope = subject.iter().cloned().collect::<Vec<_>>();
+        let scope = subject_participants.clone();
         let mut evidence = vec![
             IntentEvidenceRef::StandardsRule(rule_ref.clone()),
             IntentEvidenceRef::ComplianceEntry(entry_ref),
             IntentEvidenceRef::Authored(AuthoredEntityRef::Site),
         ];
         evidence.extend(site_assumption_evidence(detail, revision));
-        if let Some(subject) = &subject {
-            evidence.push(IntentEvidenceRef::Authored(subject.clone()));
-        }
+        evidence.extend(
+            subject_participants
+                .iter()
+                .cloned()
+                .map(IntentEvidenceRef::Authored),
+        );
         if let Some(diagnostic) = diagnostics_by_key
             .get(&(
                 entry.rule.clone(),
@@ -583,6 +868,7 @@ fn lower_standards_records(
                     code: entry.rule.clone(),
                 }),
             outcome,
+            predicate_observation: detail.predicate.clone(),
             evidence: evidence.clone(),
         }));
 
@@ -594,6 +880,9 @@ fn lower_standards_records(
             waivers.push(WaiverRecord {
                 reference,
                 targets: vec![assertion_ref],
+                authority: AssertionSource::Authored(AuthoredEntityRef::StandardsPack(
+                    overlay_pack.clone(),
+                )),
                 source: AssertionSource::Authored(AuthoredEntityRef::StandardsPack(overlay_pack)),
                 rationale: reason,
                 provenance,
@@ -633,7 +922,9 @@ fn site_assumption_evidence(
                 | Fact::RoomAreaSquareInches
                 | Fact::RoomCeilingHeight
                 | Fact::BracedLineLength
-                | Fact::BracedLineProvidedLength => {}
+                | Fact::BracedLineProvidedLength
+                | Fact::PlacedObjectContainedInRoom
+                | Fact::PlacedObjectClearance { .. } => {}
             }
         }
     }
@@ -885,6 +1176,7 @@ fn lower_nonstandards_diagnostics(
                 code: diagnostic.code,
             },
             outcome,
+            predicate_observation: None,
             evidence,
         }));
     }
@@ -1030,6 +1322,7 @@ fn lower_geometry_records(
                 code: violation.code().to_owned(),
             },
             outcome,
+            predicate_observation: None,
             evidence,
         }));
     }
@@ -1244,16 +1537,16 @@ pub(crate) fn authored_entity_for_element(
     {
         return Some(AuthoredEntityRef::BracedWallLine(id.clone()));
     }
-    None
-}
-
-fn fact_subject_to_authored(subject: &FactSubject) -> AuthoredEntityRef {
-    match subject {
-        FactSubject::Wall(id) => AuthoredEntityRef::Wall(id.clone()),
-        FactSubject::Opening(id) => AuthoredEntityRef::Opening(id.clone()),
-        FactSubject::Room(id) => AuthoredEntityRef::Room(id.clone()),
-        FactSubject::BracedWallLine(id) => AuthoredEntityRef::BracedWallLine(id.clone()),
+    if let Some(intent_override) = model
+        .intent_overrides
+        .iter()
+        .find(|intent_override| intent_override.id().0 == *id)
+    {
+        return Some(AuthoredEntityRef::IntentOverride(
+            intent_override.id().clone(),
+        ));
     }
+    None
 }
 
 pub(crate) fn diagnostic_provider(diagnostic: &PlanDiagnostic) -> DiagnosticProvider {
@@ -1338,9 +1631,12 @@ fn compare_compliance_entry(left: &ComplianceEntry, right: &ComplianceEntry) -> 
 #[cfg(test)]
 mod tests {
     use framer_core::{
-        Applicability, CheckScope, CompareOp, ComplianceCheck, DimensionAnchor,
-        DimensionConstraint, DimensionDirection, DimensionKind, Fact, FactOperand, Length,
-        Predicate, ResolutionAction, RuleOverlay,
+        Applicability, AuthoredIntentId, AuthoredIntentMode, CheckScope, ClearanceDatum,
+        ClearanceDirection, CompareOp, ComplianceCheck, DimensionAnchor, DimensionConstraint,
+        DimensionDirection, DimensionKind, ExactIntentScope, Fact, FactOperand, Furnishing,
+        FurnishingInstance, IntentAssertion, IntentDomain, IntentExpression, IntentOverride,
+        IntentOverrideId, IntentSource, Length, Point2, Predicate, PreferencePriority,
+        ProjectIntentScope, ResolutionAction, RuleOverlay,
     };
     use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic, PhysicalScene};
     use framer_solver::{MemberKind, generate_project_plan};
@@ -1348,6 +1644,306 @@ mod tests {
 
     use super::*;
     use crate::{ProjectNodeRef, RelationshipKind};
+
+    fn authored_clearance_model(mode: AuthoredIntentMode, threshold: Length) -> BuildingModel {
+        let mut model = BuildingModel::demo_two_bedroom();
+        model.furnishings.push(Furnishing::new(
+            "furnishing-test-fixture",
+            "Test fixture",
+            Length::from_feet(2.0),
+            Length::from_feet(2.0),
+            Length::from_feet(3.0),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "fixture-instance",
+            "Fixture instance",
+            "furnishing-test-fixture",
+            "level-1",
+            Point2::new(Length::from_feet(6.0), Length::from_feet(4.0)),
+        ));
+        model.intents.push(IntentAssertion {
+            id: AuthoredIntentId::new("intent-front-clearance"),
+            domain: IntentDomain::SpatialProgram,
+            mode,
+            scope: ProjectIntentScope::Exact(ExactIntentScope {
+                subject: AuthoredEntityRef::FurnishingInstance(ElementId::new("fixture-instance")),
+                participants: vec![AuthoredEntityRef::Room(ElementId::new("room-bed-1"))],
+            }),
+            expression: IntentExpression::FactPredicate(Predicate::Compare {
+                fact: Fact::PlacedObjectClearance {
+                    direction: ClearanceDirection::Front,
+                    datum: ClearanceDatum::FootprintFace,
+                },
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(threshold),
+            }),
+            source: IntentSource::User,
+            rationale: Some("Keep the fixture front approach clear".to_owned()),
+        });
+        model.sort_deterministically();
+        model.validate().unwrap();
+        model
+    }
+
+    #[test]
+    fn authored_clearance_uses_common_outcomes_and_exact_diagnostic_severity() {
+        let required =
+            authored_clearance_model(AuthoredIntentMode::Requirement, Length::from_feet(5.0));
+        let analysis = crate::analyze_project(&required).unwrap();
+        let record = analysis
+            .intent_report
+            .as_ref()
+            .unwrap()
+            .record(&AssertionRef::Authored(AuthoredIntentId::new(
+                "intent-front-clearance",
+            )))
+            .unwrap();
+        let IntentRecord::Boolean(record) = record else {
+            panic!("persisted requirement must compile as a boolean record");
+        };
+        assert_eq!(record.outcome, IntentOutcome::Violated);
+        let observation = record
+            .predicate_observation
+            .as_ref()
+            .expect("authored predicate observation must survive report lowering");
+        assert_eq!(observation.result, Tri::False);
+        assert!(matches!(
+            observation.observed_facts.as_slice(),
+            [framer_standards::ObservedFact {
+                observation: framer_standards::FactObservation::Known(
+                    framer_standards::FactValue::Length(_)
+                ),
+                ..
+            }]
+        ));
+        assert_eq!(
+            record.assertion.scope,
+            AssertionScope::Exact(vec![
+                AuthoredEntityRef::Room(ElementId::new("room-bed-1")),
+                AuthoredEntityRef::FurnishingInstance(ElementId::new("fixture-instance")),
+            ])
+        );
+        let diagnostic = analysis
+            .plan
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "intent.assertion.violated")
+            .unwrap();
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Violation);
+        assert_eq!(diagnostic.source, Some(ElementId::new("fixture-instance")));
+        let graph_record = analysis
+            .graph
+            .as_ref()
+            .unwrap()
+            .node(&ProjectNodeRef::Assertion(
+                record.assertion.reference.clone(),
+            ))
+            .unwrap();
+        assert!(
+            graph_record.detail.as_deref().is_some_and(|detail| detail
+                .contains("predicate observation: PredicateObservation")
+                && detail.contains("Known(Length")),
+            "graph assertion detail must retain the measured predicate evidence"
+        );
+
+        let preferred = authored_clearance_model(
+            AuthoredIntentMode::Preference {
+                priority: PreferencePriority(250),
+            },
+            Length::from_feet(5.0),
+        );
+        let preferred = crate::analyze_project(&preferred).unwrap();
+        let diagnostic = preferred
+            .plan
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "intent.assertion.preference-unmet")
+            .unwrap();
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+    }
+
+    #[test]
+    fn authored_clearance_missing_room_and_project_waiver_fail_closed() {
+        let mut open =
+            authored_clearance_model(AuthoredIntentMode::Requirement, Length::from_feet(1.0));
+        open.rooms
+            .iter_mut()
+            .find(|room| room.id == ElementId::new("room-bed-1"))
+            .unwrap()
+            .seed = Point2::new(Length::from_feet(-1.0), Length::from_feet(-1.0));
+        open.validate().unwrap();
+        let analysis = crate::analyze_project(&open).unwrap();
+        let record = analysis
+            .intent_report
+            .as_ref()
+            .unwrap()
+            .record(&AssertionRef::Authored(AuthoredIntentId::new(
+                "intent-front-clearance",
+            )))
+            .unwrap();
+        assert!(matches!(
+            record,
+            IntentRecord::Boolean(BooleanIntentRecord {
+                outcome: IntentOutcome::Unknown(IntentUnknown {
+                    kind: IntentUnknownKind::MissingInput,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(analysis.plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "intent.assertion.unknown"
+                && diagnostic.severity == DiagnosticSeverity::NeedsReview
+        }));
+
+        let mut waived =
+            authored_clearance_model(AuthoredIntentMode::Requirement, Length::from_feet(5.0));
+        waived.intent_overrides.push(IntentOverride::Waive {
+            id: IntentOverrideId::new("intent-waiver-front-clearance"),
+            target: AuthoredIntentId::new("intent-front-clearance"),
+            reason: "Owner-approved alternate approach".to_owned(),
+            source: IntentSource::User,
+        });
+        waived.validate().unwrap();
+        let analysis = crate::analyze_project(&waived).unwrap();
+        let report = analysis.intent_report.as_ref().unwrap();
+        let record = report
+            .record(&AssertionRef::Authored(AuthoredIntentId::new(
+                "intent-front-clearance",
+            )))
+            .unwrap();
+        assert!(matches!(
+            record,
+            IntentRecord::Boolean(BooleanIntentRecord {
+                outcome: IntentOutcome::Waived {
+                    waiver: WaiverRef::Project { override_id },
+                    ..
+                },
+                ..
+            }) if override_id == &IntentOverrideId::new("intent-waiver-front-clearance")
+        ));
+        assert_eq!(report.waivers().len(), 1);
+        assert_eq!(report.waivers()[0].authority, AssertionSource::User);
+        assert_eq!(
+            report.waivers()[0].source,
+            AssertionSource::Authored(AuthoredEntityRef::IntentOverride(IntentOverrideId::new(
+                "intent-waiver-front-clearance"
+            )))
+        );
+        assert!(
+            report.waivers()[0]
+                .provenance
+                .contains(&IntentEvidenceRef::Authored(
+                    AuthoredEntityRef::IntentOverride(IntentOverrideId::new(
+                        "intent-waiver-front-clearance"
+                    ))
+                ))
+        );
+        assert!(
+            !analysis
+                .plan
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code.starts_with("intent.assertion") })
+        );
+
+        let graph = analysis.graph.as_ref().unwrap();
+        let target = ProjectNodeRef::Assertion(AssertionRef::Authored(AuthoredIntentId::new(
+            "intent-front-clearance",
+        )));
+        let waiver = ProjectNodeRef::Authored(AuthoredEntityRef::IntentOverride(
+            IntentOverrideId::new("intent-waiver-front-clearance"),
+        ));
+        assert!(graph.edges().iter().any(|edge| {
+            edge.dependent == target
+                && edge.dependency == waiver
+                && edge.relationship == RelationshipKind::WaivedBy
+        }));
+    }
+
+    #[test]
+    fn standards_and_authored_clearance_share_the_exact_predicate_observation() {
+        let mut model =
+            authored_clearance_model(AuthoredIntentMode::Requirement, Length::from_feet(1.0));
+        model.furnishings[0].tags.push("shared-fixture".to_owned());
+        let predicate = match &model.intents[0].expression {
+            IntentExpression::FactPredicate(predicate) => predicate.clone(),
+        };
+        let pack = model
+            .standards_packs
+            .iter_mut()
+            .find(|pack| pack.id == model.standards[0])
+            .unwrap();
+        pack.checks.push(ComplianceCheck {
+            rule: "zz-test.shared-front-clearance".to_owned(),
+            citation: "Intent parity fixture".to_owned(),
+            title: "Shared front clearance".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::PlacedObjects {
+                tags: vec!["shared-fixture".to_owned()],
+            },
+            requirement: predicate.clone(),
+        });
+        pack.checks
+            .sort_by(|left, right| left.rule.cmp(&right.rule));
+        model.validate().unwrap();
+
+        let plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let standards = framer_standards::evaluate_detailed(&model, &resolved, &plan);
+        let detail = standards
+            .details
+            .iter()
+            .find(|detail| detail.check_id.as_deref() == Some("zz-test.shared-front-clearance"))
+            .unwrap();
+        let subject = FactSubject::placed_object_exact(
+            PlacedObjectRef::FurnishingInstance(ElementId::new("fixture-instance")),
+            ElementId::new("room-bed-1"),
+        );
+        let direct =
+            FactSnapshot::new(&model, &resolved, &plan).evaluate_predicate(&predicate, &subject);
+        assert_eq!(detail.predicate.as_ref(), Some(&direct));
+
+        let authored = evaluate_authored_intent(&model, &resolved, &plan);
+        assert_eq!(authored.len(), 1);
+        assert_eq!(authored[0].predicate, direct);
+        let standard_outcome = match direct.result {
+            Tri::True => IntentOutcome::Satisfied,
+            Tri::False => IntentOutcome::Violated,
+            Tri::Unknown => IntentOutcome::Unknown(unknown_from_predicate(&direct)),
+        };
+        assert_eq!(authored[0].outcome, standard_outcome);
+
+        let analysis = crate::analyze_project(&model).unwrap();
+        let report_record = analysis
+            .intent_report
+            .as_ref()
+            .unwrap()
+            .record(&AssertionRef::Authored(AuthoredIntentId::new(
+                "intent-front-clearance",
+            )))
+            .unwrap();
+        let IntentRecord::Boolean(report_record) = report_record else {
+            panic!("authored clearance must remain a boolean record");
+        };
+        assert_eq!(report_record.outcome, IntentOutcome::Satisfied);
+        assert_eq!(report_record.predicate_observation.as_ref(), Some(&direct));
+        let graph_record = analysis
+            .graph
+            .as_ref()
+            .unwrap()
+            .node(&ProjectNodeRef::Assertion(
+                report_record.assertion.reference.clone(),
+            ))
+            .unwrap();
+        assert!(
+            graph_record
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(&format!("{direct:?}")))
+        );
+    }
 
     fn compliance_entry(rule: &str, outcome: Outcome) -> ComplianceEntry {
         ComplianceEntry {
@@ -1898,7 +2494,7 @@ mod tests {
         plan.diagnostics
             .extend(current_intent_plan_diagnostics(&model, &audit));
         let revision = GraphRevision::for_model(&model).unwrap();
-        let report = compile_project_intent(&model, &plan, &audit, &standards, revision);
+        let report = compile_project_intent(&model, &plan, &audit, &standards, &[], revision);
         let geometry = report
             .records()
             .iter()
@@ -2085,7 +2681,7 @@ mod tests {
 
         let resolved = model.resolved_standards();
         let standards = framer_standards::evaluate_detailed(&model, &resolved, &plan);
-        let report = compile_project_intent(&model, &plan, &audit, &standards, revision);
+        let report = compile_project_intent(&model, &plan, &audit, &standards, &[], revision);
         let record = report
             .assertions_for(&AuthoredEntityRef::Dimension(ElementId::new(
                 "dimension-unsatisfied",

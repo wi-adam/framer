@@ -14,10 +14,11 @@
 
 use eframe::egui;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use framer_core::{
-    Applicability, CheckScope, CheckSeverity, CompareOp, ComplianceCheck, DimensionAxis,
-    DimensionKind, ElementId, Fact, FactOperand, Length, OpeningKind, Point2, Predicate,
+    Applicability, BuildingModel, CheckScope, CheckSeverity, ClearanceDatum, ClearanceDirection,
+    CompareOp, ComplianceCheck, DimensionAxis, DimensionKind, ElementId, Fact, FactOperand,
+    Furnishing, FurnishingInstance, Length, OpeningKind, Point2, Predicate, Room, RoomUsage,
     RuleOverlay,
 };
 use framer_geometry::{
@@ -30,8 +31,8 @@ use super::component_visibility::{
 };
 use super::viewport::BuiltInPreset;
 use super::{
-    FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode,
-    add_diverged_library_material, design, panels,
+    FramerApp, IntentAuthoringDraft, IntentDraftExpression, RoofForm, Selection, ViewportMode,
+    WallDisplay, WorkspaceMode, add_diverged_library_material, design, panels,
 };
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
@@ -113,6 +114,24 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
     );
 }
 
+fn assert_accessible_button_enabled(
+    harness: &Harness<FramerApp>,
+    label: &str,
+    enabled: bool,
+    surface: &str,
+) {
+    let button = harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, label)
+        .next()
+        .unwrap_or_else(|| panic!("{surface} should expose '{label}' as a button"));
+    assert_eq!(
+        !button.accesskit_node().is_disabled(),
+        enabled,
+        "{surface} should render '{label}' {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+}
+
 fn scroll_to_intent_relationships(harness: &mut Harness<FramerApp>) {
     harness.get_by_label("Intent").scroll_to_me();
     harness.run();
@@ -181,6 +200,40 @@ fn prepare_mixed_intent_status(app: &mut FramerApp) {
     app.rebuild();
     app.selected_wall = 0;
     app.selected = Selection::Wall;
+}
+
+fn prepare_authored_intent_fixture(app: &mut FramerApp) {
+    let mut model = BuildingModel::demo_shell();
+    model.rooms.push(Room::new(
+        "room-intent-ui",
+        "Intent UI room",
+        RoomUsage::Living,
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    ));
+    model.furnishings.push(Furnishing::new(
+        "furnishing-intent-ui",
+        "Intent UI furnishing",
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(24),
+        Length::from_whole_inches(30),
+    ));
+    model.furnishing_instances.push(FurnishingInstance::new(
+        "furnishing-instance-intent-ui",
+        "Placed intent UI furnishing",
+        "furnishing-intent-ui",
+        "level-1",
+        Point2::new(Length::from_feet(10.0), Length::from_feet(10.0)),
+    ));
+    model.sort_deterministically();
+    app.model = model;
+    app.selected = Selection::FurnishingInstance("furnishing-instance-intent-ui".to_owned());
+    app.component_selection.replace(Some(ComponentKey::authored(
+        AuthoredComponentKind::FurnishingInstance,
+        "furnishing-instance-intent-ui",
+    )));
+    app.history.clear();
+    app.rebuild();
 }
 
 fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
@@ -427,11 +480,11 @@ fn intent_status_groups_mixed_boolean_outcomes_and_exposes_evidence() {
         "Evidence: authored object, standards rule, compliance result, diagnostic",
         "mixed current intent status",
     );
-    assert_accessible_label(
-        &harness,
-        "Waiver: approved alternate intent fixture",
-        "mixed current intent status",
+    let waiver_label = format!(
+        "Standards waiver {} / fixture.intent.waived: approved alternate intent fixture",
+        harness.state().model.standards_packs[0].id.0
     );
+    assert_accessible_label(&harness, &waiver_label, "mixed current intent status");
     assert_accessible_label(
         &harness,
         "Unsupported condition: The current standards evaluator does not support this condition.",
@@ -444,6 +497,326 @@ fn intent_status_groups_mixed_boolean_outcomes_and_exposes_evidence() {
             .is_none(),
         "not-applicable rows should start collapsed while retaining their outcome group"
     );
+}
+
+#[test]
+fn intent_authoring_draft_cancels_without_history_and_commits_through_ui() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+
+    assert_accessible_button(&harness, "Add containment", "intent authoring");
+    assert_accessible_button(&harness, "Add clearance", "intent authoring");
+    harness.get_by_label("Add containment").click();
+    harness.run();
+    assert!(harness.state().intent_authoring_draft.is_some());
+    assert!(!harness.state().history.can_undo());
+    assert_accessible_label(
+        &harness,
+        "Primary subject: furnishing instance furnishing-instance-intent-ui",
+        "intent draft",
+    );
+    assert_accessible_label(&harness, "Source: User", "intent draft");
+    harness.get_by_label("Cancel").click();
+    harness.run();
+    assert!(harness.state().intent_authoring_draft.is_none());
+    assert!(harness.state().model.intents.is_empty());
+    assert!(!harness.state().history.can_undo());
+
+    harness.get_by_label("Add clearance").click();
+    harness.run();
+    let Some(IntentAuthoringDraft::Assertion(draft)) =
+        harness.state_mut().intent_authoring_draft.as_mut()
+    else {
+        panic!("clearance draft");
+    };
+    draft.rationale = "Keep service access clear".to_owned();
+    draft.expression = IntentDraftExpression::Clearance {
+        direction: ClearanceDirection::Front,
+        datum: ClearanceDatum::FootprintFace,
+        threshold: Length::from_feet(100.0),
+    };
+    harness.run();
+    harness.get_by_label("Create intent").click();
+    harness.run();
+    assert_eq!(harness.state().model.intents.len(), 1);
+    assert_eq!(harness.state().history.undo_label(), Some("Add intent"));
+
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "Requirement · Source: User",
+        "authored intent row",
+    );
+    assert_accessible_label(
+        &harness,
+        "Subject: furnishing instance furnishing-instance-intent-ui",
+        "authored intent row",
+    );
+    assert_accessible_label(&harness, "Host: room room-intent-ui", "authored intent row");
+    for action in ["Edit", "Delete", "Waive", "Focus all"] {
+        assert_accessible_button(&harness, action, "authored intent row");
+    }
+}
+
+#[test]
+fn plan_disables_intent_mutations_but_keeps_focus_all_enabled() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    let id = {
+        let app = harness.state_mut();
+        assert!(
+            app.begin_intent_assertion(IntentDraftExpression::Clearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+                threshold: Length::from_feet(100.0),
+            })
+        );
+        let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+        else {
+            panic!("clearance draft");
+        };
+        draft.rationale = "Keep service access clear".to_owned();
+        assert!(app.accept_intent_authoring());
+        let id = app.model.intents[0].id.clone();
+
+        assert!(app.begin_edit_intent(&id));
+        assert!(app.intent_authoring_draft.is_some());
+        app.set_workspace_mode(WorkspaceMode::Plan);
+        assert!(app.intent_authoring_draft.is_none());
+        app.history.clear();
+        id
+    };
+    let before = harness.state().model.clone();
+    harness.run_ok();
+    scroll_to_intent_relationships(&mut harness);
+
+    for action in [
+        "Add containment",
+        "Add clearance",
+        "Edit",
+        "Delete",
+        "Waive",
+    ] {
+        assert_accessible_button_enabled(&harness, action, false, "Plan intent inspector");
+        harness.get_by_label(action).click();
+        harness.run_ok();
+        assert!(harness.state().intent_authoring_draft.is_none());
+        assert_eq!(harness.state().model, before);
+        assert!(!harness.state().history.can_undo());
+    }
+
+    assert_accessible_button_enabled(&harness, "Focus all", true, "Plan intent inspector");
+    harness.get_by_label("Focus all").click();
+    harness.run_ok();
+    assert_eq!(harness.state().selected_component_count(), 2);
+    assert_eq!(
+        harness.state().focused_intent,
+        Some(framer_analysis::AssertionRef::Authored(id))
+    );
+    assert_eq!(harness.state().model, before);
+    assert!(!harness.state().history.can_undo());
+}
+
+#[test]
+fn design_locks_level_picker_for_scoped_intent_subject() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    {
+        let app = harness.state_mut();
+        app.model.levels.push(framer_core::Level::new(
+            "level-2",
+            "Level 2",
+            Length::from_feet(10.0),
+        ));
+        app.model.sort_deterministically();
+        app.rebuild();
+        assert!(app.begin_intent_assertion(IntentDraftExpression::Containment));
+        let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+        else {
+            panic!("containment draft");
+        };
+        draft.rationale = "Keep this placement scoped to its room".to_owned();
+        assert!(app.accept_intent_authoring());
+        app.history.clear();
+    }
+    harness.run_ok();
+
+    assert_accessible_label(
+        &harness,
+        "Level is locked by scoped project intent. Edit or delete that intent before moving this placement.",
+        "Design placement inspector",
+    );
+    assert!(
+        harness
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .filter(|node| node.value().as_deref() == Some("Level 1"))
+            .any(|node| node.accesskit_node().is_disabled()),
+        "the scoped placement Level combobox should be visibly disabled"
+    );
+    assert!(!harness.state().history.can_undo());
+    framer_core::save_project(&harness.state().model).expect("locked placement remains saveable");
+}
+
+#[test]
+fn placement_field_then_level_change_has_linear_history_through_inspector() {
+    const ORIGINAL_NAME: &str = "Placed intent UI furnishing";
+    const EDITED_NAME: &str = "Edited intent UI furnishing";
+    const INSTANCE_ID: &str = "furnishing-instance-intent-ui";
+
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    let original_snapshot;
+    {
+        let app = harness.state_mut();
+        app.model.levels.push(framer_core::Level::new(
+            "level-2",
+            "Level 2",
+            Length::from_feet(10.0),
+        ));
+        app.model.sort_deterministically();
+        app.history.clear();
+        app.rebuild();
+        original_snapshot = app.snapshot();
+    }
+    harness.run_ok();
+
+    let name_field = harness
+        .query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|node| node.value().as_deref() == Some(ORIGINAL_NAME))
+        .expect("furnishing placement Name field");
+    name_field.focus();
+    harness.run_steps(1);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.event(egui::Event::Text(EDITED_NAME.to_owned()));
+    harness.run_steps(1);
+    assert!(
+        harness.state().history.is_pending(),
+        "focused text editing should keep the furnishing field transaction pending"
+    );
+
+    let level_picker = harness
+        .query_all_by_role(egui::accesskit::Role::ComboBox)
+        .filter(|node| node.value().as_deref() == Some("Level 1"))
+        .max_by(|left, right| left.rect().left().total_cmp(&right.rect().left()))
+        .expect("furnishing placement Level picker");
+    level_picker.click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Edit furnishing placement")
+    );
+    // AccessKit needs a separate frame to expose popup options, and that frame
+    // naturally settles the text edit. Restore the equivalent pending state
+    // at this boundary so the option click exercises the production race: an
+    // older inspector transaction must be committed before the deferred level
+    // action records its discrete snapshot.
+    {
+        let app = harness.state_mut();
+        app.history.clear();
+        app.history
+            .begin(original_snapshot, "Edit furnishing placement");
+    }
+    assert!(harness.state().history.is_pending());
+    harness
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "Level 2")
+        .max_by(|left, right| left.rect().left().total_cmp(&right.rect().left()))
+        .expect("Level 2 placement option")
+        .click();
+    harness.run_ok();
+
+    let assert_state = |app: &FramerApp, expected_name: &str, expected_level: &str| {
+        let instance = app
+            .model
+            .furnishing_instances
+            .iter()
+            .find(|instance| instance.id.0 == INSTANCE_ID)
+            .expect("furnishing placement fixture");
+        assert_eq!(instance.name, expected_name);
+        assert_eq!(instance.level.0, expected_level);
+        app.model
+            .validate()
+            .expect("placement edit model validates");
+        framer_core::save_project(&app.model).expect("placement edit model remains saveable");
+    };
+
+    assert_state(harness.state(), EDITED_NAME, "level-2");
+    assert!(!harness.state().history.is_pending());
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Change furnishing placement level")
+    );
+
+    harness.state_mut().undo();
+    assert_state(harness.state(), EDITED_NAME, "level-1");
+    assert_eq!(
+        harness.state().history.undo_label(),
+        Some("Edit furnishing placement")
+    );
+    assert_eq!(
+        harness.state().history.redo_label(),
+        Some("Change furnishing placement level")
+    );
+
+    harness.state_mut().undo();
+    assert_state(harness.state(), ORIGINAL_NAME, "level-1");
+    assert_eq!(harness.state().history.undo_label(), None);
+    assert_eq!(
+        harness.state().history.redo_label(),
+        Some("Edit furnishing placement")
+    );
+
+    harness.state_mut().redo();
+    assert_state(harness.state(), EDITED_NAME, "level-1");
+    assert_eq!(
+        harness.state().history.redo_label(),
+        Some("Change furnishing placement level")
+    );
+
+    harness.state_mut().redo();
+    assert_state(harness.state(), EDITED_NAME, "level-2");
+    assert_eq!(harness.state().history.redo_label(), None);
+}
+
+#[test]
+fn intent_focus_all_keeps_row_context_visible_for_plan_multi_selection() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_authored_intent_fixture(harness.state_mut());
+    let id = {
+        let app = harness.state_mut();
+        assert!(
+            app.begin_intent_assertion(IntentDraftExpression::Clearance {
+                direction: ClearanceDirection::Front,
+                datum: ClearanceDatum::FootprintFace,
+                threshold: Length::from_feet(100.0),
+            })
+        );
+        let Some(IntentAuthoringDraft::Assertion(draft)) = app.intent_authoring_draft.as_mut()
+        else {
+            panic!("clearance draft");
+        };
+        draft.rationale = "Focus every participant".to_owned();
+        assert!(app.accept_intent_authoring());
+        app.model.intents[0].id.clone()
+    };
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    harness.get_by_label("Focus all").click();
+    harness.run();
+
+    assert_eq!(harness.state().selected_component_count(), 2);
+    assert_eq!(
+        harness.state().focused_intent,
+        Some(framer_analysis::AssertionRef::Authored(id))
+    );
+    assert_accessible_label(&harness, "Focus every participant", "focused intent row");
+    assert_accessible_label(&harness, "2 components selected", "focused multi-selection");
 }
 
 #[test]
