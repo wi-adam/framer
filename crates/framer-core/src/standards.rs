@@ -494,6 +494,13 @@ impl StandardsPack {
         }
         for check in &self.checks {
             validate_rule_decl(&mut rules, &check.rule)?;
+            if let CheckScope::Openings { tags } = &check.scope
+                && !tags.is_empty()
+            {
+                return Err(ModelError::StandardsOpeningTagsUnsupported {
+                    rule: check.rule.clone(),
+                });
+            }
             validate_predicate(&check.rule, &check.requirement, check.scope.subject_kind())?;
         }
         for overlay in &self.overlays {
@@ -1394,6 +1401,31 @@ mod tests {
         assert!(matches!(
             pack.validate(),
             Err(ModelError::StandardsPredicateScopeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_opening_tag_filters_that_cannot_match() {
+        let mut pack = starter_pack();
+        pack.checks.push(ComplianceCheck {
+            rule: "test.opening-tags".to_owned(),
+            citation: "Test".to_owned(),
+            title: "Tagged openings".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::Openings {
+                tags: vec!["egress".to_owned()],
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::OpeningRoughWidth,
+                op: CompareOp::Gt,
+                value: FactOperand::LengthLiteral(Length::ZERO),
+            },
+        });
+
+        assert!(matches!(
+            pack.validate(),
+            Err(ModelError::StandardsOpeningTagsUnsupported { .. })
         ));
     }
 

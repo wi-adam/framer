@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use framer_core::{AuthoredEntityRef, ElementId, Length, Predicate};
+use framer_solver::PlanDiagnostic;
 
 use crate::{
     AssertionRef, ComplianceEntryRef, DiagnosticRef, GeneratedMemberRef, GraphRevision,
@@ -220,6 +221,7 @@ pub enum AssumptionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntentEvidenceRef {
     Project,
+    Assertion(AssertionRef),
     Authored(AuthoredEntityRef),
     GeneratedMember(GeneratedMemberRef),
     PhysicalBody(PhysicalBodyRef),
@@ -286,14 +288,25 @@ pub struct IntentReport {
     revision: GraphRevision,
     records: Vec<IntentRecord>,
     waivers: Vec<WaiverRecord>,
+    diagnostics: BTreeMap<DiagnosticRef, PlanDiagnostic>,
     participant_index: BTreeMap<AuthoredEntityRef, Vec<usize>>,
 }
 
 impl IntentReport {
+    #[cfg(test)]
     pub(crate) fn from_parts(
         revision: GraphRevision,
         records: Vec<IntentRecord>,
         waivers: Vec<WaiverRecord>,
+    ) -> Self {
+        Self::from_parts_with_diagnostics(revision, records, waivers, Vec::new())
+    }
+
+    pub(crate) fn from_parts_with_diagnostics(
+        revision: GraphRevision,
+        records: Vec<IntentRecord>,
+        waivers: Vec<WaiverRecord>,
+        diagnostics: Vec<(DiagnosticRef, PlanDiagnostic)>,
     ) -> Self {
         let mut unique = BTreeMap::new();
         for mut record in records {
@@ -344,6 +357,7 @@ impl IntentReport {
             revision,
             records,
             waivers: waiver_map.into_values().collect(),
+            diagnostics: diagnostics.into_iter().collect(),
             participant_index,
         }
     }
@@ -358,6 +372,12 @@ impl IntentReport {
 
     pub fn waivers(&self) -> &[WaiverRecord] {
         &self.waivers
+    }
+
+    /// Recover the exact native diagnostic payload referenced by a common record.
+    /// Revision-scoped keys make stale references fail closed.
+    pub fn plan_diagnostic(&self, reference: &DiagnosticRef) -> Option<&PlanDiagnostic> {
+        self.diagnostics.get(reference)
     }
 
     /// Query role-qualified participants, returning each assertion at most once even when the

@@ -134,7 +134,10 @@ pub struct DiagnosticRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnknownEvidenceKind {
     AuthoredEntity,
+    Assertion,
     StandardsRule,
+    ComplianceEntry,
+    Diagnostic,
     GeneratedMember,
     GeneratedHost,
     GeneratedSource,

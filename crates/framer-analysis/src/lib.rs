@@ -40,3 +40,10 @@ pub use query::{
     DependencyImpact, GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats,
 };
 pub use revision::{GRAPH_CONTRACT_VERSION, GraphRevision};
+
+/// Identify which typed domain owns the canonical row for an existing plan diagnostic.
+/// Presentation layers use this to avoid rendering geometry audit findings twice after they are
+/// also lowered through `ProjectFramePlan::diagnostics`.
+pub fn plan_diagnostic_provider(diagnostic: &framer_solver::PlanDiagnostic) -> DiagnosticProvider {
+    lower::diagnostic_provider(diagnostic)
+}

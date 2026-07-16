@@ -366,10 +366,70 @@ pub struct StandardsEvaluationDetail {
     pub effective_waiver: Option<EffectiveWaiver>,
 }
 
+impl StandardsEvaluationDetail {
+    pub fn is_unsupported(&self) -> bool {
+        self.synthetic_kind == Some(SyntheticEntryKind::BracingOutOfDomain)
+            || self.predicate.as_ref().is_some_and(|predicate| {
+                predicate.observed_facts.iter().any(|observed| {
+                    matches!(
+                        &observed.observation,
+                        FactObservation::Unknown(unknown)
+                            if unknown.kind == FactUnknownKind::UnsupportedCondition
+                    )
+                })
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StandardsEvaluation {
     pub report: ComplianceReport,
     pub details: Vec<StandardsEvaluationDetail>,
+}
+
+impl StandardsEvaluation {
+    /// Lower the detailed evaluation through the canonical application diagnostics matrix.
+    /// Detail is required to distinguish a missing fact from an unsupported fact without
+    /// changing the frozen `ComplianceReport` payload.
+    pub fn diagnostics(&self) -> Vec<PlanDiagnostic> {
+        self.report
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let severity = match entry.outcome {
+                    Outcome::Violation => DiagnosticSeverity::Violation,
+                    Outcome::Advisory => DiagnosticSeverity::Warning,
+                    Outcome::NeedsReview => {
+                        if self
+                            .details
+                            .iter()
+                            .filter(|detail| detail.report_entry_index == index)
+                            .any(StandardsEvaluationDetail::is_unsupported)
+                        {
+                            DiagnosticSeverity::Unsupported
+                        } else {
+                            DiagnosticSeverity::NeedsReview
+                        }
+                    }
+                    Outcome::Pass | Outcome::NotApplicable | Outcome::Waived { .. } => {
+                        return None;
+                    }
+                };
+                Some(PlanDiagnostic {
+                    severity,
+                    code: entry.rule.clone(),
+                    source: entry.element.clone(),
+                    message: entry.message.clone(),
+                    rule: Some(RuleRef {
+                        pack: entry.pack.clone(),
+                        rule: entry.rule.clone(),
+                        citation: entry.citation.clone(),
+                    }),
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -633,6 +693,11 @@ fn effective_waiver(rule: &ResolvedRule) -> Option<EffectiveWaiver> {
     })
 }
 
+/// Compatibility lowering for callers that retain only the frozen v1 report.
+///
+/// Prefer [`StandardsEvaluation::diagnostics`] when detailed evaluation is available; the report
+/// alone cannot distinguish missing facts from unsupported facts except for legacy synthetic
+/// bracing entries.
 pub fn diagnostics(report: &ComplianceReport) -> Vec<PlanDiagnostic> {
     report
         .entries
@@ -733,9 +798,6 @@ fn raw_fact_value(
         }
         (Fact::OpeningJackStuds, EntityRef::Opening(opening)) => {
             let members = opening_members(plan, opening);
-            if members.is_empty() {
-                return Err(MissingInput);
-            }
             let count = members
                 .into_iter()
                 .filter(|member| member.kind == MemberKind::JackStud)
@@ -1467,14 +1529,25 @@ mod tests {
             None
         );
 
-        let mut missing_plan = plan.clone();
-        for wall_plan in &mut missing_plan.wall_plans {
+        let mut empty_member_plan = plan.clone();
+        for wall_plan in &mut empty_member_plan.wall_plans {
             wall_plan.members.clear();
         }
-        let missing_snapshot = FactSnapshot::new(&model, &resolved, &missing_plan);
-        assert_unknown_kind(
-            missing_snapshot.observe(Fact::OpeningJackStuds, &opening),
-            FactUnknownKind::MissingInput,
+        let empty_member_snapshot = FactSnapshot::new(&model, &resolved, &empty_member_plan);
+        assert_eq!(
+            empty_member_snapshot.observe(Fact::OpeningJackStuds, &opening),
+            FactObservation::Known(FactValue::Int(0)),
+            "the shared snapshot preserves the frozen v1 empty-member count",
+        );
+        assert_eq!(
+            fact_value(
+                Fact::OpeningJackStuds,
+                &opening,
+                &model,
+                &resolved,
+                &empty_member_plan,
+            ),
+            Some(FactValue::Int(0)),
         );
 
         let mut unsupported_model = braced_line_model(Length::from_feet(50.0));
@@ -1574,6 +1647,51 @@ mod tests {
         assert_eq!(
             fact_value(Fact::WallStudMaxHeight, &wall, &model, &resolved, &plan),
             None
+        );
+    }
+
+    #[test]
+    fn detailed_diagnostics_distinguish_unsupported_facts_from_missing_facts() {
+        let mut model = one_wall_model(Length::from_feet(8.0));
+        let mut pack = StandardsPack::irc_2021_starter();
+        pack.checks = vec![ComplianceCheck {
+            rule: "test.wall.unsupported-stud-height".to_owned(),
+            citation: "Test".to_owned(),
+            title: "Unsupported stud height".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::Walls {
+                exterior_only: None,
+                tags: Vec::new(),
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::WallStudMaxHeight,
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(Length::from_feet(8.0)),
+            },
+        }];
+        model.standards = vec![pack.id.clone()];
+        model.standards_packs = vec![pack];
+
+        let plan = generate_project_plan(&model).unwrap();
+        let mut resolved = model.resolved_standards();
+        resolved.studs.clear();
+        let evaluation = evaluate_detailed(&model, &resolved, &plan);
+
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.unsupported-stud-height",
+            &Outcome::NeedsReview,
+        ));
+        assert!(detail_for(&evaluation, "test.wall.unsupported-stud-height").is_unsupported());
+        assert_eq!(
+            evaluation.diagnostics()[0].severity,
+            DiagnosticSeverity::Unsupported,
+        );
+        assert_eq!(
+            diagnostics(&evaluation.report)[0].severity,
+            DiagnosticSeverity::NeedsReview,
+            "the frozen report cannot encode the detailed unsupported reason",
         );
     }
 
@@ -1992,6 +2110,20 @@ mod tests {
             evaluate_detailed(&model, &resolved, &plan),
             "detailed evaluation must be canonical"
         );
+        const FROZEN_REPORT_CSV: &str = concat!(
+            "rule,citation,pack,outcome,element,message,chain\n",
+            "test.room.unknown-detail,Test,std-irc-2021,NeedsReview,room-unknown,Room unknown detail needs review; one or more facts are unavailable.,std-irc-2021:Introduced\n",
+            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-a,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
+            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-b,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
+            "test.wall.applicability-unknown,Test,std-irc-2021,NeedsReview,,test.wall.applicability-unknown applicability needs review.,std-irc-2021:Introduced\n",
+            "test.wall.not-applicable,Test,std-irc-2021,NotApplicable,,test.wall.not-applicable is not applicable for this site context.,std-irc-2021:Introduced\n",
+            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-a,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
+            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-b,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
+            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-a,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
+            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-b,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
+            "test.wall.waived-detail,Test,std-irc-2021,Waived,,Waived: approved by test AHJ,std-irc-2021:Introduced;std-overlay:Reseverity;std-overlay:Waived\n",
+        );
+        assert_eq!(evaluation.report.to_csv(), FROZEN_REPORT_CSV);
 
         let wrapper_report = evaluate(&model, &resolved, &plan);
         assert_eq!(wrapper_report, evaluation.report);
@@ -1999,6 +2131,51 @@ mod tests {
         assert_eq!(
             diagnostics(&wrapper_report),
             diagnostics(&evaluation.report)
+        );
+        assert_eq!(
+            evaluation
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code.as_str(),
+                        diagnostic.source.as_ref().map(|source| source.0.as_str()),
+                        diagnostic.severity,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "test.room.unknown-detail",
+                    Some("room-unknown"),
+                    DiagnosticSeverity::NeedsReview,
+                ),
+                (
+                    "test.wall.advisory-detail",
+                    Some("wall-a"),
+                    DiagnosticSeverity::Warning,
+                ),
+                (
+                    "test.wall.advisory-detail",
+                    Some("wall-b"),
+                    DiagnosticSeverity::Warning,
+                ),
+                (
+                    "test.wall.applicability-unknown",
+                    None,
+                    DiagnosticSeverity::NeedsReview,
+                ),
+                (
+                    "test.wall.violation-detail",
+                    Some("wall-a"),
+                    DiagnosticSeverity::Violation,
+                ),
+                (
+                    "test.wall.violation-detail",
+                    Some("wall-b"),
+                    DiagnosticSeverity::Violation,
+                ),
+            ]
         );
 
         assert!(has_outcome(

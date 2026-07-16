@@ -115,12 +115,22 @@ impl ProjectAnalysis {
         {
             return None;
         }
+        let diagnostic = self.plan_diagnostic(reference)?;
         let mut violations = self.geometry_audit.violations.iter().collect::<Vec<_>>();
         violations.sort_by(|left, right| crate::lower::compare_geometry_violation(left, right));
-        violations
-            .get(usize::try_from(reference.ordinal).ok()?)
-            .copied()
-            .filter(|violation| violation.code() == reference.code)
+        violations.into_iter().find(|violation| {
+            violation.code() == reference.code
+                && diagnostic.source.as_ref() == Some(violation.body_a().owner())
+                && diagnostic.message == violation.to_string()
+        })
+    }
+
+    /// Recover the exact native plan diagnostic carried by common intent evidence.
+    pub fn plan_diagnostic(&self, reference: &DiagnosticRef) -> Option<&PlanDiagnostic> {
+        self.intent_report
+            .as_ref()
+            .ok()
+            .and_then(|report| report.plan_diagnostic(reference))
     }
 }
 
@@ -176,11 +186,13 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
     let resolved_standards = model.resolved_standards();
     let standards_evaluation =
         framer_standards::evaluate_detailed(model, &resolved_standards, &plan);
-    plan.diagnostics
-        .extend(crate::lower::standards_plan_diagnostics(
-            &standards_evaluation,
-        ));
+    plan.diagnostics.extend(standards_evaluation.diagnostics());
     append_library_diagnostics(&mut plan, &library_lifecycle);
+    plan.diagnostics
+        .extend(crate::lower::current_intent_plan_diagnostics(
+            model,
+            &geometry_audit,
+        ));
     let intent_report = GraphRevision::for_model(model)
         .map_err(AnalysisError::from)
         .map(|revision| {
@@ -1253,15 +1265,19 @@ impl Compiler<'_> {
         // Assertions are compiled after every current evidence family so edges never depend on
         // source-vector order and missing evidence can fail closed explicitly.
         let records = self.intent_report.records().to_vec();
-        for record in records {
+        for record in &records {
             let assertion = record.assertion();
             let assertion_node = ProjectNodeRef::Assertion(assertion.reference.clone());
             self.graph.node(ProjectNode::new(
-                assertion_node.clone(),
-                intent_record_title(&record),
-                Some(intent_record_detail(&record)),
+                assertion_node,
+                intent_record_title(record),
+                Some(intent_record_detail(record)),
             ));
+        }
 
+        for record in records {
+            let assertion = record.assertion();
+            let assertion_node = ProjectNodeRef::Assertion(assertion.reference.clone());
             for participant in &assertion.participants {
                 let participant_node = ProjectNodeRef::Authored(participant.entity.clone());
                 if self.graph.contains_node(&participant_node) {
@@ -1285,11 +1301,33 @@ impl Compiler<'_> {
             for evidence in record.evidence() {
                 let evidence_node = intent_evidence_node(evidence);
                 if self.graph.contains_node(&evidence_node) {
-                    self.graph.edge(ProjectEdge::new(
+                    let diagnostic_is_source = matches!(
+                        (&assertion.source, evidence),
+                        (
+                            crate::AssertionSource::Diagnostic(source),
+                            IntentEvidenceRef::Diagnostic(evidence)
+                        ) if source == evidence
+                    );
+                    if matches!(evidence, IntentEvidenceRef::Diagnostic(_)) && !diagnostic_is_source
+                    {
+                        self.graph.edge(ProjectEdge::new(
+                            evidence_node,
+                            assertion_node.clone(),
+                            RelationshipKind::LoweredFrom,
+                        ));
+                    } else {
+                        self.graph.edge(ProjectEdge::new(
+                            assertion_node.clone(),
+                            evidence_node,
+                            RelationshipKind::EvaluatedFrom,
+                        ));
+                    }
+                } else if let Some(kind) = unknown_kind_for_intent_evidence(evidence) {
+                    self.add_unknown_dependency(
                         assertion_node.clone(),
-                        evidence_node,
-                        RelationshipKind::EvaluatedFrom,
-                    ));
+                        kind,
+                        format!("{evidence:?}"),
+                    );
                 }
             }
 
@@ -1637,6 +1675,7 @@ fn severity_label(severity: DiagnosticSeverity) -> &'static str {
 fn intent_evidence_node(evidence: &IntentEvidenceRef) -> ProjectNodeRef {
     match evidence {
         IntentEvidenceRef::Project => ProjectNodeRef::Project,
+        IntentEvidenceRef::Assertion(reference) => ProjectNodeRef::Assertion(reference.clone()),
         IntentEvidenceRef::Authored(reference) => ProjectNodeRef::Authored(reference.clone()),
         IntentEvidenceRef::GeneratedMember(reference) => {
             ProjectNodeRef::GeneratedMember(reference.clone())
@@ -1651,6 +1690,19 @@ fn intent_evidence_node(evidence: &IntentEvidenceRef) -> ProjectNodeRef {
             ProjectNodeRef::ComplianceEntry(reference.clone())
         }
         IntentEvidenceRef::Diagnostic(reference) => ProjectNodeRef::Diagnostic(reference.clone()),
+    }
+}
+
+fn unknown_kind_for_intent_evidence(evidence: &IntentEvidenceRef) -> Option<UnknownEvidenceKind> {
+    match evidence {
+        IntentEvidenceRef::Project => None,
+        IntentEvidenceRef::Assertion(_) => Some(UnknownEvidenceKind::Assertion),
+        IntentEvidenceRef::Authored(_) => Some(UnknownEvidenceKind::AuthoredEntity),
+        IntentEvidenceRef::GeneratedMember(_) => Some(UnknownEvidenceKind::GeneratedMember),
+        IntentEvidenceRef::PhysicalBody(_) => Some(UnknownEvidenceKind::PhysicalBody),
+        IntentEvidenceRef::StandardsRule(_) => Some(UnknownEvidenceKind::StandardsRule),
+        IntentEvidenceRef::ComplianceEntry(_) => Some(UnknownEvidenceKind::ComplianceEntry),
+        IntentEvidenceRef::Diagnostic(_) => Some(UnknownEvidenceKind::Diagnostic),
     }
 }
 
@@ -1725,7 +1777,12 @@ mod tests {
     use framer_solver::{DiagnosticSeverity, PlanDiagnostic, RuleRef};
 
     use super::*;
-    use crate::{GraphQueryCache, ProjectNodeRef};
+    use crate::{
+        AssertionRef, AssertionScope, AssertionSource, BooleanExpression, BooleanIntentMode,
+        BooleanIntentRecord, CompiledAssertion, DerivedAssertionId, DerivedAssertionProvider,
+        DerivedAssertionRole, DerivedAssertionSource, GraphQueryCache, IntentDomain,
+        ProjectNodeRef, SiteAssumptionKey,
+    };
 
     fn analysis(model: &BuildingModel) -> ProjectAnalysis {
         analyze_project(model).expect("fixture should analyze")
@@ -2479,6 +2536,117 @@ mod tests {
     }
 
     #[test]
+    fn missing_common_evidence_compiles_to_exact_unknown_families() {
+        let model = BuildingModel::demo_wall();
+        let plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let scene = build_physical_scene(&model, &plan);
+        let audit = audit_physical_scene(&scene);
+        let revision = GraphRevision::for_model(&model).unwrap();
+        let owner = AssertionRef::Derived(DerivedAssertionId::new(
+            revision,
+            DerivedAssertionProvider::Analysis,
+            DerivedAssertionSource::Project,
+            DerivedAssertionRole::Diagnostic {
+                provider: DiagnosticProvider::Analysis,
+                code: "test.missing-evidence".to_owned(),
+                ordinal: 0,
+            },
+        ));
+        let absent_assertion = AssertionRef::Derived(DerivedAssertionId::new(
+            revision,
+            DerivedAssertionProvider::Standards,
+            DerivedAssertionSource::Project,
+            DerivedAssertionRole::Diagnostic {
+                provider: DiagnosticProvider::Standards,
+                code: "test.absent-assertion".to_owned(),
+                ordinal: 0,
+            },
+        ));
+        let absent_compliance = ComplianceEntryRef {
+            revision,
+            rule: StandardsRuleRef::resolved(model.standards[0].clone(), "test.absent-compliance"),
+            subject: Some(AuthoredEntityRef::Wall(model.walls[0].id.clone())),
+            ordinal: 0,
+        };
+        let absent_diagnostic = DiagnosticRef {
+            revision,
+            provider: DiagnosticProvider::Solver,
+            code: "test.absent-diagnostic".to_owned(),
+            source: Some(AuthoredEntityRef::Wall(model.walls[0].id.clone())),
+            ordinal: 0,
+        };
+        let intent = IntentReport::from_parts(
+            revision,
+            vec![IntentRecord::Boolean(BooleanIntentRecord {
+                assertion: CompiledAssertion {
+                    reference: owner.clone(),
+                    domain: IntentDomain::Construction,
+                    scope: AssertionScope::Project,
+                    participants: Vec::new(),
+                    source: AssertionSource::Project,
+                    rationale: "Missing evidence test".to_owned(),
+                },
+                mode: BooleanIntentMode::Requirement,
+                expression: BooleanExpression::Finding {
+                    code: "test.missing-evidence".to_owned(),
+                },
+                outcome: IntentOutcome::Unknown(crate::IntentUnknown {
+                    kind: crate::IntentUnknownKind::EvaluationUnavailable,
+                    detail: "evidence is absent".to_owned(),
+                }),
+                evidence: vec![
+                    IntentEvidenceRef::Assertion(absent_assertion),
+                    IntentEvidenceRef::ComplianceEntry(absent_compliance),
+                    IntentEvidenceRef::Diagnostic(absent_diagnostic),
+                ],
+            })],
+            Vec::new(),
+        );
+        let graph = compile_project_graph_with_intent(
+            &model,
+            &plan,
+            &resolved,
+            &scene,
+            &audit,
+            &ComplianceReport::default(),
+            &intent,
+        )
+        .unwrap();
+        let owner_node = ProjectNodeRef::Assertion(owner);
+        let expected = BTreeSet::from([
+            UnknownEvidenceKind::Assertion,
+            UnknownEvidenceKind::ComplianceEntry,
+            UnknownEvidenceKind::Diagnostic,
+        ]);
+        let actual = graph
+            .edges()
+            .iter()
+            .filter_map(|edge| {
+                (edge.dependent == owner_node
+                    && edge.relationship == RelationshipKind::UnresolvedEvidence)
+                    .then_some(&edge.dependency)
+            })
+            .filter_map(|dependency| match dependency {
+                ProjectNodeRef::UnknownEvidence(unknown) => Some(unknown.kind),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+
+        let mut cache = GraphQueryCache::default();
+        let queried = cache
+            .evidence_for(&graph, &owner_node)
+            .into_iter()
+            .filter_map(|trace| match trace.node {
+                ProjectNodeRef::UnknownEvidence(unknown) => Some(unknown.kind),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(queried, expected);
+    }
+
+    #[test]
     fn site_impact_reaches_solver_and_compliance_consequences() {
         let model = BuildingModel::demo_wall();
         let analysis = analysis(&model);
@@ -2503,6 +2671,56 @@ mod tests {
                 && trace.path.first().is_some_and(|step| {
                     step.relationship == RelationshipKind::EvaluatedFrom && !step.toward_dependency
                 })
+        }));
+    }
+
+    #[test]
+    fn standards_evidence_reaches_typed_site_assumptions() {
+        let model = BuildingModel::demo_wall();
+        let analysis = analysis(&model);
+        let report = analysis.intent_report.as_ref().unwrap();
+        let graph = analysis.graph.as_ref().unwrap();
+        let (standards_assertion, site_assumption) = report
+            .records()
+            .iter()
+            .find_map(|record| {
+                let AssertionRef::Derived(assertion) = &record.assertion().reference else {
+                    return None;
+                };
+                if assertion.provider != DerivedAssertionProvider::Standards {
+                    return None;
+                }
+                record
+                    .evidence()
+                    .iter()
+                    .find_map(|evidence| match evidence {
+                        IntentEvidenceRef::Assertion(
+                            reference @ AssertionRef::Derived(assumption),
+                        ) if assumption.role
+                            == DerivedAssertionRole::SiteAssumption(
+                                SiteAssumptionKey::GroundSnowLoad,
+                            ) =>
+                        {
+                            Some((record.assertion().reference.clone(), reference.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("header-span intent should cite the ground-snow-load premise");
+
+        let standards_node = ProjectNodeRef::Assertion(standards_assertion);
+        let assumption_node = ProjectNodeRef::Assertion(site_assumption);
+        let mut cache = GraphQueryCache::default();
+        let evidence = cache.evidence_for(graph, &standards_node);
+        assert!(evidence.iter().any(|trace| {
+            trace.node == assumption_node
+                && trace.path.first().is_some_and(|step| {
+                    step.relationship == RelationshipKind::EvaluatedFrom && step.toward_dependency
+                })
+        }));
+        assert!(evidence.iter().any(|trace| {
+            trace.node == ProjectNodeRef::Authored(AuthoredEntityRef::Site)
+                && trace.path.iter().all(|step| step.toward_dependency)
         }));
     }
 
