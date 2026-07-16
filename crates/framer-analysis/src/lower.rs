@@ -1347,6 +1347,7 @@ mod tests {
     use framer_standards::EffectiveWaiver;
 
     use super::*;
+    use crate::{ProjectNodeRef, RelationshipKind};
 
     fn compliance_entry(rule: &str, outcome: Outcome) -> ComplianceEntry {
         ComplianceEntry {
@@ -1835,10 +1836,21 @@ mod tests {
         assert_eq!(
             waiver.reference,
             WaiverRef::Standards {
-                overlay_pack,
+                overlay_pack: overlay_pack.clone(),
                 rule: "test.all-walls-waived".to_owned(),
             }
         );
+
+        let graph = analysis.graph.as_ref().unwrap();
+        let overlay_node = ProjectNodeRef::Authored(AuthoredEntityRef::StandardsPack(overlay_pack));
+        for record in &waived_records {
+            let assertion_node = ProjectNodeRef::Assertion(record.assertion().reference.clone());
+            assert!(graph.edges().iter().any(|edge| {
+                edge.relationship == RelationshipKind::WaivedBy
+                    && edge.dependent == assertion_node
+                    && edge.dependency == overlay_node
+            }));
+        }
 
         let evidence_ref = waived_records[0]
             .evidence()
