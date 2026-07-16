@@ -21,3 +21,4 @@ New plan? Copy [`../templates/plan-template.md`](../templates/plan-template.md).
 | [2026-07-07 — UI/UX hardening](2026-07-07-ui-ux-hardening.md) | [Design System](../specs/design-system.md), [Command Surfaces](../specs/command-surfaces.md) |
 | [2026-07-08 — View–workflow alignment](2026-07-08-view-workflow-alignment.md) | [Command Surfaces](../specs/command-surfaces.md), [Render View Mode](../specs/render-view.md) |
 | [2026-07-14 — Tiled viewport workspaces](2026-07-14-tiled-viewport-workspaces.md) | [Tiled Viewport Workspaces](../specs/viewport-layouts.md) |
+| [2026-07-15 — Intent Model and Resolution](2026-07-15-intent-model-and-resolution.md) | [Intent Model and Resolution](../specs/intent-model-and-resolution.md) |

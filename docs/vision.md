@@ -320,6 +320,13 @@ goals relate.
   compliance report with citations. Ships pre-canned packs (IRC 2021 first);
   users augment, override, or fully define their own. Subsumes G-008's rule
   tables. See [specs/standards-engine.md](specs/standards-engine.md).
+- **G-016 Intent Model and Resolution:** compile Framer's typed authored objects,
+  explicit cross-object assertions, generated framing, standards outcomes, and
+  physical evidence into one deterministic intent network. Use it to explain
+  derivation and impact, distinguish satisfied/violated/unknown/waived intent,
+  and propose explicit authored resolution options without replacing the
+  canonical `BuildingModel` or silently changing topology/construction choices.
+  See [specs/intent-model-and-resolution.md](specs/intent-model-and-resolution.md).
 
 ## Definition Of Done
 

@@ -1,0 +1,351 @@
+# Intent Model and Resolution — Implementation Plan (2026-07-15)
+
+> **Implementation plan** (point-in-time). **Spec:**
+> [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
+> is an archival record of how the work was sequenced; the spec is the durable source of truth.
+>
+> **Status:** Proposed; no implementation slices have started.
+
+## Goal
+
+Deliver Framer's intent model incrementally without replacing `BuildingModel`, changing persisted
+project data before the representation is proven, or pretending one solver can resolve every
+domain. The plan first builds a read-only graph over current truth, then normalizes assertion and
+outcome protocols, introduces one schema-backed cross-object intent slice, and finally adds
+human-approved candidate authored changes.
+
+The completed initiative should let a user or agent inspect why an object was generated, what
+depends on an authored choice, which intents are unresolved, and which explicit alternatives are
+available. Structural synthesis involving posts, beams, load paths, or engineered members remains
+gated on those domain primitives being modeled honestly.
+
+## Architecture / stack summary
+
+Current resolution is orchestrated by `FramerApp::rebuild()` in
+`crates/framer-app/src/app/mod.rs`: apply wall-local driving dimensions, call
+`framer_solver::generate_project_plan`, build and audit `framer_geometry::PhysicalScene`, evaluate
+the resolved standards stack through `framer-standards`, and merge diagnostics.
+
+The implementation builds on:
+
+- `framer-core::BuildingModel`, globally unique `ElementId`, typed direct references, room
+  topology, `ConstraintSystem`, and the standards `Fact`/`Predicate` vocabulary;
+- `framer-solver::ProjectFramePlan`, `FrameMember.source`, `RuleProvenance`, and diagnostics;
+- `framer-standards::ComplianceReport` and three-valued fact evaluation;
+- `framer-geometry::BodyRef`, `GeometryAudit`, and structured violations; and
+- app-only `ComponentKey`/`Selection`, which demonstrate identity needs but must not become the
+  cross-crate contract.
+
+A higher UI-free analysis/resolution layer may combine these outputs. Core owns only the persisted
+or lower-level semantic types required below the solver; the new top-level layer must not create
+dependency cycles. Quantitative measurement remains in `framer-standards`: standards checks and
+project assertions consume the same facts instead of implementing parallel clearance, span, or
+performance calculations.
+
+## Risk and coverage ledger
+
+| Behavior | Boundary | Required proof | Likely failure if omitted |
+| --- | --- | --- | --- |
+| Stable project graph | core/solver/standards/geometry → analysis | Same input builds byte/logically identical ordered nodes and edges; missing optional evidence does not panic | Graph becomes presentation-only or nondeterministic |
+| Common semantic references | core/domain crates → analysis/app | Every supported authored/generated kind resolves; authored/derived assertion namespaces cannot collide; revision-scoped generated refs reject stale use | Another app-only identity enum becomes accidental truth |
+| Shared fact measurement | core/standards → analysis | A standards check and authored assertion over the same fact receive the identical observation and three-valued result | Standards and intent engines disagree about the same distance/span |
+| Common outcomes/evidence | standards/solver/geometry → analysis | Exact standards mapping includes Advisory → violated preference and retains domain payload/citation | Diagnostics lose severity or information during normalization |
+| Mode-specific result channels | analysis → ranking/evidence | Requirement/preference yield `IntentOutcome`; objective yields an exact scalar observation; assumption yields typed premise evidence and can make dependents unknown | Objectives become fake booleans or assumptions look inapplicable |
+| Waiver normalization | core standards/project intent → analysis | `RuleOverlay::Waive` and `IntentOverride::Waive` lower to one targeted graph shape; empty/dangling/duplicate overrides reject | Waivers become assertions or silently detach from their targets |
+| Persisted cross-object assertions | `.framer` → core | Positive canonical round-trip plus unknown/wrong-kind/duplicate/invalid-value rejection | Schema accepts dangling or stringly intent |
+| Directional fixture clearance | core/standards → analysis | Deg0/90/180/270 front/side facts, centerline-vs-face datum, containment, open-room unknown, and standards-vs-project parity | Flagship slice cannot express real fixture requirements |
+| Soft preference resolution | core/analysis | Priority ordering and stable ties are deterministic; required constraints never weaken | Vector/hash order silently chooses a design |
+| Candidate authored changes | analysis → app/history | Candidates never mutate until accepted; stale graph revision rejects; accepted patch validates, is undoable, and reruns resolution | Solver silently changes topology or applies a stale option |
+| Standards/geometry integration | analysis/app | Unsupported and unknown remain visible; source/rule/body evidence survives | A missing evaluator looks like success |
+| Existing diagnostics integration | analysis → solver/app | Required/preference/unknown lowering follows one severity matrix; pass/N/A/waived remain report-only | App grows a second competing problems surface |
+| Product-visible explanation UI | analysis → app | UI harness/screenshots cover why/impact/options and no-result states; lazy query work stays revision-cached | Graph exists but cannot answer user questions or bloats every rebuild |
+
+## Slices / phases
+
+### Slice 1 — Read-only unified project graph, no schema change
+
+Prove the graph shape against information Framer already computes. This slice must not add an
+`intents` field to `BuildingModel`, change `.framer`, or alter framing/compliance behavior.
+
+- **Task 1.1 — Lock semantic node and edge vocabulary for current entities**
+  - Define typed graph references for current authored entities, generated members, physical
+    bodies, standards rules, diagnostics, and derived reports.
+  - Keep authored references independent of app selection and keep generated types out of
+    `framer-core` unless a lower crate genuinely needs them.
+  - Define `AssertionRef::Authored` and `AssertionRef::Derived` as type-disjoint namespaces.
+    Derived ids include provider + semantic source + role and are authoritative only for the
+    current graph revision; generated member/body ids are never persisted.
+  - Files: new UI-free analysis module/crate after its boundary is named; `Cargo.toml` workspace
+    wiring; focused adapters in `crates/framer-core`, `crates/framer-solver`,
+    `crates/framer-standards`, and `crates/framer-geometry` only where necessary.
+  - Verify: positive resolution for every current entity family; explicit missing-source handling;
+    authored/derived ids with identical text cannot collide; compile-time exhaustive matches for
+    closed kinds.
+  - Commit: `feat(analysis): add typed project graph identity`
+
+- **Task 1.2 — Compile current truth into a deterministic graph**
+  - Compile ownership/reference edges from `BuildingModel`, dimension/anchor relationships,
+    room/topology consequences, member/source/rule evidence, compliance entries, and geometry
+    violations.
+  - Sort id-keyed graph records canonically while preserving semantic order such as standards
+    stack chains.
+  - Key the graph/cache by a deterministic `GraphRevision` fingerprint over the canonical
+    post-propagation model plus a fact/evaluator contract version. Reuse the project's pinned
+    hashing/canonicalization helpers rather than inventing an identity algorithm. Keep the app's
+    process-local `document_revision` separate.
+  - Eagerly compile only the current relationships/outcomes required by diagnostics; memoize
+    explanation/impact projections on first query and invalidate them on `FramerApp::rebuild()`.
+  - Expose localized `incoming_intent`, `derived_from`, `depends_on`, and `evidence_for` queries.
+  - Files: analysis graph/compiler files; tests with checked example projects.
+  - Verify: two compiles are `Eq`; permuting non-semantic source vectors before canonical model
+    sorting produces the same graph; semantic order remains visible; incomplete optional evidence
+    produces an explicit unknown edge/outcome rather than a panic; repeated queries reuse the
+    revision cache and one authored edit invalidates it.
+  - Commit: `feat(analysis): compile deterministic project graph`
+
+- **Task 1.3 — Add a read-only explanation surface**
+  - Add a focused inspector/panel view for "why generated" and "affected by" over selected
+    authored objects and generated members. Do not add a whole-graph editing canvas.
+  - Reuse or adapt app selection into graph references without making presentation state
+    canonical.
+  - Record a representative `rebuild()` baseline and first-query/cached-query timing in the PR;
+    candidate generation remains absent from the rebuild path.
+  - Files: `crates/framer-app/src/app/mod.rs`, `crates/framer-app/src/app/panels.rs`, app tests,
+    `docs/architecture.md`, `docs/code-map.md`.
+  - Verify: UI harness tests for authored object, generated member, compliance evidence, and no
+    available evidence; `scripts/ui-shots.sh` visual review.
+  - Commit: `feat(app): explain project graph relationships`
+
+**Slice 1 exit criteria:** A current v13 project opens byte-identically, its plan/report/audit are
+unchanged, and graph queries can explain at least a wall opening → header/member → rule/source
+chain plus one geometry or compliance issue.
+
+### Slice 2 — Common assertion, outcome, and evidence protocol
+
+Normalize the cross-domain protocol while leaving specialized evaluators intact. Still no project
+schema change.
+
+- **Task 2.1 — Define the non-persisted common assertion envelope**
+  - Introduce `AssertionRef`, domain vocabulary, requirement/preference/objective/assumption modes,
+    deterministic scope projections, source/rationale, and qualified participants for compiled
+    current intent. Prohibition normalizes to required negation; decision and waiver are not modes.
+  - Dispatch results by mode: requirement/preference → `IntentOutcome`; objective → exact
+    `ObjectiveObservation` with minimize/maximize direction and named vector component; assumption
+    → typed `AssumptionEvidence`. Objective/assumption records never receive a synthetic boolean
+    outcome.
+  - Lower current `DimensionConstraint`, construction selections, site assumptions, standards
+    checks, and `RuleOverlay::Waive` into the envelope/override graph without duplicating storage.
+  - Give each derived assertion a deterministic provider/source/role identity and keep it disjoint
+    from future persisted `AuthoredIntentId`s.
+  - Files: core-owned lower-level types only if required by lower crates; otherwise analysis types
+    and adapters; `crates/framer-core/src/constraints.rs` tests.
+  - Verify: each current assertion has stable identity and participants; assertion namespaces do
+    not collide; prohibition and equivalent required negation produce one evaluator form;
+    requirement/preference dispatch to boolean outcome, objective dispatches to scalar observation,
+    assumption dispatches to premise evidence, and neither objective nor assumption becomes
+    `NotApplicable` merely because it is non-boolean; wall-local dimension solving remains
+    byte/behavior identical.
+  - Commit: `feat(intent): normalize existing authored assertions`
+
+- **Task 2.2 — Establish one shared fact and predicate path**
+  - Reuse the core-owned `Fact`, `FactOperand`, `CompareOp`, and `Predicate` vocabulary. Refactor
+    `framer-standards::fact_value` behind a shared UI-free fact provider/snapshot that remains the
+    sole quantitative measurement implementation.
+  - Keep standards `CheckScope` as selector-only pack syntax and introduce a common sorted
+    fact-subject projection that can also accept exact project participants later. Analysis calls
+    the shared provider; it does not calculate a second copy of any fact.
+  - Files: `crates/framer-core/src/standards.rs`, `crates/framer-standards/src/lib.rs`, analysis fact
+    adapter/tests; standards spec/code map if the public contract moves.
+  - Verify: existing compliance output is byte/behavior identical; a compiled assertion and a
+    standards check over the same fact share the exact `FactValue`/unknown result; scope ordering is
+    deterministic; missing and wrong-scope facts fail closed.
+  - Commit: `refactor(standards): share facts with intent analysis`
+
+- **Task 2.3 — Normalize domain results without erasing domain payloads**
+  - Add the common `Satisfied | Violated | Unknown | NotApplicable | Waived` outcome and structured
+    evidence references for requirement/preference assertions. Carry objective observations and
+    assumption evidence through their separate `IntentEvaluation` variants.
+  - Adapt standards outcomes, plan diagnostics, library lifecycle issues where applicable, and
+    geometry violations. Keep their existing detailed types available.
+  - Lock standards lowering as `Pass → Satisfied`, required `Violation → Violated`, failed
+    `Advisory → Violated` on a preference-tier assertion, `NeedsReview → Unknown`, with
+    `NotApplicable` and `Waived` direct. Preserve the original severity, citation, and report entry
+    as evidence.
+  - Lower actionable assertion outcomes into the existing `PlanDiagnostic` channel:
+    required violation → `Violation`, preference/advisory violation → `Warning`, missing fact →
+    `NeedsReview`, unsupported fact/evaluator → `Unsupported`; satisfied/not-applicable/waived stay
+    report/inspector-only.
+  - Files: analysis adapters; focused shared types; `crates/framer-standards/src/lib.rs` and
+    `crates/framer-geometry` tests where public contracts change.
+  - Verify: table-driven coverage for every standards outcome/severity mapping and every diagnostic
+    severity mapping; waived/not-applicable compliance entries remain report-only unless the intent
+    inspector requests them; geometry witness data remains recoverable.
+  - Commit: `feat(analysis): unify intent outcomes and evidence`
+
+- **Task 2.4 — Expose status and impact in the app**
+  - Group selected-entity assertions by domain and outcome and show the dependency impact of an
+    authored edit as a projection, not a promise that every value changes.
+  - Files: app panels/actions, UI harness tests, `docs/code-map.md`.
+  - Verify: status groups include unknown and waived; empty/no-evaluator states are honest;
+    `scripts/ui-shots.sh`.
+  - Commit: `feat(app): show intent status and impact`
+
+**Slice 2 exit criteria:** Dimensions, construction selections, standards checks, and geometry
+issues are queryable through one assertion/outcome/evidence protocol; standards checks and
+compiled intent share one fact measurement path; actionable results use the existing diagnostics
+surface; all existing domain tests and generated outputs remain unchanged.
+
+### Slice 3 — First schema-backed cross-object intent
+
+Add only the minimum persisted assertion set required for a real cross-domain vertical slice:
+placed-object **containment and directional clearance**. This slice is locked because it exercises
+design intent, semantic object relationships, shared standards facts, and construction influence.
+It does not widen `ConstraintSystem`; clearances are evaluated facts and movement is a later
+candidate edit.
+
+- **Task 3.1 — Lock and serialize typed authored assertions**
+  - Add core-owned `IntentAssertion`, typed authored references, domain, mode/priority, exact
+    project scope, shared fact-predicate expression, source, and rationale. Do not add a parallel
+    `SpatialIntent` threshold language.
+  - Keep the first persisted vertical slice to requirement/preference assertions. Objective and
+    assumption result shapes exist in the compiled protocol, but their authored schema waits for a
+    feature that can exercise ranking or premise consumption end to end.
+  - Add `IntentOverride::Waive` targeting an `AuthoredIntentId`; empty reasons and unknown targets
+    are invalid. `RuleOverlay::Waive` remains the standards rule storage form, and both compile to
+    one graph waiver record/outcome. A standards overlay waiver is referenced by overlay pack +
+    rule and applies to every scoped rule-instance assertion from that resolved rule.
+  - Add `BuildingModel.intents` and `intent_overrides` (or the final locked names) as id-sorted
+    collections. Do not duplicate existing direct field relationships.
+  - Lock the placed-object local frame: model `+X` is right, `+Y` is up; width is left/right, depth
+    is back/front, origin is the center, and Deg0 front is local `+Y`. `QuarterTurn` is
+    counterclockwise, so Deg90 front is `-X`, Deg180 is `-Y`, and Deg270 is `+X`; screen coordinates
+    do not change the mapping. Clearance fact requests carry `Left/Right/Front/Back/Around` and
+    centerline-versus-footprint-face datum.
+  - Project assertions may use exact typed refs; selector-scoped reusable policy stays in
+    `StandardsPack`. Do not bump `.framerlib` or distribute project assertions in this slice.
+  - Bump the then-current project schema (v13 → v14 if no intervening bump), update all example
+    projects, explicit old-schema rejection, canonical round-trips, `project-files.md`,
+    architecture, code map, and this spec.
+  - Files: `crates/framer-core/src/model.rs`, a focused intent module, `src/project.rs`, public
+    exports, examples, docs.
+  - Verify: positive round-trip; duplicate assertion/override id; authored/derived namespace
+    collision attempt; unknown/wrong-kind assertion target; unknown waiver target; empty waiver
+    reason; self/empty invalid relation; invalid priority/value; unsupported domain/expression pair
+    including objective/assumption in this first persisted slice; canonical assertion/override
+    order; old schema rejected explicitly.
+  - Commit: `feat(core): persist typed cross-object intent`
+
+- **Task 3.2 — Evaluate containment and clearance**
+  - Extend the shared core `Fact` request/subject vocabulary and the single
+    `framer-standards` fact provider for placed furnishing/MEP footprints, containing room, and
+    directional nearest-obstacle clearance. Both standards checks and project assertions evaluate
+    those exact observations through the common `Predicate` evaluator.
+  - Measure side centerline clearance independently from front/back footprint-face clearance after
+    applying `QuarterTurn`; do not reduce the requirement to one radial bounding-box gap.
+  - An open room, unknown family geometry, or unsupported clearance participant yields `Unknown`,
+    not pass. A geometric miss yields `Violated` without making the project unserializable.
+  - Lower actionable results into `ProjectFramePlan.diagnostics` through the mapping locked in
+    Slice 2. The intent inspector/report retains satisfied, not-applicable, and waived entries plus
+    all cross-object participants.
+  - Files: core fact/scope vocabulary and topology helpers, `framer-standards` fact provider,
+    analysis adapter/compiler, diagnostics lowering, focused tests,
+    `docs/specs/standards-engine.md`, and `docs/code-map.md`.
+  - Verify: containment plus front/left/right clearance at Deg0/90/180/270 using asymmetric
+    obstacles; explicitly assert Deg90 front=`-X` and that left/right do not mirror; cover
+    centerline-versus-face datum, nearest wall and object obstacle, satisfied/violated/open-room
+    unknown/missing-capability unknown/not-applicable/waived cases, and deterministic multi-object
+    ordering; the same fixture rule expressed once as a required standards check and once as
+    required project intent observes the identical fact and outcome status.
+  - Commit: `feat(analysis): evaluate object containment and clearance`
+
+- **Task 3.3 — Author and inspect cross-object intent**
+  - Add inspector/catalog actions for declaring required versus preferred containment/clearance,
+    selecting participants, displaying rationale/source, waiving with reason where permitted, and
+    focusing all implicated entities.
+  - Waiving a project assertion writes `IntentOverride::Waive`; waiving a standards rule continues
+    to write `RuleOverlay::Waive`. Both display the same compiled waived outcome with provenance.
+  - All mutation uses `FramerApp::edit()` and ordinary undo/redo. Mid-authoring incomplete state is
+    transient app state, not a malformed persisted assertion. The existing diagnostics panel is
+    the sole problems surface; the intent inspector adds context rather than a competing list.
+  - Files: app model-edit helpers, actions/panels/viewport focus, history/UI tests, screenshots.
+  - Verify: create/edit/delete/waive undo/redo; project-vs-standards waiver provenance; reopen
+    round-trip; invalid participant selection cannot author a bad model; one diagnostic can focus
+    its primary subject and the inspector can focus every participant; `scripts/ui-shots.sh`.
+  - Commit: `feat(app): author cross-object intent`
+
+**Slice 3 exit criteria:** A user can persist, reopen, evaluate, inspect, and waive one real
+cross-object containment/clearance requirement; an unresolved requirement is saveable and clearly
+visible.
+
+### Slice 4 — Candidate authored changes and explicit resolution
+
+Introduce option generation only for edits Framer can already represent and validate. Do not claim
+general structural optimization.
+
+- **Task 4.1 — Define typed authored patches and resolution options**
+  - Define typed patch operations for existing safe mutations such as moving/rotating a placed
+    object, changing an applicable construction system, or editing an existing parameter.
+  - Each option reports satisfied, violated, waived, and unknown intents plus a deterministic
+    lexicographic objective vector and evidence.
+  - Arbitrary JSON patching is rejected. Graph-derived options remain disposable and carry the
+    exact graph/document revision against which their tradeoffs were evaluated.
+  - Files: analysis resolution/patch modules; app edit adapter; unit tests.
+  - Verify: stable option ordering and tie-breaking; malformed target rejection; any intervening
+    authored rebuild makes an option stale; evaluating an option does not mutate the source model;
+    applying a selected current option validates and round-trips.
+  - Commit: `feat(resolution): add typed authored change options`
+
+- **Task 4.2 — Generate and preview placement-resolution options**
+  - For a violated placed-object clearance, generate bounded candidates such as moving or rotating
+    the existing object within its containing room. Do not add walls, routes, or framing objects in
+    this first provider.
+  - Preview the authored diff and its intent tradeoffs. Acceptance is one undoable edit followed by
+    a full rebuild; dismissal changes nothing.
+  - Files: analysis candidate provider, app option panel/viewport preview, history/UI tests.
+  - Verify: unique candidate; several ranked candidates; no feasible candidate; required intent is
+    never traded for a lower-tier preference; no silent application; UI shots.
+  - Commit: `feat(app): preview intent resolution options`
+
+- **Task 4.3 — Gate structural alternatives on honest prerequisites**
+  - Before implementing dimensional-lumber versus engineered-member alternatives, add or link
+    durable specs for authored posts/beams/supports, bearing and load paths, member capacities and
+    deflection, engineered member families, and the responsible standards/analysis boundary.
+  - Once those primitives exist, add candidate providers for deeper/closer dimensional members,
+    changed bearing direction, added support, or engineered substitution. Every option must expose
+    affected spatial, resource, construction, and compliance intent.
+  - Files: new durable specs/plans first; core/solver/standards/geometry/app only in later scoped
+    implementation plans.
+  - Verify: structural evaluator proof appropriate to its spec, geometry audit for every accepted
+    physical option, and explicit unsupported behavior outside the modeled domain.
+  - Commit: deferred to the later structural feature plans.
+
+**Slice 4 exit criteria:** Framer can propose, preview, accept, undo, and explain deterministic
+authored changes for at least one supported conflict. Structural alternatives remain unavailable
+and explicitly labeled until their domain prerequisites are implemented.
+
+## Final verification
+
+Each implementation slice runs focused owning-crate tests plus the full workspace gate before its
+final commit:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+python3 scripts/check-markdown-links.py
+```
+
+Additional gates:
+
+- Run `scripts/ui-shots.sh` for every intent inspector, status, impact, or option UI change.
+- Run `cargo test -p framer-app --test gpu_parity --locked -- --nocapture` if option previews or
+  accepted changes alter shared render/scene-building behavior.
+- Run the headless `geometry-audit` command on checked examples for accepted options that alter
+  physical assemblies or generated members.
+- Confirm canonical `.framer` output and explicit old-schema rejection in the schema-backed slice.
+- Adversarially delete each new validator, unknown branch, adapter mapping, and candidate-approval
+  guard; a focused test must fail.
+
+When a slice lands, update the durable spec's **Status** and **Last reviewed**, refresh
+`docs/architecture.md`, `docs/code-map.md`, and `docs/project-files.md` where relevant, and record
+which later slices remain proposed.

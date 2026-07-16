@@ -24,12 +24,13 @@ New spec? Copy [`../templates/spec-template.md`](../templates/spec-template.md).
 | [Command Surfaces](command-surfaces.md) | G-011 | Implemented |
 | [Component Visibility, Multi-Selection, and Isolation](component-visibility-and-isolation.md) | G-003 / G-011 | Implemented |
 | [Tiled Viewport Workspaces](viewport-layouts.md) | G-003 / G-011 | Implemented |
+| [Intent Model and Resolution](intent-model-and-resolution.md) | G-016 | Proposed |
 | [Build & CI](build-and-ci.md) | — (infrastructure) | Implemented |
 
 Related durable specs that live elsewhere because they are heavily cross-linked:
 
 - [`../project-files.md`](../project-files.md) — the `.framer` file-format spec + agent editing
   contract.
-- [`../vision.md`](../vision.md) — the product source of truth and goal backlog (G-001…G-012).
+- [`../vision.md`](../vision.md) — the product source of truth and goal backlog (G-001…G-016).
 - [`../architecture.md`](../architecture.md) / [`../code-map.md`](../code-map.md) — system shape
   and concrete code navigation.
