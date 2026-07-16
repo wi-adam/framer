@@ -243,15 +243,100 @@ fn add_wall_is_a_single_undoable_step() {
 }
 
 #[test]
+fn add_wall_collinear_continuation_extends_existing_wall_in_one_undo_step() {
+    let mut app = FramerApp::default();
+    replace_walls_with_rectangular_footprint(&mut app, 10.0, 8.0);
+    let before = app.model.clone();
+    let walls_before = app.model.walls.len();
+
+    // The authored top wall runs from (10,8) back to (0,8). Drawing outward
+    // from its local start exercises the offset-shifting extension direction.
+    app.add_wall(
+        Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+        Point2::new(Length::from_feet(20.0), Length::from_feet(8.0)),
+    );
+
+    assert_eq!(
+        app.model.walls.len(),
+        walls_before,
+        "a straight continuation must not author a second physical wall section"
+    );
+    let extended = app
+        .model
+        .walls
+        .iter()
+        .find(|wall| wall.start.y == Length::from_feet(8.0) && wall.end.y == wall.start.y)
+        .unwrap();
+    assert_eq!(extended.length, Length::from_feet(20.0));
+    assert_eq!(app.history.undo_label(), Some("Draw wall"));
+    assert_eq!(
+        app.project_plan.as_ref().unwrap().wall_plans.len(),
+        walls_before,
+        "regeneration must frame one extended wall rather than two restarted sections"
+    );
+
+    app.undo();
+    assert_eq!(app.model, before, "undo restores the pre-extension wall");
+}
+
+#[test]
+fn drawing_adjacent_room_extends_perimeter_and_reclassifies_old_corners_as_tees() {
+    let mut app = FramerApp::default();
+    replace_walls_with_rectangular_footprint(&mut app, 10.0, 8.0);
+    assert_eq!(
+        framer_core::enclosed_room_count(&app.model),
+        1,
+        "the starting footprint encloses one room"
+    );
+
+    // Add the three missing sides of a room to the right. The top and bottom
+    // gestures continue existing perimeter walls; only the new outer wall is a
+    // new authored wall. The old right wall becomes the shared partition.
+    app.add_wall(
+        Point2::new(Length::from_feet(10.0), Length::from_feet(8.0)),
+        Point2::new(Length::from_feet(20.0), Length::from_feet(8.0)),
+    );
+    app.add_wall(
+        Point2::new(Length::from_feet(20.0), Length::from_feet(8.0)),
+        Point2::new(Length::from_feet(20.0), Length::ZERO),
+    );
+    app.add_wall(
+        Point2::new(Length::from_feet(20.0), Length::ZERO),
+        Point2::new(Length::from_feet(10.0), Length::ZERO),
+    );
+
+    assert_eq!(app.model.walls.len(), 5);
+    assert_eq!(framer_core::enclosed_room_count(&app.model), 2);
+    let tee_count = app
+        .model
+        .wall_joins
+        .iter()
+        .filter(|join| join.kind == framer_core::WallJoinKind::Tee)
+        .count();
+    assert_eq!(
+        tee_count, 2,
+        "the former outside corners become partition tees on the extended runs"
+    );
+    assert_eq!(app.project_plan.as_ref().unwrap().wall_plans.len(), 5);
+}
+
+#[test]
 fn add_wall_auto_creates_corner_join_at_shared_endpoint() {
     let mut app = FramerApp::default();
+    // Seed a free wall with only one wall at its far endpoint. Demo-shell
+    // corners have two perpendicular walls, so any outward ortho gesture there
+    // is correctly interpreted as continuing one of those perimeter walls.
+    app.add_wall(
+        Point2::new(Length::ZERO, Length::from_feet(30.0)),
+        Point2::new(Length::from_feet(10.0), Length::from_feet(30.0)),
+    );
     let joins_before = app.model.wall_joins.len();
 
-    // The demo shell has an endpoint at the origin; a wall drawn from there
-    // should auto-join the walls meeting at (0,0).
+    // A perpendicular wall drawn from the free wall's endpoint is a true corner,
+    // not a straight continuation.
     app.add_wall(
-        Point2::new(Length::from_feet(0.0), Length::from_feet(0.0)),
-        Point2::new(Length::from_feet(0.0), Length::from_feet(-10.0)),
+        Point2::new(Length::from_feet(10.0), Length::from_feet(30.0)),
+        Point2::new(Length::from_feet(10.0), Length::from_feet(40.0)),
     );
 
     assert!(

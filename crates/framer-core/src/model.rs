@@ -1473,6 +1473,82 @@ impl BuildingModel {
         true
     }
 
+    /// Extend one existing wall when a newly drawn segment is its exact,
+    /// non-overlapping collinear continuation. This keeps draw gestures as
+    /// authored room/layout intent instead of turning every click into a
+    /// physical framing break. The caller remains responsible for reconciling
+    /// joins after the mutation.
+    ///
+    /// The continuation is deliberately conservative: it must identify exactly
+    /// one wall on `level`, and the wall must still validate after extension.
+    /// That final guard prevents a draw gesture from silently overriding a
+    /// driving dimension. When the local start moves, nested opening and braced
+    /// panel offsets shift by the added length so their world positions stay
+    /// fixed.
+    pub fn extend_collinear_wall(
+        &mut self,
+        level: &ElementId,
+        segment_start: Point2,
+        segment_end: Point2,
+    ) -> Option<ElementId> {
+        if segment_start == segment_end
+            || (segment_start.x != segment_end.x && segment_start.y != segment_end.y)
+        {
+            return None;
+        }
+
+        let candidates = self
+            .walls
+            .iter()
+            .enumerate()
+            .filter(|(_, wall)| wall.level == *level)
+            .flat_map(|(index, wall)| {
+                [(segment_start, segment_end), (segment_end, segment_start)]
+                    .into_iter()
+                    .filter_map(move |(shared, new_endpoint)| {
+                        wall_continuation_at_endpoint(wall, shared, new_endpoint).map(
+                            |(extend_start, extension)| {
+                                (index, extend_start, new_endpoint, extension)
+                            },
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let [(index, extend_start, new_endpoint, extension)] = candidates.as_slice() else {
+            return None;
+        };
+        if self.walls.iter().enumerate().any(|(other_index, wall)| {
+            other_index != *index
+                && wall.level == *level
+                && wall_overlaps_segment_interior(wall, segment_start, segment_end)
+        }) {
+            return None;
+        }
+
+        let mut extended = self.walls[*index].clone();
+        if *extend_start {
+            extended.start = *new_endpoint;
+            for opening in &mut extended.openings {
+                opening.center += *extension;
+            }
+            for panel in &mut extended.bracing {
+                panel.offset += *extension;
+            }
+        } else {
+            extended.end = *new_endpoint;
+        }
+        extended.length += *extension;
+
+        if extended.validate().is_err() {
+            return None;
+        }
+
+        let id = extended.id.clone();
+        self.walls[*index] = extended;
+        Some(id)
+    }
+
     /// Move the `which_end` endpoint of `wall` to `new_point`, dragging along every
     /// other wall endpoint that coincides with the old point so a shared corner
     /// stays connected ("move the joint"). Each moved wall's `length` is resynced
@@ -1638,6 +1714,59 @@ fn derive_wall_joins(walls: &[Wall]) -> Vec<DesiredJoin> {
         }
     }
     joins
+}
+
+/// Whether `new_endpoint` continues `wall` straight through `shared`, returning
+/// which local end moves and the added length. The strict negative dot product
+/// distinguishes a continuation from a coincident/overlapping stroke.
+fn wall_continuation_at_endpoint(
+    wall: &Wall,
+    shared: Point2,
+    new_endpoint: Point2,
+) -> Option<(bool, Length)> {
+    let (other, extend_start) = if wall.start == shared {
+        (wall.end, true)
+    } else if wall.end == shared {
+        (wall.start, false)
+    } else {
+        return None;
+    };
+
+    let old_dx = (other.x - shared.x).ticks() as i128;
+    let old_dy = (other.y - shared.y).ticks() as i128;
+    let new_dx = (new_endpoint.x - shared.x).ticks() as i128;
+    let new_dy = (new_endpoint.y - shared.y).ticks() as i128;
+    if old_dx * new_dy - old_dy * new_dx != 0 || old_dx * new_dx + old_dy * new_dy >= 0 {
+        return None;
+    }
+
+    let extension = if new_dx != 0 {
+        (new_endpoint.x - shared.x).abs()
+    } else {
+        (new_endpoint.y - shared.y).abs()
+    };
+    (extension > Length::ZERO).then_some((extend_start, extension))
+}
+
+/// Whether an axis-aligned wall overlaps the positive-length interior of an
+/// axis-aligned segment. Endpoint-only contact is allowed because reconciliation
+/// can represent that junction; coincident framing runs are not.
+fn wall_overlaps_segment_interior(wall: &Wall, start: Point2, end: Point2) -> bool {
+    if start.y == end.y && wall.start.y == wall.end.y && wall.start.y == start.y {
+        let wall_min = wall.start.x.min(wall.end.x);
+        let wall_max = wall.start.x.max(wall.end.x);
+        let segment_min = start.x.min(end.x);
+        let segment_max = start.x.max(end.x);
+        wall_min.max(segment_min) < wall_max.min(segment_max)
+    } else if start.x == end.x && wall.start.x == wall.end.x && wall.start.x == start.x {
+        let wall_min = wall.start.y.min(wall.end.y);
+        let wall_max = wall.start.y.max(wall.end.y);
+        let segment_min = start.y.min(end.y);
+        let segment_max = start.y.max(end.y);
+        wall_min.max(segment_min) < wall_max.min(segment_max)
+    } else {
+        false
+    }
 }
 
 /// The single join relationship (if any) between two distinct walls, in priority
@@ -6981,6 +7110,175 @@ mod tests {
         assert_eq!(model.wall_joins[0].kind, WallJoinKind::Corner);
         assert_eq!(model.wall_joins[0].point, rp(10.0, 0.0));
         model.validate().unwrap();
+    }
+
+    #[test]
+    fn extend_collinear_wall_moves_start_and_preserves_wall_local_content() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut wall = placed_wall("existing", rp(10.0, 0.0), rp(0.0, 0.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(3.0),
+            Length::from_feet(2.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        wall.bracing.push(BracedPanel {
+            id: ElementId::new("panel"),
+            offset: Length::from_feet(2.0),
+            length: Length::from_feet(4.0),
+            method: crate::BracingMethod::Wsp,
+        });
+        let opening_world_point = wall.point_at_local_x(wall.openings[0].center);
+        let bracing_world_point = wall.point_at_local_x(wall.bracing[0].offset);
+        model.walls.push(wall);
+
+        let extended =
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(10.0, 0.0), rp(20.0, 0.0));
+
+        assert_eq!(extended, Some(ElementId::new("existing")));
+        let wall = &model.walls[0];
+        assert_eq!(wall.start, rp(20.0, 0.0));
+        assert_eq!(wall.end, rp(0.0, 0.0));
+        assert_eq!(wall.length, Length::from_feet(20.0));
+        assert_eq!(
+            wall.point_at_local_x(wall.openings[0].center),
+            opening_world_point,
+            "moving the local start must not move an existing opening"
+        );
+        assert_eq!(
+            wall.point_at_local_x(wall.bracing[0].offset),
+            bracing_world_point,
+            "moving the local start must not move an existing braced panel"
+        );
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn extend_collinear_wall_moves_end_without_shifting_local_content() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut wall = placed_wall("existing", rp(0.0, 0.0), rp(0.0, 10.0), &code);
+        wall.openings.push(Opening::window(
+            "window",
+            "Window",
+            Length::from_feet(3.0),
+            Length::from_feet(2.0),
+            Length::from_feet(3.0),
+            Length::from_feet(3.0),
+        ));
+        model.walls.push(wall);
+
+        let extended =
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(0.0, 20.0), rp(0.0, 10.0));
+
+        assert_eq!(extended, Some(ElementId::new("existing")));
+        let wall = &model.walls[0];
+        assert_eq!(wall.start, rp(0.0, 0.0));
+        assert_eq!(wall.end, rp(0.0, 20.0));
+        assert_eq!(wall.length, Length::from_feet(20.0));
+        assert_eq!(wall.openings[0].center, Length::from_feet(3.0));
+        model.validate().unwrap();
+    }
+
+    #[test]
+    fn extend_collinear_wall_rejects_overlap_ambiguity_and_driving_conflicts() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        let mut constrained = placed_wall("constrained", rp(0.0, 0.0), rp(10.0, 0.0), &code);
+        constrained.dimensions.push(driving_dimension(
+            "wall-length",
+            DimensionAnchor::WallStart,
+            DimensionAnchor::WallEnd,
+            DimensionDirection::Forward,
+            Length::from_feet(10.0),
+        ));
+        model.walls.push(constrained);
+
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(10.0, 0.0), rp(10.0, 0.0),),
+            None,
+            "a zero-length segment is not a continuation"
+        );
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(10.0, 0.0), rp(20.0, 1.0),),
+            None,
+            "a diagonal segment is not a continuation"
+        );
+
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(10.0, 0.0), rp(20.0, 0.0),),
+            None,
+            "a draw gesture must not silently override a driving dimension"
+        );
+        assert_eq!(model.walls[0].length, Length::from_feet(10.0));
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(2.0, 0.0), rp(10.0, 0.0),),
+            None,
+            "an overlapping stroke is not a continuation"
+        );
+
+        model.walls[0].dimensions.clear();
+        model.walls.push(placed_wall(
+            "wrong-level-continuation",
+            rp(10.0, 0.0),
+            rp(20.0, 0.0),
+            &code,
+        ));
+        model
+            .levels
+            .push(Level::new("level-2", "Level 2", Length::from_feet(10.0)));
+        model.walls.push(placed_wall_on_level(
+            "other-level",
+            "level-2",
+            rp(10.0, 0.0),
+            rp(20.0, 0.0),
+            &code,
+        ));
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-2"), rp(20.0, 0.0), rp(30.0, 0.0),),
+            Some(ElementId::new("other-level")),
+            "only the requested level participates in continuation"
+        );
+        assert_eq!(model.walls[0].length, Length::from_feet(10.0));
+        assert_eq!(model.walls[1].length, Length::from_feet(10.0));
+    }
+
+    #[test]
+    fn extend_collinear_wall_rejects_multiple_candidates_and_other_wall_overlap() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model
+            .walls
+            .push(placed_wall("left", rp(0.0, 0.0), rp(10.0, 0.0), &code));
+        model
+            .walls
+            .push(placed_wall("right", rp(20.0, 0.0), rp(30.0, 0.0), &code));
+
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(10.0, 0.0), rp(20.0, 0.0),),
+            None,
+            "a bridge between two possible host walls is ambiguous"
+        );
+
+        model.walls.clear();
+        model
+            .walls
+            .push(placed_wall("lower", rp(0.0, 0.0), rp(0.0, 10.0), &code));
+        model.walls.push(placed_wall(
+            "vertical-overlap",
+            rp(0.0, 15.0),
+            rp(0.0, 25.0),
+            &code,
+        ));
+        assert_eq!(
+            model.extend_collinear_wall(&ElementId::new("level-1"), rp(0.0, 10.0), rp(0.0, 20.0),),
+            None,
+            "a continuation must not create coincident wall runs"
+        );
+        assert_eq!(model.walls[0].length, Length::from_feet(10.0));
     }
 
     #[test]

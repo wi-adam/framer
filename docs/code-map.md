@@ -147,6 +147,10 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 - `BuildingModel::resolved_standards()` / `framing_defaults()` — resolve the ordered standards
   stack into the tables and defaults consumed by the solver and UI defaults.
 - `BuildingModel::validate()` — full model validation (called before every save).
+- `BuildingModel::extend_collinear_wall()` — conservatively absorbs a newly drawn
+  straight continuation into one compatible authored wall, preserving world-space
+  opening/bracing placement and refusing ambiguous or driving-dimension-breaking
+  merges; the app follows it with `reconcile_joins()` before regeneration.
 - `load_project(&str) -> BuildingModel` / `save_project(&BuildingModel) -> String` (`project.rs`).
 - `load_library(&str) -> Library` / `save_library(&Library) -> String` (`library.rs`).
 - `room_boundaries(model)` / `room_boundary(model, seed)` plus level-scoped
