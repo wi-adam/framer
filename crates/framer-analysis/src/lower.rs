@@ -1,23 +1,45 @@
-use framer_core::{AuthoredEntityRef, BuildingModel, DimensionKind, ElementId, PropertyValue};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
-use crate::{
-    AssertionParticipant, AssertionParticipantRole, AssertionRef, AssertionSource,
-    AssumptionEvidence, AssumptionIntentRecord, AssumptionPremise, BooleanExpression,
-    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, DerivedAssertionId,
-    DerivedAssertionProvider, DerivedAssertionRole, DerivedAssertionSource, GraphRevision,
-    IntentDomain, IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentUnknown,
-    IntentUnknownKind, IntentValue, SelectionAttribute, SiteAssumptionKey,
+use framer_core::{
+    AuthoredEntityRef, BuildingModel, CheckSeverity, DimensionKind, ElementId, PropertyValue,
+};
+use framer_geometry::{GeometryAudit, GeometryViolation};
+use framer_solver::{DiagnosticSeverity, PlanDiagnostic, ProjectFramePlan, RuleRef};
+use framer_standards::{
+    ComplianceEntry, ComplianceReport, FactSubject, FactUnknownKind, Outcome, StandardsEvaluation,
+    StandardsEvaluationDetail, SyntheticEntryKind, Tri,
 };
 
+use crate::{
+    AssertionParticipant, AssertionParticipantRole, AssertionRef, AssertionScope, AssertionSource,
+    AssumptionEvidence, AssumptionIntentRecord, AssumptionPremise, BooleanExpression,
+    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, ComplianceEntryRef,
+    DerivedAssertionId, DerivedAssertionProvider, DerivedAssertionRole, DerivedAssertionSource,
+    DiagnosticProvider, DiagnosticRef, GraphRevision, IntentDomain, IntentEvidenceRef,
+    IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind, IntentValue,
+    PhysicalBodyRef, PreferencePriority, SelectionAttribute, SiteAssumptionKey, StandardsRuleRef,
+    WaiverRecord, WaiverRef,
+};
+
+#[cfg(test)]
 pub(crate) fn compile_current_intent(
     model: &BuildingModel,
     revision: GraphRevision,
 ) -> IntentReport {
+    IntentReport::from_parts(
+        revision,
+        current_intent_records(model, revision),
+        Vec::new(),
+    )
+}
+
+fn current_intent_records(model: &BuildingModel, revision: GraphRevision) -> Vec<IntentRecord> {
     let mut records = Vec::new();
     compile_driving_dimensions(model, revision, &mut records);
     compile_construction_selections(model, revision, &mut records);
     compile_site_premises(model, revision, &mut records);
-    IntentReport::from_parts(revision, records, Vec::new())
+    records
 }
 
 fn compile_driving_dimensions(
@@ -62,7 +84,7 @@ fn compile_driving_dimensions(
                         DerivedAssertionRole::DrivingDimension,
                     )),
                     domain: IntentDomain::SpatialProgram,
-                    scope: vec![wall_ref.clone(), dimension_ref.clone()],
+                    scope: AssertionScope::Exact(vec![wall_ref.clone(), dimension_ref.clone()]),
                     participants: vec![
                         AssertionParticipant::new(
                             wall_ref.clone(),
@@ -165,7 +187,7 @@ fn compile_construction_selection(
                 },
             )),
             domain: IntentDomain::Construction,
-            scope: vec![host.clone(), system.clone()],
+            scope: AssertionScope::Exact(vec![host.clone(), system.clone()]),
             participants: vec![
                 AssertionParticipant::new(host.clone(), AssertionParticipantRole::Host, 0),
                 AssertionParticipant::new(
@@ -263,7 +285,7 @@ fn site_assumption(
                 DerivedAssertionRole::SiteAssumption(key),
             )),
             domain: IntentDomain::Compliance,
-            scope: vec![site.clone()],
+            scope: AssertionScope::Exact(vec![site.clone()]),
             participants: vec![AssertionParticipant::new(
                 site.clone(),
                 AssertionParticipantRole::SitePremise,
@@ -296,11 +318,1262 @@ fn property_value(value: &PropertyValue) -> IntentValue {
     }
 }
 
+pub(crate) fn compile_project_intent(
+    model: &BuildingModel,
+    plan: &ProjectFramePlan,
+    geometry_audit: &GeometryAudit,
+    standards: &StandardsEvaluation,
+    revision: GraphRevision,
+) -> IntentReport {
+    let mut records = current_intent_records(model, revision);
+    let mut waivers = Vec::new();
+    let diagnostics = canonical_plan_diagnostic_records(model, plan, revision);
+    let mut diagnostics_by_key =
+        BTreeMap::<(String, Option<ElementId>, String), Vec<DiagnosticRef>>::new();
+    for (diagnostic, reference) in &diagnostics {
+        diagnostics_by_key
+            .entry((
+                diagnostic.code.clone(),
+                diagnostic.source.clone(),
+                diagnostic.message.clone(),
+            ))
+            .or_default()
+            .push(reference.clone());
+    }
+
+    lower_standards_records(
+        model,
+        standards,
+        revision,
+        &diagnostics_by_key,
+        &mut records,
+        &mut waivers,
+    );
+    lower_nonstandards_diagnostics(diagnostics, revision, &mut records);
+    lower_geometry_records(model, geometry_audit, revision, &mut records);
+
+    IntentReport::from_parts(revision, records, waivers)
+}
+
+/// The sole analysis-owned standards-to-diagnostics lowering. It preserves the legacy payload
+/// exactly while allowing structured unsupported observations to reach `Unsupported`.
+pub(crate) fn standards_plan_diagnostics(evaluation: &StandardsEvaluation) -> Vec<PlanDiagnostic> {
+    evaluation
+        .report
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let severity = match entry.outcome {
+                Outcome::Violation => DiagnosticSeverity::Violation,
+                Outcome::Advisory => DiagnosticSeverity::Warning,
+                Outcome::NeedsReview => {
+                    let details = evaluation
+                        .details
+                        .iter()
+                        .filter(|detail| detail.report_entry_index == index);
+                    if details.clone().any(detail_is_unsupported) {
+                        DiagnosticSeverity::Unsupported
+                    } else {
+                        DiagnosticSeverity::NeedsReview
+                    }
+                }
+                Outcome::Pass | Outcome::NotApplicable | Outcome::Waived { .. } => return None,
+            };
+            Some(PlanDiagnostic {
+                severity,
+                code: entry.rule.clone(),
+                source: entry.element.clone(),
+                message: entry.message.clone(),
+                rule: Some(RuleRef {
+                    pack: entry.pack.clone(),
+                    rule: entry.rule.clone(),
+                    citation: entry.citation.clone(),
+                }),
+            })
+        })
+        .collect()
+}
+
+fn lower_standards_records(
+    model: &BuildingModel,
+    standards: &StandardsEvaluation,
+    revision: GraphRevision,
+    diagnostics_by_key: &BTreeMap<(String, Option<ElementId>, String), Vec<DiagnosticRef>>,
+    records: &mut Vec<IntentRecord>,
+    waivers: &mut Vec<WaiverRecord>,
+) {
+    let compliance_refs = compliance_entry_references(model, &standards.report, revision);
+    for detail in &standards.details {
+        let Some(entry) = standards.report.entries.get(detail.report_entry_index) else {
+            continue;
+        };
+        let Some(entry_ref) = compliance_refs
+            .get(detail.report_entry_index)
+            .and_then(Clone::clone)
+        else {
+            continue;
+        };
+        let subject = detail
+            .subject
+            .as_ref()
+            .map(fact_subject_to_authored)
+            .or_else(|| {
+                entry
+                    .element
+                    .as_ref()
+                    .and_then(|id| authored_entity_for_element(model, id))
+            });
+        let rule_ref = StandardsRuleRef::resolved(entry.pack.clone(), entry.rule.clone());
+        let assertion_ref = AssertionRef::Derived(DerivedAssertionId::new(
+            revision,
+            DerivedAssertionProvider::Standards,
+            DerivedAssertionSource::StandardsRule(rule_ref.clone()),
+            DerivedAssertionRole::StandardsCheck {
+                subject: subject.clone(),
+                ordinal: entry_ref.ordinal,
+            },
+        ));
+        let (mode, outcome, waiver) = standards_outcome(entry, detail);
+        let participants = subject
+            .iter()
+            .cloned()
+            .map(|subject| {
+                AssertionParticipant::new(subject, AssertionParticipantRole::EvaluatedEntity, 0)
+            })
+            .collect::<Vec<_>>();
+        let scope = subject.iter().cloned().collect::<Vec<_>>();
+        let mut evidence = vec![
+            IntentEvidenceRef::StandardsRule(rule_ref.clone()),
+            IntentEvidenceRef::ComplianceEntry(entry_ref),
+            IntentEvidenceRef::Authored(AuthoredEntityRef::Site),
+        ];
+        if let Some(subject) = &subject {
+            evidence.push(IntentEvidenceRef::Authored(subject.clone()));
+        }
+        if let Some(diagnostic) = diagnostics_by_key
+            .get(&(
+                entry.rule.clone(),
+                entry.element.clone(),
+                entry.message.clone(),
+            ))
+            .and_then(|matches| matches.first())
+        {
+            evidence.push(IntentEvidenceRef::Diagnostic(diagnostic.clone()));
+        }
+        let rationale = detail
+            .check_definition
+            .as_ref()
+            .map(|check| format!("{} ({})", check.title, check.citation))
+            .unwrap_or_else(|| entry.message.clone());
+        records.push(IntentRecord::Boolean(BooleanIntentRecord {
+            assertion: CompiledAssertion {
+                reference: assertion_ref.clone(),
+                domain: IntentDomain::Compliance,
+                scope: if scope.is_empty() {
+                    AssertionScope::Project
+                } else {
+                    AssertionScope::Exact(scope)
+                },
+                participants,
+                source: AssertionSource::StandardsRule(rule_ref.clone()),
+                rationale,
+            },
+            mode,
+            expression: detail
+                .check_definition
+                .as_ref()
+                .map(|check| BooleanExpression::Predicate(check.requirement.clone()))
+                .unwrap_or_else(|| BooleanExpression::Finding {
+                    code: entry.rule.clone(),
+                }),
+            outcome,
+            evidence: evidence.clone(),
+        }));
+
+        if let Some((reference, reason, overlay_pack)) = waiver {
+            let mut provenance = evidence;
+            provenance.push(IntentEvidenceRef::Authored(
+                AuthoredEntityRef::StandardsPack(overlay_pack.clone()),
+            ));
+            waivers.push(WaiverRecord {
+                reference,
+                targets: vec![assertion_ref],
+                source: AssertionSource::Authored(AuthoredEntityRef::StandardsPack(overlay_pack)),
+                rationale: reason,
+                provenance,
+            });
+        }
+    }
+}
+
+fn standards_outcome(
+    entry: &ComplianceEntry,
+    detail: &StandardsEvaluationDetail,
+) -> (
+    BooleanIntentMode,
+    IntentOutcome,
+    Option<(WaiverRef, String, ElementId)>,
+) {
+    const ADVISORY_PRIORITY: PreferencePriority = PreferencePriority(100);
+    let mode = match (
+        entry.outcome.clone(),
+        detail.severity,
+        detail.synthetic_kind,
+    ) {
+        (Outcome::Advisory, _, _) | (_, Some(CheckSeverity::Advisory), _) => {
+            BooleanIntentMode::Preference {
+                priority: ADVISORY_PRIORITY,
+            }
+        }
+        (_, _, Some(SyntheticEntryKind::UnassociatedBracingPanel)) => {
+            BooleanIntentMode::Preference {
+                priority: ADVISORY_PRIORITY,
+            }
+        }
+        _ => BooleanIntentMode::Requirement,
+    };
+    let mut waiver = None;
+    let outcome = match &entry.outcome {
+        Outcome::Pass => IntentOutcome::Satisfied,
+        Outcome::Violation | Outcome::Advisory => IntentOutcome::Violated,
+        Outcome::NeedsReview => IntentOutcome::Unknown(unknown_from_standards(detail)),
+        Outcome::NotApplicable => IntentOutcome::NotApplicable,
+        Outcome::Waived { reason } => match &detail.effective_waiver {
+            Some(effective) => {
+                let reference = WaiverRef::Standards {
+                    overlay_pack: effective.overlay_pack.clone(),
+                    rule: entry.rule.clone(),
+                };
+                waiver = Some((
+                    reference.clone(),
+                    reason.clone(),
+                    effective.overlay_pack.clone(),
+                ));
+                IntentOutcome::Waived {
+                    waiver: reference,
+                    reason: reason.clone(),
+                }
+            }
+            None => IntentOutcome::Unknown(IntentUnknown {
+                kind: IntentUnknownKind::EvaluationUnavailable,
+                detail: format!("Waiver provenance for '{}' is unavailable.", entry.rule),
+            }),
+        },
+    };
+    (mode, outcome, waiver)
+}
+
+fn unknown_from_standards(detail: &StandardsEvaluationDetail) -> IntentUnknown {
+    let kind = if detail_is_unsupported(detail) {
+        IntentUnknownKind::UnsupportedCondition
+    } else if detail.predicate.as_ref().is_some_and(|predicate| {
+        predicate.observed_facts.iter().any(|observed| {
+            matches!(
+                &observed.observation,
+                framer_standards::FactObservation::Unknown(unknown)
+                    if unknown.kind == FactUnknownKind::WrongSubjectKind
+            )
+        })
+    }) {
+        IntentUnknownKind::WrongSubjectKind
+    } else if detail.predicate.as_ref().is_some_and(|predicate| {
+        predicate.observed_facts.iter().any(|observed| {
+            matches!(
+                &observed.observation,
+                framer_standards::FactObservation::Unknown(unknown)
+                    if unknown.kind == FactUnknownKind::UnresolvedSubject
+            )
+        })
+    }) {
+        IntentUnknownKind::UnresolvedSubject
+    } else if detail.applicability == Some(Tri::Unknown)
+        || detail.predicate.as_ref().is_some_and(|predicate| {
+            predicate.observed_facts.iter().any(|observed| {
+                matches!(
+                    &observed.observation,
+                    framer_standards::FactObservation::Unknown(unknown)
+                        if unknown.kind == FactUnknownKind::MissingInput
+                )
+            })
+        })
+    {
+        IntentUnknownKind::MissingInput
+    } else {
+        IntentUnknownKind::EvaluationUnavailable
+    };
+    IntentUnknown {
+        kind,
+        detail: match kind {
+            IntentUnknownKind::MissingInput => {
+                "One or more required standards facts are missing.".to_owned()
+            }
+            IntentUnknownKind::UnresolvedSubject => {
+                "The standards-check subject could not be resolved.".to_owned()
+            }
+            IntentUnknownKind::WrongSubjectKind => {
+                "A standards fact was requested for the wrong subject family.".to_owned()
+            }
+            IntentUnknownKind::UnsupportedCondition => {
+                "The current standards evaluator does not support this condition.".to_owned()
+            }
+            IntentUnknownKind::UnresolvedReference | IntentUnknownKind::EvaluationUnavailable => {
+                "Standards evaluation evidence is unavailable.".to_owned()
+            }
+        },
+    }
+}
+
+fn detail_is_unsupported(detail: &StandardsEvaluationDetail) -> bool {
+    detail.synthetic_kind == Some(SyntheticEntryKind::BracingOutOfDomain)
+        || detail.predicate.as_ref().is_some_and(|predicate| {
+            predicate.observed_facts.iter().any(|observed| {
+                matches!(
+                    &observed.observation,
+                    framer_standards::FactObservation::Unknown(unknown)
+                        if unknown.kind == FactUnknownKind::UnsupportedCondition
+                )
+            })
+        })
+}
+
+fn lower_nonstandards_diagnostics(
+    diagnostics: Vec<(PlanDiagnostic, DiagnosticRef)>,
+    revision: GraphRevision,
+    records: &mut Vec<IntentRecord>,
+) {
+    for (diagnostic, reference) in diagnostics {
+        if reference.provider == DiagnosticProvider::Standards {
+            continue;
+        }
+        let participant = reference.source.clone();
+        let scope = participant
+            .iter()
+            .cloned()
+            .collect::<Vec<AuthoredEntityRef>>();
+        let participants = participant
+            .iter()
+            .cloned()
+            .map(|subject| {
+                AssertionParticipant::new(subject, AssertionParticipantRole::EvaluatedEntity, 0)
+            })
+            .collect::<Vec<_>>();
+        let assertion = CompiledAssertion {
+            reference: AssertionRef::Derived(DerivedAssertionId::new(
+                revision,
+                diagnostic_assertion_provider(reference.provider),
+                participant
+                    .clone()
+                    .map(DerivedAssertionSource::Authored)
+                    .unwrap_or(DerivedAssertionSource::Project),
+                DerivedAssertionRole::Diagnostic {
+                    provider: reference.provider,
+                    code: reference.code.clone(),
+                    ordinal: reference.ordinal,
+                },
+            )),
+            domain: diagnostic_domain(reference.provider),
+            scope: if scope.is_empty() {
+                AssertionScope::Project
+            } else {
+                AssertionScope::Exact(scope)
+            },
+            participants,
+            source: AssertionSource::Diagnostic(reference.clone()),
+            rationale: diagnostic.message.clone(),
+        };
+        let mut evidence = vec![IntentEvidenceRef::Diagnostic(reference)];
+        if let Some(participant) = participant {
+            evidence.push(IntentEvidenceRef::Authored(participant));
+        }
+        if diagnostic.severity == DiagnosticSeverity::Info {
+            records.push(IntentRecord::Assumption(AssumptionIntentRecord {
+                assertion,
+                premise: AssumptionPremise {
+                    label: diagnostic.code,
+                },
+                evidence: AssumptionEvidence::Known(IntentValue::Text(diagnostic.message)),
+                provenance: evidence,
+            }));
+            continue;
+        }
+        let (mode, outcome) = diagnostic_outcome(diagnostic.severity, &diagnostic.message);
+        records.push(IntentRecord::Boolean(BooleanIntentRecord {
+            assertion,
+            mode,
+            expression: BooleanExpression::Finding {
+                code: diagnostic.code,
+            },
+            outcome,
+            evidence,
+        }));
+    }
+}
+
+fn diagnostic_outcome(
+    severity: DiagnosticSeverity,
+    message: &str,
+) -> (BooleanIntentMode, IntentOutcome) {
+    match severity {
+        DiagnosticSeverity::Violation => (BooleanIntentMode::Requirement, IntentOutcome::Violated),
+        DiagnosticSeverity::Warning => (
+            BooleanIntentMode::Preference {
+                priority: PreferencePriority(100),
+            },
+            IntentOutcome::Violated,
+        ),
+        DiagnosticSeverity::NeedsReview => (
+            BooleanIntentMode::Requirement,
+            IntentOutcome::Unknown(IntentUnknown {
+                kind: IntentUnknownKind::MissingInput,
+                detail: message.to_owned(),
+            }),
+        ),
+        DiagnosticSeverity::Unsupported => (
+            BooleanIntentMode::Requirement,
+            IntentOutcome::Unknown(IntentUnknown {
+                kind: IntentUnknownKind::UnsupportedCondition,
+                detail: message.to_owned(),
+            }),
+        ),
+        DiagnosticSeverity::Info => unreachable!("info diagnostics use assumption evidence"),
+    }
+}
+
+fn lower_geometry_records(
+    model: &BuildingModel,
+    audit: &GeometryAudit,
+    revision: GraphRevision,
+    records: &mut Vec<IntentRecord>,
+) {
+    for (violation, reference) in canonical_geometry_records(model, audit, revision) {
+        let mut participants = Vec::new();
+        let mut scope = Vec::new();
+        let mut evidence = vec![IntentEvidenceRef::Diagnostic(reference.clone())];
+        for (order, body) in [Some(violation.body_a()), violation.body_b()]
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let body_ref = PhysicalBodyRef::new(revision, body.clone());
+            evidence.push(IntentEvidenceRef::PhysicalBody(body_ref));
+            if let Some(owner) = authored_entity_for_element(model, body.owner()) {
+                scope.push(owner.clone());
+                participants.push(AssertionParticipant::new(
+                    owner.clone(),
+                    AssertionParticipantRole::EvaluatedEntity,
+                    u32::try_from(order).unwrap_or(u32::MAX),
+                ));
+                evidence.push(IntentEvidenceRef::Authored(owner));
+            }
+        }
+        let outcome = match violation {
+            GeometryViolation::QueryUnsupported(_) => IntentOutcome::Unknown(IntentUnknown {
+                kind: IntentUnknownKind::UnsupportedCondition,
+                detail: violation.to_string(),
+            }),
+            GeometryViolation::BodyUnbuildable(_) | GeometryViolation::Overlap(_) => {
+                IntentOutcome::Violated
+            }
+        };
+        records.push(IntentRecord::Boolean(BooleanIntentRecord {
+            assertion: CompiledAssertion {
+                reference: AssertionRef::Derived(DerivedAssertionId::new(
+                    revision,
+                    DerivedAssertionProvider::Geometry,
+                    DerivedAssertionSource::PhysicalBody(PhysicalBodyRef::new(
+                        revision,
+                        violation.body_a().clone(),
+                    )),
+                    DerivedAssertionRole::GeometryFinding {
+                        code: violation.code().to_owned(),
+                        ordinal: reference.ordinal,
+                    },
+                )),
+                domain: IntentDomain::FabricationInstallation,
+                scope: if scope.is_empty() {
+                    AssertionScope::Project
+                } else {
+                    AssertionScope::Exact(scope)
+                },
+                participants,
+                source: AssertionSource::Diagnostic(reference),
+                rationale: violation.to_string(),
+            },
+            mode: BooleanIntentMode::Requirement,
+            expression: BooleanExpression::Finding {
+                code: violation.code().to_owned(),
+            },
+            outcome,
+            evidence,
+        }));
+    }
+}
+
+fn diagnostic_assertion_provider(provider: DiagnosticProvider) -> DerivedAssertionProvider {
+    match provider {
+        DiagnosticProvider::Solver => DerivedAssertionProvider::Solver,
+        DiagnosticProvider::Standards => DerivedAssertionProvider::Standards,
+        DiagnosticProvider::Geometry => DerivedAssertionProvider::Geometry,
+        DiagnosticProvider::Library => DerivedAssertionProvider::Library,
+        DiagnosticProvider::Analysis => DerivedAssertionProvider::Analysis,
+    }
+}
+
+fn diagnostic_domain(provider: DiagnosticProvider) -> IntentDomain {
+    match provider {
+        DiagnosticProvider::Standards => IntentDomain::Compliance,
+        DiagnosticProvider::Geometry => IntentDomain::FabricationInstallation,
+        DiagnosticProvider::Library => IntentDomain::Resource,
+        DiagnosticProvider::Solver | DiagnosticProvider::Analysis => IntentDomain::Construction,
+    }
+}
+
+pub(crate) fn canonical_plan_diagnostic_records(
+    model: &BuildingModel,
+    plan: &ProjectFramePlan,
+    revision: GraphRevision,
+) -> Vec<(PlanDiagnostic, DiagnosticRef)> {
+    let mut diagnostics = plan.diagnostics.clone();
+    diagnostics.extend(
+        plan.wall_plans
+            .iter()
+            .flat_map(|host| host.diagnostics.iter().cloned()),
+    );
+    diagnostics.extend(
+        plan.floor_plans
+            .iter()
+            .flat_map(|host| host.diagnostics.iter().cloned()),
+    );
+    diagnostics.extend(
+        plan.ceiling_plans
+            .iter()
+            .flat_map(|host| host.diagnostics.iter().cloned()),
+    );
+    diagnostics.extend(
+        plan.roof_plans
+            .iter()
+            .flat_map(|host| host.diagnostics.iter().cloned()),
+    );
+    diagnostics.sort_by(compare_plan_diagnostic);
+
+    let mut ordinals =
+        BTreeMap::<(DiagnosticProvider, String, Option<AuthoredEntityRef>), u32>::new();
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| {
+            let provider = diagnostic_provider(&diagnostic);
+            let source = diagnostic
+                .source
+                .as_ref()
+                .and_then(|id| authored_entity_for_element(model, id));
+            let ordinal = ordinals
+                .entry((provider, diagnostic.code.clone(), source.clone()))
+                .or_default();
+            let reference = DiagnosticRef {
+                revision,
+                provider,
+                code: diagnostic.code.clone(),
+                source,
+                ordinal: *ordinal,
+            };
+            *ordinal = ordinal.saturating_add(1);
+            (diagnostic, reference)
+        })
+        .collect()
+}
+
+pub(crate) fn canonical_geometry_records(
+    model: &BuildingModel,
+    audit: &GeometryAudit,
+    revision: GraphRevision,
+) -> Vec<(GeometryViolation, DiagnosticRef)> {
+    let mut violations = audit.violations.clone();
+    violations.sort_by(compare_geometry_violation);
+    violations
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, violation)| {
+            let reference = DiagnosticRef {
+                revision,
+                provider: DiagnosticProvider::Geometry,
+                code: violation.code().to_owned(),
+                source: authored_entity_for_element(model, violation.body_a().owner()),
+                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+            };
+            (violation, reference)
+        })
+        .collect()
+}
+
+fn compliance_entry_references(
+    model: &BuildingModel,
+    report: &ComplianceReport,
+    revision: GraphRevision,
+) -> Vec<Option<ComplianceEntryRef>> {
+    let mut indices = (0..report.entries.len()).collect::<Vec<_>>();
+    indices.sort_by(|left, right| {
+        compare_compliance_entry(&report.entries[*left], &report.entries[*right])
+    });
+    let mut ordinals = BTreeMap::<(StandardsRuleRef, Option<AuthoredEntityRef>), u32>::new();
+    let mut references = vec![None; report.entries.len()];
+    for index in indices {
+        let entry = &report.entries[index];
+        let subject = entry
+            .element
+            .as_ref()
+            .and_then(|id| authored_entity_for_element(model, id));
+        let rule = StandardsRuleRef::resolved(entry.pack.clone(), entry.rule.clone());
+        let ordinal = ordinals.entry((rule.clone(), subject.clone())).or_default();
+        references[index] = Some(ComplianceEntryRef {
+            revision,
+            rule,
+            subject,
+            ordinal: *ordinal,
+        });
+        *ordinal = ordinal.saturating_add(1);
+    }
+    references
+}
+
+pub(crate) fn authored_entity_for_element(
+    model: &BuildingModel,
+    id: &ElementId,
+) -> Option<AuthoredEntityRef> {
+    if model.standards_packs.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::StandardsPack(id.clone()));
+    }
+    if model.materials.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::Material(id.clone()));
+    }
+    if model.systems.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::ConstructionSystem(id.clone()));
+    }
+    if model.furnishings.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::Furnishing(id.clone()));
+    }
+    if model.mep_objects.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::MepObject(id.clone()));
+    }
+    if model.levels.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::Level(id.clone()));
+    }
+    for wall in &model.walls {
+        if wall.id == *id {
+            return Some(AuthoredEntityRef::Wall(id.clone()));
+        }
+        if wall.openings.iter().any(|entity| entity.id == *id) {
+            return Some(AuthoredEntityRef::Opening(id.clone()));
+        }
+        if wall.dimensions.iter().any(|entity| entity.id == *id) {
+            return Some(AuthoredEntityRef::Dimension(id.clone()));
+        }
+        if wall.bracing.iter().any(|entity| entity.id == *id) {
+            return Some(AuthoredEntityRef::BracedPanel(id.clone()));
+        }
+    }
+    if model.wall_joins.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::WallJoin(id.clone()));
+    }
+    if model.rooms.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::Room(id.clone()));
+    }
+    if model
+        .furnishing_instances
+        .iter()
+        .any(|entity| entity.id == *id)
+    {
+        return Some(AuthoredEntityRef::FurnishingInstance(id.clone()));
+    }
+    if model.mep_instances.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::MepInstance(id.clone()));
+    }
+    for roof in &model.roof_planes {
+        if roof.id == *id {
+            return Some(AuthoredEntityRef::RoofPlane(id.clone()));
+        }
+        if roof.openings.iter().any(|entity| entity.id == *id) {
+            return Some(AuthoredEntityRef::RoofOpening(id.clone()));
+        }
+    }
+    if model.ceilings.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::Ceiling(id.clone()));
+    }
+    if model.floor_decks.iter().any(|entity| entity.id == *id) {
+        return Some(AuthoredEntityRef::FloorDeck(id.clone()));
+    }
+    if model
+        .braced_wall_lines
+        .iter()
+        .any(|entity| entity.id == *id)
+    {
+        return Some(AuthoredEntityRef::BracedWallLine(id.clone()));
+    }
+    None
+}
+
+fn fact_subject_to_authored(subject: &FactSubject) -> AuthoredEntityRef {
+    match subject {
+        FactSubject::Wall(id) => AuthoredEntityRef::Wall(id.clone()),
+        FactSubject::Opening(id) => AuthoredEntityRef::Opening(id.clone()),
+        FactSubject::Room(id) => AuthoredEntityRef::Room(id.clone()),
+        FactSubject::BracedWallLine(id) => AuthoredEntityRef::BracedWallLine(id.clone()),
+    }
+}
+
+fn diagnostic_provider(diagnostic: &PlanDiagnostic) -> DiagnosticProvider {
+    if diagnostic.rule.is_some() {
+        DiagnosticProvider::Standards
+    } else if diagnostic.code.starts_with("library.") {
+        DiagnosticProvider::Library
+    } else {
+        DiagnosticProvider::Solver
+    }
+}
+
+fn compare_plan_diagnostic(left: &PlanDiagnostic, right: &PlanDiagnostic) -> Ordering {
+    diagnostic_provider(left)
+        .cmp(&diagnostic_provider(right))
+        .then_with(|| left.code.cmp(&right.code))
+        .then_with(|| left.source.cmp(&right.source))
+        .then_with(|| severity_rank(left.severity).cmp(&severity_rank(right.severity)))
+        .then_with(|| left.message.cmp(&right.message))
+        .then_with(|| compare_rule_ref(left.rule.as_ref(), right.rule.as_ref()))
+}
+
+fn severity_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Info => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Unsupported => 2,
+        DiagnosticSeverity::Violation => 3,
+        DiagnosticSeverity::NeedsReview => 4,
+    }
+}
+
+fn compare_rule_ref(left: Option<&RuleRef>, right: Option<&RuleRef>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .pack
+            .cmp(&right.pack)
+            .then_with(|| left.rule.cmp(&right.rule))
+            .then_with(|| left.citation.cmp(&right.citation)),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+pub(crate) fn compare_geometry_violation(
+    left: &GeometryViolation,
+    right: &GeometryViolation,
+) -> Ordering {
+    left.body_a()
+        .cmp(right.body_a())
+        .then_with(|| left.body_b().cmp(&right.body_b()))
+        .then_with(|| left.code().cmp(right.code()))
+        .then_with(|| left.to_string().cmp(&right.to_string()))
+}
+
+fn outcome_rank(outcome: &Outcome) -> u8 {
+    match outcome {
+        Outcome::Pass => 0,
+        Outcome::Violation => 1,
+        Outcome::Advisory => 2,
+        Outcome::NeedsReview => 3,
+        Outcome::NotApplicable => 4,
+        Outcome::Waived { .. } => 5,
+    }
+}
+
+fn compare_compliance_entry(left: &ComplianceEntry, right: &ComplianceEntry) -> Ordering {
+    left.rule
+        .cmp(&right.rule)
+        .then_with(|| left.element.cmp(&right.element))
+        .then_with(|| left.pack.cmp(&right.pack))
+        .then_with(|| outcome_rank(&left.outcome).cmp(&outcome_rank(&right.outcome)))
+        .then_with(|| left.citation.cmp(&right.citation))
+        .then_with(|| left.message.cmp(&right.message))
+}
+
 #[cfg(test)]
 mod tests {
-    use framer_core::{DimensionAnchor, DimensionConstraint, DimensionDirection, DimensionKind};
+    use framer_core::{
+        Applicability, CheckScope, CompareOp, ComplianceCheck, DimensionAnchor,
+        DimensionConstraint, DimensionDirection, DimensionKind, Fact, FactOperand, Predicate,
+        ResolutionAction, RuleOverlay,
+    };
+    use framer_geometry::{AssemblyKind, BodyRef, GeometryBuildDiagnostic, PhysicalScene};
+    use framer_solver::generate_project_plan;
+    use framer_standards::EffectiveWaiver;
 
     use super::*;
+
+    fn compliance_entry(rule: &str, outcome: Outcome) -> ComplianceEntry {
+        ComplianceEntry {
+            rule: rule.to_owned(),
+            citation: "Test citation".to_owned(),
+            pack: ElementId::new("standards-test"),
+            outcome,
+            element: Some(ElementId::new("wall")),
+            message: format!("{rule} result"),
+            chain: vec![(
+                ElementId::new("standards-test"),
+                ResolutionAction::Introduced,
+            )],
+        }
+    }
+
+    fn standards_detail(severity: CheckSeverity, applicability: Tri) -> StandardsEvaluationDetail {
+        StandardsEvaluationDetail {
+            report_entry_index: 0,
+            check_id: Some("test".to_owned()),
+            definition_pack: Some(ElementId::new("standards-test")),
+            check_definition: None,
+            severity: Some(severity),
+            subject: Some(FactSubject::Wall(ElementId::new("wall"))),
+            scope_subjects: vec![FactSubject::Wall(ElementId::new("wall"))],
+            applicability: Some(applicability),
+            predicate: None,
+            synthetic_kind: None,
+            effective_waiver: None,
+        }
+    }
+
+    #[test]
+    fn standards_outcomes_map_to_exact_common_modes_and_results() {
+        let required = standards_detail(CheckSeverity::Required, Tri::True);
+        let advisory = standards_detail(CheckSeverity::Advisory, Tri::True);
+        let missing = standards_detail(CheckSeverity::Required, Tri::Unknown);
+        let mut unsupported = standards_detail(CheckSeverity::Required, Tri::True);
+        unsupported.synthetic_kind = Some(SyntheticEntryKind::BracingOutOfDomain);
+        let mut synthetic_advisory = standards_detail(CheckSeverity::Required, Tri::True);
+        synthetic_advisory.synthetic_kind = Some(SyntheticEntryKind::UnassociatedBracingPanel);
+        synthetic_advisory.severity = None;
+        let mut waived = standards_detail(CheckSeverity::Advisory, Tri::True);
+        waived.effective_waiver = Some(EffectiveWaiver {
+            reason: "approved alternate".to_owned(),
+            overlay_pack: ElementId::new("standards-overlay"),
+            chain: vec![(
+                ElementId::new("standards-overlay"),
+                ResolutionAction::Waived,
+            )],
+        });
+
+        let cases = [
+            (
+                compliance_entry("pass-required", Outcome::Pass),
+                required.clone(),
+                BooleanIntentMode::Requirement,
+                IntentOutcome::Satisfied,
+            ),
+            (
+                compliance_entry("pass-advisory", Outcome::Pass),
+                advisory,
+                BooleanIntentMode::Preference {
+                    priority: PreferencePriority(100),
+                },
+                IntentOutcome::Satisfied,
+            ),
+            (
+                compliance_entry("violation", Outcome::Violation),
+                required.clone(),
+                BooleanIntentMode::Requirement,
+                IntentOutcome::Violated,
+            ),
+            (
+                compliance_entry("advisory", Outcome::Advisory),
+                synthetic_advisory,
+                BooleanIntentMode::Preference {
+                    priority: PreferencePriority(100),
+                },
+                IntentOutcome::Violated,
+            ),
+            (
+                compliance_entry("missing", Outcome::NeedsReview),
+                missing,
+                BooleanIntentMode::Requirement,
+                IntentOutcome::Unknown(IntentUnknown {
+                    kind: IntentUnknownKind::MissingInput,
+                    detail: "One or more required standards facts are missing.".to_owned(),
+                }),
+            ),
+            (
+                compliance_entry("unsupported", Outcome::NeedsReview),
+                unsupported,
+                BooleanIntentMode::Requirement,
+                IntentOutcome::Unknown(IntentUnknown {
+                    kind: IntentUnknownKind::UnsupportedCondition,
+                    detail: "The current standards evaluator does not support this condition."
+                        .to_owned(),
+                }),
+            ),
+            (
+                compliance_entry("n-a", Outcome::NotApplicable),
+                required,
+                BooleanIntentMode::Requirement,
+                IntentOutcome::NotApplicable,
+            ),
+        ];
+        for (entry, detail, expected_mode, expected_outcome) in cases {
+            let (mode, outcome, waiver) = standards_outcome(&entry, &detail);
+            assert_eq!(mode, expected_mode, "{}", entry.rule);
+            assert_eq!(outcome, expected_outcome, "{}", entry.rule);
+            assert!(waiver.is_none(), "{}", entry.rule);
+        }
+
+        let waived_entry = compliance_entry(
+            "waived",
+            Outcome::Waived {
+                reason: "approved alternate".to_owned(),
+            },
+        );
+        let (mode, outcome, waiver) = standards_outcome(&waived_entry, &waived);
+        assert_eq!(
+            mode,
+            BooleanIntentMode::Preference {
+                priority: PreferencePriority(100)
+            }
+        );
+        assert_eq!(
+            outcome,
+            IntentOutcome::Waived {
+                waiver: WaiverRef::Standards {
+                    overlay_pack: ElementId::new("standards-overlay"),
+                    rule: "waived".to_owned(),
+                },
+                reason: "approved alternate".to_owned(),
+            }
+        );
+        assert!(waiver.is_some());
+    }
+
+    #[test]
+    fn standards_diagnostics_use_one_exact_severity_matrix() {
+        let mut entries = vec![
+            compliance_entry("violation", Outcome::Violation),
+            compliance_entry("advisory", Outcome::Advisory),
+            compliance_entry("missing", Outcome::NeedsReview),
+            compliance_entry("unsupported", Outcome::NeedsReview),
+            compliance_entry("pass", Outcome::Pass),
+            compliance_entry("n-a", Outcome::NotApplicable),
+            compliance_entry(
+                "waived",
+                Outcome::Waived {
+                    reason: "approved".to_owned(),
+                },
+            ),
+        ];
+        for entry in &mut entries {
+            entry.element = None;
+        }
+        let mut details = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let mut detail = standards_detail(CheckSeverity::Required, Tri::True);
+            detail.report_entry_index = index;
+            detail.subject = None;
+            detail.scope_subjects.clear();
+            if entry.rule == "missing" {
+                detail.applicability = Some(Tri::Unknown);
+            }
+            if entry.rule == "unsupported" {
+                detail.synthetic_kind = Some(SyntheticEntryKind::BracingOutOfDomain);
+            }
+            details.push(detail);
+        }
+        let evaluation = StandardsEvaluation {
+            report: ComplianceReport { entries },
+            details,
+        };
+        let diagnostics = standards_plan_diagnostics(&evaluation);
+        assert_eq!(diagnostics.len(), 4);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.severity))
+                .collect::<Vec<_>>(),
+            vec![
+                ("violation", DiagnosticSeverity::Violation),
+                ("advisory", DiagnosticSeverity::Warning),
+                ("missing", DiagnosticSeverity::NeedsReview),
+                ("unsupported", DiagnosticSeverity::Unsupported),
+            ]
+        );
+        for diagnostic in diagnostics {
+            let entry = evaluation
+                .report
+                .entries
+                .iter()
+                .find(|entry| entry.rule == diagnostic.code)
+                .unwrap();
+            assert_eq!(diagnostic.source, entry.element);
+            assert_eq!(diagnostic.message, entry.message);
+            assert_eq!(diagnostic.rule.as_ref().unwrap().citation, entry.citation);
+        }
+    }
+
+    #[test]
+    fn existing_standard_diagnostics_are_installed_once_with_exact_payloads() {
+        for model in [
+            BuildingModel::demo_wall(),
+            BuildingModel::demo_shell(),
+            BuildingModel::demo_two_bedroom(),
+        ] {
+            let plan = generate_project_plan(&model).unwrap();
+            let resolved = model.resolved_standards();
+            let evaluation = framer_standards::evaluate_detailed(&model, &resolved, &plan);
+            let expected = framer_standards::diagnostics(&evaluation.report);
+            assert_eq!(standards_plan_diagnostics(&evaluation), expected);
+
+            let analysis = crate::analyze_project(&model).unwrap();
+            for diagnostic in expected {
+                assert_eq!(
+                    analysis
+                        .plan
+                        .diagnostics
+                        .iter()
+                        .filter(|candidate| **candidate == diagnostic)
+                        .count(),
+                    1,
+                    "{}",
+                    diagnostic.code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonstandards_diagnostic_severities_keep_mode_specific_results() {
+        let model = BuildingModel::new();
+        let revision = GraphRevision::for_model(&model).unwrap();
+        let diagnostics = [
+            DiagnosticSeverity::Violation,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::NeedsReview,
+            DiagnosticSeverity::Unsupported,
+            DiagnosticSeverity::Info,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, severity)| {
+            let code = format!("test.{ordinal}");
+            (
+                PlanDiagnostic {
+                    severity,
+                    code: code.clone(),
+                    source: None,
+                    message: format!("message {ordinal}"),
+                    rule: None,
+                },
+                DiagnosticRef {
+                    revision,
+                    provider: DiagnosticProvider::Solver,
+                    code,
+                    source: None,
+                    ordinal: u32::try_from(ordinal).unwrap(),
+                },
+            )
+        })
+        .collect();
+        let mut records = Vec::new();
+        lower_nonstandards_diagnostics(diagnostics, revision, &mut records);
+
+        assert!(matches!(
+            &records[0],
+            IntentRecord::Boolean(BooleanIntentRecord {
+                mode: BooleanIntentMode::Requirement,
+                outcome: IntentOutcome::Violated,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &records[1],
+            IntentRecord::Boolean(BooleanIntentRecord {
+                mode: BooleanIntentMode::Preference { .. },
+                outcome: IntentOutcome::Violated,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &records[2],
+            IntentRecord::Boolean(BooleanIntentRecord {
+                outcome: IntentOutcome::Unknown(IntentUnknown {
+                    kind: IntentUnknownKind::MissingInput,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &records[3],
+            IntentRecord::Boolean(BooleanIntentRecord {
+                outcome: IntentOutcome::Unknown(IntentUnknown {
+                    kind: IntentUnknownKind::UnsupportedCondition,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(&records[4], IntentRecord::Assumption(_)));
+    }
+
+    #[test]
+    fn scoped_standards_waiver_shares_one_override_and_retains_native_evidence() {
+        let mut model = BuildingModel::demo_shell();
+        let pack = &mut model.standards_packs[0];
+        let overlay_pack = pack.id.clone();
+        pack.checks.push(ComplianceCheck {
+            rule: "test.all-walls-waived".to_owned(),
+            citation: "Test".to_owned(),
+            title: "All wall heights".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::Walls {
+                exterior_only: None,
+                tags: Vec::new(),
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::WallHeight,
+                op: CompareOp::Le,
+                value: FactOperand::LengthLiteral(framer_core::Length::from_feet(20.0)),
+            },
+        });
+        pack.overlays.push(RuleOverlay::Waive {
+            target: "test.all-walls-waived".to_owned(),
+            reason: "approved alternate".to_owned(),
+        });
+        model.validate().unwrap();
+
+        let analysis = crate::analyze_project(&model).unwrap();
+        let report = analysis.intent_report.as_ref().unwrap();
+        let legacy_entries = analysis
+            .standards_evaluation
+            .report
+            .entries
+            .iter()
+            .filter(|entry| entry.rule == "test.all-walls-waived")
+            .collect::<Vec<_>>();
+        assert_eq!(legacy_entries.len(), 1);
+        assert!(legacy_entries[0].element.is_none());
+
+        let waived_records = report
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    IntentRecord::Boolean(BooleanIntentRecord {
+                        assertion: CompiledAssertion {
+                            reference: AssertionRef::Derived(DerivedAssertionId {
+                                provider: DerivedAssertionProvider::Standards,
+                                ..
+                            }),
+                            ..
+                        },
+                        outcome: IntentOutcome::Waived { .. },
+                        ..
+                    })
+                ) && record.assertion().rationale.contains("All wall heights")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(waived_records.len(), model.walls.len());
+        assert_eq!(report.waivers().len(), 1);
+        let waiver = &report.waivers()[0];
+        assert_eq!(waiver.targets.len(), model.walls.len());
+        assert_eq!(
+            waiver.reference,
+            WaiverRef::Standards {
+                overlay_pack,
+                rule: "test.all-walls-waived".to_owned(),
+            }
+        );
+
+        let evidence_ref = waived_records[0]
+            .evidence()
+            .iter()
+            .find_map(|evidence| match evidence {
+                IntentEvidenceRef::ComplianceEntry(reference) => Some(reference),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            analysis.compliance_entry(evidence_ref),
+            Some(legacy_entries[0])
+        );
+        assert_eq!(
+            analysis.standards_details_for(evidence_ref).len(),
+            model.walls.len()
+        );
+    }
+
+    #[test]
+    fn geometry_findings_keep_native_witness_payload_recoverable() {
+        let model = BuildingModel::demo_wall();
+        let mut plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let standards = framer_standards::evaluate_detailed(&model, &resolved, &plan);
+        plan.diagnostics
+            .extend(standards_plan_diagnostics(&standards));
+        let body = BodyRef::assembly(model.walls[0].id.clone(), AssemblyKind::Wall);
+        let audit = GeometryAudit {
+            violations: vec![GeometryViolation::BodyUnbuildable(
+                GeometryBuildDiagnostic::unbuildable(body, "missing solid"),
+            )],
+        };
+        let revision = GraphRevision::for_model(&model).unwrap();
+        let report = compile_project_intent(&model, &plan, &audit, &standards, revision);
+        let geometry = report
+            .records()
+            .iter()
+            .find(|record| {
+                matches!(
+                    record,
+                    IntentRecord::Boolean(BooleanIntentRecord {
+                        assertion: CompiledAssertion {
+                            reference: AssertionRef::Derived(DerivedAssertionId {
+                                provider: DerivedAssertionProvider::Geometry,
+                                ..
+                            }),
+                            ..
+                        },
+                        outcome: IntentOutcome::Violated,
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        let diagnostic = geometry
+            .evidence()
+            .iter()
+            .find_map(|evidence| match evidence {
+                IntentEvidenceRef::Diagnostic(reference) => Some(reference.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            geometry
+                .evidence()
+                .iter()
+                .any(|evidence| matches!(evidence, IntentEvidenceRef::PhysicalBody(_)))
+        );
+
+        let analysis = crate::ProjectAnalysis {
+            plan,
+            resolved_standards: resolved,
+            physical_scene: PhysicalScene::default(),
+            geometry_audit: audit.clone(),
+            standards_evaluation: standards,
+            library_lifecycle: crate::LibraryLifecycleStatus::default(),
+            intent_report: Ok(report),
+            graph: Err(crate::AnalysisError::Project(
+                "not compiled in this test".to_owned(),
+            )),
+        };
+        assert_eq!(
+            analysis.geometry_violation(&diagnostic),
+            audit.violations.first()
+        );
+    }
 
     #[test]
     fn lowers_driving_but_not_reference_dimensions() {

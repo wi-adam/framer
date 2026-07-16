@@ -15,7 +15,7 @@ use framer_solver::{
     DiagnosticSeverity, FrameMember, MemberKind, PlanDiagnostic, ProjectFramePlan, RoomSchedule,
     SolverError, generate_project_plan,
 };
-use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
+use framer_standards::{ComplianceEntry, ComplianceReport, Outcome, StandardsEvaluation};
 use thiserror::Error;
 
 use crate::graph::{GraphBuildError, GraphBuilder};
@@ -37,10 +37,91 @@ pub struct ProjectAnalysis {
     pub resolved_standards: ResolvedStandards,
     pub physical_scene: PhysicalScene,
     pub geometry_audit: GeometryAudit,
-    pub compliance_report: ComplianceReport,
+    pub standards_evaluation: StandardsEvaluation,
     pub library_lifecycle: LibraryLifecycleStatus,
     pub intent_report: Result<IntentReport, AnalysisError>,
     pub graph: Result<ProjectGraph, AnalysisError>,
+}
+
+impl ProjectAnalysis {
+    pub fn revision(&self) -> Option<GraphRevision> {
+        self.intent_report
+            .as_ref()
+            .ok()
+            .map(IntentReport::revision)
+            .or_else(|| self.graph.as_ref().ok().map(ProjectGraph::revision))
+    }
+
+    /// Recover the original standards payload referenced by common intent evidence.
+    pub fn compliance_entry(&self, reference: &ComplianceEntryRef) -> Option<&ComplianceEntry> {
+        if self.revision() != Some(reference.revision) {
+            return None;
+        }
+        let mut indices = (0..self.standards_evaluation.report.entries.len()).collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            compare_compliance_entry(
+                &self.standards_evaluation.report.entries[*left],
+                &self.standards_evaluation.report.entries[*right],
+            )
+        });
+        let mut ordinal = 0u32;
+        for index in indices {
+            let entry = &self.standards_evaluation.report.entries[index];
+            let same_rule = entry.rule == reference.rule.rule
+                && Some(&entry.pack) == reference.rule.pack.as_ref();
+            let same_subject = entry.element.as_ref()
+                == reference
+                    .subject
+                    .as_ref()
+                    .and_then(AuthoredEntityRef::element_id);
+            if !same_rule || !same_subject {
+                continue;
+            }
+            if ordinal == reference.ordinal {
+                return Some(entry);
+            }
+            ordinal = ordinal.saturating_add(1);
+        }
+        None
+    }
+
+    pub fn standards_details_for(
+        &self,
+        reference: &ComplianceEntryRef,
+    ) -> Vec<&framer_standards::StandardsEvaluationDetail> {
+        let Some(entry) = self.compliance_entry(reference) else {
+            return Vec::new();
+        };
+        let Some(index) = self
+            .standards_evaluation
+            .report
+            .entries
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, entry))
+        else {
+            return Vec::new();
+        };
+        self.standards_evaluation
+            .details
+            .iter()
+            .filter(|detail| detail.report_entry_index == index)
+            .collect()
+    }
+
+    /// Recover the native geometry witness payload for a common geometry finding.
+    pub fn geometry_violation(&self, reference: &DiagnosticRef) -> Option<&GeometryViolation> {
+        if reference.provider != DiagnosticProvider::Geometry
+            || self.revision() != Some(reference.revision)
+        {
+            return None;
+        }
+        let mut violations = self.geometry_audit.violations.iter().collect::<Vec<_>>();
+        violations.sort_by(|left, right| crate::lower::compare_geometry_violation(left, right));
+        violations
+            .get(usize::try_from(reference.ordinal).ok()?)
+            .copied()
+            .filter(|violation| violation.code() == reference.code)
+    }
 }
 
 /// Current lifecycle comparison between vendored project items and the bundled library source.
@@ -93,13 +174,24 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
     let physical_scene = build_physical_scene(model, &plan);
     let geometry_audit = audit_physical_scene(&physical_scene);
     let resolved_standards = model.resolved_standards();
-    let compliance_report = framer_standards::evaluate(model, &resolved_standards, &plan);
+    let standards_evaluation =
+        framer_standards::evaluate_detailed(model, &resolved_standards, &plan);
     plan.diagnostics
-        .extend(framer_standards::diagnostics(&compliance_report));
+        .extend(crate::lower::standards_plan_diagnostics(
+            &standards_evaluation,
+        ));
     append_library_diagnostics(&mut plan, &library_lifecycle);
     let intent_report = GraphRevision::for_model(model)
         .map_err(AnalysisError::from)
-        .map(|revision| crate::lower::compile_current_intent(model, revision));
+        .map(|revision| {
+            crate::lower::compile_project_intent(
+                model,
+                &plan,
+                &geometry_audit,
+                &standards_evaluation,
+                revision,
+            )
+        });
     let graph = match &intent_report {
         Ok(intent_report) => compile_project_graph_with_intent(
             model,
@@ -107,7 +199,7 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
             &resolved_standards,
             &physical_scene,
             &geometry_audit,
-            &compliance_report,
+            &standards_evaluation.report,
             intent_report,
         ),
         Err(error) => Err(error.clone()),
@@ -118,7 +210,7 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
         resolved_standards,
         physical_scene,
         geometry_audit,
-        compliance_report,
+        standards_evaluation,
         library_lifecycle,
         intent_report,
         graph,
@@ -993,53 +1085,9 @@ impl Compiler<'_> {
     }
 
     fn compile_plan_diagnostics(&mut self) {
-        let mut diagnostics = self.plan.diagnostics.clone();
-        diagnostics.extend(
-            self.plan
-                .wall_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .floor_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .ceiling_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .roof_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.sort_by(compare_diagnostic);
-
-        let mut ordinals =
-            BTreeMap::<(DiagnosticProvider, String, Option<AuthoredEntityRef>), u32>::new();
-        for diagnostic in diagnostics {
-            let provider = diagnostic_provider(&diagnostic);
-            let source = diagnostic
-                .source
-                .as_ref()
-                .and_then(|id| self.authored_by_id.get(id))
-                .cloned();
-            let ordinal = ordinals
-                .entry((provider, diagnostic.code.clone(), source.clone()))
-                .or_default();
-            let reference = DiagnosticRef {
-                revision: self.revision,
-                provider,
-                code: diagnostic.code.clone(),
-                source,
-                ordinal: *ordinal,
-            };
-            *ordinal = ordinal.saturating_add(1);
+        for (diagnostic, reference) in
+            crate::lower::canonical_plan_diagnostic_records(self.model, self.plan, self.revision)
+        {
             let node = ProjectNodeRef::Diagnostic(reference.clone());
             self.graph.node(ProjectNode::new(
                 node.clone(),
@@ -1178,17 +1226,9 @@ impl Compiler<'_> {
     }
 
     fn compile_geometry_audit(&mut self) {
-        let mut violations = self.geometry_audit.violations.iter().collect::<Vec<_>>();
-        violations.sort_by(|left, right| compare_geometry_violation(left, right));
-        for (ordinal, violation) in violations.into_iter().enumerate() {
-            let source = self.authored_by_id.get(violation.body_a().owner()).cloned();
-            let reference = DiagnosticRef {
-                revision: self.revision,
-                provider: DiagnosticProvider::Geometry,
-                code: violation.code().to_owned(),
-                source,
-                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-            };
+        for (violation, reference) in
+            crate::lower::canonical_geometry_records(self.model, self.geometry_audit, self.revision)
+        {
             let diagnostic_node = ProjectNodeRef::Diagnostic(reference);
             self.graph.node(ProjectNode::new(
                 diagnostic_node.clone(),
@@ -1584,26 +1624,6 @@ fn generated_source_matches(host: &AuthoredEntityRef, source: &AuthoredEntityRef
     }
 }
 
-fn diagnostic_provider(diagnostic: &PlanDiagnostic) -> DiagnosticProvider {
-    if diagnostic.rule.is_some() {
-        DiagnosticProvider::Standards
-    } else if diagnostic.code.starts_with("library.") {
-        DiagnosticProvider::Library
-    } else {
-        DiagnosticProvider::Solver
-    }
-}
-
-fn severity_rank(severity: DiagnosticSeverity) -> u8 {
-    match severity {
-        DiagnosticSeverity::Info => 0,
-        DiagnosticSeverity::Warning => 1,
-        DiagnosticSeverity::Unsupported => 2,
-        DiagnosticSeverity::Violation => 3,
-        DiagnosticSeverity::NeedsReview => 4,
-    }
-}
-
 fn severity_label(severity: DiagnosticSeverity) -> &'static str {
     match severity {
         DiagnosticSeverity::Info => "Info",
@@ -1655,40 +1675,6 @@ fn intent_record_detail(record: &IntentRecord) -> String {
         IntentRecord::Assumption(record) => {
             format!("{:?} — {}", record.evidence, record.assertion.rationale)
         }
-    }
-}
-
-fn compare_diagnostic(left: &PlanDiagnostic, right: &PlanDiagnostic) -> Ordering {
-    diagnostic_provider(left)
-        .cmp(&diagnostic_provider(right))
-        .then_with(|| left.code.cmp(&right.code))
-        .then_with(|| left.source.cmp(&right.source))
-        .then_with(|| severity_rank(left.severity).cmp(&severity_rank(right.severity)))
-        .then_with(|| left.message.cmp(&right.message))
-        .then_with(|| compare_rule_ref(left.rule.as_ref(), right.rule.as_ref()))
-}
-
-fn compare_geometry_violation(left: &GeometryViolation, right: &GeometryViolation) -> Ordering {
-    left.body_a()
-        .cmp(right.body_a())
-        .then_with(|| left.body_b().cmp(&right.body_b()))
-        .then_with(|| left.code().cmp(right.code()))
-        .then_with(|| left.to_string().cmp(&right.to_string()))
-}
-
-fn compare_rule_ref(
-    left: Option<&framer_solver::RuleRef>,
-    right: Option<&framer_solver::RuleRef>,
-) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left
-            .pack
-            .cmp(&right.pack)
-            .then_with(|| left.rule.cmp(&right.rule))
-            .then_with(|| left.citation.cmp(&right.citation)),
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
     }
 }
 

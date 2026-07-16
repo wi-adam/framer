@@ -29,12 +29,12 @@ pub use identity::{
     StandardsRuleRef, UnknownEvidenceKind, UnknownEvidenceRef,
 };
 pub use intent::{
-    AssertionParticipant, AssertionParticipantRole, AssertionSource, AssumptionEvidence,
-    AssumptionIntentRecord, AssumptionPremise, BooleanExpression, BooleanIntentMode,
-    BooleanIntentRecord, CompiledAssertion, ExactValue, IntentDomain, IntentEvidenceRef,
-    IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind, IntentValue,
-    ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord, ObjectiveObservation,
-    PreferencePriority, SelectionAttribute, WaiverRecord, WaiverRef,
+    AssertionParticipant, AssertionParticipantRole, AssertionScope, AssertionSource,
+    AssumptionEvidence, AssumptionIntentRecord, AssumptionPremise, BooleanExpression,
+    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, ExactValue, IntentDomain,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind,
+    IntentValue, ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord,
+    ObjectiveObservation, PreferencePriority, SelectionAttribute, WaiverRecord, WaiverRef,
 };
 pub use query::{
     DependencyImpact, GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats,

@@ -69,11 +69,17 @@ pub enum AssertionSource {
 
 /// Common assertion metadata, shared by boolean, objective, and assumption records.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssertionScope {
+    Project,
+    Exact(Vec<AuthoredEntityRef>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledAssertion {
     pub reference: AssertionRef,
     pub domain: IntentDomain,
     /// Canonical, role-free projection used by selection lookup and deterministic presentation.
-    pub scope: Vec<AuthoredEntityRef>,
+    pub scope: AssertionScope,
     /// Role-qualified expression participants. Semantic order is preserved independently of the
     /// canonical scope projection.
     pub participants: Vec<AssertionParticipant>,
@@ -150,7 +156,7 @@ pub enum WaiverRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiverRecord {
     pub reference: WaiverRef,
-    pub target: AssertionRef,
+    pub targets: Vec<AssertionRef>,
     pub source: AssertionSource,
     pub rationale: String,
     pub provenance: Vec<IntentEvidenceRef>,
@@ -312,11 +318,26 @@ impl IntentReport {
             }
         }
 
-        let mut waiver_map = BTreeMap::new();
+        let mut waiver_map = BTreeMap::<WaiverRef, WaiverRecord>::new();
         for mut waiver in waivers {
+            waiver.targets.sort();
+            waiver.targets.dedup();
             waiver.provenance.sort();
             waiver.provenance.dedup();
-            waiver_map.insert(waiver.reference.clone(), waiver);
+            match waiver_map.entry(waiver.reference.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(waiver);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    current.targets.extend(waiver.targets);
+                    current.targets.sort();
+                    current.targets.dedup();
+                    current.provenance.extend(waiver.provenance);
+                    current.provenance.sort();
+                    current.provenance.dedup();
+                }
+            }
         }
 
         Self {
@@ -376,8 +397,10 @@ fn canonicalize_record(record: &mut IntentRecord) {
             &mut record.assertion
         }
     };
-    assertion.scope.sort();
-    assertion.scope.dedup();
+    if let AssertionScope::Exact(scope) = &mut assertion.scope {
+        scope.sort();
+        scope.dedup();
+    }
     assertion.participants.sort_by(|left, right| {
         left.semantic_order
             .cmp(&right.semantic_order)
@@ -416,7 +439,7 @@ mod tests {
                 assertion: CompiledAssertion {
                     reference: reference.clone(),
                     domain: IntentDomain::SpatialProgram,
-                    scope: vec![wall.clone(), wall.clone()],
+                    scope: AssertionScope::Exact(vec![wall.clone(), wall.clone()]),
                     participants: vec![
                         AssertionParticipant::new(
                             wall.clone(),
@@ -439,7 +462,10 @@ mod tests {
         );
 
         assert_eq!(report.assertions_for(&wall).len(), 1);
-        assert_eq!(report.records()[0].assertion().scope, vec![wall]);
+        assert_eq!(
+            report.records()[0].assertion().scope,
+            AssertionScope::Exact(vec![wall])
+        );
         assert!(report.record(&reference).is_some());
     }
 

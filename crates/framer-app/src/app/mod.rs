@@ -835,11 +835,12 @@ impl FramerApp {
                     resolved_standards: _,
                     physical_scene,
                     geometry_audit,
-                    compliance_report: report,
+                    standards_evaluation,
                     library_lifecycle,
                     intent_report: _,
                     graph,
                 } = analysis;
+                let report = standards_evaluation.report;
                 self.library_issues = library_lifecycle.issues;
                 self.library_issue_error = library_lifecycle.error;
                 self.graph_queries.clear();
