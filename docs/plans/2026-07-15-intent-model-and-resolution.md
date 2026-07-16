@@ -4,9 +4,9 @@
 > [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
 > is an archival record of how the work was sequenced; the spec is the durable source of truth.
 >
-> **Status:** In progress; Slice 1 merged in PR #129. Slice 2 implementation and
-> full verification are complete on its delivery branch, with draft-PR
-> review/merge pending. Work started from `origin/main` at `cf8f2e0` on
+> **Status:** In progress; Slice 1 merged in PR #129. Slice 2 is under review in
+> PR #130; review fixes are implemented and locally verified, with latest-head
+> CI/merge pending. Work started from `origin/main` at `cf8f2e0` on
 > 2026-07-15. Slices 3-4 remain proposed and have not started.
 
 ## Goal
@@ -295,6 +295,10 @@ schema change.
   `UnknownEvidence` nodes rather than disappearing.
 - [x] Add cached filtered impact projection and typed site-premise evidence while
   preserving directional generated-member explanation queries.
+- [x] Treat an explicit standards `RuleRef` as authoritative over diagnostic-code
+  namespace fallbacks, and materialize absent standards-referenced site flags as
+  one typed unavailable premise so their evidence never becomes a dangling graph
+  reference.
 - [x] Replace the inspector's relationship-only block with one read-only **Intent**
   section: domain/outcome-grouped current status, authored potential impact and
   dependencies, generated **Why generated**, and honest empty, stale, solver,
@@ -305,20 +309,22 @@ schema change.
 - [x] Keep schema v13 and all checked example project bytes unchanged; run focused
   parity/evidence tests, strict full-workspace gates, and visual review.
 
-Verification evidence recorded on 2026-07-15:
+Verification evidence recorded on 2026-07-15 and refreshed on 2026-07-16:
 
 - `cargo fmt --all -- --check`, strict all-target/all-feature workspace clippy,
   and `cargo test --workspace --all-features --locked` passed. The locked suite
-  passed 1,047 tests with 3 manual/visual probes ignored, including all 8 GPU
+  passed 1,049 tests with 3 manual/visual probes ignored, including all 8 GPU
   parity tests and checked-example geometry audits.
 - Focused tests pin the frozen standards CSV and empty-member jack-stud behavior;
   distinguish detailed unsupported facts from report-only needs-review; cover
-  every common standards/diagnostic mapping; recover duplicate geometry and plan
-  diagnostic payloads exactly; reject stale references; and prove typed site and
-  missing-evidence graph paths.
+  every common standards/diagnostic mapping, including explicit rule provenance
+  before code-prefix fallbacks; recover duplicate geometry and plan diagnostic
+  payloads exactly; reject stale references; and prove typed site, absent
+  standards-referenced site-flag, and missing-evidence graph paths.
 - App harness coverage passed for mixed outcomes, assumptions, generated evidence,
-  unavailable/stale/empty states, graph-only failure, and geometry diagnostic
-  de-duplication. `scripts/ui-shots.sh` rendered 57 frames; Intent frames 43-50
+  unavailable/stale/empty states, graph-only failure, missing dynamic site
+  premises, and geometry diagnostic de-duplication. `scripts/ui-shots.sh`
+  rendered 57 frames; Intent frames 43-50
   were visually reviewed for impact, generated provenance, compliance/geometry
   evidence, all outcome groups, empty/no-selection states, and graph-only failure.
 - `python3 scripts/check-markdown-links.py` checked 389 local links with no

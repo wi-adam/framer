@@ -450,6 +450,7 @@ fn intent_status_groups_mixed_boolean_outcomes_and_exposes_evidence() {
 fn intent_status_keeps_assumptions_inside_their_domain_without_boolean_outcomes() {
     let mut harness = demo_harness();
     harness.run();
+    prepare_mixed_intent_status(harness.state_mut());
     harness.state_mut().selected = Selection::Site;
     harness.run();
     scroll_to_intent_relationships(&mut harness);
@@ -462,6 +463,16 @@ fn intent_status_keeps_assumptions_inside_their_domain_without_boolean_outcomes(
     assert_accessible_label(
         &harness,
         "Missing input: Jurisdiction is not provided.",
+        "site intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "missing-intent-fixture-flag",
+        "site intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "Missing input: missing-intent-fixture-flag is not provided.",
         "site intent status",
     );
     let report = harness

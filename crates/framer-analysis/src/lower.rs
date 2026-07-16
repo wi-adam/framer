@@ -30,7 +30,7 @@ pub(crate) fn compile_current_intent(
 ) -> IntentReport {
     IntentReport::from_parts(
         revision,
-        current_intent_records(model, revision, &BTreeMap::new()),
+        current_intent_records(model, revision, &BTreeMap::new(), &BTreeSet::new()),
         Vec::new(),
     )
 }
@@ -42,11 +42,12 @@ fn current_intent_records(
     model: &BuildingModel,
     revision: GraphRevision,
     diagnostics: &DiagnosticEvidenceIndex,
+    referenced_site_properties: &BTreeSet<String>,
 ) -> Vec<IntentRecord> {
     let mut records = Vec::new();
     compile_driving_dimensions(model, revision, diagnostics, &mut records);
     compile_construction_selections(model, revision, &mut records);
-    compile_site_premises(model, revision, &mut records);
+    compile_site_premises(model, revision, referenced_site_properties, &mut records);
     records
 }
 
@@ -241,6 +242,7 @@ fn compile_construction_selection(
 fn compile_site_premises(
     model: &BuildingModel,
     revision: GraphRevision,
+    referenced_properties: &BTreeSet<String>,
     records: &mut Vec<IntentRecord>,
 ) {
     let site = &model.site;
@@ -283,12 +285,18 @@ fn compile_site_premises(
         site.frost_depth.map(IntentValue::Length),
         records,
     );
-    for (key, value) in &site.properties {
+    let property_keys = site
+        .properties
+        .keys()
+        .chain(referenced_properties)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in property_keys {
         site_assumption(
             revision,
             SiteAssumptionKey::Property(key.clone()),
-            key,
-            Some(property_value(value)),
+            &key,
+            site.properties.get(&key).map(property_value),
             records,
         );
     }
@@ -367,7 +375,13 @@ pub(crate) fn compile_project_intent(
             .or_default()
             .push(reference.clone());
     }
-    let mut records = current_intent_records(model, revision, &diagnostic_evidence);
+    let referenced_site_properties = referenced_site_property_keys(standards);
+    let mut records = current_intent_records(
+        model,
+        revision,
+        &diagnostic_evidence,
+        &referenced_site_properties,
+    );
     let mut waivers = Vec::new();
     let diagnostic_payloads = diagnostics
         .iter()
@@ -625,6 +639,26 @@ fn site_assumption_evidence(
     }
     keys.into_iter()
         .map(|key| IntentEvidenceRef::Assertion(site_assumption_assertion_ref(revision, key)))
+        .collect()
+}
+
+fn referenced_site_property_keys(standards: &StandardsEvaluation) -> BTreeSet<String> {
+    let mut assumptions = BTreeSet::new();
+    for detail in &standards.details {
+        if let Some(check) = &detail.check_definition {
+            collect_applicability_assumptions(&check.applies, &mut assumptions);
+        }
+    }
+    assumptions
+        .into_iter()
+        .filter_map(|key| match key {
+            SiteAssumptionKey::Property(key) => Some(key),
+            SiteAssumptionKey::Jurisdiction
+            | SiteAssumptionKey::SeismicDesignCategory
+            | SiteAssumptionKey::WindSpeed
+            | SiteAssumptionKey::GroundSnowLoad
+            | SiteAssumptionKey::FrostDepth => None,
+        })
         .collect()
 }
 
@@ -1223,12 +1257,12 @@ fn fact_subject_to_authored(subject: &FactSubject) -> AuthoredEntityRef {
 }
 
 pub(crate) fn diagnostic_provider(diagnostic: &PlanDiagnostic) -> DiagnosticProvider {
-    if diagnostic.code.starts_with("geometry.") {
+    if diagnostic.rule.is_some() {
+        DiagnosticProvider::Standards
+    } else if diagnostic.code.starts_with("geometry.") {
         DiagnosticProvider::Geometry
     } else if diagnostic.code.starts_with("intent.") {
         DiagnosticProvider::Analysis
-    } else if diagnostic.rule.is_some() {
-        DiagnosticProvider::Standards
     } else if diagnostic.code.starts_with("library.") {
         DiagnosticProvider::Library
     } else {
@@ -1545,6 +1579,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn explicit_standards_rules_precede_diagnostic_code_prefix_fallbacks() {
+        let diagnostic = |code: &str, rule| PlanDiagnostic {
+            severity: DiagnosticSeverity::Violation,
+            code: code.to_owned(),
+            source: None,
+            message: "test diagnostic".to_owned(),
+            rule,
+        };
+        let rule = |code: &str| {
+            Some(RuleRef {
+                pack: ElementId::new("standards-test"),
+                rule: code.to_owned(),
+                citation: "Test citation".to_owned(),
+            })
+        };
+
+        for code in ["geometry.clearance", "intent.constraint"] {
+            assert_eq!(
+                diagnostic_provider(&diagnostic(code, rule(code))),
+                DiagnosticProvider::Standards,
+                "explicit standards provenance must own {code}",
+            );
+        }
+        assert_eq!(
+            diagnostic_provider(&diagnostic("geometry.clearance", None)),
+            DiagnosticProvider::Geometry,
+        );
+        assert_eq!(
+            diagnostic_provider(&diagnostic("intent.constraint", None)),
+            DiagnosticProvider::Analysis,
+        );
     }
 
     #[test]
@@ -2085,5 +2153,85 @@ mod tests {
             construction_count
         );
         assert_eq!(report.assertions_for(&AuthoredEntityRef::Site).len(), 6);
+    }
+
+    #[test]
+    fn standards_referenced_missing_site_flags_materialize_typed_assumptions_once() {
+        const KEY: &str = "missing-intent-fixture-flag";
+        const RULE: &str = "test.missing-site-flag";
+
+        let mut model = BuildingModel::demo_wall();
+        model.standards_packs[0].checks.push(ComplianceCheck {
+            rule: RULE.to_owned(),
+            citation: "Test citation".to_owned(),
+            title: "Missing site flag".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::All(vec![
+                Applicability::SiteFlag {
+                    key: KEY.to_owned(),
+                },
+                Applicability::Not(Box::new(Applicability::SiteFlag {
+                    key: KEY.to_owned(),
+                })),
+            ]),
+            scope: CheckScope::Walls {
+                exterior_only: None,
+                tags: Vec::new(),
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::WallHeight,
+                op: CompareOp::Gt,
+                value: FactOperand::LengthLiteral(Length::ZERO),
+            },
+        });
+
+        let analysis = crate::analyze_project(&model).unwrap();
+        let report = analysis.intent_report.as_ref().unwrap();
+        let assumptions = report
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                IntentRecord::Assumption(record)
+                    if matches!(
+                        &record.assertion.reference,
+                        AssertionRef::Derived(DerivedAssertionId {
+                            role: DerivedAssertionRole::SiteAssumption(
+                                SiteAssumptionKey::Property(key),
+                            ),
+                            ..
+                        }) if key == KEY
+                    ) =>
+                {
+                    Some(record)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(assumptions.len(), 1);
+        assert!(matches!(
+            &assumptions[0].evidence,
+            AssumptionEvidence::Unavailable(IntentUnknown {
+                kind: IntentUnknownKind::MissingInput,
+                detail,
+            }) if detail == "missing-intent-fixture-flag is not provided."
+        ));
+        let assumption_ref = assumptions[0].assertion.reference.clone();
+
+        let standards_record = report
+            .records()
+            .iter()
+            .find(|record| {
+                matches!(
+                    &record.assertion().source,
+                    AssertionSource::StandardsRule(rule) if rule.rule == RULE
+                )
+            })
+            .unwrap();
+        assert!(
+            standards_record
+                .evidence()
+                .contains(&IntentEvidenceRef::Assertion(assumption_ref.clone()))
+        );
+        assert!(report.record(&assumption_ref).is_some());
     }
 }
