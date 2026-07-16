@@ -11,6 +11,7 @@ clap.workspace = true
 config.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
 env_logger.workspace = true
+framer-analysis.workspace = true
 framer-core.workspace = true
 framer-geometry.workspace = true
 framer-library.workspace = true

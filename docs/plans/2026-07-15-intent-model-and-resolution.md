@@ -4,7 +4,10 @@
 > [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
 > is an archival record of how the work was sequenced; the spec is the durable source of truth.
 >
-> **Status:** Proposed; no implementation slices have started.
+> **Status:** In progress; Slice 1 implementation and verification are complete
+> on its delivery branch, with draft-PR review/merge pending. Work started from
+> `origin/main` at `cf8f2e0` on 2026-07-15. Slices 2-4 remain proposed and have
+> not started.
 
 ## Goal
 
@@ -21,10 +24,13 @@ gated on those domain primitives being modeled honestly.
 
 ## Architecture / stack summary
 
-Current resolution is orchestrated by `FramerApp::rebuild()` in
-`crates/framer-app/src/app/mod.rs`: apply wall-local driving dimensions, call
-`framer_solver::generate_project_plan`, build and audit `framer_geometry::PhysicalScene`, evaluate
-the resolved standards stack through `framer-standards`, and merge diagnostics.
+Current resolution starts in `FramerApp::rebuild()` in
+`crates/framer-app/src/app/mod.rs`: apply wall-local driving dimensions, then call
+`framer_analysis::analyze_project`. That UI-free entry point generates the
+`ProjectFramePlan`, builds and audits `framer_geometry::PhysicalScene`, evaluates
+the resolved standards stack through `framer-standards`, evaluates starter-library
+lifecycle state through `framer-library`, lowers both standards and lifecycle
+diagnostics, and compiles the current project graph as one coherent generation.
 
 The implementation builds on:
 
@@ -32,21 +38,23 @@ The implementation builds on:
   topology, `ConstraintSystem`, and the standards `Fact`/`Predicate` vocabulary;
 - `framer-solver::ProjectFramePlan`, `FrameMember.source`, `RuleProvenance`, and diagnostics;
 - `framer-standards::ComplianceReport` and three-valued fact evaluation;
-- `framer-geometry::BodyRef`, `GeometryAudit`, and structured violations; and
+- `framer-geometry::BodyRef`, `GeometryAudit`, and structured violations;
+- `framer-library::library_lifecycle_issues` and typed lifecycle issues; and
 - app-only `ComponentKey`/`Selection`, which demonstrate identity needs but must not become the
   cross-crate contract.
 
-A higher UI-free analysis/resolution layer may combine these outputs. Core owns only the persisted
-or lower-level semantic types required below the solver; the new top-level layer must not create
-dependency cycles. Quantitative measurement remains in `framer-standards`: standards checks and
-project assertions consume the same facts instead of implementing parallel clearance, span, or
-performance calculations.
+The eighth workspace crate, `framer-analysis`, depends on core, library, solver,
+standards, and geometry to combine these outputs without creating a lower-crate
+dependency cycle. Core owns only persisted or lower-level semantic types required
+below the solver. Quantitative measurement remains in `framer-standards`:
+standards checks and future project assertions consume the same facts instead of
+implementing parallel clearance, span, or performance calculations.
 
 ## Risk and coverage ledger
 
 | Behavior | Boundary | Required proof | Likely failure if omitted |
 | --- | --- | --- | --- |
-| Stable project graph | core/solver/standards/geometry → analysis | Same input builds byte/logically identical ordered nodes and edges; missing optional evidence does not panic | Graph becomes presentation-only or nondeterministic |
+| Stable project graph | core/library/solver/standards/geometry → analysis | Same input builds byte/logically identical ordered nodes and edges; missing optional evidence does not panic | Graph becomes presentation-only or nondeterministic |
 | Common semantic references | core/domain crates → analysis/app | Every supported authored/generated kind resolves; authored/derived assertion namespaces cannot collide; revision-scoped generated refs reject stale use | Another app-only identity enum becomes accidental truth |
 | Shared fact measurement | core/standards → analysis | A standards check and authored assertion over the same fact receive the identical observation and three-valued result | Standards and intent engines disagree about the same distance/span |
 | Common outcomes/evidence | standards/solver/geometry → analysis | Exact standards mapping includes Advisory → violated preference and retains domain payload/citation | Diagnostics lose severity or information during normalization |
@@ -56,9 +64,26 @@ performance calculations.
 | Directional fixture clearance | core/standards → analysis | Deg0/90/180/270 front/side facts, centerline-vs-face datum, containment, open-room unknown, and standards-vs-project parity | Flagship slice cannot express real fixture requirements |
 | Soft preference resolution | core/analysis | Priority ordering and stable ties are deterministic; required constraints never weaken | Vector/hash order silently chooses a design |
 | Candidate authored changes | analysis → app/history | Candidates never mutate until accepted; stale graph revision rejects; accepted patch validates, is undoable, and reruns resolution | Solver silently changes topology or applies a stale option |
-| Standards/geometry integration | analysis/app | Unsupported and unknown remain visible; source/rule/body evidence survives | A missing evaluator looks like success |
+| Standards/geometry/library integration | analysis/app | Unsupported and unknown remain visible; source/rule/body/lifecycle evidence survives | A missing evaluator looks like success |
 | Existing diagnostics integration | analysis → solver/app | Required/preference/unknown lowering follows one severity matrix; pass/N/A/waived remain report-only | App grows a second competing problems surface |
 | Product-visible explanation UI | analysis → app | UI harness/screenshots cover why/impact/options and no-result states; lazy query work stays revision-cached | Graph exists but cannot answer user questions or bloats every rebuild |
+
+### Slice 1 execution ledger
+
+This slice begins with the following narrowed proof obligations. They refine the initiative-wide
+ledger above without widening Slice 1 into the assertion/outcome work reserved for Slice 2.
+
+| Contract at risk | Slice 1 boundary | Required focused proof before PR | Review failure prevented |
+| --- | --- | --- | --- |
+| Typed semantic identity | core/library/solver/standards/geometry → `framer-analysis` | Every supported authored family, generated member host/source, physical body, room schedule/boundary consequence, standards rule/report entry, and diagnostic resolves through a closed typed reference; missing or wrong-family generated host/source evidence fails closed; authored and derived assertion ids with identical text remain unequal | App-only ids, wrong-family references, or vector positions become graph truth |
+| Deterministic graph revision | canonical post-propagation model + starter-library source → analysis cache | Canonical non-semantic reordering preserves the revision and graph; standards-stack reordering, graph contract changes, and starter-library availability/content-hash changes alter the revision; external input is length-delimited | Cache entries survive a semantic/external-input change or churn on harmless ordering |
+| Deterministic compilation | existing regenerated outputs → project graph | Two compiles are `Eq`; nodes and edges are canonical; missing member/rule/room evidence becomes explicit unknown nodes; a missing edge endpoint returns typed `GraphBuildError` through `AnalysisError` instead of panicking; library diagnostics enter the plan before graph compilation | The graph is nondeterministic, optional evidence looks complete, or a compiler invariant crashes rebuild |
+| Current evidence chain | opening/host/rule/member/report/audit/room/library/site → graph | A checked example proves opening → generated header → rule/source traceability, room schedule/boundary dependencies, matching library lifecycle status/diagnostics, site impact on solver/compliance consequences, plus one compliance or geometry issue with all participants retained | “Why generated” is only a label without machine-readable provenance |
+| Lazy impact/explanation queries | graph → query cache | First and repeated dependency/dependent closures are equal, the second query is a cache hit, cycles terminate, evidence walks only toward support, `Project` is an endpoint rather than a bridge, and a changed `GraphRevision` clears cached closures | Transitive work runs every frame, crosses into downstream evidence, links unrelated project nodes, or returns stale results |
+| App orchestration | analysis → `FramerApp::rebuild` | Successful rebuild installs matching domain outputs, lifecycle status, and graph; authored rebuild changes its revision; solver failure clears graph/cache but refreshes lifecycle status; selection adapters cover authored and generated selections | UI reads a graph or lifecycle status from a different document generation |
+| Read-only explanation UI | app selection → inspector | UI harness and screenshot deck cover an authored object, generated member, compliance evidence, and honest no-selection/no-evidence states | The graph is inaccessible, misleading, or becomes an editing surface |
+| No schema or behavior change | v13 project/core/library/solver/standards/geometry | `PROJECT_SCHEMA_VERSION` and canonical examples remain unchanged; representative plan/report/audit/lifecycle values match compilation inputs; full workspace gates remain green | Slice 1 accidentally persists derived state or changes generation |
+| Rebuild/query cost | app + analysis | Record representative rebuild, first-query, and cached-query timings in the PR; candidate generation remains absent | Derived graph work silently enters the per-frame or rebuild hot path |
 
 ## Slices / phases
 
@@ -69,15 +94,16 @@ Prove the graph shape against information Framer already computes. This slice mu
 
 - **Task 1.1 — Lock semantic node and edge vocabulary for current entities**
   - Define typed graph references for current authored entities, generated members, physical
-    bodies, standards rules, diagnostics, and derived reports.
+    bodies, room schedule/boundary consequences, standards rules, diagnostics, and derived reports.
   - Keep authored references independent of app selection and keep generated types out of
     `framer-core` unless a lower crate genuinely needs them.
   - Define `AssertionRef::Authored` and `AssertionRef::Derived` as type-disjoint namespaces.
     Derived ids include provider + semantic source + role and are authoritative only for the
     current graph revision; generated member/body ids are never persisted.
   - Files: new UI-free analysis module/crate after its boundary is named; `Cargo.toml` workspace
-    wiring; focused adapters in `crates/framer-core`, `crates/framer-solver`,
-    `crates/framer-standards`, and `crates/framer-geometry` only where necessary.
+    wiring; focused adapters in `crates/framer-core`, `crates/framer-library`,
+    `crates/framer-solver`, `crates/framer-standards`, and `crates/framer-geometry` only where
+    necessary.
   - Verify: positive resolution for every current entity family; explicit missing-source handling;
     authored/derived ids with identical text cannot collide; compile-time exhaustive matches for
     closed kinds.
@@ -85,22 +111,28 @@ Prove the graph shape against information Framer already computes. This slice mu
 
 - **Task 1.2 — Compile current truth into a deterministic graph**
   - Compile ownership/reference edges from `BuildingModel`, dimension/anchor relationships,
-    room/topology consequences, member/source/rule evidence, compliance entries, and geometry
-    violations.
+    typed room schedule/topology consequences, member/source/rule evidence, compliance entries,
+    library-lifecycle diagnostics, and geometry violations. Missing room boundary, boundary-wall,
+    or schedule input becomes explicit unknown evidence.
   - Sort id-keyed graph records canonically while preserving semantic order such as standards
     stack chains.
-  - Key the graph/cache by a deterministic `GraphRevision` fingerprint over the canonical
-    post-propagation model plus a fact/evaluator contract version. Reuse the project's pinned
+  - Key the graph/cache by a deterministic `GraphRevision` fingerprint over the fact/evaluator
+    contract version, a length-delimited deterministic starter-library availability/content-hash
+    input, and the canonical post-propagation model. Reuse the project's pinned
     hashing/canonicalization helpers rather than inventing an identity algorithm. Keep the app's
     process-local `document_revision` separate.
   - Eagerly compile only the current relationships/outcomes required by diagnostics; memoize
     explanation/impact projections on first query and invalidate them on `FramerApp::rebuild()`.
-  - Expose localized `incoming_intent`, `derived_from`, `depends_on`, and `evidence_for` queries.
+  - Expose localized `incoming_intent`, `derived_from`, dependency, dependent, and `evidence_for`
+    queries. Evidence traversal moves only toward whitelisted support, and `Project` is an endpoint
+    rather than a bridge between unrelated project-owned entities.
   - Files: analysis graph/compiler files; tests with checked example projects.
   - Verify: two compiles are `Eq`; permuting non-semantic source vectors before canonical model
-    sorting produces the same graph; semantic order remains visible; incomplete optional evidence
-    produces an explicit unknown edge/outcome rather than a panic; repeated queries reuse the
-    revision cache and one authored edit invalidates it.
+    sorting produces the same graph; semantic order remains visible; changing the starter-library
+    source fingerprint changes the revision; incomplete optional evidence produces an explicit
+    unknown edge/outcome; a missing graph endpoint returns typed `GraphBuildError` through
+    `AnalysisError` rather than panicking; repeated queries reuse the revision cache and one
+    authored edit invalidates it.
   - Commit: `feat(analysis): compile deterministic project graph`
 
 - **Task 1.3 — Add a read-only explanation surface**
@@ -116,9 +148,60 @@ Prove the graph shape against information Framer already computes. This slice mu
     available evidence; `scripts/ui-shots.sh` visual review.
   - Commit: `feat(app): explain project graph relationships`
 
-**Slice 1 exit criteria:** A current v13 project opens byte-identically, its plan/report/audit are
-unchanged, and graph queries can explain at least a wall opening → header/member → rule/source
-chain plus one geometry or compliance issue.
+#### Slice 1 implementation checklist
+
+- [x] Name and wire the UI-free `framer-analysis` crate without reversing lower-crate
+  dependencies; it consumes core, library, solver, standards, and geometry.
+- [x] Add closed authored and revision-scoped derived graph identities, including type-disjoint
+  authored/derived assertion ids and explicit unknown evidence.
+- [x] Generate the plan, resolved standards, compliance report, physical scene/audit,
+  `LibraryLifecycleStatus`, and graph as one coherent `ProjectAnalysis`; lifecycle diagnostics are
+  lowered before graph compilation, and graph compilation remains independently fallible.
+- [x] Compile canonically ordered current ownership/reference and derivation/evidence relationships,
+  including the opening → generated header → solver rule/source chain, typed room schedule/boundary
+  consequences, matching library lifecycle diagnostics/status, site-context impact on solver and
+  compliance consequences, and compliance/geometry evidence. Missing or wrong-family generated
+  hosts/sources lower to explicit unknown evidence.
+- [x] Fingerprint `GRAPH_CONTRACT_VERSION`, a length-delimited deterministic starter-library
+  availability/content-hash input, and canonical post-propagation project bytes; keep that revision
+  separate from app document revision and bind lazy cycle-safe query closures to it.
+- [x] Validate dependent and dependency endpoints at graph finalization and route typed
+  `GraphBuildError` through independently fallible `AnalysisError` rather than panicking rebuild.
+- [x] Restrict evidence closures to directional supporting dependencies and stop localized
+  traversal at the project ownership node instead of using it as a cross-project bridge.
+- [x] Adapt authored/generated app selection into `ProjectNodeRef` and add the existing inspector's
+  read-only "Depends on"/"Why generated" and "Affected by" surface with honest empty/error states.
+- [x] Keep schema v13, `BuildingModel`, canonical project examples, solver behavior, and persisted
+  authored semantics unchanged; do not add candidate generation.
+- [x] Add focused graph revision/compilation/query tests for external library-source fingerprint
+  changes, typed endpoint failures, missing/wrong-family generated hosts and sources, lifecycle
+  parity, typed room consequences and unknowns, site impact, directional evidence, and
+  project-endpoint traversal, plus app harness and screenshot-deck states for authored, generated,
+  compliance, graph-error, no-evidence, and no-selection cases.
+- [x] Execute and record focused/core/app tests and full workspace format, clippy, and test gates.
+- [x] Run and review `scripts/ui-shots.sh` for the inspector states.
+- [x] Record representative rebuild, first-query, and cached-query timing in the PR.
+
+Verification evidence recorded on 2026-07-15:
+
+- `cargo fmt --all -- --check`, strict all-target/all-feature workspace clippy, and the locked
+  all-feature workspace test suite passed; 1,019 tests passed and 3 manual probes were ignored.
+  The workspace run included all 8 GPU parity tests and the checked-example geometry audit tests.
+- `python3 scripts/check-markdown-links.py` checked 389 links with no failures. Schema remains v13,
+  and `git diff -- examples` is empty; byte-exact canonical example tests passed in the workspace
+  suite.
+- `scripts/ui-shots.sh` rendered all 54 frames. Frames 43-47 were visually reviewed for authored
+  impact, generated provenance, compliance evidence, no recorded evidence, and no selection.
+- The release-mode 40-sample probe measured rebuild median 3.266 ms / p95 5.054 ms, first-query
+  median 21.458 us / p95 34.375 us, and cached-query median 1.334 us / p95 2.000 us.
+
+Slice 1's implementation exit criteria are satisfied on its delivery branch; draft-PR review and
+merge remain before Slice 2 starts. Slices 2-4 remain proposed/not started.
+
+**Slice 1 exit criteria:** A current v13 project opens byte-identically; its plan/report/audit and
+existing library-lifecycle diagnostic behavior are unchanged; and graph queries can explain at
+least a wall opening → header/member → rule/source chain, room schedule/boundary consequences, and
+one geometry or compliance issue.
 
 ### Slice 2 — Common assertion, outcome, and evidence protocol
 

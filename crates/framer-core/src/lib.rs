@@ -1,4 +1,5 @@
 mod constraints;
+mod intent;
 mod library;
 mod model;
 mod project;
@@ -7,6 +8,7 @@ mod topology;
 mod units;
 
 pub use constraints::{ConstraintSystem, ConstraintVariable, LinearConstraint, LinearExpression};
+pub use intent::{AuthoredEntityRef, AuthoredIntentId, LibraryVersionRef};
 pub use library::{
     LIBRARY_FORMAT, LIBRARY_SCHEMA_VERSION, Library, LibraryDocument, LibraryError, load_library,
     save_library,

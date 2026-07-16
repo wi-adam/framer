@@ -136,6 +136,12 @@ fn sync_active_viewport_mode(harness: &mut Harness<'_, FramerApp>) {
     harness.state_mut().viewport_mode = mode;
 }
 
+fn scroll_to_intent_relationships(harness: &mut Harness<'_, FramerApp>) {
+    harness.run_ok();
+    harness.get_by_label("Intent relationships").scroll_to_me();
+    harness.run_ok();
+}
+
 fn open_3d_component_context_menu(harness: &mut Harness<'_, FramerApp>) {
     let rect = harness.get_by_label("3D viewport").rect();
     for y in [0.25, 0.375, 0.5, 0.625, 0.75] {
@@ -665,6 +671,86 @@ fn capture_ui_shot_deck() {
         "geometry-overlap-diagnostics-light",
     );
     drop(overlap_light);
+
+    // Read-only project-graph explanations. Keep these in a dedicated harness
+    // so inspector scroll state does not perturb the established deck.
+    let mut intent = shots_harness(design::studio_light());
+    intent.run_ok();
+    let (wall_index, host_id, opening_id, member_id) = {
+        let app = intent.state();
+        app.project_plan
+            .as_ref()
+            .expect("default generated plan")
+            .wall_plans
+            .iter()
+            .find_map(|host| {
+                let wall_index = app
+                    .model
+                    .walls
+                    .iter()
+                    .position(|wall| wall.id == host.wall)?;
+                let wall = &app.model.walls[wall_index];
+                wall.openings.iter().find_map(|opening| {
+                    host.members
+                        .iter()
+                        .find(|member| {
+                            member.kind == MemberKind::Header && member.source == opening.id
+                        })
+                        .map(|member| {
+                            (
+                                wall_index,
+                                host.wall.0.clone(),
+                                opening.id.0.clone(),
+                                member.id.clone(),
+                            )
+                        })
+                })
+            })
+            .expect("default project should include an opening header")
+    };
+    intent.state_mut().apply_selection(
+        Selection::Opening(opening_id),
+        Some(wall_index),
+        SelectionOp::Replace,
+    );
+    scroll_to_intent_relationships(&mut intent);
+    shot(&mut intent, &dir, &mut index, "intent-opening-affected-by");
+    intent.state_mut().apply_selection(
+        Selection::Member {
+            source_id: host_id,
+            member_id,
+        },
+        Some(wall_index),
+        SelectionOp::Replace,
+    );
+    scroll_to_intent_relationships(&mut intent);
+    shot(&mut intent, &dir, &mut index, "intent-header-why-generated");
+
+    intent.state_mut().model.walls[0].height = Length::from_feet(20.0);
+    intent.state_mut().rebuild();
+    intent.state_mut().selected_wall = 0;
+    intent.state_mut().selected = Selection::Wall;
+    scroll_to_intent_relationships(&mut intent);
+    shot(
+        &mut intent,
+        &dir,
+        &mut index,
+        "intent-wall-compliance-evidence",
+    );
+
+    let mut unused = intent.state().model.materials[0].clone();
+    unused.id = ElementId::new("material-unused-relationship-shot");
+    unused.name = "Unused relationship material".to_owned();
+    intent.state_mut().model.materials.push(unused);
+    intent.state_mut().rebuild();
+    intent.state_mut().selected =
+        Selection::Material("material-unused-relationship-shot".to_owned());
+    scroll_to_intent_relationships(&mut intent);
+    shot(&mut intent, &dir, &mut index, "intent-no-recorded-evidence");
+    intent.state_mut().selected = Selection::None;
+    scroll_to_intent_relationships(&mut intent);
+    shot(&mut intent, &dir, &mut index, "intent-no-selection");
+    drop(intent);
 
     // Dark palette spot-checks: default state + an inspector-heavy state.
     let mut dark = shots_harness(design::studio_dark());

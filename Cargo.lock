@@ -1415,6 +1415,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "framer-analysis"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "framer-core",
+ "framer-geometry",
+ "framer-library",
+ "framer-solver",
+ "framer-standards",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "framer-app"
 version = "0.1.0"
 dependencies = [
@@ -1424,6 +1437,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "env_logger",
+ "framer-analysis",
  "framer-core",
  "framer-geometry",
  "framer-library",
