@@ -171,10 +171,45 @@ impl UnknownEvidenceRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DerivedAssertionProvider {
     Core,
+    Library,
     Solver,
     Standards,
     Geometry,
     Analysis,
+}
+
+/// Closed semantic roles for disposable assertions. Dynamic domain keys remain payloads inside a
+/// typed variant instead of becoming an ungoverned string namespace.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SiteAssumptionKey {
+    Jurisdiction,
+    SeismicDesignCategory,
+    WindSpeed,
+    GroundSnowLoad,
+    FrostDepth,
+    Property(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DerivedAssertionRole {
+    DrivingDimension,
+    ConstructionSystemSelection {
+        selected: ElementId,
+    },
+    SiteAssumption(SiteAssumptionKey),
+    StandardsCheck {
+        subject: Option<AuthoredEntityRef>,
+        ordinal: u32,
+    },
+    Diagnostic {
+        provider: DiagnosticProvider,
+        code: String,
+        ordinal: u32,
+    },
+    GeometryFinding {
+        code: String,
+        ordinal: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -192,7 +227,7 @@ pub struct DerivedAssertionId {
     pub revision: GraphRevision,
     pub provider: DerivedAssertionProvider,
     pub source: DerivedAssertionSource,
-    pub role: String,
+    pub role: DerivedAssertionRole,
 }
 
 impl DerivedAssertionId {
@@ -200,13 +235,13 @@ impl DerivedAssertionId {
         revision: GraphRevision,
         provider: DerivedAssertionProvider,
         source: DerivedAssertionSource,
-        role: impl Into<String>,
+        role: DerivedAssertionRole,
     ) -> Self {
         Self {
             revision,
             provider,
             source,
-            role: role.into(),
+            role,
         }
     }
 }
@@ -267,7 +302,11 @@ mod tests {
             revision,
             DerivedAssertionProvider::Analysis,
             DerivedAssertionSource::Project,
-            "same-text",
+            DerivedAssertionRole::Diagnostic {
+                provider: DiagnosticProvider::Analysis,
+                code: "same-text".to_owned(),
+                ordinal: 0,
+            },
         ));
 
         assert_ne!(authored, derived);

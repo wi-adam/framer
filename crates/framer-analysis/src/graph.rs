@@ -25,6 +25,8 @@ pub enum RelationshipKind {
     VendoredFrom,
     References,
     HostedBy,
+    AppliesTo,
+    WaivedBy,
     GeneratedFrom,
     JustifiedBy,
     PhysicalFormOf,
@@ -45,6 +47,7 @@ impl RelationshipKind {
             | Self::VendoredFrom
             | Self::References
             | Self::HostedBy => GraphFamily::OwnershipReference,
+            Self::AppliesTo | Self::WaivedBy => GraphFamily::ConstraintAssertion,
             Self::GeneratedFrom
             | Self::JustifiedBy
             | Self::PhysicalFormOf
@@ -65,6 +68,8 @@ impl RelationshipKind {
             Self::VendoredFrom => "vendored from",
             Self::References => "references",
             Self::HostedBy => "hosted by",
+            Self::AppliesTo => "applies to",
+            Self::WaivedBy => "waived by",
             Self::GeneratedFrom => "generated from",
             Self::JustifiedBy => "justified by",
             Self::PhysicalFormOf => "physical form of",
@@ -84,6 +89,8 @@ impl RelationshipKind {
             Self::VendoredFrom => "source for",
             Self::References => "referenced by",
             Self::HostedBy => "hosts",
+            Self::AppliesTo => "has assertion",
+            Self::WaivedBy => "waives",
             Self::GeneratedFrom => "generates",
             Self::JustifiedBy => "justifies",
             Self::PhysicalFormOf => "has physical form",

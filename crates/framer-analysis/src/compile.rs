@@ -21,9 +21,10 @@ use thiserror::Error;
 use crate::graph::{GraphBuildError, GraphBuilder};
 use crate::{
     ComplianceEntryRef, DiagnosticProvider, DiagnosticRef, GeneratedMemberRef, GraphRevision,
-    PhysicalBodyRef, ProjectEdge, ProjectGraph, ProjectNode, ProjectNodeRef, RelationshipKind,
-    RoomConsequenceKind, RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef,
-    UnknownEvidenceKind, UnknownEvidenceRef,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, PhysicalBodyRef, ProjectEdge,
+    ProjectGraph, ProjectNode, ProjectNodeRef, RelationshipKind, RoomConsequenceKind,
+    RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef, UnknownEvidenceKind,
+    UnknownEvidenceRef,
 };
 
 /// A coherent generation of every UI-free derived artifact consumed by the app.
@@ -38,6 +39,7 @@ pub struct ProjectAnalysis {
     pub geometry_audit: GeometryAudit,
     pub compliance_report: ComplianceReport,
     pub library_lifecycle: LibraryLifecycleStatus,
+    pub intent_report: Result<IntentReport, AnalysisError>,
     pub graph: Result<ProjectGraph, AnalysisError>,
 }
 
@@ -49,12 +51,18 @@ pub struct LibraryLifecycleStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalysisError {
     #[error("project graph revision could not be computed: {0}")]
-    Project(#[from] ProjectError),
+    Project(String),
     #[error("project graph could not be compiled: {0}")]
     Graph(#[from] GraphBuildError),
+}
+
+impl From<ProjectError> for AnalysisError {
+    fn from(error: ProjectError) -> Self {
+        Self::Project(error.to_string())
+    }
 }
 
 /// Recompute current library lifecycle status without requiring framing to solve successfully.
@@ -89,14 +97,21 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
     plan.diagnostics
         .extend(framer_standards::diagnostics(&compliance_report));
     append_library_diagnostics(&mut plan, &library_lifecycle);
-    let graph = compile_project_graph(
-        model,
-        &plan,
-        &resolved_standards,
-        &physical_scene,
-        &geometry_audit,
-        &compliance_report,
-    );
+    let intent_report = GraphRevision::for_model(model)
+        .map_err(AnalysisError::from)
+        .map(|revision| crate::lower::compile_current_intent(model, revision));
+    let graph = match &intent_report {
+        Ok(intent_report) => compile_project_graph_with_intent(
+            model,
+            &plan,
+            &resolved_standards,
+            &physical_scene,
+            &geometry_audit,
+            &compliance_report,
+            intent_report,
+        ),
+        Err(error) => Err(error.clone()),
+    };
 
     Ok(ProjectAnalysis {
         plan,
@@ -105,6 +120,7 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
         geometry_audit,
         compliance_report,
         library_lifecycle,
+        intent_report,
         graph,
     })
 }
@@ -160,6 +176,7 @@ fn append_library_diagnostics(plan: &mut ProjectFramePlan, status: &LibraryLifec
     }
 }
 
+#[cfg(test)]
 fn compile_project_graph(
     model: &BuildingModel,
     plan: &ProjectFramePlan,
@@ -169,6 +186,29 @@ fn compile_project_graph(
     compliance_report: &ComplianceReport,
 ) -> Result<ProjectGraph, AnalysisError> {
     let revision = GraphRevision::for_model(model)?;
+    let intent_report = crate::lower::compile_current_intent(model, revision);
+    compile_project_graph_with_intent(
+        model,
+        plan,
+        resolved,
+        physical_scene,
+        geometry_audit,
+        compliance_report,
+        &intent_report,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_project_graph_with_intent(
+    model: &BuildingModel,
+    plan: &ProjectFramePlan,
+    resolved: &ResolvedStandards,
+    physical_scene: &PhysicalScene,
+    geometry_audit: &GeometryAudit,
+    compliance_report: &ComplianceReport,
+    intent_report: &IntentReport,
+) -> Result<ProjectGraph, AnalysisError> {
+    let revision = intent_report.revision();
     let mut compiler = Compiler {
         model,
         plan,
@@ -176,6 +216,7 @@ fn compile_project_graph(
         physical_scene,
         geometry_audit,
         compliance_report,
+        intent_report,
         revision,
         graph: GraphBuilder::new(revision),
         authored_by_id: BTreeMap::new(),
@@ -194,6 +235,7 @@ struct Compiler<'a> {
     physical_scene: &'a PhysicalScene,
     geometry_audit: &'a GeometryAudit,
     compliance_report: &'a ComplianceReport,
+    intent_report: &'a IntentReport,
     revision: GraphRevision,
     graph: GraphBuilder,
     authored_by_id: BTreeMap<ElementId, AuthoredEntityRef>,
@@ -213,6 +255,7 @@ impl Compiler<'_> {
         self.compile_plan_diagnostics();
         self.compile_compliance_report();
         self.compile_geometry_audit();
+        self.compile_intent_assertions();
     }
 
     fn compile_authored_nodes(&mut self) {
@@ -1166,6 +1209,68 @@ impl Compiler<'_> {
         }
     }
 
+    fn compile_intent_assertions(&mut self) {
+        // Assertions are compiled after every current evidence family so edges never depend on
+        // source-vector order and missing evidence can fail closed explicitly.
+        let records = self.intent_report.records().to_vec();
+        for record in records {
+            let assertion = record.assertion();
+            let assertion_node = ProjectNodeRef::Assertion(assertion.reference.clone());
+            self.graph.node(ProjectNode::new(
+                assertion_node.clone(),
+                intent_record_title(&record),
+                Some(intent_record_detail(&record)),
+            ));
+
+            for participant in &assertion.participants {
+                let participant_node = ProjectNodeRef::Authored(participant.entity.clone());
+                if self.graph.contains_node(&participant_node) {
+                    self.graph.edge(
+                        ProjectEdge::new(
+                            assertion_node.clone(),
+                            participant_node,
+                            RelationshipKind::AppliesTo,
+                        )
+                        .ordered(participant.semantic_order as usize),
+                    );
+                } else {
+                    self.add_unknown_dependency(
+                        assertion_node.clone(),
+                        UnknownEvidenceKind::AuthoredEntity,
+                        format!("{:?}", participant.entity),
+                    );
+                }
+            }
+
+            for evidence in record.evidence() {
+                let evidence_node = intent_evidence_node(evidence);
+                if self.graph.contains_node(&evidence_node) {
+                    self.graph.edge(ProjectEdge::new(
+                        assertion_node.clone(),
+                        evidence_node,
+                        RelationshipKind::EvaluatedFrom,
+                    ));
+                }
+            }
+
+            if let IntentRecord::Boolean(boolean) = &record
+                && let IntentOutcome::Waived { waiver, .. } = &boolean.outcome
+                && let crate::WaiverRef::Standards { overlay_pack, .. } = waiver
+            {
+                let waiver_node = ProjectNodeRef::Authored(AuthoredEntityRef::StandardsPack(
+                    overlay_pack.clone(),
+                ));
+                if self.graph.contains_node(&waiver_node) {
+                    self.graph.edge(ProjectEdge::new(
+                        assertion_node,
+                        waiver_node,
+                        RelationshipKind::WaivedBy,
+                    ));
+                }
+            }
+        }
+    }
+
     fn add_authored(
         &mut self,
         reference: AuthoredEntityRef,
@@ -1506,6 +1611,50 @@ fn severity_label(severity: DiagnosticSeverity) -> &'static str {
         DiagnosticSeverity::Unsupported => "Unsupported",
         DiagnosticSeverity::Violation => "Violation",
         DiagnosticSeverity::NeedsReview => "Needs review",
+    }
+}
+
+fn intent_evidence_node(evidence: &IntentEvidenceRef) -> ProjectNodeRef {
+    match evidence {
+        IntentEvidenceRef::Project => ProjectNodeRef::Project,
+        IntentEvidenceRef::Authored(reference) => ProjectNodeRef::Authored(reference.clone()),
+        IntentEvidenceRef::GeneratedMember(reference) => {
+            ProjectNodeRef::GeneratedMember(reference.clone())
+        }
+        IntentEvidenceRef::PhysicalBody(reference) => {
+            ProjectNodeRef::PhysicalBody(reference.clone())
+        }
+        IntentEvidenceRef::StandardsRule(reference) => {
+            ProjectNodeRef::StandardsRule(reference.clone())
+        }
+        IntentEvidenceRef::ComplianceEntry(reference) => {
+            ProjectNodeRef::ComplianceEntry(reference.clone())
+        }
+        IntentEvidenceRef::Diagnostic(reference) => ProjectNodeRef::Diagnostic(reference.clone()),
+    }
+}
+
+fn intent_record_title(record: &IntentRecord) -> String {
+    match record {
+        IntentRecord::Boolean(record) => format!("{:?} assertion", record.mode),
+        IntentRecord::Objective(record) => {
+            format!("Objective: {}", record.objective.component)
+        }
+        IntentRecord::Assumption(record) => format!("Assumption: {}", record.premise.label),
+    }
+}
+
+fn intent_record_detail(record: &IntentRecord) -> String {
+    match record {
+        IntentRecord::Boolean(record) => {
+            format!("{:?} — {}", record.outcome, record.assertion.rationale)
+        }
+        IntentRecord::Objective(record) => {
+            format!("{:?} — {}", record.observation, record.assertion.rationale)
+        }
+        IntentRecord::Assumption(record) => {
+            format!("{:?} — {}", record.evidence, record.assertion.rationale)
+        }
     }
 }
 
@@ -2291,6 +2440,56 @@ mod tests {
                     || step.relationship == RelationshipKind::JustifiedBy
             })
         }));
+    }
+
+    #[test]
+    fn authored_assertions_are_queryable_and_impact_is_filtered_and_cached() {
+        let model = BuildingModel::demo_wall();
+        let analysis = analysis(&model);
+        let report = analysis.intent_report.as_ref().unwrap();
+        let graph = analysis.graph.as_ref().unwrap();
+        let wall_ref = AuthoredEntityRef::Wall(model.walls[0].id.clone());
+        let wall_node = ProjectNodeRef::Authored(wall_ref.clone());
+
+        let wall_assertions = report.assertions_for(&wall_ref);
+        assert!(wall_assertions.iter().any(|record| {
+            matches!(
+                record,
+                IntentRecord::Boolean(crate::BooleanIntentRecord {
+                    expression: crate::BooleanExpression::SelectedEntity { .. },
+                    outcome: IntentOutcome::Satisfied,
+                    ..
+                })
+            )
+        }));
+        assert!(wall_assertions.iter().all(|record| {
+            graph
+                .node(&ProjectNodeRef::Assertion(
+                    record.assertion().reference.clone(),
+                ))
+                .is_some()
+        }));
+        assert!(graph.edges().iter().any(|edge| {
+            edge.dependency == wall_node
+                && matches!(edge.dependent, ProjectNodeRef::Assertion(_))
+                && edge.relationship == RelationshipKind::AppliesTo
+        }));
+
+        let mut cache = GraphQueryCache::default();
+        let first = cache.impact_of(graph, &wall_node);
+        let cached = cache.impact_of(graph, &wall_node);
+        assert_eq!(first, cached);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 1);
+        assert!(!first.assertions.is_empty());
+        assert!(first.derived_results.iter().all(|trace| matches!(
+            trace.node,
+            ProjectNodeRef::GeneratedMember(_)
+                | ProjectNodeRef::RoomConsequence(_)
+                | ProjectNodeRef::PhysicalBody(_)
+                | ProjectNodeRef::ComplianceEntry(_)
+                | ProjectNodeRef::Diagnostic(_)
+        )));
     }
 
     #[test]

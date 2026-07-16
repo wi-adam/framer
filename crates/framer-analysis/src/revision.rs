@@ -5,7 +5,7 @@ use framer_core::{BuildingModel, ProjectError, save_project};
 /// Version of the fact/evaluator contract included in every graph revision fingerprint.
 /// Increment when the same canonical authored model would produce meaningfully different graph
 /// semantics without a project-schema change.
-pub const GRAPH_CONTRACT_VERSION: u32 = 1;
+pub const GRAPH_CONTRACT_VERSION: u32 = 2;
 const REVISION_DOMAIN: &[u8] = b"framer.analysis.graph-revision\0";
 
 /// Deterministic fingerprint of the canonical post-propagation authored model, external analysis

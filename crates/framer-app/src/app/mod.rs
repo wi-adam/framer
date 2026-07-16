@@ -837,6 +837,7 @@ impl FramerApp {
                     geometry_audit,
                     compliance_report: report,
                     library_lifecycle,
+                    intent_report: _,
                     graph,
                 } = analysis;
                 self.library_issues = library_lifecycle.issues;

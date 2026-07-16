@@ -9,6 +9,8 @@
 mod compile;
 mod graph;
 mod identity;
+mod intent;
+mod lower;
 mod query;
 mod revision;
 
@@ -21,10 +23,20 @@ pub use graph::{
 };
 pub use identity::{
     AssertionRef, AuthoredEntityRef, AuthoredIntentId, ComplianceEntryRef, DerivedAssertionId,
-    DerivedAssertionProvider, DerivedAssertionSource, DiagnosticProvider, DiagnosticRef,
-    GeneratedMemberRef, LibraryVersionRef, PhysicalBodyRef, ProjectNodeRef, RoomConsequenceKind,
-    RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef, UnknownEvidenceKind,
-    UnknownEvidenceRef,
+    DerivedAssertionProvider, DerivedAssertionRole, DerivedAssertionSource, DiagnosticProvider,
+    DiagnosticRef, GeneratedMemberRef, LibraryVersionRef, PhysicalBodyRef, ProjectNodeRef,
+    RoomConsequenceKind, RoomConsequenceRef, SiteAssumptionKey, SolverProvenanceRef,
+    StandardsRuleRef, UnknownEvidenceKind, UnknownEvidenceRef,
 };
-pub use query::{GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats};
+pub use intent::{
+    AssertionParticipant, AssertionParticipantRole, AssertionSource, AssumptionEvidence,
+    AssumptionIntentRecord, AssumptionPremise, BooleanExpression, BooleanIntentMode,
+    BooleanIntentRecord, CompiledAssertion, ExactValue, IntentDomain, IntentEvidenceRef,
+    IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind, IntentValue,
+    ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord, ObjectiveObservation,
+    PreferencePriority, SelectionAttribute, WaiverRecord, WaiverRef,
+};
+pub use query::{
+    DependencyImpact, GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats,
+};
 pub use revision::{GRAPH_CONTRACT_VERSION, GraphRevision};
