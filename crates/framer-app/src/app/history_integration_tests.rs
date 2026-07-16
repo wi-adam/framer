@@ -6,11 +6,12 @@
 //! no-op edits, re-solves on restore, and is cleared by load/reset.
 
 use eframe::egui;
-use framer_analysis::AssertionRef;
+use framer_analysis::{AssertionParticipantRole, AssertionRef, AssertionSource};
 use framer_core::{
-    AuthoredIntentMode, BuildingModel, ClearanceDatum, ClearanceDirection, ElementId,
-    FramingDefaults, Furnishing, FurnishingInstance, IntentDomain, Length, Level, MepInstance,
-    MepObject, MepObjectKind, OpeningKind, Point2, PreferencePriority, Room, RoomUsage, Wall,
+    Applicability, AuthoredIntentMode, BuildingModel, CheckScope, CheckSeverity, ClearanceDatum,
+    ClearanceDirection, CompareOp, ComplianceCheck, ElementId, Fact, FactOperand, FramingDefaults,
+    Furnishing, FurnishingInstance, IntentDomain, Length, Level, MepInstance, MepObject,
+    MepObjectKind, OpeningKind, Point2, Predicate, PreferencePriority, Room, RoomUsage, Wall,
 };
 
 use super::actions::ActionId;
@@ -499,6 +500,61 @@ fn focus_all_selects_object_and_room_while_keeping_object_primary() {
     assert!(app.component_is_selected(&ComponentKey::authored(
         AuthoredComponentKind::FurnishingInstance,
         subject_id.0
+    )));
+    assert_eq!(app.focused_intent, Some(reference));
+}
+
+#[test]
+fn focus_all_uses_evaluated_entity_for_standards_placement_records() {
+    let mut app = FramerApp::default();
+    let (subject_id, room_id) = prepare_intent_fixture(&mut app);
+    let rule = "fixture.standards-placement-focus";
+    app.model.standards_packs[0].checks.push(ComplianceCheck {
+        rule: rule.to_owned(),
+        citation: "Intent focus fixture".to_owned(),
+        title: "Placed object remains in its room".to_owned(),
+        severity: CheckSeverity::Required,
+        applies: Applicability::Always,
+        scope: CheckScope::PlacedObjects { tags: Vec::new() },
+        requirement: Predicate::Compare {
+            fact: Fact::PlacedObjectContainedInRoom,
+            op: CompareOp::Eq,
+            value: FactOperand::FlagLiteral(true),
+        },
+    });
+    app.model.sort_deterministically();
+    app.model.validate().expect("standards focus fixture");
+    app.rebuild();
+
+    let reference = app
+        .intent_report
+        .as_ref()
+        .and_then(|report| report.as_ref().ok())
+        .and_then(|report| {
+            report.records().iter().find_map(|record| {
+                let assertion = record.assertion();
+                match &assertion.source {
+                    AssertionSource::StandardsRule(source) if source.rule == rule => {
+                        assert!(assertion.participants.iter().all(|participant| {
+                            participant.role == AssertionParticipantRole::EvaluatedEntity
+                        }));
+                        Some(assertion.reference.clone())
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .expect("standards placement assertion");
+
+    assert!(app.focus_all_intent_participants(&reference));
+    assert_eq!(
+        app.selected,
+        Selection::FurnishingInstance(subject_id.0.clone())
+    );
+    assert_eq!(app.selected_component_count(), 2);
+    assert!(app.component_is_selected(&ComponentKey::authored(
+        AuthoredComponentKind::Room,
+        room_id.0
     )));
     assert_eq!(app.focused_intent, Some(reference));
 }

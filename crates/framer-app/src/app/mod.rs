@@ -1548,14 +1548,33 @@ impl FramerApp {
             return false;
         };
         let participants = record.assertion().participants.clone();
+        let participant_order =
+            |left: &&framer_analysis::AssertionParticipant,
+             right: &&framer_analysis::AssertionParticipant| {
+                left.semantic_order
+                    .cmp(&right.semantic_order)
+                    .then_with(|| left.role.cmp(&right.role))
+                    .then_with(|| left.entity.cmp(&right.entity))
+            };
+        let selectable = |participant: &&framer_analysis::AssertionParticipant| {
+            component_key_for_authored_entity(&participant.entity).is_some()
+        };
         let primary = participants
             .iter()
-            .find(|participant| {
+            .filter(|participant| {
                 participant.role == framer_analysis::AssertionParticipantRole::Subject
+            })
+            .filter(selectable)
+            .min_by(participant_order)
+            .or_else(|| {
+                participants
+                    .iter()
+                    .filter(selectable)
+                    .min_by(participant_order)
             })
             .map(|participant| participant.entity.clone());
         let Some(primary) = primary else {
-            self.file_status = Some("Intent has no selectable primary subject".to_owned());
+            self.file_status = Some("Intent has no selectable participants".to_owned());
             return false;
         };
         let Some(primary_key) = component_key_for_authored_entity(&primary) else {
