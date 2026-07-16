@@ -868,8 +868,12 @@ Use:
   read-only regenerated current status, dependencies, possible impact, and
   generated provenance; it does not persist those derived views. Authored intent
   mutation controls are disabled in Plan, while the read-only **Focus all** action
-  remains available to select every exact participant. Candidate resolution
-  options remain Slice 4.
+  remains available to select every exact participant. Explicit placement
+  resolution requests, ranked options, outcome evidence, and Plan ghost previews
+  are disposable derived state and are never written to `.framer`; only an
+  accepted typed placement change updates the ordinary authored instance fields. Plan can inspect
+  and preview those options, but acceptance is enabled only in the Design workspace and commits
+  one ordinary validated, undoable authored edit.
 - `Export` in Plan Mode to write disposable sidecar artifacts next to the project
   path: `<project>.svg` for the shell plan plus wall elevations, `<project>.csv`
   for the grouped whole-project BOM/cut list plus fastener takeoff section, and

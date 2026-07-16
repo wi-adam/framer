@@ -4,9 +4,9 @@
 > [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
 > is an archival record of how the work was sequenced; the spec is the durable source of truth.
 >
-> **Status:** In progress. Slice 1 merged in PR #129 and Slice 2 merged in PR
-> #130. Slice 3 implementation is in progress from the resulting `origin/main`
-> head; verification, review, and merge remain pending. Slice 4 remains proposed.
+> **Status:** Complete when this record lands on `main` in final PR #132. Slices 1-4 were
+> delivered sequentially in PRs #129, #130, #131, and #132; the first three are already merged,
+> and this completion status becomes authoritative only through #132's merge.
 > The initiative started from `origin/main` at `cf8f2e0` on 2026-07-15.
 
 ## Goal
@@ -445,13 +445,15 @@ candidate edit.
 - [x] Run focused core/standards/analysis/app tests, the screenshot deck, and the complete format,
   strict clippy, locked all-feature workspace test, and markdown-link gates on the final combined
   diff.
-- [ ] Record final verification evidence, complete review, and merge the Slice 3 PR.
+- [x] Record final verification evidence, complete review, and merge the Slice 3 PR.
 
-Pre-PR verification on 2026-07-16 passed `cargo fmt --all -- --check`, strict workspace Clippy,
-the locked all-feature workspace test suite (including all eight GPU parity tests), the 61-frame
+Final Slice 3 verification on 2026-07-16 passed `cargo fmt --all -- --check`, strict workspace
+Clippy, the locked all-feature workspace test suite, all eight GPU parity tests, the 61-frame
 off-screen UI deck with direct review of the new authoring/waiver/focus states, the 392-link local
 Markdown check, and `git diff --check`. Focused core, standards, analysis, app-history, UI-harness,
-and Plan multi-selection tests also passed. PR review, latest-head CI, and merge remain pending.
+and Plan multi-selection tests also passed. Exact-head CI was green on Ubuntu, macOS, Windows,
+docs, Clippy, Linux GPU parity, zizmor, and PR review; fresh-head review approved the change with no
+must-fix findings. PR #131 merged as `2ef59d0`.
 
 **Slice 3 exit criteria:** A user can persist, reopen, evaluate, inspect, focus, edit/delete, and
 waive one real cross-object containment/clearance requirement or preference; an unresolved
@@ -498,6 +500,68 @@ general structural optimization.
   - Verify: structural evaluator proof appropriate to its spec, geometry audit for every accepted
     physical option, and explicit unsupported behavior outside the modeled domain.
   - Commit: deferred to the later structural feature plans.
+
+#### Slice 4 implementation checklist
+
+- [x] Narrow the first typed patch vocabulary to expected-value furnishing/MEP placement pose
+  changes; defer construction-system and parameter patch variants until a concrete provider needs
+  them, and reject arbitrary JSON mutation entirely.
+- [x] Stage each patch on a cloned model, compare its expected pose, sort and validate the candidate,
+  and re-fingerprint the result so stale state or a forged option cannot cross the acceptance
+  boundary.
+- [x] Bind generated options to exact graph and process-local document revisions. Mark every
+  displayed set stale on rebuild; allow only a new explicit same-graph request to reauthorize an
+  immutable cached evaluation for the current document generation.
+- [x] Add a deterministic coarse-to-fine furnishing/MEP room-placement provider measured only by
+  `FactSnapshot`, capped at 2,048 fact measurements, 128 full candidate analyses, and 8 returned
+  options. Report an empty result as bounded rather than infeasible, and disclose unmeasured poses
+  or unanalyzed feasible candidates when either cap truncates the search.
+- [x] Require the target clearance to become satisfied and reject any authored required-intent
+  disappearance or required-outcome regression before soft ranking.
+- [x] Preserve exact before/after boolean, objective, and assumption evidence. Rank required costs,
+  preference tiers, named nonzero-priority direction-aware `Length`/`Int` objective components,
+  movement, rotation, and a stable semantic patch tie-breaker without booleanizing non-boolean
+  modes or ranking unknown diagnostic prose.
+- [x] Add inspector generation, ranked tradeoff/evidence states, explicit Preview/Accept/Dismiss,
+  stale/error/bounded-empty/truncated handling, and nested-clearance eligibility. Keep Plan preview
+  presentation-only and require Design workspace for one validated undoable acceptance edit.
+- [x] Draw the target-specific Plan ghost in docked and deferred snapshots without adding picks or
+  bounds, and fail closed for missing, wrong-kind, stale-pose, or missing-family inputs.
+- [x] Keep structural alternatives explicitly unavailable with their missing support/load-path,
+  capacity/deflection, and engineered-family prerequisites named.
+- [x] Add focused analysis, patch, history, UI-harness, viewport, and screenshot-deck coverage for
+  positive furnishing/MEP flows, stable ordering, tampering/staleness, required non-regression,
+  mode-specific effects, objective ordering laws, unique/several/empty searches, preview,
+  dismissal, acceptance, undo/redo, and unsupported structural synthesis.
+- [x] Run the final combined format, strict clippy, locked all-feature workspace test,
+  Markdown-link, GPU parity, UI screenshot-deck, and diff checks; record exact evidence below.
+- [x] Complete exact-head CI and fresh-head review, address every actionable finding, and make final
+  PR #132 merge-ready. This checked completion record becomes authoritative only when #132 merges.
+
+Final local Slice 4 verification on 2026-07-16 passed `cargo fmt --all -- --check`, strict
+all-target/all-feature workspace Clippy, the locked all-feature workspace suite (1,131 passed and
+3 manual probes ignored), all 8 explicit GPU parity tests, the 392-link/73-file local Markdown
+check, warning-denied `framer-analysis` rustdoc, and `git diff --check`. The 64-frame off-screen UI
+deck passed; frames 52-54 were directly
+reviewed for above-the-fold option actions, disclosed bounded-search truncation on both populated
+and empty results, exact fact evidence, and a legible non-pickable rotated Plan ghost. Focused
+analysis tests passed 77/1 ignored,
+including every typed revision/patch/search/error guard and the mode-specific objective/assumption
+ranking laws. Focused app tests directly pin current Plan-mode rejection, changed-graph cache
+regeneration, history, preview, stale rotation, bounds neutrality, non-pickable ghost clicks,
+error/empty/truncated states, nested predicates, and dismissal.
+
+The reviewed implementation head passed required GitHub CI on Ubuntu, macOS, and Windows plus
+strict lint, documentation, workflow-security, and Linux GPU-parity jobs. Fresh-head review
+approved with no must-fix finding. The earlier single Codex P2 was fixed, answered, and resolved;
+its bounded-empty disclosure now has UI-harness and screenshot coverage. Three independent final
+audits then found only missing regression/documentation contracts, all addressed before this
+completion record: full-analysis-cap disclosure, graph-change cache invalidation, the real Design
+guard, preview staleness/picking/bounds, and an overbroad conflict-graph promise. The containing
+status-only descendant remains subject to the same required exact-head CI and fresh review before
+merge. Schema remains v14, the diff contains no canonical example or `Cargo.lock` changes, and no
+review thread remains unresolved. A geometry audit was not required because this provider edits
+only existing furnishing/MEP poses and does not alter physical assemblies or generated members.
 
 **Slice 4 exit criteria:** Framer can propose, preview, accept, undo, and explain deterministic
 authored changes for at least one supported conflict. Structural alternatives remain unavailable

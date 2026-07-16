@@ -224,7 +224,7 @@ fn prepare_authored_intent_shot(app: &mut FramerApp) {
     model.furnishings.push(Furnishing::new(
         "furnishing-intent-shot",
         "Mechanical cabinet",
-        Length::from_whole_inches(30),
+        Length::from_whole_inches(48),
         Length::from_whole_inches(24),
         Length::from_whole_inches(72),
     ));
@@ -928,6 +928,77 @@ fn capture_ui_shot_deck() {
         &mut index,
         "intent-violated-assertion",
     );
+
+    assert!(
+        violated_intent
+            .state_mut()
+            .request_resolution_options(authored_id.clone())
+    );
+    scroll_to_intent_relationships(&mut violated_intent);
+    violated_intent
+        .get_by_label("Resolution options")
+        .scroll_to_me();
+    violated_intent.run_ok();
+    shot(
+        &mut violated_intent,
+        &dir,
+        &mut index,
+        "intent-placement-resolution-options",
+    );
+    assert!(violated_intent.state_mut().preview_resolution_option(0));
+    violated_intent.run_steps(2);
+    shot(
+        &mut violated_intent,
+        &dir,
+        &mut index,
+        "intent-placement-resolution-preview",
+    );
+    violated_intent.state_mut().dismiss_resolution_options();
+
+    let mut bounded_empty_model = violated_intent.state().model.clone();
+    let mut bounded_predicates = Vec::new();
+    for direction in [
+        ClearanceDirection::Left,
+        ClearanceDirection::Right,
+        ClearanceDirection::Front,
+        ClearanceDirection::Back,
+        ClearanceDirection::Around,
+    ] {
+        for datum in [ClearanceDatum::Centerline, ClearanceDatum::FootprintFace] {
+            bounded_predicates.push(Predicate::Compare {
+                fact: Fact::PlacedObjectClearance { direction, datum },
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(Length::from_feet(1_000.0)),
+            });
+        }
+    }
+    bounded_empty_model.intents[0].expression =
+        framer_core::IntentExpression::FactPredicate(Predicate::All(bounded_predicates));
+    bounded_empty_model.sort_deterministically();
+    bounded_empty_model.validate().unwrap();
+
+    let mut bounded_empty = shots_harness(design::studio_light());
+    bounded_empty.run_ok();
+    install_authored_intent_shot_model(bounded_empty.state_mut(), bounded_empty_model);
+    assert!(
+        bounded_empty
+            .state_mut()
+            .request_resolution_options(authored_id.clone())
+    );
+    scroll_to_intent_relationships(&mut bounded_empty);
+    bounded_empty
+        .get_by_label(
+            "No feasible placement option was found within the bounded deterministic search.",
+        )
+        .scroll_to_me();
+    bounded_empty.run_ok();
+    shot(
+        &mut bounded_empty,
+        &dir,
+        &mut index,
+        "intent-placement-resolution-bounded-empty",
+    );
+    drop(bounded_empty);
 
     assert!(violated_intent.state_mut().begin_waive_intent(&authored_id));
     let Some(IntentAuthoringDraft::Waiver(draft)) =

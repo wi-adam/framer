@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 
 use framer_core::{AuthoredEntityRef, ElementId, IntentOverrideId, Length, Predicate};
 pub use framer_core::{AuthoredIntentMode as BooleanIntentMode, IntentDomain, PreferencePriority};
@@ -158,16 +159,51 @@ pub enum ObjectiveDirection {
     Maximize,
 }
 
+/// Nonzero lexicographic objective tier. Larger values are stronger and compare before lower
+/// tiers, matching authored preference priority semantics without making objectives boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ObjectivePriority(NonZeroU16);
+
+impl ObjectivePriority {
+    pub const fn new(value: u16) -> Option<Self> {
+        match NonZeroU16::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExactValueKind {
+    Length,
+    Int,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExactValue {
     Length(Length),
     Int(i64),
 }
 
+impl ExactValue {
+    pub const fn kind(&self) -> ExactValueKind {
+        match self {
+            Self::Length(_) => ExactValueKind::Length,
+            Self::Int(_) => ExactValueKind::Int,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectiveDefinition {
     pub component: String,
     pub direction: ObjectiveDirection,
+    pub priority: ObjectivePriority,
+    pub value_kind: ExactValueKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +519,17 @@ mod tests {
         assert_eq!(
             BooleanExpression::prohibition(prohibited.clone()),
             BooleanExpression::Predicate(Predicate::Not(Box::new(prohibited)))
+        );
+    }
+
+    #[test]
+    fn objective_priority_is_nonzero_and_exact_values_report_their_kind() {
+        assert!(ObjectivePriority::new(0).is_none());
+        assert_eq!(ObjectivePriority::new(7).unwrap().get(), 7);
+        assert_eq!(ExactValue::Int(3).kind(), ExactValueKind::Int);
+        assert_eq!(
+            ExactValue::Length(Length::from_whole_inches(3)).kind(),
+            ExactValueKind::Length
         );
     }
 }

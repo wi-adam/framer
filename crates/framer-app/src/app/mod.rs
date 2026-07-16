@@ -12,6 +12,7 @@ mod panels;
 mod project_io;
 mod render;
 mod render_job;
+mod resolution;
 mod theme;
 #[cfg(test)]
 mod ui_harness_tests;
@@ -27,6 +28,7 @@ use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
 use framer_analysis::{
     AnalysisError, AssertionRef, GraphQueryCache, IntentReport, ProjectGraph, ProjectNodeRef,
+    ResolutionCache,
 };
 use framer_core::{
     AuthoredEntityRef, AuthoredIntentId, AuthoredIntentMode, BuildingModel, ClearanceDatum,
@@ -60,6 +62,7 @@ use model_edit::{
     translate_keeps_ortho, translate_keeps_positive_length,
 };
 use project_io::{DEFAULT_PROJECT_PATH, compliance_report_path, export_paths, write_text_file};
+use resolution::ResolutionUiState;
 use viewport::{PaneId, ViewportWorkspaceState, WallDragEvent};
 
 pub(crate) struct FramerApp {
@@ -75,6 +78,16 @@ pub(crate) struct FramerApp {
     /// Assertion retained while `Focus all` temporarily creates a heterogeneous multi-selection.
     /// Disposable presentation context; rebuilt reports remain the canonical status source.
     focused_intent: Option<AssertionRef>,
+    /// Explicitly requested, disposable candidate authored changes. This is deliberately outside
+    /// [`Snapshot`]: generating, previewing, or dismissing options never changes the document or
+    /// history. Every option carries independent graph and process-local document revisions.
+    resolution_ui: Option<ResolutionUiState>,
+    /// Revision-bound memoization for explicit candidate requests. Candidate generation never
+    /// runs from `rebuild()` or a paint path.
+    resolution_cache: ResolutionCache,
+    /// Pure Plan overlay for the explicitly previewed placement option. Never persisted, picked,
+    /// or substituted for the canonical authored model.
+    placement_resolution_preview: Option<viewport::PlacementResolutionPreview>,
     /// Target/surface snapshot for the currently open canvas context menu.
     /// Presentation-only and never serialized; egui owns the popup's open state.
     context_menu_context: Option<ContextMenuContext>,
@@ -901,6 +914,9 @@ impl Default for FramerApp {
             component_visibility: ComponentVisibility::default(),
             intent_authoring_draft: None,
             focused_intent: None,
+            resolution_ui: None,
+            resolution_cache: ResolutionCache::default(),
+            placement_resolution_preview: None,
             context_menu_context: None,
             project_plan: None,
             physical_scene: None,
@@ -988,6 +1004,10 @@ impl FramerApp {
 
     fn rebuild(&mut self) {
         self.deferred_document_cache = None;
+        if let Some(state) = self.resolution_ui.as_mut() {
+            state.stale = true;
+        }
+        self.placement_resolution_preview = None;
         self.document_revision = self.document_revision.wrapping_add(1);
         if self.selected_wall >= self.model.walls.len() {
             self.selected_wall = 0;
@@ -1509,7 +1529,7 @@ impl FramerApp {
     ) -> bool {
         candidate.sort_deterministically();
         if let Err(error) = candidate.validate() {
-            self.file_status = Some(format!("Intent edit rejected: {error}"));
+            self.file_status = Some(format!("Document edit rejected: {error}"));
             return false;
         }
         self.intent_authoring_draft = None;
@@ -1764,6 +1784,7 @@ impl FramerApp {
     ) {
         self.intent_authoring_draft = None;
         self.focused_intent = None;
+        self.dismiss_resolution_options();
         let current_primary = self.primary_component_key();
         let target_wall_id = wall_context
             .and_then(|index| self.model.walls.get(index))
@@ -1796,6 +1817,7 @@ impl FramerApp {
     fn clear_selection(&mut self) {
         self.intent_authoring_draft = None;
         self.focused_intent = None;
+        self.dismiss_resolution_options();
         self.selected = Selection::None;
         self.component_selection.replace(None);
     }
@@ -2034,6 +2056,7 @@ impl FramerApp {
         self.settle_history(false);
         self.intent_authoring_draft = None;
         self.focused_intent = None;
+        self.dismiss_resolution_options();
         let current = self.snapshot();
         if let Some(previous) = self.history.undo(current) {
             let model_changed = self.model != previous.model;
@@ -2050,6 +2073,7 @@ impl FramerApp {
         self.settle_history(false);
         self.intent_authoring_draft = None;
         self.focused_intent = None;
+        self.dismiss_resolution_options();
         let current = self.snapshot();
         if let Some(next) = self.history.redo(current) {
             let model_changed = self.model != next.model;
@@ -2132,6 +2156,8 @@ impl FramerApp {
         self.component_visibility = ComponentVisibility::default();
         self.intent_authoring_draft = None;
         self.focused_intent = None;
+        self.dismiss_resolution_options();
+        self.resolution_cache.clear();
         self.context_menu_context = None;
     }
 

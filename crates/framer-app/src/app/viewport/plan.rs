@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
-use framer_core::{BuildingModel, ElementId, Length, Point2, QuarterTurn, Wall};
+use framer_core::{AuthoredEntityRef, BuildingModel, ElementId, Length, Point2, QuarterTurn, Wall};
 
 use super::camera_2d::{View2dState, apply_view_2d_input, reset_view_on_empty_double_click};
 use super::geom::{ModelBounds, distance_to_segment, plan_inches, plan_inverse_point, plan_point};
@@ -18,7 +18,7 @@ use super::view_common::{
     draw_scale_bar, draw_view_background, draw_view_border, draw_view_empty, draw_view_title,
     viewport_drawing_rect, viewport_size,
 };
-use super::{DrawWallPlanInput, theme};
+use super::{DrawWallPlanInput, PlacementResolutionPreview, theme};
 use crate::app::component_visibility::{AuthoredComponentKind, ComponentKey};
 use crate::app::design::text_size;
 use crate::app::draw_wall::{GuideAxis, SnapContext, SnapKind, SnapResult, resolve_snap};
@@ -62,6 +62,7 @@ pub(super) struct PlanView<'a> {
     pub(super) selection: &'a Selection,
     pub(super) selected_components: &'a [ComponentKey],
     pub(super) layers: ViewLayers,
+    pub(super) placement_resolution_preview: Option<&'a PlacementResolutionPreview>,
     pub(super) draw_tool: &'a DrawWallPlanInput,
     pub(super) room_tool_active: bool,
     pub(super) ceiling_tool_active: bool,
@@ -518,6 +519,7 @@ pub(super) fn draw_project_plan(
         selection,
         selected_components,
         layers,
+        placement_resolution_preview,
         draw_tool,
         room_tool_active,
         ceiling_tool_active,
@@ -546,7 +548,7 @@ pub(super) fn draw_project_plan(
     }
     draw_view_border(&painter, drawing);
 
-    let bounds = match plan_model_bounds(model, roof_plan_mode) {
+    let bounds = match plan_view_bounds(model, roof_plan_mode, placement_resolution_preview) {
         Some(bounds) => bounds,
         // An empty model has no bounds. When the draw-wall tool is active, fall
         // back to a default region around the origin so the user can still place
@@ -898,6 +900,19 @@ pub(super) fn draw_project_plan(
         }
     }
 
+    // Resolution candidates are disposable presentation. Paint the before ->
+    // after cue only after canonical placed objects, walls, and openings have
+    // drawn and completed hit-testing, so the ghost stays visible without
+    // becoming selectable or changing interaction precedence. Roof Plan
+    // intentionally stays canonical-only.
+    if !roof_plan_mode
+        && let Some(preview_geometry) = placement_resolution_preview.and_then(|preview| {
+            placement_resolution_preview_geometry(model, preview, bounds, drawing, camera)
+        })
+    {
+        draw_placement_resolution_preview(&painter, preview_geometry);
+    }
+
     if roof_empty {
         draw_roof_empty_state(&painter, drawing);
         *toolbar_out = None;
@@ -1147,6 +1162,16 @@ fn plan_model_bounds(model: &BuildingModel, include_roofs: bool) -> Option<Model
     bounds
 }
 
+/// Fit only canonical model state. A resolution ghost is presentation-only, so even a candidate
+/// destination far outside the authored footprint must not change the camera fit.
+fn plan_view_bounds(
+    model: &BuildingModel,
+    include_roofs: bool,
+    _placement_resolution_preview: Option<&PlacementResolutionPreview>,
+) -> Option<ModelBounds> {
+    plan_model_bounds(model, include_roofs)
+}
+
 /// The average of `vertices` (a screen-space polygon's label anchor). `None` for
 /// an empty polygon.
 fn polygon_centroid(vertices: &[Pos2]) -> Option<Pos2> {
@@ -1188,6 +1213,145 @@ fn object_footprint_rect(
             camera,
         ),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlacementResolutionPreviewGeometry {
+    source: Rect,
+    destination: Rect,
+}
+
+/// Resolve a typed placement preview against the canonical model snapshot.
+///
+/// Both instance and family must resolve in the matching authored collection,
+/// and the candidate's before pose must still equal the canonical pose. Any
+/// stale, missing, or wrong-kind input fails closed with no overlay.
+fn placement_resolution_preview_geometry(
+    model: &BuildingModel,
+    preview: &PlacementResolutionPreview,
+    bounds: ModelBounds,
+    drawing: Rect,
+    camera: &View2dState,
+) -> Option<PlacementResolutionPreviewGeometry> {
+    let (canonical_position, canonical_rotation, width, depth) = match &preview.target {
+        AuthoredEntityRef::FurnishingInstance(target) => {
+            let instance = model
+                .furnishing_instances
+                .iter()
+                .find(|instance| instance.id == *target)?;
+            let family = model
+                .furnishings
+                .iter()
+                .find(|family| family.id == instance.family)?;
+            (
+                instance.position,
+                instance.rotation,
+                family.size.width,
+                family.size.depth,
+            )
+        }
+        AuthoredEntityRef::MepInstance(target) => {
+            let instance = model
+                .mep_instances
+                .iter()
+                .find(|instance| instance.id == *target)?;
+            let family = model
+                .mep_objects
+                .iter()
+                .find(|family| family.id == instance.family)?;
+            (
+                instance.position,
+                instance.rotation,
+                family.size.width,
+                family.size.depth,
+            )
+        }
+        _ => return None,
+    };
+    if canonical_position != preview.before_position
+        || canonical_rotation != preview.before_rotation
+    {
+        return None;
+    }
+
+    Some(PlacementResolutionPreviewGeometry {
+        source: object_footprint_rect(
+            preview.before_position,
+            width,
+            depth,
+            preview.before_rotation,
+            bounds,
+            drawing,
+            camera,
+        ),
+        destination: object_footprint_rect(
+            preview.after_position,
+            width,
+            depth,
+            preview.after_rotation,
+            bounds,
+            drawing,
+            camera,
+        ),
+    })
+}
+
+fn draw_placement_resolution_preview(
+    painter: &egui::Painter,
+    geometry: PlacementResolutionPreviewGeometry,
+) {
+    let source_center = geometry.source.center();
+    let destination_center = geometry.destination.center();
+
+    // A light veil and an outside outline de-emphasize the source while leaving
+    // its canonical selection stroke and pickable footprint intact underneath.
+    painter.rect_filled(geometry.source, 2.0, theme::sheet().gamma_multiply(0.16));
+    painter.rect_stroke(
+        geometry.source.expand(3.0),
+        3.0,
+        Stroke::new(1.25, theme::text_muted()),
+        StrokeKind::Outside,
+    );
+
+    draw_dashed_line(
+        painter,
+        source_center,
+        destination_center,
+        Stroke::new(1.75, theme::active_blue()),
+    );
+    painter.circle_filled(source_center, 3.0, theme::active_blue());
+
+    painter.rect_filled(
+        geometry.destination,
+        2.0,
+        theme::success().gamma_multiply(0.24),
+    );
+    painter.rect_stroke(
+        geometry.destination,
+        2.0,
+        Stroke::new(2.25, theme::success()),
+        StrokeKind::Outside,
+    );
+    painter.circle_filled(destination_center, 3.0, theme::success());
+
+    let badge = Rect::from_center_size(
+        Pos2::new(destination_center.x, geometry.destination.top() - 13.0),
+        Vec2::new(62.0, 19.0),
+    );
+    painter.rect_filled(badge, 4.0, theme::sheet().gamma_multiply(0.94));
+    painter.rect_stroke(
+        badge,
+        4.0,
+        Stroke::new(1.0, theme::success()),
+        StrokeKind::Outside,
+    );
+    painter.text(
+        badge.center(),
+        Align2::CENTER_CENTER,
+        "Preview",
+        FontId::proportional(text_size::LABEL),
+        theme::success(),
+    );
 }
 
 fn draw_object_footprint(
@@ -1506,10 +1670,328 @@ mod tests {
             "room-2"
         ));
     }
-    use framer_core::{FramingDefaults, Level, RoofPlane, Room, RoomUsage, Slope};
+    use framer_core::{
+        FramingDefaults, Furnishing, FurnishingInstance, Level, MepInstance, MepObject,
+        MepObjectKind, RoofPlane, Room, RoomUsage, Slope,
+    };
 
     fn p(x_ft: f64, y_ft: f64) -> Point2 {
         Point2::new(Length::from_feet(x_ft), Length::from_feet(y_ft))
+    }
+
+    fn preview_test_view() -> (ModelBounds, Rect, View2dState) {
+        (
+            ModelBounds {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 120.0,
+                max_y: 120.0,
+            },
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(600.0, 600.0)),
+            View2dState::default(),
+        )
+    }
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "expected {expected}, got {actual}",
+        );
+    }
+
+    fn assert_rect_pose(rect: Rect, center: Pos2, width: f32, height: f32) {
+        assert_near(rect.center().x, center.x);
+        assert_near(rect.center().y, center.y);
+        assert_near(rect.width(), width);
+        assert_near(rect.height(), height);
+    }
+
+    #[test]
+    fn furnishing_placement_preview_uses_target_family_and_after_rotation() {
+        let mut model = BuildingModel::new();
+        model.furnishings.push(Furnishing::new(
+            "desk",
+            "Desk",
+            Length::from_inches(24.0),
+            Length::from_inches(48.0),
+            Length::from_inches(30.0),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "desk-1",
+            "Desk",
+            "desk",
+            "level-1",
+            Point2::new(Length::from_inches(24.0), Length::from_inches(36.0)),
+        ));
+        let preview = PlacementResolutionPreview {
+            target: AuthoredEntityRef::FurnishingInstance(ElementId::new("desk-1")),
+            before_position: model.furnishing_instances[0].position,
+            before_rotation: QuarterTurn::Deg0,
+            after_position: Point2::new(Length::from_inches(72.0), Length::from_inches(84.0)),
+            after_rotation: QuarterTurn::Deg90,
+        };
+        let (bounds, drawing, camera) = preview_test_view();
+
+        let geometry =
+            placement_resolution_preview_geometry(&model, &preview, bounds, drawing, &camera)
+                .expect("resolved furnishing preview");
+
+        assert_rect_pose(
+            geometry.source,
+            plan_point(preview.before_position, bounds, drawing, &camera),
+            120.0,
+            240.0,
+        );
+        assert_rect_pose(
+            geometry.destination,
+            plan_point(preview.after_position, bounds, drawing, &camera),
+            240.0,
+            120.0,
+        );
+    }
+
+    #[test]
+    fn mep_placement_preview_uses_target_family_for_both_pose_rects() {
+        let mut model = BuildingModel::new();
+        model.mep_objects.push(MepObject::new(
+            "air-handler",
+            "Air handler",
+            MepObjectKind::Mechanical,
+            Length::from_inches(18.0),
+            Length::from_inches(30.0),
+            Length::from_inches(36.0),
+        ));
+        let mut instance = MepInstance::new(
+            "air-handler-1",
+            "Air handler",
+            "air-handler",
+            "level-1",
+            Point2::new(Length::from_inches(30.0), Length::from_inches(42.0)),
+        );
+        instance.rotation = QuarterTurn::Deg270;
+        model.mep_instances.push(instance);
+        let preview = PlacementResolutionPreview {
+            target: AuthoredEntityRef::MepInstance(ElementId::new("air-handler-1")),
+            before_position: model.mep_instances[0].position,
+            before_rotation: QuarterTurn::Deg270,
+            after_position: Point2::new(Length::from_inches(90.0), Length::from_inches(66.0)),
+            after_rotation: QuarterTurn::Deg180,
+        };
+        let (bounds, drawing, camera) = preview_test_view();
+
+        let geometry =
+            placement_resolution_preview_geometry(&model, &preview, bounds, drawing, &camera)
+                .expect("resolved MEP preview");
+
+        assert_rect_pose(
+            geometry.source,
+            plan_point(preview.before_position, bounds, drawing, &camera),
+            150.0,
+            90.0,
+        );
+        assert_rect_pose(
+            geometry.destination,
+            plan_point(preview.after_position, bounds, drawing, &camera),
+            90.0,
+            150.0,
+        );
+    }
+
+    #[test]
+    fn placement_preview_missing_wrong_or_stale_target_fails_closed() {
+        let mut model = BuildingModel::new();
+        model.furnishings.push(Furnishing::new(
+            "chair",
+            "Chair",
+            Length::from_inches(20.0),
+            Length::from_inches(24.0),
+            Length::from_inches(36.0),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "chair-1",
+            "Chair",
+            "chair",
+            "level-1",
+            Point2::new(Length::from_inches(24.0), Length::from_inches(24.0)),
+        ));
+        let base = PlacementResolutionPreview {
+            target: AuthoredEntityRef::FurnishingInstance(ElementId::new("chair-1")),
+            before_position: model.furnishing_instances[0].position,
+            before_rotation: QuarterTurn::Deg0,
+            after_position: Point2::new(Length::from_inches(48.0), Length::from_inches(48.0)),
+            after_rotation: QuarterTurn::Deg90,
+        };
+        let (bounds, drawing, camera) = preview_test_view();
+        let resolve = |model: &BuildingModel, preview: &PlacementResolutionPreview| {
+            placement_resolution_preview_geometry(model, preview, bounds, drawing, &camera)
+        };
+
+        let mut missing = base.clone();
+        missing.target = AuthoredEntityRef::FurnishingInstance(ElementId::new("missing-instance"));
+        assert!(resolve(&model, &missing).is_none());
+
+        let mut wrong_kind = base.clone();
+        wrong_kind.target = AuthoredEntityRef::Wall(ElementId::new("chair-1"));
+        assert!(resolve(&model, &wrong_kind).is_none());
+
+        let mut stale = base.clone();
+        stale.before_position = Point2::new(Length::ZERO, Length::ZERO);
+        assert!(resolve(&model, &stale).is_none());
+
+        let mut stale_rotation = base.clone();
+        stale_rotation.before_rotation = QuarterTurn::Deg90;
+        assert!(resolve(&model, &stale_rotation).is_none());
+
+        model.furnishings.clear();
+        assert!(
+            resolve(&model, &base).is_none(),
+            "an instance with a missing family must not paint guessed geometry",
+        );
+    }
+
+    #[test]
+    fn placement_preview_is_bounds_neutral() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls = rect_walls(&code, "bounds", "level-1", 0.0, 12.0);
+        model.furnishings.push(Furnishing::new(
+            "desk",
+            "Desk",
+            Length::from_inches(24.0),
+            Length::from_inches(48.0),
+            Length::from_inches(30.0),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "desk-1",
+            "Desk",
+            "desk",
+            "level-1",
+            p(2.0, 2.0),
+        ));
+        let preview = PlacementResolutionPreview {
+            target: AuthoredEntityRef::FurnishingInstance(ElementId::new("desk-1")),
+            before_position: p(2.0, 2.0),
+            before_rotation: QuarterTurn::Deg0,
+            after_position: p(120.0, 120.0),
+            after_rotation: QuarterTurn::Deg90,
+        };
+
+        let canonical = plan_view_bounds(&model, false, None).expect("canonical bounds");
+        let previewed = plan_view_bounds(&model, false, Some(&preview)).expect("previewed bounds");
+        assert_near(previewed.min_x, canonical.min_x);
+        assert_near(previewed.min_y, canonical.min_y);
+        assert_near(previewed.max_x, canonical.max_x);
+        assert_near(previewed.max_y, canonical.max_y);
+    }
+
+    #[test]
+    fn placement_preview_destination_is_not_pickable() {
+        let code = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls = rect_walls(&code, "pick", "level-1", 0.0, 12.0);
+        model.furnishings.push(Furnishing::new(
+            "chair",
+            "Chair",
+            Length::from_inches(20.0),
+            Length::from_inches(24.0),
+            Length::from_inches(36.0),
+        ));
+        model.furnishing_instances.push(FurnishingInstance::new(
+            "chair-1",
+            "Chair",
+            "chair",
+            "level-1",
+            p(2.0, 2.0),
+        ));
+        model.sort_deterministically();
+        model.validate().expect("preview pick fixture");
+        let preview = PlacementResolutionPreview {
+            target: AuthoredEntityRef::FurnishingInstance(ElementId::new("chair-1")),
+            before_position: p(2.0, 2.0),
+            before_rotation: QuarterTurn::Deg0,
+            after_position: p(8.0, 4.0),
+            after_rotation: QuarterTurn::Deg90,
+        };
+        let draw_tool = DrawWallPlanInput {
+            active: false,
+            start: None,
+            snap_step: None,
+            previous_snap: None,
+        };
+        let selection = Selection::None;
+        let layers = ViewLayers {
+            grid: false,
+            rooms: false,
+            wall_labels: false,
+            ..ViewLayers::default()
+        };
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut camera = View2dState::default();
+        let mut draw_frame = |input: egui::RawInput| {
+            let mut click = None;
+            let mut destination = None;
+            let _ = ctx.run_ui(input, |ui| {
+                let rect =
+                    Rect::from_min_size(ui.available_rect_before_wrap().min, viewport_size(ui));
+                let drawing = viewport_drawing_rect(rect, 58.0);
+                let bounds = plan_view_bounds(&model, false, Some(&preview)).unwrap();
+                destination = Some(plan_point(preview.after_position, bounds, drawing, &camera));
+                let mut cursor = None;
+                let mut toolbar = None;
+                let mut snap = None;
+                let mut wall_drag = None;
+                click = draw_project_plan(
+                    ui,
+                    PlanView {
+                        model: &model,
+                        selected_wall: 0,
+                        selection: &selection,
+                        selected_components: &[],
+                        layers,
+                        placement_resolution_preview: Some(&preview),
+                        draw_tool: &draw_tool,
+                        room_tool_active: false,
+                        ceiling_tool_active: false,
+                        vault_tool_active: false,
+                        floor_tool_active: false,
+                        roof_plan_mode: false,
+                        active_wall_drag: None,
+                    },
+                    &mut camera,
+                    &mut cursor,
+                    &mut toolbar,
+                    &mut snap,
+                    &mut wall_drag,
+                );
+            });
+            (click, destination.expect("preview destination"))
+        };
+
+        let (_, destination) = draw_frame(egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        });
+        let pointer_input = |pressed| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.events.extend([
+                egui::Event::PointerMoved(destination),
+                egui::Event::PointerButton {
+                    pos: destination,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            input
+        };
+        let (pressed, _) = draw_frame(pointer_input(true));
+        assert!(pressed.is_none());
+        let (released, _) = draw_frame(pointer_input(false));
+        assert!(matches!(released, Some(ViewClick::EmptyCanvas)));
     }
 
     fn wall(code: &FramingDefaults, id: &str, level: &str, a: Point2, b: Point2) -> Wall {
