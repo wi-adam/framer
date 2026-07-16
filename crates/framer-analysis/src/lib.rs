@@ -11,7 +11,9 @@ mod graph;
 mod identity;
 mod intent;
 mod lower;
+mod patch;
 mod query;
+mod resolution;
 mod revision;
 
 pub use compile::{
@@ -31,13 +33,30 @@ pub use identity::{
 pub use intent::{
     AssertionParticipant, AssertionParticipantRole, AssertionScope, AssertionSource,
     AssumptionEvidence, AssumptionIntentRecord, AssumptionPremise, BooleanExpression,
-    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, ExactValue, IntentDomain,
-    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind,
-    IntentValue, ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord,
-    ObjectiveObservation, PreferencePriority, SelectionAttribute, WaiverRecord, WaiverRef,
+    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, ExactValue, ExactValueKind,
+    IntentDomain, IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentUnknown,
+    IntentUnknownKind, IntentValue, ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord,
+    ObjectiveObservation, ObjectivePriority, PreferencePriority, SelectionAttribute, WaiverRecord,
+    WaiverRef,
+};
+pub use patch::{
+    PlacementPatch, PlacementPatchError, PlacementPose, PlacementTarget, StagedPlacementPatch,
+    apply_placement_patch, current_placement_pose, stage_placement_patch,
 };
 pub use query::{
     DependencyImpact, GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats,
+};
+pub use resolution::{
+    AssertionSemanticKey, AssertionTransition, CategorizedIntentOutcomes,
+    DerivedAssertionSemanticKey, DerivedAssertionSemanticSource, DocumentRevision,
+    GeneratedMemberSemanticRef, IntentOutcomeCategory, PlacementPatchSemanticKey,
+    PlacementTargetKind, PreferenceTierCost, ResolutionAssumptionEffect, ResolutionCache,
+    ResolutionCacheStats, ResolutionCapability, ResolutionCapabilityAvailability,
+    ResolutionEffects, ResolutionError, ResolutionIntentEffect, ResolutionObjectiveComponent,
+    ResolutionObjectiveEffect, ResolutionObjectiveVector, ResolutionOption, ResolutionOptionSet,
+    ResolutionRequest, ResolutionRevision, ResolutionSearchOutcome, ResolutionSearchSummary,
+    STRUCTURAL_RESOLUTION_UNAVAILABLE_REASON, apply_resolution_option, generate_resolution_options,
+    resolution_capability, stage_resolution_option,
 };
 pub use revision::{GRAPH_CONTRACT_VERSION, GraphRevision};
 

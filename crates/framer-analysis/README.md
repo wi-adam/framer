@@ -24,6 +24,21 @@ assumptions retain typed premise evidence rather than receiving invented boolean
 states. It never mutates or serializes authored intent. Lower crates do not depend
 on it; `framer-app` is currently its only workspace consumer.
 
+Placement resolution is a separate explicit path, never part of
+`analyze_project()`. `generate_resolution_options` performs a bounded deterministic
+search for an existing furnishing/MEP pose, measures containment and clearance
+only through `framer-standards::FactSnapshot`, rejects required-intent regressions,
+and returns revision-bound typed patches with categorized boolean outcomes, exact
+named objective observations, typed assumption evidence, and lexicographic costs.
+Search metadata discloses its fact-measurement/full-analysis caps and whether
+pose measurement or candidate ranking was truncated; an empty bounded result does not claim
+mathematical infeasibility. Preview/staging clones and validates the authored
+model; application remains the app's explicit undoable edit. `GraphRevision`
+identifies the immutable evaluation/cache result, while an explicit same-graph
+request may reauthorize it for a newer process-local document revision; an
+already displayed set remains stale. Structural alternatives are reported
+unavailable until their authored and evaluated prerequisites exist.
+
 `GraphRevision` is BLAKE3 over domain separation, `GRAPH_CONTRACT_VERSION`, a
 length-delimited deterministic starter-library source input (`available` plus
 its content hash, or `unavailable`), and canonical project bytes. Changing the
@@ -74,5 +89,11 @@ directional query for explaining a generated selection.
   evaluator results without requiring graph finalization.
 - `GraphQueryCache::impact_of(graph, start)` returns cached, filtered
   assertion and derived-result impact traces for one authored entity.
+- `generate_resolution_options(model, revision, request, cache)` explicitly
+  synthesizes and memoizes bounded placement-clearance options for the exact graph
+  and app document revision.
+- `stage_resolution_option(model, option, current_revision)` rejects stale
+  authority/expected values and returns a sorted, validated candidate model
+  without mutating its source.
 - `library_lifecycle_status(model)` evaluates library lifecycle state even when
   project regeneration fails.
