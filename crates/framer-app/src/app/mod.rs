@@ -25,21 +25,18 @@ use std::sync::Arc;
 
 use crate::app_config::AppConfig;
 use eframe::egui::{self, CentralPanel, Frame, Panel, ScrollArea};
+use framer_analysis::{GraphQueryCache, ProjectGraph, ProjectNodeRef};
 use framer_core::{
-    BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint, DimensionDirection,
-    DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room, RoomUsage, Wall,
-    concave_polygon_corners, level_wall_loop_outline, load_project as load_project_document,
-    save_project as save_project_document,
+    AuthoredEntityRef, BuildingModel, DimensionAnchor, DimensionAxis, DimensionConstraint,
+    DimensionDirection, DimensionKind, ElementId, Length, Opening, OpeningKind, Point2, Room,
+    RoomUsage, Wall, concave_polygon_corners, level_wall_loop_outline,
+    load_project as load_project_document, save_project as save_project_document,
 };
 use framer_geometry::{
     Aabb, GeometryAudit, GeometryViolation, PhysicalScene, Point3 as PhysicalPoint3,
-    audit_physical_scene, build_physical_scene,
 };
 use framer_render::math::Vec3;
-use framer_solver::{
-    DiagnosticSeverity, FrameMember, PlanDiagnostic, ProjectFramePlan, export_bom_csv,
-    export_project_svg, generate_project_plan,
-};
+use framer_solver::{FrameMember, ProjectFramePlan, export_bom_csv, export_project_svg};
 use framer_standards::ComplianceReport;
 
 use component_visibility::{
@@ -74,6 +71,11 @@ pub(crate) struct FramerApp {
     geometry_audit: GeometryAudit,
     active_geometry_violation: Option<GeometryViolation>,
     compliance_report: Option<ComplianceReport>,
+    /// Deterministic, disposable cross-domain graph for the current successful rebuild.
+    project_graph: Option<ProjectGraph>,
+    project_graph_error: Option<String>,
+    /// Lazy explanation/impact closures, rebound automatically by deterministic graph revision.
+    graph_queries: GraphQueryCache,
     library_issues: Vec<framer_library::LibraryIssue>,
     library_issue_error: Option<String>,
     error: Option<String>,
@@ -175,6 +177,8 @@ enum Selection {
     Join(String),
     Room(String),
     Member {
+        /// Generated-plan host id. The legacy field name predates semantic member sources;
+        /// `FrameMember::source` may instead identify an opening or another authored object.
         source_id: String,
         member_id: String,
     },
@@ -729,6 +733,9 @@ impl Default for FramerApp {
             geometry_audit: GeometryAudit::default(),
             active_geometry_violation: None,
             compliance_report: None,
+            project_graph: None,
+            project_graph_error: None,
+            graph_queries: GraphQueryCache::default(),
             library_issues: Vec::new(),
             library_issue_error: None,
             error: None,
@@ -821,30 +828,31 @@ impl FramerApp {
 
         self.model.apply_driving_dimensions();
 
-        match collect_library_lifecycle_issues(&self.model) {
-            Ok(issues) => {
-                self.library_issues = issues;
-                self.library_issue_error = None;
-            }
-            Err(error) => {
-                self.library_issues.clear();
-                self.library_issue_error = Some(error);
-            }
-        }
-
-        match generate_project_plan(&self.model) {
-            Ok(mut plan) => {
-                let physical_scene = build_physical_scene(&self.model, &plan);
-                let geometry_audit = audit_physical_scene(&physical_scene);
-                let resolved_standards = self.model.resolved_standards();
-                let report = framer_standards::evaluate(&self.model, &resolved_standards, &plan);
-                plan.diagnostics
-                    .extend(framer_standards::diagnostics(&report));
-                append_library_diagnostics(
-                    &mut plan,
-                    &self.library_issues,
-                    self.library_issue_error.as_deref(),
-                );
+        match framer_analysis::analyze_project(&self.model) {
+            Ok(analysis) => {
+                let framer_analysis::ProjectAnalysis {
+                    plan,
+                    resolved_standards: _,
+                    physical_scene,
+                    geometry_audit,
+                    compliance_report: report,
+                    library_lifecycle,
+                    graph,
+                } = analysis;
+                self.library_issues = library_lifecycle.issues;
+                self.library_issue_error = library_lifecycle.error;
+                self.graph_queries.clear();
+                match graph {
+                    Ok(graph) => {
+                        self.project_graph = Some(graph);
+                        self.project_graph_error = None;
+                    }
+                    Err(error) => {
+                        self.project_graph = None;
+                        self.project_graph_error = Some(error.to_string());
+                        self.graph_queries.clear();
+                    }
+                }
                 self.compliance_report = Some(report);
                 self.physical_scene = Some(physical_scene);
                 self.geometry_audit = geometry_audit;
@@ -860,15 +868,86 @@ impl FramerApp {
                 self.error = None;
             }
             Err(error) => {
+                let library_lifecycle = framer_analysis::library_lifecycle_status(&self.model);
+                self.library_issues = library_lifecycle.issues;
+                self.library_issue_error = library_lifecycle.error;
                 self.project_plan = None;
                 self.physical_scene = None;
                 self.geometry_audit = GeometryAudit::default();
                 self.active_geometry_violation = None;
                 self.compliance_report = None;
+                self.project_graph = None;
+                self.project_graph_error = None;
+                self.graph_queries.clear();
                 self.error = Some(error.to_string());
             }
         }
         self.prune_component_presentation();
+    }
+
+    fn selected_project_node_ref(&self) -> Option<ProjectNodeRef> {
+        let graph = self.project_graph.as_ref()?;
+        let authored = |reference: AuthoredEntityRef| {
+            let node = ProjectNodeRef::Authored(reference);
+            graph.node(&node).is_some().then_some(node)
+        };
+        match &self.selected {
+            Selection::None => None,
+            Selection::Site => authored(AuthoredEntityRef::Site),
+            Selection::Level(id) => authored(AuthoredEntityRef::Level(ElementId::new(id.clone()))),
+            Selection::Wall => self
+                .model
+                .walls
+                .get(self.selected_wall)
+                .and_then(|wall| authored(AuthoredEntityRef::Wall(wall.id.clone()))),
+            Selection::Opening(id) => {
+                authored(AuthoredEntityRef::Opening(ElementId::new(id.clone())))
+            }
+            Selection::Dimension(id) => {
+                authored(AuthoredEntityRef::Dimension(ElementId::new(id.clone())))
+            }
+            Selection::Join(id) => {
+                authored(AuthoredEntityRef::WallJoin(ElementId::new(id.clone())))
+            }
+            Selection::Room(id) => authored(AuthoredEntityRef::Room(ElementId::new(id.clone()))),
+            Selection::Member {
+                source_id: host_id,
+                member_id,
+            } => graph
+                .generated_member(host_id, member_id)
+                .cloned()
+                .map(ProjectNodeRef::GeneratedMember),
+            Selection::RoofPlane(id) => {
+                authored(AuthoredEntityRef::RoofPlane(ElementId::new(id.clone())))
+            }
+            Selection::Ceiling(id) => {
+                authored(AuthoredEntityRef::Ceiling(ElementId::new(id.clone())))
+            }
+            Selection::FloorDeck(id) => {
+                authored(AuthoredEntityRef::FloorDeck(ElementId::new(id.clone())))
+            }
+            Selection::System(id) => authored(AuthoredEntityRef::ConstructionSystem(
+                ElementId::new(id.clone()),
+            )),
+            Selection::Material(id) => {
+                authored(AuthoredEntityRef::Material(ElementId::new(id.clone())))
+            }
+            Selection::Furnishing(id) => {
+                authored(AuthoredEntityRef::Furnishing(ElementId::new(id.clone())))
+            }
+            Selection::MepObject(id) => {
+                authored(AuthoredEntityRef::MepObject(ElementId::new(id.clone())))
+            }
+            Selection::StandardsPack(id) => {
+                authored(AuthoredEntityRef::StandardsPack(ElementId::new(id.clone())))
+            }
+            Selection::FurnishingInstance(id) => authored(AuthoredEntityRef::FurnishingInstance(
+                ElementId::new(id.clone()),
+            )),
+            Selection::MepInstance(id) => {
+                authored(AuthoredEntityRef::MepInstance(ElementId::new(id.clone())))
+            }
+        }
     }
 
     /// Capture the current restorable state (authored model + selection and
@@ -4383,17 +4462,6 @@ impl FramerApp {
     }
 }
 
-fn collect_library_lifecycle_issues(
-    model: &BuildingModel,
-) -> Result<Vec<framer_library::LibraryIssue>, String> {
-    let current_libraries = framer_library::starter_library_ref()
-        .ok()
-        .map(|loaded| std::slice::from_ref(&loaded.library))
-        .unwrap_or_default();
-    framer_library::library_lifecycle_issues(model, current_libraries)
-        .map_err(|error| error.to_string())
-}
-
 fn is_project_local_standards_pack_id(id: &ElementId) -> bool {
     id.0.starts_with("std-local-")
 }
@@ -4422,59 +4490,26 @@ fn project_local_standards_pack(
     }
 }
 
-fn append_library_diagnostics(
-    plan: &mut ProjectFramePlan,
-    issues: &[framer_library::LibraryIssue],
-    check_error: Option<&str>,
-) {
-    if let Some(error) = check_error {
-        plan.diagnostics.push(PlanDiagnostic {
-            severity: DiagnosticSeverity::Warning,
-            code: "library.lifecycle.check-failed".to_owned(),
-            source: None,
-            message: format!("Library lifecycle status could not be checked: {error}."),
-            rule: None,
-        });
-        return;
-    }
-
-    for issue in issues {
-        let item_kind = match &issue.item {
-            framer_library::LibraryItem::Material(_) => "material",
-            framer_library::LibraryItem::System(_) => "system",
-            framer_library::LibraryItem::Furnishing(_) => "furnishing",
-            framer_library::LibraryItem::MepObject(_) => "MEP object",
-            framer_library::LibraryItem::StandardsPack(_) => "standards pack",
-        };
-        let code = match issue.kind {
-            framer_library::LibraryIssueKind::Diverged => "library.item.diverged",
-            framer_library::LibraryIssueKind::OutOfDate => "library.item.out-of-date",
-            framer_library::LibraryIssueKind::SourceMissing => "library.item.source-missing",
-        };
-        let message = match issue.kind {
-            framer_library::LibraryIssueKind::Diverged => format!(
-                "Library {item_kind} '{}' has local edits; detach it to keep those edits or re-sync it to overwrite them from the source library.",
-                issue.item_id().0
-            ),
-            framer_library::LibraryIssueKind::OutOfDate => format!(
-                "Library {item_kind} '{}' is out of date with source item '{}'.",
-                issue.item_id().0,
-                issue.source_id.0
-            ),
-            framer_library::LibraryIssueKind::SourceMissing => format!(
-                "Library {item_kind} '{}' references source item '{}' which is not present in the available library.",
-                issue.item_id().0,
-                issue.source_id.0
-            ),
-        };
-        plan.diagnostics.push(PlanDiagnostic {
-            severity: DiagnosticSeverity::Warning,
-            code: code.to_owned(),
-            source: Some(issue.item_id().clone()),
-            message,
-            rule: None,
-        });
-    }
+#[cfg(test)]
+fn add_diverged_library_material(model: &mut BuildingModel) -> ElementId {
+    let loaded = framer_library::starter_library_ref().unwrap();
+    let source = loaded
+        .library
+        .materials
+        .first()
+        .expect("starter library material");
+    let imported =
+        framer_library::import_material(model, &loaded.library, &loaded.content_hash, &source.id)
+            .unwrap();
+    let material_id = imported.materials[0].clone();
+    model
+        .materials
+        .iter_mut()
+        .find(|material| material.id == material_id)
+        .unwrap()
+        .tags
+        .push("local-divergence".to_owned());
+    material_id
 }
 
 impl eframe::App for FramerApp {
@@ -4662,6 +4697,7 @@ mod tests {
         BracedWallLine, DimensionHorizontalReference, DimensionVerticalReference, Furnishing,
         FurnishingInstance, MepInstance, MepObject, MepObjectKind, RuleOverlay,
     };
+    use framer_solver::DiagnosticSeverity;
 
     use super::*;
 
@@ -4750,6 +4786,10 @@ mod tests {
     #[test]
     fn invalid_regeneration_clears_geometry_cache_with_plan() {
         let mut app = FramerApp::default();
+        let graph = app.project_graph.as_ref().expect("default project graph");
+        let wall = ProjectNodeRef::Authored(AuthoredEntityRef::Wall(app.model.walls[0].id.clone()));
+        app.graph_queries.dependencies(graph, &wall);
+        assert_eq!(app.graph_queries.stats().entries, 1);
         app.model.walls[0].end = app.model.walls[0].start;
 
         app.rebuild();
@@ -4757,6 +4797,135 @@ mod tests {
         assert!(app.project_plan.is_none());
         assert!(app.physical_scene.is_none());
         assert!(app.geometry_audit.is_clean());
+        assert!(app.project_graph.is_none());
+        assert!(app.project_graph_error.is_none());
+        assert_eq!(app.graph_queries.stats(), Default::default());
+    }
+
+    #[test]
+    fn rebuild_installs_matching_graph_and_invalidates_queries_on_authored_change() {
+        let mut app = FramerApp::default();
+        let first_revision = framer_analysis::GraphRevision::for_model(&app.model).unwrap();
+        assert_eq!(
+            app.project_graph.as_ref().map(ProjectGraph::revision),
+            Some(first_revision)
+        );
+
+        let wall = ProjectNodeRef::Authored(AuthoredEntityRef::Wall(app.model.walls[0].id.clone()));
+        let first_graph = app.project_graph.as_ref().unwrap();
+        let first = app.graph_queries.dependencies(first_graph, &wall);
+        let repeated = app.graph_queries.dependencies(first_graph, &wall);
+        assert_eq!(first, repeated);
+        assert_eq!(app.graph_queries.stats().hits, 1);
+
+        app.rebuild();
+        assert_eq!(
+            app.graph_queries.stats(),
+            Default::default(),
+            "every rebuild boundary should invalidate lazy graph projections"
+        );
+
+        app.model.site.jurisdiction = "Graph revision fixture".to_owned();
+        app.rebuild();
+        let changed_graph = app.project_graph.as_ref().unwrap();
+        assert_ne!(changed_graph.revision(), first_revision);
+        assert_eq!(
+            changed_graph.revision(),
+            framer_analysis::GraphRevision::for_model(&app.model).unwrap()
+        );
+        app.graph_queries.dependencies(changed_graph, &wall);
+        assert_eq!(app.graph_queries.stats().hits, 0);
+        assert_eq!(app.graph_queries.stats().misses, 1);
+        assert_eq!(app.graph_queries.revision(), Some(changed_graph.revision()));
+    }
+
+    #[test]
+    fn selection_adapter_uses_authored_identity_and_generated_host_identity() {
+        let mut app = FramerApp::default();
+        let opening = app.model.walls[0].openings[0].id.clone();
+        app.selected = Selection::Opening(opening.0.clone());
+        assert_eq!(
+            app.selected_project_node_ref(),
+            Some(ProjectNodeRef::Authored(AuthoredEntityRef::Opening(
+                opening
+            )))
+        );
+
+        let (host_id, member_id) = {
+            let host = app
+                .project_plan
+                .as_ref()
+                .and_then(|plan| plan.wall_plans.first())
+                .expect("default wall framing");
+            let member = host.members.first().expect("default generated member");
+            (host.wall.0.clone(), member.id.clone())
+        };
+        app.selected = Selection::Member {
+            source_id: host_id.clone(),
+            member_id: member_id.clone(),
+        };
+        let ProjectNodeRef::GeneratedMember(member) = app
+            .selected_project_node_ref()
+            .expect("generated selection")
+        else {
+            panic!("generated selection should map to a generated graph reference");
+        };
+        assert_eq!(member.host.element_id().unwrap().0, host_id);
+        assert_eq!(member.member_id, member_id);
+        assert_eq!(
+            member.revision,
+            app.project_graph.as_ref().unwrap().revision()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode timing probe; run with --ignored --nocapture"]
+    fn project_graph_rebuild_and_query_timing() {
+        const SAMPLES: usize = 40;
+        let mut app = FramerApp::default();
+        let wall = ProjectNodeRef::Authored(AuthoredEntityRef::Wall(app.model.walls[0].id.clone()));
+        let mut rebuild_ns = Vec::with_capacity(SAMPLES);
+        let mut first_query_ns = Vec::with_capacity(SAMPLES);
+        let mut cached_query_ns = Vec::with_capacity(SAMPLES);
+
+        for _ in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            app.rebuild();
+            rebuild_ns.push(started.elapsed().as_nanos());
+
+            let graph = app.project_graph.as_ref().expect("timed rebuild graph");
+            let started = std::time::Instant::now();
+            let first = app.graph_queries.dependencies(graph, &wall);
+            first_query_ns.push(started.elapsed().as_nanos());
+
+            let started = std::time::Instant::now();
+            let cached = app.graph_queries.dependencies(graph, &wall);
+            cached_query_ns.push(started.elapsed().as_nanos());
+            assert_eq!(first, cached);
+        }
+
+        fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
+            samples.sort_unstable();
+            let index = ((samples.len() - 1) * numerator) / denominator;
+            samples[index]
+        }
+
+        let rebuild_median = percentile(&mut rebuild_ns, 1, 2);
+        let rebuild_p95 = percentile(&mut rebuild_ns, 95, 100);
+        let first_median = percentile(&mut first_query_ns, 1, 2);
+        let first_p95 = percentile(&mut first_query_ns, 95, 100);
+        let cached_median = percentile(&mut cached_query_ns, 1, 2);
+        let cached_p95 = percentile(&mut cached_query_ns, 95, 100);
+        println!(
+            "project graph timing ({SAMPLES} samples): rebuild median {:.3} ms p95 {:.3} ms; \
+             first query median {:.3} us p95 {:.3} us; cached query median {:.3} us p95 {:.3} us",
+            rebuild_median as f64 / 1_000_000.0,
+            rebuild_p95 as f64 / 1_000_000.0,
+            first_median as f64 / 1_000.0,
+            first_p95 as f64 / 1_000.0,
+            cached_median as f64 / 1_000.0,
+            cached_p95 as f64 / 1_000.0,
+        );
     }
 
     #[test]
@@ -5438,89 +5607,35 @@ mod tests {
     }
 
     #[test]
-    fn library_diagnostics_cover_lifecycle_kinds_and_check_failure() {
-        let issues = vec![
-            framer_library::LibraryIssue {
-                item: framer_library::LibraryItem::Material(ElementId::new("local-material")),
-                source_id: ElementId::new("source-material"),
-                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
-                version_id: "2026.06".to_owned(),
-                kind: framer_library::LibraryIssueKind::OutOfDate,
-                expected_hash: "blake3:expected-material".to_owned(),
-                actual_hash: Some("blake3:actual-material".to_owned()),
-            },
-            framer_library::LibraryIssue {
-                item: framer_library::LibraryItem::System(ElementId::new("local-system")),
-                source_id: ElementId::new("source-system"),
-                library_uid: "11111111-1111-4111-8111-111111111111".to_owned(),
-                version_id: "2026.06".to_owned(),
-                kind: framer_library::LibraryIssueKind::SourceMissing,
-                expected_hash: "blake3:expected-system".to_owned(),
-                actual_hash: None,
-            },
-        ];
-        let mut plan = ProjectFramePlan {
-            wall_plans: Vec::new(),
-            floor_plans: Vec::new(),
-            ceiling_plans: Vec::new(),
-            roof_plans: Vec::new(),
-            diagnostics: Vec::new(),
-            rooms: Vec::new(),
-            layers: Vec::new(),
-            fasteners: Vec::new(),
-        };
+    fn rebuild_installs_library_lifecycle_diagnostic_in_plan_and_graph() {
+        let mut app = FramerApp::default();
+        let material_id = add_diverged_library_material(&mut app.model);
 
-        append_library_diagnostics(&mut plan, &issues, None);
+        app.rebuild();
 
-        assert_eq!(plan.diagnostics.len(), 2);
-        assert_eq!(
-            plan.diagnostics[0].code,
-            "library.item.out-of-date".to_owned()
-        );
-        assert_eq!(plan.diagnostics[0].severity, DiagnosticSeverity::Warning);
-        assert_eq!(
-            plan.diagnostics[0].source,
-            Some(ElementId::new("local-material"))
-        );
-        assert!(plan.diagnostics[0].message.contains("source-material"));
-        assert_eq!(
-            plan.diagnostics[1].code,
-            "library.item.source-missing".to_owned()
-        );
-        assert_eq!(plan.diagnostics[1].severity, DiagnosticSeverity::Warning);
-        assert_eq!(
-            plan.diagnostics[1].source,
-            Some(ElementId::new("local-system"))
-        );
-        assert!(plan.diagnostics[1].message.contains("source-system"));
+        assert!(app.library_issue_error.is_none());
+        assert!(app.library_issues.iter().any(|issue| {
+            issue.kind == framer_library::LibraryIssueKind::Diverged
+                && issue.item_id() == &material_id
+        }));
+        let plan = app.project_plan.as_ref().unwrap();
+        assert!(plan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic.code == "library.item.diverged"
+                && diagnostic.source.as_ref() == Some(&material_id)
+        }));
 
-        let mut failed_plan = ProjectFramePlan {
-            wall_plans: Vec::new(),
-            floor_plans: Vec::new(),
-            ceiling_plans: Vec::new(),
-            roof_plans: Vec::new(),
-            diagnostics: Vec::new(),
-            rooms: Vec::new(),
-            layers: Vec::new(),
-            fasteners: Vec::new(),
-        };
-        append_library_diagnostics(&mut failed_plan, &issues, Some("resolver failed"));
-
-        assert_eq!(failed_plan.diagnostics.len(), 1);
-        assert_eq!(
-            failed_plan.diagnostics[0].code,
-            "library.lifecycle.check-failed".to_owned()
-        );
-        assert_eq!(
-            failed_plan.diagnostics[0].severity,
-            DiagnosticSeverity::Warning
-        );
-        assert_eq!(failed_plan.diagnostics[0].source, None);
-        assert!(
-            failed_plan.diagnostics[0]
-                .message
-                .contains("resolver failed")
-        );
+        let material = ProjectNodeRef::Authored(AuthoredEntityRef::Material(material_id));
+        let graph = app.project_graph.as_ref().unwrap();
+        let dependents = app.graph_queries.dependents(graph, &material);
+        assert!(dependents.iter().any(|trace| {
+            matches!(
+                &trace.node,
+                ProjectNodeRef::Diagnostic(reference)
+                    if reference.provider == framer_analysis::DiagnosticProvider::Library
+                        && reference.code == "library.item.diverged"
+            )
+        }));
     }
 
     #[test]

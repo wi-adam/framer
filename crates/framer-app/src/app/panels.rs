@@ -5,6 +5,7 @@ use eframe::egui::{
     RichText, ScrollArea, Stroke, Ui, Vec2,
     containers::menu::{MenuButton, MenuConfig},
 };
+use framer_analysis::{GraphTrace, ProjectGraph, ProjectNodeRef};
 use framer_core::{
     BuildingModel, CeilingSlope, DimensionAnchor, DimensionAxis, DimensionConstraint,
     DimensionHorizontalReference, DimensionKind, DimensionVerticalReference, ElementId,
@@ -1955,6 +1956,7 @@ impl FramerApp {
         if selected_component_count > 1 {
             panel_header(ui, "Inspector", "Multiple");
             multi_selection_inspector(ui, selected_component_count);
+            self.project_relationships_panel(ui, true);
             self.inspector_output_sections(ui);
             return;
         }
@@ -3356,7 +3358,83 @@ impl FramerApp {
             self.rebuild();
         }
 
+        self.project_relationships_panel(ui, false);
         self.inspector_output_sections(ui);
+    }
+
+    fn project_relationships_panel(&mut self, ui: &mut Ui, multiple: bool) {
+        ui.separator();
+        widgets::section(
+            ui,
+            "project-relationships",
+            "Intent relationships",
+            true,
+            |ui| {
+                if multiple {
+                    ui.label(
+                        RichText::new("Relationships are available one object at a time.")
+                            .color(theme::text_secondary()),
+                    );
+                    return;
+                }
+                let Some(selected) = self.selected_project_node_ref() else {
+                    if matches!(self.selected, Selection::None) {
+                        ui.label(
+                            RichText::new(
+                                "Select an authored object or generated member to inspect relationships.",
+                            )
+                            .color(theme::text_secondary()),
+                        );
+                    } else if let Some(error) = self.project_graph_error.as_deref() {
+                        ui.label(
+                            RichText::new(format!("Relationships are unavailable: {error}"))
+                                .color(theme::danger()),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(
+                                "Relationships are unavailable until the project regenerates.",
+                            )
+                            .color(theme::text_secondary()),
+                        );
+                    }
+                    return;
+                };
+                let Some(graph) = self.project_graph.as_ref() else {
+                    ui.label(
+                        RichText::new(
+                            "Relationships are unavailable until the project regenerates.",
+                        )
+                        .color(theme::text_secondary()),
+                    );
+                    return;
+                };
+
+                let dependencies = self.graph_queries.dependencies(graph, &selected);
+                let dependents = self.graph_queries.dependents(graph, &selected);
+                if matches!(selected, ProjectNodeRef::GeneratedMember(_)) {
+                    graph_trace_group(ui, "Why generated", None, graph, &dependencies);
+                    ui.add_space(design::space::SM);
+                    graph_trace_group(
+                        ui,
+                        "Affected by",
+                        Some("These items may change when this object changes."),
+                        graph,
+                        &dependents,
+                    );
+                } else {
+                    graph_trace_group(
+                        ui,
+                        "Affected by",
+                        Some("These items may change when this object changes."),
+                        graph,
+                        &dependents,
+                    );
+                    ui.add_space(design::space::SM);
+                    graph_trace_group(ui, "Depends on", None, graph, &dependencies);
+                }
+            },
+        );
     }
 
     fn inspector_output_sections(&mut self, ui: &mut Ui) {
@@ -4409,6 +4487,112 @@ fn panel_subheader(ui: &mut Ui, title: &str) {
             .color(theme::text_muted()),
     );
     ui.add_space(3.0);
+}
+
+fn graph_trace_group(
+    ui: &mut Ui,
+    title: &str,
+    helper: Option<&str>,
+    graph: &ProjectGraph,
+    traces: &[GraphTrace],
+) {
+    const ROW_LIMIT: usize = 6;
+
+    panel_subheader(ui, title);
+    if let Some(helper) = helper {
+        ui.label(RichText::new(helper).small().color(theme::text_secondary()));
+    }
+
+    let mut visible = traces
+        .iter()
+        .filter(|trace| !matches!(trace.node, ProjectNodeRef::Project))
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| {
+        graph_trace_display_priority(&left.node)
+            .cmp(&graph_trace_display_priority(&right.node))
+            .then_with(|| left.depth.cmp(&right.depth))
+            .then_with(|| left.node.cmp(&right.node))
+    });
+    if visible.is_empty() {
+        ui.label(
+            RichText::new("No recorded relationships in the current resolution.")
+                .color(theme::text_secondary()),
+        );
+        return;
+    }
+
+    for trace in visible.iter().take(ROW_LIMIT) {
+        let Some(node) = graph.node(&trace.node) else {
+            continue;
+        };
+        let relationship = trace
+            .path
+            .iter()
+            .map(|step| {
+                if step.toward_dependency {
+                    step.relationship.label()
+                } else {
+                    step.relationship.inverse_label()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(if relationship.is_empty() {
+                    "related to"
+                } else {
+                    &relationship
+                })
+                .small()
+                .color(theme::text_secondary()),
+            );
+            ui.label(RichText::new(&node.title).color(theme::text_primary()));
+        });
+        if graph_trace_shows_detail(trace)
+            && let Some(detail) = node.detail.as_deref()
+        {
+            ui.label(RichText::new(detail).small().color(theme::text_secondary()));
+        }
+    }
+
+    if visible.len() > ROW_LIMIT {
+        ui.add_space(design::space::SM);
+        ui.label(
+            RichText::new(format!("{} more…", visible.len() - ROW_LIMIT))
+                .small()
+                .color(theme::text_secondary()),
+        );
+    }
+}
+
+fn graph_trace_display_priority(reference: &ProjectNodeRef) -> u8 {
+    match reference {
+        ProjectNodeRef::ComplianceEntry(_) => 0,
+        ProjectNodeRef::Diagnostic(_) => 1,
+        ProjectNodeRef::UnknownEvidence(_) => 2,
+        ProjectNodeRef::RoomConsequence(_) => 3,
+        ProjectNodeRef::SolverProvenance(_) => 4,
+        ProjectNodeRef::StandardsRule(_) => 5,
+        ProjectNodeRef::Authored(_) => 6,
+        ProjectNodeRef::Assertion(_) => 7,
+        ProjectNodeRef::GeneratedMember(_) => 8,
+        ProjectNodeRef::PhysicalBody(_) => 9,
+        ProjectNodeRef::Project => 10,
+    }
+}
+
+fn graph_trace_shows_detail(trace: &GraphTrace) -> bool {
+    trace.depth == 1
+        || matches!(
+            trace.node,
+            ProjectNodeRef::ComplianceEntry(_)
+                | ProjectNodeRef::Diagnostic(_)
+                | ProjectNodeRef::UnknownEvidence(_)
+                | ProjectNodeRef::RoomConsequence(_)
+                | ProjectNodeRef::SolverProvenance(_)
+                | ProjectNodeRef::StandardsRule(_)
+        )
 }
 
 fn site_context_editor(ui: &mut Ui, site: &mut framer_core::SiteContext) -> bool {

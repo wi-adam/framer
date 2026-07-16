@@ -15,7 +15,7 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{DimensionAxis, DimensionKind, Length, OpeningKind, Point2};
+use framer_core::{DimensionAxis, DimensionKind, ElementId, Length, OpeningKind, Point2};
 
 use super::actions::{self, ActionId};
 use super::component_visibility::{
@@ -23,7 +23,8 @@ use super::component_visibility::{
 };
 use super::viewport::BuiltInPreset;
 use super::{
-    FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode, design, panels,
+    FramerApp, RoofForm, Selection, ViewportMode, WallDisplay, WorkspaceMode,
+    add_diverged_library_material, design, panels,
 };
 
 /// A headless harness wrapping a fully-loaded `FramerApp` (the demo shell).
@@ -105,6 +106,11 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
     );
 }
 
+fn scroll_to_intent_relationships(harness: &mut Harness<FramerApp>) {
+    harness.get_by_label("Intent relationships").scroll_to_me();
+    harness.run();
+}
+
 fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
     secondary_click_pickable_3d_component_at_xs(harness, &[0.25, 0.375, 0.5, 0.625, 0.75]);
 }
@@ -163,6 +169,148 @@ fn boots_and_lays_out_demo_shell() {
     assert!(
         harness.query_all_by_label("Framer").next().is_some(),
         "the 'Framer' title label should be in the accessibility tree"
+    );
+}
+
+#[test]
+fn intent_relationships_explain_authored_and_generated_selections() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let (wall_index, host_id, opening_id, opening_name, member_id, member_title) = {
+        let app = harness.state();
+        app.project_plan
+            .as_ref()
+            .expect("default generated plan")
+            .wall_plans
+            .iter()
+            .find_map(|host| {
+                let wall_index = app
+                    .model
+                    .walls
+                    .iter()
+                    .position(|wall| wall.id == host.wall)?;
+                let wall = &app.model.walls[wall_index];
+                wall.openings.iter().find_map(|opening| {
+                    host.members
+                        .iter()
+                        .find(|member| {
+                            member.kind == framer_solver::MemberKind::Header
+                                && member.source == opening.id
+                        })
+                        .map(|member| {
+                            (
+                                wall_index,
+                                host.wall.0.clone(),
+                                opening.id.0.clone(),
+                                opening.name.clone(),
+                                member.id.clone(),
+                                format!("{}: {}", member.kind.label(), member.id),
+                            )
+                        })
+                })
+            })
+            .expect("default project should include an opening header")
+    };
+
+    harness.state_mut().apply_selection(
+        Selection::Opening(opening_id),
+        Some(wall_index),
+        SelectionOp::Replace,
+    );
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(&harness, "Affected by", "authored relationship inspector");
+    assert_accessible_label(&harness, &member_title, "authored relationship inspector");
+
+    harness.state_mut().apply_selection(
+        Selection::Member {
+            source_id: host_id,
+            member_id,
+        },
+        Some(wall_index),
+        SelectionOp::Replace,
+    );
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "Why generated",
+        "generated relationship inspector",
+    );
+    assert_accessible_label(&harness, &opening_name, "generated relationship inspector");
+}
+
+#[test]
+fn intent_relationships_show_compliance_and_honest_empty_states() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    harness.state_mut().model.walls[0].height = Length::from_feet(20.0);
+    harness.state_mut().rebuild();
+    harness.state_mut().selected_wall = 0;
+    harness.state_mut().selected = Selection::Wall;
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "Compliance Violation: irc2021.r602.3-5.stud-height",
+        "compliance relationship inspector",
+    );
+
+    let mut unused = harness.state().model.materials[0].clone();
+    unused.id = ElementId::new("material-unused-relationship-fixture");
+    unused.name = "Unused relationship fixture".to_owned();
+    harness.state_mut().model.materials.push(unused);
+    harness.state_mut().rebuild();
+    harness.state_mut().selected =
+        Selection::Material("material-unused-relationship-fixture".to_owned());
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert!(
+        harness
+            .query_all_by_label("No recorded relationships in the current resolution.")
+            .count()
+            >= 1,
+        "an unused authored object should report that no graph evidence is recorded"
+    );
+
+    harness.state_mut().selected = Selection::None;
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "Select an authored object or generated member to inspect relationships.",
+        "empty relationship inspector",
+    );
+
+    harness.state_mut().selected = Selection::Wall;
+    harness.state_mut().project_graph = None;
+    harness.state_mut().project_graph_error = Some("fixture graph failure".to_owned());
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(
+        &harness,
+        "Relationships are unavailable: fixture graph failure",
+        "failed relationship inspector",
+    );
+}
+
+#[test]
+fn intent_relationships_include_library_lifecycle_diagnostics() {
+    let mut harness = demo_harness();
+    harness.run();
+
+    let material_id = add_diverged_library_material(&mut harness.state_mut().model);
+    harness.state_mut().rebuild();
+    harness.state_mut().selected = Selection::Material(material_id.0);
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+
+    assert_accessible_label(
+        &harness,
+        "Warning: library.item.diverged",
+        "library relationship inspector",
     );
 }
 
