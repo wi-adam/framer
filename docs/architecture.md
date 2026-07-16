@@ -27,10 +27,17 @@ small buildings, garages, decks, and wood framed BBQ islands.
   `.framerlib` content.
 - `crates/framer-solver`: deterministic framing-plan, per-layer material takeoff,
   and BOM generation.
+- `crates/framer-standards`: UI-free compliance fact measurement, predicate
+  evaluation, deterministic reporting, and diagnostics lowering over resolved
+  standards and solver output.
 - `crates/framer-geometry`: UI-free physical-solid derivation over authored
   assemblies and generated framing, with stable semantic body identity and
   convex-piece lowering, spatial broad phase, and deterministic contact/overlap
   auditing.
+- `crates/framer-analysis`: UI-free orchestration of the solver, standards,
+  geometry, and library-lifecycle outputs plus a deterministic, revision-bound
+  project graph. The graph is disposable and provides lazy explanation and
+  impact queries without making lower crates depend on the app.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and tiled viewport workspace.
@@ -58,6 +65,26 @@ Only the first layer should be directly editable by users. The second and third
 layers are regenerated unless the product later adds explicit override records.
 Named viewport-layout presets are an app-local preference over presentation state,
 not project data; they never enter `.framer`.
+
+`framer-analysis::ProjectGraph` is a derived index across these layers, not a
+fourth source of truth. Each graph and every generated-member, body, compliance,
+diagnostic, or derived-assertion reference it contains is bound to a deterministic
+`GraphRevision` over the graph contract version, a length-delimited deterministic
+starter-library source input (availability plus content hash when available), and
+the canonical post-propagation project bytes. Graph nodes, edges, and cached query
+closures are discarded and rebuilt after any of those inputs change; they are
+never persisted.
+
+Regenerated room schedules and topology boundaries are typed consequence nodes
+in that graph. They depend on the authored room and the walls that bound it; an
+open boundary, unmatched boundary edge, or absent schedule produces explicit
+unknown evidence. Explanation traversal follows dependency/evidence direction
+toward support rather than wandering into downstream consequences. The project
+ownership node may be returned as a useful endpoint, but it is never traversed as
+a bridge between otherwise unrelated project-owned entities. Generated member
+hosts and sources are kind-checked, and site context is an explicit dependency of
+solver provenance and compliance evaluation so impact queries reach those
+consequences without traversing through project ownership.
 
 ## Mode Contract
 
@@ -190,6 +217,19 @@ multi-wall CAD shell:
   Elevation, WGPU-backed 3D, and path-traced Render panes. Panes have independent
   cameras/render runtimes and may be deferred into native windows while sharing
   project selection and presentation context.
+- `framer-analysis` generates the coherent plan, standards report, physical
+  scene, geometry audit, starter-library lifecycle status, and a canonically
+  ordered project graph for each successful app rebuild. Lifecycle warnings are
+  lowered into the plan before graph compilation, so the returned status, plan
+  diagnostics, and graph describe the same generation. The inspector adapts the
+  current authored or generated selection to that graph and shows read-only
+  "Depends on"/"Why generated" and "Affected by" relationships. Missing evidence
+  is represented explicitly rather than silently omitted, and graph compilation
+  failure leaves valid framing/compliance output and matching lifecycle status
+  available while relationships are reported as unavailable. Graph finalization
+  validates that every edge endpoint exists; an internal missed endpoint returns
+  a typed `GraphBuildError` through the independently fallible `AnalysisError`
+  channel rather than panicking the rebuild.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
 
@@ -222,7 +262,8 @@ The current v13 `.framer` format is documented in
 [project-files.md](project-files.md). It stores the authored intent model only
 (including site context, standards packs, the material library, construction
 systems, furnishing/MEP families, and placed object instances); derived framing
-plans, live viewport layouts/cameras/render accumulators, and exports remain
+plans, analysis graphs and query caches, room consequences, library-lifecycle
+status, live viewport layouts/cameras/render accumulators, and exports remain
 disposable outputs that are regenerated from the project. Named viewport-layout
 presets are persisted separately as app-local preferences and contain no project
 selection, 2D camera, or authored-model state.

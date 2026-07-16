@@ -4,7 +4,9 @@
 > Kept current as the feature evolves; point-in-time task breakdowns live in
 > [`docs/plans/`](../plans/). See [spec-driven-development.md](../spec-driven-development.md).
 >
-> **Status:** Proposed · **Linked goal:** G-016 (Intent Model and Resolution) ·
+> **Status:** In progress — Slice 1 implemented and verified on its delivery branch;
+> draft-PR review/merge pending; Slices 2-4 proposed/not started · **Linked goal:** G-016
+> (Intent Model and Resolution) ·
 > **Plan:**
 > [2026-07-15 — Intent Model and Resolution](../plans/2026-07-15-intent-model-and-resolution.md) ·
 > **Last reviewed:** 2026-07-15
@@ -65,6 +67,9 @@ intent" from becoming an untyped property bag.
 - Framer compiles a deterministic, UI-free **project graph** from the authored model and the
   current regenerated outputs. The graph is disposable and is never required to recover the
   project.
+- Current derived room schedules and topology boundaries are typed, revision-scoped consequence
+  nodes. They link back to the authored room and deterministic boundary walls; open, unmatched, or
+  absent inputs produce explicit unknown evidence instead of disappearing.
 - Existing direct fields remain authoritative. The compiler exposes `Wall.system`,
   `Ceiling.region`, instance-family references, nested opening ownership, and similar fields as
   graph relationships without serializing duplicate edges.
@@ -76,8 +81,9 @@ intent" from becoming an untyped property bag.
   its provider, semantic source, and role; it can never collide with a persisted authored id.
 - Graph nodes and relationships use typed semantic references. Vector indices, display labels,
   and app-only selection state are not project identity. Authored references are durable;
-  generated-member/body references are deterministic only for the current resolution inputs and
-  must not be persisted or assumed to survive an authored edit.
+  generated-member/body references are deterministic only for the current authored, analysis-
+  contract, and starter-library source inputs and must not be persisted or assumed to survive an
+  authored or external analysis-input change.
 - Persisted assertions may target authored entities, stable rules, or typed deterministic scopes.
   They do not target disposable render meshes or opaque cache identities.
 
@@ -259,6 +265,10 @@ solver:
 
 - Given an authored or generated entity, callers can query incoming intent, outgoing consequences,
   supporting evidence, current outcomes, conflicts, and alternatives.
+- Supporting-evidence traversal is directional: it walks from a consequence only toward
+  whitelisted dependencies that justify it. It does not cross into downstream bodies or
+  diagnostics. The project ownership node is a valid endpoint but never a transitive bridge between
+  otherwise unrelated project-owned entities.
 - A generated member can trace to its semantic source, construction selection, relevant standards
   rule/table, and the facts that selected it.
 - An impact query can answer which assertions and derived entities may change if an authored
@@ -275,8 +285,9 @@ solver:
   invalidates the previous cache and eagerly computes only fact observations/outcomes needed for
   the existing diagnostics surface.
 - Whole-graph projections, transitive impact/explanation closures, and candidate generation are
-  lazy and memoized for the current `document_revision`; candidate providers run only on explicit
-  request. Slice 1 records a representative rebuild/query budget before the graph grows.
+  lazy and memoized for the current deterministic `GraphRevision`; candidate providers run only on
+  explicit request. The app's process-local `document_revision` remains a separate mutation guard.
+  Slice 1 records a representative rebuild/query budget before the graph grows.
 
 ## Decisions (locked)
 
@@ -315,6 +326,58 @@ solver:
 
 ## Architecture (grounded in the codebase)
 
+### Slice 1 implementation status
+
+Slice 1 has established the read-only graph boundary without changing project
+schema or authored behavior:
+
+- [x] Add the eighth, UI-free `framer-analysis` crate above core, library,
+  solver, standards, and geometry and below the app.
+- [x] Add schema-neutral `AuthoredEntityRef`/`AuthoredIntentId` namespaces in
+  `framer-core`; no intent collection was added to `BuildingModel`.
+- [x] Compile current authored entities, generated members, physical bodies,
+  typed room schedule/boundary consequences, standards/report entries,
+  diagnostics, provenance, and explicit unknown evidence into canonically ordered
+  nodes and dependency-oriented edges. Missing or wrong-family generated hosts
+  and sources fail closed, and site impact reaches solver and compliance
+  consequences.
+- [x] Bind generated/evidence identity and lazy graph-query caches to a
+  deterministic `GraphRevision` over `GRAPH_CONTRACT_VERSION`, a length-delimited
+  starter-library availability/content-hash input, and canonical post-propagation
+  project bytes.
+- [x] Route `FramerApp::rebuild()` through one coherent `ProjectAnalysis` and
+  expose read-only dependency/impact traces in the existing inspector.
+- [x] Return matching starter-library lifecycle status, lower its warnings into
+  the plan before graph compilation, and retain the standalone status path when
+  framing cannot solve.
+- [x] Keep evidence traversal directional and treat the project ownership node as
+  a result endpoint rather than a bridge across unrelated entities.
+- [x] Validate both endpoints of every compiled edge and return typed
+  `GraphBuildError` through independently fallible `AnalysisError` rather than
+  panicking on an internal graph-builder invariant failure.
+- [x] Keep `.framer` schema v13 and the canonical authored document shape
+  unchanged; the graph, revision, and query cache are disposable.
+- [x] Add focused graph/query tests for matching lifecycle status/diagnostics,
+  typed room consequences, unknown room evidence, typed generated source/host
+  failures, site impact, directional support, and project-endpoint behavior, plus
+  app harness/screenshot-deck coverage for authored, generated, compliance,
+  graph-error, no-evidence, and no-selection inspector states.
+- [x] Execute and record all focused tests, full workspace gates, UI screenshot
+  review, and representative rebuild/first-query/cached-query timing for the Slice 1 PR.
+
+Slice 1 verification on 2026-07-15 passed format, strict all-target/all-feature
+workspace clippy, and the locked all-feature workspace suite (1,019 passed, 3
+manual probes ignored), including 8 GPU parity tests and checked-example geometry
+audits. The markdown checker passed 389 links. The final 54-frame deck passed and
+its five intent-relationship frames were visually reviewed. A release-mode
+40-sample probe measured rebuild median 3.266 ms / p95 5.054 ms, first-query
+median 21.458 us / p95 34.375 us, and cached-query median 1.334 us / p95 2.000 us.
+Schema remains v13 and no checked example changed.
+
+Slices 2-4 below remain proposed and have not started. In particular, Slice 1
+does not persist authored assertions, normalize the full common outcome protocol,
+evaluate new cross-object intent, or generate candidate authored changes.
+
 ### Existing seams
 
 - `crates/framer-core/src/model.rs`: `BuildingModel` and globally unique `ElementId`s are the
@@ -335,15 +398,30 @@ solver:
   project assertions; `ComplianceReport` outcomes adapt to the common protocol.
 - `crates/framer-geometry`: `BodyRef`, `PhysicalScene`, and structured geometry violations provide
   stable physical identity and post-generation evidence.
-- `crates/framer-app/src/app/mod.rs`: `rebuild()` is the current orchestration seam: apply driving
-  dimensions, generate the plan, build/audit physical geometry, evaluate standards, and lower
-  diagnostics.
+- `crates/framer-analysis`: `analyze_project()` now generates the plan, resolved standards,
+  compliance report, physical scene/audit, starter-library lifecycle status, and fallible graph as
+  one coherent UI-free generation. Lifecycle diagnostics are installed before graph compilation,
+  so the returned status, plan, and graph match; `library_lifecycle_status()` remains available if
+  solving fails. `identity.rs`, `revision.rs`, `graph.rs`, `compile.rs`, and `query.rs` own the closed
+  cross-domain references, typed room consequences, canonical graph, explicit unknown evidence,
+  deterministic revision fingerprint, and lazy revision-bound directional closures. Graph
+  revision fingerprinting and endpoint validation fail independently through
+  `AnalysisError::Project` and `AnalysisError::Graph` without discarding valid
+  plan/report/geometry/lifecycle outputs.
+- `crates/framer-app/src/app/mod.rs`: `rebuild()` remains the authored orchestration seam, applying
+  driving dimensions before calling `framer_analysis::analyze_project()`. It installs or clears the
+  graph alongside the matching regenerated outputs and adapts app selection into graph references.
+- `crates/framer-app/src/app/panels.rs`: the existing inspector consumes dependency and dependent
+  traces as read-only "Depends on"/"Why generated" and "Affected by" sections; it does not author
+  graph state.
 - `crates/framer-app/src/app/component_visibility.rs`: `ComponentKey` demonstrates the need for
   stable authored/generated identity, but remains app-only presentation state and is not the
   cross-crate semantic reference type.
 - `crates/framer-core/src/library.rs` and `crates/framer-library`: reusable content is selector-
-  scoped and vendor-on-use. General intent-policy distribution is not part of the first project
-  assertion schema; existing `StandardsPack` is the reusable quantitative-policy path.
+  scoped and vendor-on-use. `framer-analysis` consumes current starter-library lifecycle issues so
+  they participate in the same plan/graph generation. General intent-policy distribution is not
+  part of the first project assertion schema; existing `StandardsPack` is the reusable
+  quantitative-policy path.
 
 ### Proposed data shape
 
@@ -420,14 +498,19 @@ assertions. Objective and assumption result shapes exist in the compiled protoco
 authored schema waits for a later end-to-end ranking or premise-consumption feature. Unsupported
 domain/mode/expression combinations fail validation rather than becoming inert data.
 
-The compiled graph owns a project-wide `ProjectNodeRef` capable of addressing authored entities,
-revision-scoped generated members/bodies, rules, assertions, facts, and diagnostics without making
-lower crates depend on app types. Core-owned authored reference and assertion types remain
-independent of solver or geometry types; a higher UI-free analysis layer may combine all node
-families. `GraphRevision` is a deterministic, disposable fingerprint of the canonical
-post-propagation authored model plus the fact/evaluator contract version. It is not the app's
-process-local `document_revision` and is never serialized; candidate application checks both the
-current graph fingerprint and the app revision before editing.
+Slice 1 implements the compiled graph as a project-wide `ProjectNodeRef` capable of addressing
+authored entities, revision-scoped generated members/bodies and room schedule/boundary consequences,
+rules, compliance entries, assertions, diagnostics, solver provenance, and explicit unknown evidence
+without making lower crates depend on app types. Core-owned authored reference and assertion-id types
+remain independent of solver or geometry types; `framer-analysis` combines all node families.
+`GraphRevision` is a deterministic, disposable BLAKE3 fingerprint over domain separation,
+`GRAPH_CONTRACT_VERSION`, a length-delimited deterministic starter-library source input
+(`available` plus content hash, or `unavailable`), and the canonical post-propagation project bytes.
+It is not the app's process-local `document_revision` and is never serialized; future candidate
+application will also check current app revision before editing. `GraphBuilder::finish` separately
+validates that every edge's dependent and dependency nodes exist; a missed endpoint returns typed
+`GraphBuildError::MissingDependent` or `MissingDependency` through `AnalysisError::Graph` rather
+than panicking.
 
 ### Crate direction
 
@@ -438,23 +521,24 @@ current graph fingerprint and the app revision before editing.
   for both standards and project intent.
 - Other domain crates keep their specialized solving/evaluation responsibilities and emit
   structured evidence through adapters or shared lower-level types.
-- A UI-free top-level analysis/resolution layer may depend on core, solver, standards, and geometry
-  to compile the whole graph and produce cross-domain queries/options. It must not create a cycle
-  by becoming a dependency of those lower crates.
-- `framer-app` consumes the compiled graph for inspector, diagnostic, impact, and option UI and
-  remains the sole owner of interactive mutation/history.
+- The UI-free top-level `framer-analysis` crate depends on core, library, solver, standards, and
+  geometry to compile the whole graph and produce cross-domain queries. Later slices may add
+  outcomes and options there. No lower crate depends on it.
+- `framer-app` consumes the compiled graph for the current read-only inspector and remains the sole
+  owner of interactive mutation/history. Later diagnostic, status, and option UI must preserve that
+  direction.
 
 ## Constraints & invariants
 
 - Authored intent remains the only persisted project truth; all graph projections, outcomes, and
   options are regenerated.
-- Same `.framer` plus evaluator versions produces identical graph ordering, outcomes, evidence,
-  options, and ranking.
+- Same `.framer`, starter-library availability/content hash, and evaluator/graph-contract versions
+  produce identical graph ordering, outcomes, evidence, options, and ranking.
 - Persisted data is `Eq`, float-free, ID-sorted where order is not semantic, and agent-readable.
 - Semantic lists such as standards stacks, construction layers, priority tiers, and predicate
   children retain documented stable order and are never accidentally canonicalized by sorting.
-- `framer-core`, `framer-solver`, `framer-standards`, `framer-geometry`, and any new analysis layer
-  remain UI-free.
+- `framer-core`, `framer-library`, `framer-solver`, `framer-standards`, `framer-geometry`, and
+  `framer-analysis` remain UI-free.
 - Schema changes follow the complete project-file ritual: version bump, checked examples,
   round-trip and explicit old-schema rejection tests, `project-files.md`, architecture/code map,
   and this spec.
@@ -484,12 +568,8 @@ current graph fingerprint and the app revision before editing.
 
 ## Open questions
 
-- What is the smallest core-owned typed authored reference enum that avoids repeating app
-  selection enums without coupling core to generated member kinds?
 - Which deterministic preference tiers ship first: `Strong/Medium/Weak`, or one `Preferred` tier
   widened only after a real conflict needs it? `Requirement` remains a mode, not a preference tier.
-- What should the higher UI-free orchestration crate be called (`framer-analysis`,
-  `framer-resolution`, or another name)? Lock the boundary before naming the crate.
 - After the project assertion/evaluator contract is proven, should reusable non-compliance policy
   remain an expanded `StandardsPack` capability or become a separate selector-only intent-policy
   library item? Either way, `.framerlib` policy must not contain project `ElementId` references.

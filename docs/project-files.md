@@ -6,9 +6,10 @@ and edit authored design intent without reverse-engineering an opaque binary
 container.
 
 The v13 format stores only the canonical intent model. Generated framing plans,
-cached viewport data, drawings, BOM exports, and other disposable artifacts are
-regenerated from the authored model and must not be written into the canonical
-file.
+the revision-bound project analysis graph and its query cache, typed room
+schedule/boundary consequences, current library-lifecycle status, cached viewport
+data, drawings, BOM exports, and other disposable artifacts are regenerated from
+the authored model and must not be written into the canonical file.
 
 This matches Framer's Design Mode / Plan Mode split. Design Mode writes the
 authored model saved here. Plan Mode regenerates framing layouts, diagnostics,
@@ -61,7 +62,8 @@ for the single-wall example.
 - `schema_version` must be `13` when saving from the current app.
 - `authored` contains the user-authored semantic model.
 - Unknown top-level keys are rejected (`deny_unknown_fields`). Do not add
-  `generated`, `cache`, `exports`, or presentation data to project files.
+  `generated`, `analysis`, `graph`, `cache`, `exports`, or presentation data to
+  project files.
 - `site` stores jurisdiction and environmental inputs used by standards checks.
 - `standards` is the ordered standards-pack stack. `standards_packs` embeds the
   self-contained pack definitions referenced by that stack. New projects seed
@@ -633,7 +635,12 @@ Framer canonicalizes project files before saving:
 - A material's `properties` map is ordered (a `BTreeMap`), so property insertion
   order does not affect output.
 - JSON is pretty-printed with a trailing newline.
-- Generated framing is deterministic output and is not saved.
+- Generated framing, room schedule/boundary consequence nodes, library-lifecycle
+  status, and the derived project graph are deterministic output and are not
+  saved. `GraphRevision` fingerprints the analysis contract version, a
+  length-delimited deterministic starter-library source input (availability plus
+  content hash when available), and canonical project bytes; it is a
+  cache/evidence boundary, not project data.
 
 This keeps `.framer` files stable for Git diffs, code review, and agent edits. The
 three checked-in `examples/projects/*.framer` files are verified byte-for-byte
@@ -649,7 +656,8 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 3. Preserve `format` and `schema_version` (`13`). The build is v13-only; do not
    hand-write a different version.
 4. Preserve existing stable IDs.
-5. Keep authored intent separate from generated framing, cached view data,
+5. Keep authored intent separate from generated framing, room consequences,
+   library-lifecycle status, analysis graphs and query caches, cached view data,
    drawings, BOM exports, and UI state.
 6. Use exact tick values for dimensions and thicknesses.
 7. Apply construction and object families by *reference*: point a wall's `system`
@@ -703,7 +711,9 @@ Use:
   and the `Dimension` tool in the wall view to create driving or reference dimensions.
 - `Plan` to inspect generated framing, diagnostics, BOM rows (including the
   fastening and per-layer material takeoffs), read-only authored summaries, and
-  selectable generated members.
+  selectable generated members. The inspector's read-only **Intent relationships**
+  section explains current dependencies and possible impact from the disposable
+  graph; it does not edit or persist relationships.
 - `Export` in Plan Mode to write disposable sidecar artifacts next to the project
   path: `<project>.svg` for the shell plan plus wall elevations, `<project>.csv`
   for the grouped whole-project BOM/cut list plus fastener takeoff section, and
