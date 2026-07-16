@@ -4,10 +4,10 @@
 > [docs/specs/intent-model-and-resolution.md](../specs/intent-model-and-resolution.md). This file
 > is an archival record of how the work was sequenced; the spec is the durable source of truth.
 >
-> **Status:** In progress; Slice 1 implementation and verification are complete
-> on its delivery branch, with draft-PR review/merge pending. Work started from
-> `origin/main` at `cf8f2e0` on 2026-07-15. Slices 2-4 remain proposed and have
-> not started.
+> **Status:** In progress; Slice 1 merged in PR #129. Slice 2 is under review in
+> PR #130; review fixes are implemented and locally verified, with latest-head
+> CI/merge pending. Work started from `origin/main` at `cf8f2e0` on
+> 2026-07-15. Slices 3-4 remain proposed and have not started.
 
 ## Goal
 
@@ -195,8 +195,8 @@ Verification evidence recorded on 2026-07-15:
 - The release-mode 40-sample probe measured rebuild median 3.266 ms / p95 5.054 ms, first-query
   median 21.458 us / p95 34.375 us, and cached-query median 1.334 us / p95 2.000 us.
 
-Slice 1's implementation exit criteria are satisfied on its delivery branch; draft-PR review and
-merge remain before Slice 2 starts. Slices 2-4 remain proposed/not started.
+Slice 1's implementation exit criteria were satisfied and merged in PR #129 before Slice 2
+started. Slices 3-4 remain proposed/not started.
 
 **Slice 1 exit criteria:** A current v13 project opens byte-identically; its plan/report/audit and
 existing library-lifecycle diagnostic behavior are unchanged; and graph queries can explain at
@@ -272,6 +272,64 @@ schema change.
   - Verify: status groups include unknown and waived; empty/no-evaluator states are honest;
     `scripts/ui-shots.sh`.
   - Commit: `feat(app): show intent status and impact`
+
+#### Slice 2 implementation checklist
+
+- [x] Add a closed, non-persisted `IntentReport` protocol with type-disjoint
+  boolean, objective, and assumption records; typed domains, participants,
+  sources, scopes, unknown reasons, waivers, and revision-bound evidence.
+- [x] Normalize current driving dimensions, explicit construction choices, site
+  premises, standards checks, non-standards diagnostics, and geometry findings
+  without adding a persisted `BuildingModel` field.
+- [x] Make `framer-standards::FactSnapshot` the sole fact measurement and
+  predicate-evaluation path; preserve the frozen `ComplianceReport`, CSV, and
+  compatibility diagnostic behavior while adding structured detailed evidence.
+- [x] Retain winning waived check definitions and exact scoped waiver provenance;
+  reject opening tag selectors that cannot match authored openings instead of
+  silently evaluating an empty scope.
+- [x] Lower actionable results into `ProjectFramePlan::diagnostics` exactly once
+  through provider-specific semantics. Preserve and recover exact compliance,
+  plan-diagnostic, and geometry witness payloads with stale-revision rejection.
+- [x] Compile typed assertion/evidence relationships after all evidence families;
+  unresolved assertion, compliance-entry, and diagnostic evidence becomes exact
+  `UnknownEvidence` nodes rather than disappearing.
+- [x] Add cached filtered impact projection and typed site-premise evidence while
+  preserving directional generated-member explanation queries.
+- [x] Treat an explicit standards `RuleRef` as authoritative over diagnostic-code
+  namespace fallbacks, and materialize absent standards-referenced site flags as
+  one typed unavailable premise so their evidence never becomes a dangling graph
+  reference.
+- [x] Replace the inspector's relationship-only block with one read-only **Intent**
+  section: domain/outcome-grouped current status, authored potential impact and
+  dependencies, generated **Why generated**, and honest empty, stale, solver,
+  intent, graph, no-selection, and multi-selection states.
+- [x] Keep geometry diagnostics owned by the structured geometry audit in the app
+  while exposing the same actionable rows through the common protocol, avoiding
+  duplicate counts and list rows.
+- [x] Keep schema v13 and all checked example project bytes unchanged; run focused
+  parity/evidence tests, strict full-workspace gates, and visual review.
+
+Verification evidence recorded on 2026-07-15 and refreshed on 2026-07-16:
+
+- `cargo fmt --all -- --check`, strict all-target/all-feature workspace clippy,
+  and `cargo test --workspace --all-features --locked` passed. The locked suite
+  passed 1,049 tests with 3 manual/visual probes ignored, including all 8 GPU
+  parity tests and checked-example geometry audits.
+- Focused tests pin the frozen standards CSV and empty-member jack-stud behavior;
+  distinguish detailed unsupported facts from report-only needs-review; cover
+  every common standards/diagnostic mapping, including explicit rule provenance
+  before code-prefix fallbacks; recover duplicate geometry and plan diagnostic
+  payloads exactly; reject stale references; and prove typed site, absent
+  standards-referenced site-flag, and missing-evidence graph paths.
+- App harness coverage passed for mixed outcomes, assumptions, generated evidence,
+  unavailable/stale/empty states, graph-only failure, missing dynamic site
+  premises, and geometry diagnostic de-duplication. `scripts/ui-shots.sh`
+  rendered 57 frames; Intent frames 43-50
+  were visually reviewed for impact, generated provenance, compliance/geometry
+  evidence, all outcome groups, empty/no-selection states, and graph-only failure.
+- `python3 scripts/check-markdown-links.py` checked 389 local links with no
+  failures. `PROJECT_SCHEMA_VERSION` remains 13, `git diff 40ab043 -- examples`
+  is empty, and canonical example round-trip tests passed.
 
 **Slice 2 exit criteria:** Dimensions, construction selections, standards checks, and geometry
 issues are queryable through one assertion/outcome/evidence protocol; standards checks and

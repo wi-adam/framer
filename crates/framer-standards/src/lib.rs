@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use framer_core::{
     Applicability, BoardProfile, BracedPanel, BracedWallLine, BracingMethod, BracingRow,
-    BuildingModel, CheckScope, CheckSeverity, CompareOp, ElementId, Fact, FactOperand, HeaderRow,
-    Length, Opening, Predicate, PropertyValue, ResolutionAction, ResolvedRule, ResolvedStandards,
-    SiteContext, Wall, WallExposure,
+    BuildingModel, CheckScope, CheckSeverity, CompareOp, ComplianceCheck, ElementId, Fact,
+    FactOperand, FactSubjectKind, HeaderRow, Length, Opening, Predicate, PropertyValue,
+    ResolutionAction, ResolvedRule, ResolvedStandards, SiteContext, Wall, WallExposure,
 };
 use framer_solver::{
     DiagnosticSeverity, FrameMember, MemberKind, PlanDiagnostic, ProjectFramePlan, RuleRef,
@@ -55,18 +55,207 @@ pub enum FactValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EntityRef {
+pub enum FactSubject {
     Wall(ElementId),
     Opening(ElementId),
     Room(ElementId),
     BracedWallLine(ElementId),
 }
 
-impl EntityRef {
-    fn element(&self) -> &ElementId {
+impl FactSubject {
+    pub const fn subject_kind(&self) -> FactSubjectKind {
+        match self {
+            Self::Wall(_) => FactSubjectKind::Wall,
+            Self::Opening(_) => FactSubjectKind::Opening,
+            Self::Room(_) => FactSubjectKind::Room,
+            Self::BracedWallLine(_) => FactSubjectKind::BracedWallLine,
+        }
+    }
+
+    pub fn element(&self) -> &ElementId {
         match self {
             Self::Wall(id) | Self::Opening(id) | Self::Room(id) | Self::BracedWallLine(id) => id,
         }
+    }
+}
+
+/// Backwards-compatible name for the original standards evaluator subject.
+pub type EntityRef = FactSubject;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FactUnknownKind {
+    MissingInput,
+    UnresolvedSubject,
+    WrongSubjectKind,
+    UnsupportedCondition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactUnknown {
+    pub fact: Fact,
+    pub subject: FactSubject,
+    pub kind: FactUnknownKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactObservation {
+    Known(FactValue),
+    Unknown(FactUnknown),
+}
+
+impl FactObservation {
+    pub const fn known_value(&self) -> Option<FactValue> {
+        match self {
+            Self::Known(value) => Some(*value),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedFact {
+    pub fact: Fact,
+    pub observation: FactObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredicateObservation {
+    pub result: Tri,
+    pub observed_facts: Vec<ObservedFact>,
+}
+
+/// One immutable, revision-local view of all quantitative standards inputs.
+///
+/// Both standards checks and intent analysis use this concrete provider so a
+/// given fact/subject pair has one measurement implementation.
+#[derive(Debug, Clone, Copy)]
+pub struct FactSnapshot<'a> {
+    model: &'a BuildingModel,
+    resolved: &'a ResolvedStandards,
+    plan: &'a ProjectFramePlan,
+}
+
+impl<'a> FactSnapshot<'a> {
+    pub const fn new(
+        model: &'a BuildingModel,
+        resolved: &'a ResolvedStandards,
+        plan: &'a ProjectFramePlan,
+    ) -> Self {
+        Self {
+            model,
+            resolved,
+            plan,
+        }
+    }
+
+    pub fn subjects_for(&self, scope: &CheckScope) -> Vec<FactSubject> {
+        let mut subjects = scoped_entities(self.model, scope.clone());
+        subjects.sort();
+        subjects.dedup();
+        subjects
+    }
+
+    pub fn observe(&self, fact: Fact, subject: &FactSubject) -> FactObservation {
+        if fact.subject_kind() != subject.subject_kind() {
+            return self.unknown(fact, subject, FactUnknownKind::WrongSubjectKind);
+        }
+        if !self.subject_exists(subject) {
+            return self.unknown(fact, subject, FactUnknownKind::UnresolvedSubject);
+        }
+
+        match raw_fact_value(fact, subject, self.model, self.resolved, self.plan) {
+            Ok(value) => FactObservation::Known(value),
+            Err(kind) => self.unknown(fact, subject, kind),
+        }
+    }
+
+    pub fn evaluate_predicate(
+        &self,
+        predicate: &Predicate,
+        subject: &FactSubject,
+    ) -> PredicateObservation {
+        let mut observed = BTreeMap::new();
+        let result = self.predicate_result(predicate, subject, &mut observed);
+        PredicateObservation {
+            result,
+            observed_facts: observed
+                .into_iter()
+                .map(|(fact, observation)| ObservedFact { fact, observation })
+                .collect(),
+        }
+    }
+
+    fn predicate_result(
+        &self,
+        predicate: &Predicate,
+        subject: &FactSubject,
+        observed: &mut BTreeMap<Fact, FactObservation>,
+    ) -> Tri {
+        match predicate {
+            Predicate::All(children) => Tri::all(
+                children
+                    .iter()
+                    .map(|child| self.predicate_result(child, subject, observed)),
+            ),
+            Predicate::Any(children) => Tri::any(
+                children
+                    .iter()
+                    .map(|child| self.predicate_result(child, subject, observed)),
+            ),
+            Predicate::Not(child) => self.predicate_result(child, subject, observed).not(),
+            Predicate::Compare { fact, op, value } => {
+                let Some(left) = self.observed_value(*fact, subject, observed) else {
+                    return Tri::Unknown;
+                };
+                let Some(right) = self.operand_value(value, subject, observed) else {
+                    return Tri::Unknown;
+                };
+                compare_fact_values(left, *op, right)
+            }
+        }
+    }
+
+    fn operand_value(
+        &self,
+        operand: &FactOperand,
+        subject: &FactSubject,
+        observed: &mut BTreeMap<Fact, FactObservation>,
+    ) -> Option<FactValue> {
+        match operand {
+            FactOperand::LengthLiteral(length) => Some(FactValue::Length(*length)),
+            FactOperand::IntLiteral(value) => Some(FactValue::Int(*value)),
+            FactOperand::FlagLiteral(value) => Some(FactValue::Flag(*value)),
+            FactOperand::Fact(fact) => self.observed_value(*fact, subject, observed),
+        }
+    }
+
+    fn observed_value(
+        &self,
+        fact: Fact,
+        subject: &FactSubject,
+        observed: &mut BTreeMap<Fact, FactObservation>,
+    ) -> Option<FactValue> {
+        observed
+            .entry(fact)
+            .or_insert_with(|| self.observe(fact, subject))
+            .known_value()
+    }
+
+    fn subject_exists(&self, subject: &FactSubject) -> bool {
+        match subject {
+            FactSubject::Wall(id) => find_wall(self.model, id).is_some(),
+            FactSubject::Opening(id) => find_opening(self.model, id).is_some(),
+            FactSubject::Room(id) => self.model.rooms.iter().any(|room| room.id == *id),
+            FactSubject::BracedWallLine(id) => find_braced_line(self.model, id).is_some(),
+        }
+    }
+
+    fn unknown(&self, fact: Fact, subject: &FactSubject, kind: FactUnknownKind) -> FactObservation {
+        FactObservation::Unknown(FactUnknown {
+            fact,
+            subject: subject.clone(),
+            kind,
+        })
     }
 }
 
@@ -144,57 +333,273 @@ impl ComplianceReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SyntheticEntryKind {
+    UnassociatedBracingPanel,
+    BracingOutOfDomain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveWaiver {
+    pub reason: String,
+    pub overlay_pack: ElementId,
+    pub chain: Vec<(ElementId, ResolutionAction)>,
+}
+
+/// Evidence for one logical subject behind a compliance report entry.
+///
+/// `report_entry_index` indexes `StandardsEvaluation::report.entries`. Several
+/// details may intentionally point at the same legacy subjectless entry (most
+/// notably a scoped waived rule).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandardsEvaluationDetail {
+    pub report_entry_index: usize,
+    pub check_id: Option<String>,
+    pub definition_pack: Option<ElementId>,
+    pub check_definition: Option<ComplianceCheck>,
+    pub severity: Option<CheckSeverity>,
+    pub subject: Option<FactSubject>,
+    pub scope_subjects: Vec<FactSubject>,
+    pub applicability: Option<Tri>,
+    pub predicate: Option<PredicateObservation>,
+    pub synthetic_kind: Option<SyntheticEntryKind>,
+    pub effective_waiver: Option<EffectiveWaiver>,
+}
+
+impl StandardsEvaluationDetail {
+    pub fn is_unsupported(&self) -> bool {
+        self.synthetic_kind == Some(SyntheticEntryKind::BracingOutOfDomain)
+            || self.predicate.as_ref().is_some_and(|predicate| {
+                predicate.observed_facts.iter().any(|observed| {
+                    matches!(
+                        &observed.observation,
+                        FactObservation::Unknown(unknown)
+                            if unknown.kind == FactUnknownKind::UnsupportedCondition
+                    )
+                })
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StandardsEvaluation {
+    pub report: ComplianceReport,
+    pub details: Vec<StandardsEvaluationDetail>,
+}
+
+impl StandardsEvaluation {
+    /// Lower the detailed evaluation through the canonical application diagnostics matrix.
+    /// Detail is required to distinguish a missing fact from an unsupported fact without
+    /// changing the frozen `ComplianceReport` payload.
+    pub fn diagnostics(&self) -> Vec<PlanDiagnostic> {
+        self.report
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let severity = match entry.outcome {
+                    Outcome::Violation => DiagnosticSeverity::Violation,
+                    Outcome::Advisory => DiagnosticSeverity::Warning,
+                    Outcome::NeedsReview => {
+                        if self
+                            .details
+                            .iter()
+                            .filter(|detail| detail.report_entry_index == index)
+                            .any(StandardsEvaluationDetail::is_unsupported)
+                        {
+                            DiagnosticSeverity::Unsupported
+                        } else {
+                            DiagnosticSeverity::NeedsReview
+                        }
+                    }
+                    Outcome::Pass | Outcome::NotApplicable | Outcome::Waived { .. } => {
+                        return None;
+                    }
+                };
+                Some(PlanDiagnostic {
+                    severity,
+                    code: entry.rule.clone(),
+                    source: entry.element.clone(),
+                    message: entry.message.clone(),
+                    rule: Some(RuleRef {
+                        pack: entry.pack.clone(),
+                        rule: entry.rule.clone(),
+                        citation: entry.citation.clone(),
+                    }),
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct PendingEvaluationEntry {
+    report: ComplianceEntry,
+    details: Vec<StandardsEvaluationDetail>,
+}
+
 pub fn evaluate(
     model: &BuildingModel,
     resolved: &ResolvedStandards,
     plan: &ProjectFramePlan,
 ) -> ComplianceReport {
+    evaluate_detailed(model, resolved, plan).report
+}
+
+pub fn evaluate_detailed(
+    model: &BuildingModel,
+    resolved: &ResolvedStandards,
+    plan: &ProjectFramePlan,
+) -> StandardsEvaluation {
+    let snapshot = FactSnapshot::new(model, resolved, plan);
     let active_checks = resolved
         .checks
         .iter()
         .map(|(pack, check)| (check.rule.as_str(), (pack, check)))
         .collect::<BTreeMap<_, _>>();
-    let mut entries = Vec::new();
-    entries.extend(bracing_diagnostic_entries(model, resolved));
+    let mut check_definitions = active_checks.clone();
+    for (pack, check) in &resolved.check_definitions {
+        check_definitions.insert(check.rule.as_str(), (pack, check));
+    }
+    let mut pending = bracing_diagnostic_entries(model, resolved)
+        .into_iter()
+        .map(|report| {
+            let (synthetic_kind, subject) = match report.rule.as_str() {
+                BRACING_UNASSOCIATED_PANEL => {
+                    (Some(SyntheticEntryKind::UnassociatedBracingPanel), None)
+                }
+                BRACING_OUT_OF_DOMAIN => (
+                    Some(SyntheticEntryKind::BracingOutOfDomain),
+                    report.element.clone().map(FactSubject::BracedWallLine),
+                ),
+                _ => (None, None),
+            };
+            let scope_subjects = subject.iter().cloned().collect();
+            PendingEvaluationEntry {
+                report,
+                details: vec![StandardsEvaluationDetail {
+                    report_entry_index: 0,
+                    check_id: None,
+                    definition_pack: None,
+                    check_definition: None,
+                    severity: None,
+                    subject,
+                    scope_subjects,
+                    applicability: None,
+                    predicate: None,
+                    synthetic_kind,
+                    effective_waiver: None,
+                }],
+            }
+        })
+        .collect::<Vec<_>>();
 
     for rule in resolved.rules.iter().filter(|rule| rule.severity.is_some()) {
         if let Some(reason) = &rule.waived {
-            entries.push(entry(
-                rule,
-                Outcome::Waived {
-                    reason: reason.clone(),
-                },
-                None,
-                format!("Waived: {reason}"),
-            ));
+            let definition = check_definitions.get(rule.rule.as_str()).copied();
+            let scope_subjects = definition
+                .map(|(_, check)| snapshot.subjects_for(&check.scope))
+                .unwrap_or_default();
+            let applicability_observation =
+                definition.map(|(_, check)| applicability(check.applies.clone(), &model.site));
+            let effective_waiver = effective_waiver(rule);
+            let detail_subjects = optional_subjects(&scope_subjects);
+            let details = detail_subjects
+                .into_iter()
+                .map(|subject| StandardsEvaluationDetail {
+                    report_entry_index: 0,
+                    check_id: definition.map(|(_, check)| check.rule.clone()),
+                    definition_pack: definition.map(|(pack, _)| pack.clone()),
+                    check_definition: definition.map(|(_, check)| check.clone()),
+                    severity: rule.severity,
+                    predicate: match (definition, applicability_observation, &subject) {
+                        (Some((_, check)), Some(Tri::True), Some(subject)) => {
+                            Some(snapshot.evaluate_predicate(&check.requirement, subject))
+                        }
+                        _ => None,
+                    },
+                    subject,
+                    scope_subjects: scope_subjects.clone(),
+                    applicability: applicability_observation,
+                    synthetic_kind: None,
+                    effective_waiver: effective_waiver.clone(),
+                })
+                .collect();
+            pending.push(PendingEvaluationEntry {
+                report: entry(
+                    rule,
+                    Outcome::Waived {
+                        reason: reason.clone(),
+                    },
+                    None,
+                    format!("Waived: {reason}"),
+                ),
+                details,
+            });
             continue;
         }
 
         let Some((_, check)) = active_checks.get(rule.rule.as_str()) else {
             continue;
         };
+        let definition = check_definitions
+            .get(rule.rule.as_str())
+            .copied()
+            .unwrap_or_else(|| active_checks[rule.rule.as_str()]);
+        let scope_subjects = snapshot.subjects_for(&check.scope);
+        let applicability_observation = applicability(check.applies.clone(), &model.site);
 
-        match applicability(check.applies.clone(), &model.site) {
+        match applicability_observation {
             Tri::False => {
-                entries.push(entry(
-                    rule,
-                    Outcome::NotApplicable,
-                    None,
-                    format!("{} is not applicable for this site context.", check.title),
-                ));
+                pending.push(PendingEvaluationEntry {
+                    report: entry(
+                        rule,
+                        Outcome::NotApplicable,
+                        None,
+                        format!("{} is not applicable for this site context.", check.title),
+                    ),
+                    details: optional_subjects(&scope_subjects)
+                        .into_iter()
+                        .map(|subject| {
+                            check_detail(
+                                definition,
+                                rule,
+                                subject,
+                                scope_subjects.clone(),
+                                applicability_observation,
+                                None,
+                            )
+                        })
+                        .collect(),
+                });
             }
             Tri::Unknown => {
-                entries.push(entry(
-                    rule,
-                    Outcome::NeedsReview,
-                    None,
-                    format!("{} applicability needs review.", check.title),
-                ));
+                pending.push(PendingEvaluationEntry {
+                    report: entry(
+                        rule,
+                        Outcome::NeedsReview,
+                        None,
+                        format!("{} applicability needs review.", check.title),
+                    ),
+                    details: optional_subjects(&scope_subjects)
+                        .into_iter()
+                        .map(|subject| {
+                            check_detail(
+                                definition,
+                                rule,
+                                subject,
+                                scope_subjects.clone(),
+                                applicability_observation,
+                                None,
+                            )
+                        })
+                        .collect(),
+                });
             }
             Tri::True => {
-                for entity in scoped_entities(model, check.scope.clone()) {
-                    let tri = predicate_value(&check.requirement, &entity, model, resolved, plan);
-                    let outcome = match tri {
+                for subject in &scope_subjects {
+                    let predicate = snapshot.evaluate_predicate(&check.requirement, subject);
+                    let outcome = match predicate.result {
                         Tri::True => Outcome::Pass,
                         Tri::False => match check.severity {
                             CheckSeverity::Required => Outcome::Violation,
@@ -202,25 +607,97 @@ pub fn evaluate(
                         },
                         Tri::Unknown => Outcome::NeedsReview,
                     };
-                    entries.push(entry(
-                        rule,
-                        outcome.clone(),
-                        Some(entity.element().clone()),
-                        outcome_message(&check.title, &outcome),
-                    ));
+                    pending.push(PendingEvaluationEntry {
+                        report: entry(
+                            rule,
+                            outcome.clone(),
+                            Some(subject.element().clone()),
+                            outcome_message(&check.title, &outcome),
+                        ),
+                        details: vec![check_detail(
+                            definition,
+                            rule,
+                            Some(subject.clone()),
+                            scope_subjects.clone(),
+                            applicability_observation,
+                            Some(predicate),
+                        )],
+                    });
                 }
             }
         }
     }
 
-    entries.sort_by(|left, right| {
-        left.rule
-            .cmp(&right.rule)
-            .then_with(|| left.element.cmp(&right.element))
+    pending.sort_by(|left, right| {
+        left.report
+            .rule
+            .cmp(&right.report.rule)
+            .then_with(|| left.report.element.cmp(&right.report.element))
     });
-    ComplianceReport { entries }
+    let mut report = ComplianceReport::default();
+    let mut details = Vec::new();
+    for (report_entry_index, mut pending_entry) in pending.into_iter().enumerate() {
+        pending_entry
+            .details
+            .sort_by(|left, right| left.subject.cmp(&right.subject));
+        for detail in &mut pending_entry.details {
+            detail.report_entry_index = report_entry_index;
+        }
+        report.entries.push(pending_entry.report);
+        details.extend(pending_entry.details);
+    }
+    StandardsEvaluation { report, details }
 }
 
+fn optional_subjects(subjects: &[FactSubject]) -> Vec<Option<FactSubject>> {
+    if subjects.is_empty() {
+        vec![None]
+    } else {
+        subjects.iter().cloned().map(Some).collect()
+    }
+}
+
+fn check_detail(
+    definition: (&ElementId, &ComplianceCheck),
+    rule: &ResolvedRule,
+    subject: Option<FactSubject>,
+    scope_subjects: Vec<FactSubject>,
+    applicability: Tri,
+    predicate: Option<PredicateObservation>,
+) -> StandardsEvaluationDetail {
+    StandardsEvaluationDetail {
+        report_entry_index: 0,
+        check_id: Some(definition.1.rule.clone()),
+        definition_pack: Some(definition.0.clone()),
+        check_definition: Some(definition.1.clone()),
+        severity: rule.severity,
+        subject,
+        scope_subjects,
+        applicability: Some(applicability),
+        predicate,
+        synthetic_kind: None,
+        effective_waiver: None,
+    }
+}
+
+fn effective_waiver(rule: &ResolvedRule) -> Option<EffectiveWaiver> {
+    let reason = rule.waived.clone()?;
+    let overlay_pack =
+        rule.chain.iter().rev().find_map(|(pack, action)| {
+            (*action == ResolutionAction::Waived).then(|| pack.clone())
+        })?;
+    Some(EffectiveWaiver {
+        reason,
+        overlay_pack,
+        chain: rule.chain.clone(),
+    })
+}
+
+/// Compatibility lowering for callers that retain only the frozen v1 report.
+///
+/// Prefer [`StandardsEvaluation::diagnostics`] when detailed evaluation is available; the report
+/// alone cannot distinguish missing facts from unsupported facts except for legacy synthetic
+/// bracing entries.
 pub fn diagnostics(report: &ComplianceReport) -> Vec<PlanDiagnostic> {
     report
         .entries
@@ -257,94 +734,127 @@ pub fn fact_value(
     resolved: &ResolvedStandards,
     plan: &ProjectFramePlan,
 ) -> Option<FactValue> {
+    FactSnapshot::new(model, resolved, plan)
+        .observe(fact, entity)
+        .known_value()
+}
+
+fn raw_fact_value(
+    fact: Fact,
+    entity: &FactSubject,
+    model: &BuildingModel,
+    resolved: &ResolvedStandards,
+    plan: &ProjectFramePlan,
+) -> Result<FactValue, FactUnknownKind> {
+    use FactUnknownKind::{MissingInput, UnsupportedCondition, WrongSubjectKind};
+
     match (fact, entity) {
-        (Fact::WallLength, EntityRef::Wall(wall)) => {
-            Some(FactValue::Length(find_wall(model, wall)?.length))
-        }
-        (Fact::WallHeight, EntityRef::Wall(wall)) => {
-            Some(FactValue::Length(find_wall(model, wall)?.height))
-        }
+        (Fact::WallLength, EntityRef::Wall(wall)) => Ok(FactValue::Length(
+            find_wall(model, wall).ok_or(MissingInput)?.length,
+        )),
+        (Fact::WallHeight, EntityRef::Wall(wall)) => Ok(FactValue::Length(
+            find_wall(model, wall).ok_or(MissingInput)?.height,
+        )),
         (Fact::WallIsExterior, EntityRef::Wall(wall)) => {
-            let wall = find_wall(model, wall)?;
-            let system = model.system_for(wall)?;
-            Some(FactValue::Flag(system.exposure() == WallExposure::Exterior))
+            let wall = find_wall(model, wall).ok_or(MissingInput)?;
+            let system = model.system_for(wall).ok_or(MissingInput)?;
+            Ok(FactValue::Flag(system.exposure() == WallExposure::Exterior))
         }
         (Fact::WallStudSpacing, EntityRef::Wall(wall)) => {
-            let wall = find_wall(model, wall)?;
-            let system = model.system_for(wall)?;
-            Some(FactValue::Length(
-                system.framing_layer()?.framing.as_ref()?.spacing,
+            let wall = find_wall(model, wall).ok_or(MissingInput)?;
+            let system = model.system_for(wall).ok_or(MissingInput)?;
+            Ok(FactValue::Length(
+                system
+                    .framing_layer()
+                    .and_then(|layer| layer.framing.as_ref())
+                    .ok_or(MissingInput)?
+                    .spacing,
             ))
         }
         (Fact::WallSystemRValueMilli, EntityRef::Wall(wall)) => {
-            let wall = find_wall(model, wall)?;
-            let system = model.system_for(wall)?;
-            Some(FactValue::Int(system.r_value_milli(&model.materials)))
+            let wall = find_wall(model, wall).ok_or(MissingInput)?;
+            let system = model.system_for(wall).ok_or(MissingInput)?;
+            Ok(FactValue::Int(system.r_value_milli(&model.materials)))
         }
         (Fact::WallStudMaxHeight, EntityRef::Wall(wall)) => {
-            let wall = find_wall(model, wall)?;
-            Some(FactValue::Length(wall_stud_max_height(
-                wall.id.clone(),
-                model,
-                resolved,
-            )?))
+            let wall = find_wall(model, wall).ok_or(MissingInput)?;
+            Ok(FactValue::Length(
+                wall_stud_max_height(wall.id.clone(), model, resolved)
+                    .ok_or(UnsupportedCondition)?,
+            ))
         }
-        (Fact::OpeningRoughWidth, EntityRef::Opening(opening)) => {
-            Some(FactValue::Length(find_opening(model, opening)?.1.width))
-        }
-        (Fact::OpeningRoughHeight, EntityRef::Opening(opening)) => {
-            Some(FactValue::Length(find_opening(model, opening)?.1.height))
-        }
+        (Fact::OpeningRoughWidth, EntityRef::Opening(opening)) => Ok(FactValue::Length(
+            find_opening(model, opening).ok_or(MissingInput)?.1.width,
+        )),
+        (Fact::OpeningRoughHeight, EntityRef::Opening(opening)) => Ok(FactValue::Length(
+            find_opening(model, opening).ok_or(MissingInput)?.1.height,
+        )),
         (Fact::OpeningHeaderDepth, EntityRef::Opening(opening)) => {
-            let header = opening_headers(plan, opening).into_iter().next()?;
-            Some(FactValue::Length(header.cross_section_depth))
+            let header = opening_headers(plan, opening)
+                .into_iter()
+                .next()
+                .ok_or(MissingInput)?;
+            Ok(FactValue::Length(header.cross_section_depth))
         }
         (Fact::OpeningJackStuds, EntityRef::Opening(opening)) => {
-            let count = opening_members(plan, opening)
+            let members = opening_members(plan, opening);
+            let count = members
                 .into_iter()
                 .filter(|member| member.kind == MemberKind::JackStud)
                 .count()
                 / 2;
-            i64::try_from(count).ok().map(FactValue::Int)
+            i64::try_from(count)
+                .map(FactValue::Int)
+                .map_err(|_| UnsupportedCondition)
         }
         (Fact::OpeningHeaderMaxSpan, EntityRef::Opening(opening)) => {
-            let (_, opening_model) = find_opening(model, opening)?;
-            Some(FactValue::Length(opening_header_max_span(
-                opening_model,
-                opening,
-                model,
-                resolved,
-                plan,
-            )?))
+            let (_, opening_model) = find_opening(model, opening).ok_or(MissingInput)?;
+            if opening_headers(plan, opening).is_empty() {
+                return Err(MissingInput);
+            }
+            Ok(FactValue::Length(
+                opening_header_max_span(opening_model, opening, model, resolved, plan)
+                    .ok_or(UnsupportedCondition)?,
+            ))
         }
         (Fact::RoomAreaSquareInches, EntityRef::Room(room)) => plan
             .rooms
             .iter()
             .find(|schedule| schedule.room == *room)
-            .map(|schedule| FactValue::Int(schedule.area_square_inches)),
+            .map(|schedule| FactValue::Int(schedule.area_square_inches))
+            .ok_or(MissingInput),
         (Fact::RoomCeilingHeight, EntityRef::Room(room)) => {
-            let room = model.rooms.iter().find(|candidate| candidate.id == *room)?;
+            let room = model
+                .rooms
+                .iter()
+                .find(|candidate| candidate.id == *room)
+                .ok_or(MissingInput)?;
             let level = model
                 .levels
                 .iter()
-                .find(|candidate| candidate.id == room.level)?;
-            (level.height > Length::ZERO).then_some(FactValue::Length(level.height))
+                .find(|candidate| candidate.id == room.level)
+                .ok_or(MissingInput)?;
+            (level.height > Length::ZERO)
+                .then_some(FactValue::Length(level.height))
+                .ok_or(MissingInput)
         }
-        (Fact::BracedLineLength, EntityRef::BracedWallLine(line)) => Some(FactValue::Length(
-            braced_line_length(find_braced_line(model, line)?)?,
+        (Fact::BracedLineLength, EntityRef::BracedWallLine(line)) => Ok(FactValue::Length(
+            braced_line_length(find_braced_line(model, line).ok_or(MissingInput)?)
+                .ok_or(UnsupportedCondition)?,
         )),
         (Fact::BracedLineProvidedLength, EntityRef::BracedWallLine(line)) => {
-            let line = find_braced_line(model, line)?;
-            Some(FactValue::Length(braced_line_provided_length(model, line)))
+            let line = find_braced_line(model, line).ok_or(MissingInput)?;
+            Ok(FactValue::Length(braced_line_provided_length(model, line)))
         }
         (Fact::BracedLineRequiredLength, EntityRef::BracedWallLine(line)) => {
-            let line = find_braced_line(model, line)?;
+            let line = find_braced_line(model, line).ok_or(MissingInput)?;
             match braced_line_required_length(line, model, resolved) {
-                BracingRequirement::Known(length) => Some(FactValue::Length(length)),
-                BracingRequirement::Unknown | BracingRequirement::OutOfDomain => None,
+                BracingRequirement::Known(length) => Ok(FactValue::Length(length)),
+                BracingRequirement::Unknown => Err(MissingInput),
+                BracingRequirement::OutOfDomain => Err(UnsupportedCondition),
             }
         }
-        _ => None,
+        _ => Err(WrongSubjectKind),
     }
 }
 
@@ -512,52 +1022,6 @@ fn applicability(applies: Applicability, site: &SiteContext) -> Tri {
             Some(PropertyValue::Flag(value)) => Tri::from(*value),
             Some(_) | None => Tri::Unknown,
         },
-    }
-}
-
-fn predicate_value(
-    predicate: &Predicate,
-    entity: &EntityRef,
-    model: &BuildingModel,
-    resolved: &ResolvedStandards,
-    plan: &ProjectFramePlan,
-) -> Tri {
-    match predicate {
-        Predicate::All(children) => Tri::all(
-            children
-                .iter()
-                .map(|child| predicate_value(child, entity, model, resolved, plan)),
-        ),
-        Predicate::Any(children) => Tri::any(
-            children
-                .iter()
-                .map(|child| predicate_value(child, entity, model, resolved, plan)),
-        ),
-        Predicate::Not(child) => predicate_value(child, entity, model, resolved, plan).not(),
-        Predicate::Compare { fact, op, value } => {
-            let Some(left) = fact_value(*fact, entity, model, resolved, plan) else {
-                return Tri::Unknown;
-            };
-            let Some(right) = operand_value(value, entity, model, resolved, plan) else {
-                return Tri::Unknown;
-            };
-            compare_fact_values(left, *op, right)
-        }
-    }
-}
-
-fn operand_value(
-    value: &FactOperand,
-    entity: &EntityRef,
-    model: &BuildingModel,
-    resolved: &ResolvedStandards,
-    plan: &ProjectFramePlan,
-) -> Option<FactValue> {
-    match value {
-        FactOperand::LengthLiteral(length) => Some(FactValue::Length(*length)),
-        FactOperand::IntLiteral(value) => Some(FactValue::Int(*value)),
-        FactOperand::FlagLiteral(value) => Some(FactValue::Flag(*value)),
-        FactOperand::Fact(fact) => fact_value(*fact, entity, model, resolved, plan),
     }
 }
 
@@ -950,6 +1414,220 @@ mod tests {
     }
 
     #[test]
+    fn fact_snapshot_observes_every_current_fact_and_matches_fact_value() {
+        let wall_model = BuildingModel::demo_wall();
+        let wall_resolved = wall_model.resolved_standards();
+        let wall_plan = generate_project_plan(&wall_model).unwrap();
+        let wall_snapshot = FactSnapshot::new(&wall_model, &wall_resolved, &wall_plan);
+        let wall = FactSubject::Wall(wall_model.walls[0].id.clone());
+        for fact in [
+            Fact::WallLength,
+            Fact::WallHeight,
+            Fact::WallIsExterior,
+            Fact::WallStudSpacing,
+            Fact::WallSystemRValueMilli,
+            Fact::WallStudMaxHeight,
+        ] {
+            assert_known_with_wrapper(
+                fact,
+                &wall,
+                &wall_snapshot,
+                &wall_model,
+                &wall_resolved,
+                &wall_plan,
+            );
+        }
+
+        let opening = FactSubject::Opening(wall_model.walls[0].openings[0].id.clone());
+        for fact in [
+            Fact::OpeningRoughWidth,
+            Fact::OpeningRoughHeight,
+            Fact::OpeningHeaderDepth,
+            Fact::OpeningJackStuds,
+            Fact::OpeningHeaderMaxSpan,
+        ] {
+            assert_known_with_wrapper(
+                fact,
+                &opening,
+                &wall_snapshot,
+                &wall_model,
+                &wall_resolved,
+                &wall_plan,
+            );
+        }
+
+        let mut room_model = BuildingModel::demo_two_bedroom();
+        room_model.levels[0].height = Length::from_feet(8.0);
+        let room_resolved = room_model.resolved_standards();
+        let room_plan = generate_project_plan(&room_model).unwrap();
+        let room_snapshot = FactSnapshot::new(&room_model, &room_resolved, &room_plan);
+        let room = FactSubject::Room(room_model.rooms[0].id.clone());
+        for fact in [Fact::RoomAreaSquareInches, Fact::RoomCeilingHeight] {
+            assert_known_with_wrapper(
+                fact,
+                &room,
+                &room_snapshot,
+                &room_model,
+                &room_resolved,
+                &room_plan,
+            );
+        }
+
+        let mut bracing_model = braced_line_model(Length::from_feet(20.0));
+        bracing_model.site.seismic = Some(SeismicDesignCategory::C);
+        bracing_model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let bracing_resolved = bracing_model.resolved_standards();
+        let bracing_plan = generate_project_plan(&bracing_model).unwrap();
+        let bracing_snapshot = FactSnapshot::new(&bracing_model, &bracing_resolved, &bracing_plan);
+        let line = FactSubject::BracedWallLine(ElementId::new("bwl"));
+        for fact in [
+            Fact::BracedLineLength,
+            Fact::BracedLineRequiredLength,
+            Fact::BracedLineProvidedLength,
+        ] {
+            assert_known_with_wrapper(
+                fact,
+                &line,
+                &bracing_snapshot,
+                &bracing_model,
+                &bracing_resolved,
+                &bracing_plan,
+            );
+        }
+    }
+
+    #[test]
+    fn fact_snapshot_fails_closed_with_structured_unknowns() {
+        let model = BuildingModel::demo_wall();
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        let snapshot = FactSnapshot::new(&model, &resolved, &plan);
+        let opening = FactSubject::Opening(model.walls[0].openings[0].id.clone());
+
+        assert_unknown_kind(
+            snapshot.observe(Fact::WallLength, &opening),
+            FactUnknownKind::WrongSubjectKind,
+        );
+        let missing_opening = FactSubject::Opening(ElementId::new("missing-opening"));
+        assert_unknown_kind(
+            snapshot.observe(Fact::OpeningJackStuds, &missing_opening),
+            FactUnknownKind::UnresolvedSubject,
+        );
+        assert_eq!(
+            fact_value(
+                Fact::OpeningJackStuds,
+                &missing_opening,
+                &model,
+                &resolved,
+                &plan,
+            ),
+            None
+        );
+
+        let mut empty_member_plan = plan.clone();
+        for wall_plan in &mut empty_member_plan.wall_plans {
+            wall_plan.members.clear();
+        }
+        let empty_member_snapshot = FactSnapshot::new(&model, &resolved, &empty_member_plan);
+        assert_eq!(
+            empty_member_snapshot.observe(Fact::OpeningJackStuds, &opening),
+            FactObservation::Known(FactValue::Int(0)),
+            "the shared snapshot preserves the frozen v1 empty-member count",
+        );
+        assert_eq!(
+            fact_value(
+                Fact::OpeningJackStuds,
+                &opening,
+                &model,
+                &resolved,
+                &empty_member_plan,
+            ),
+            Some(FactValue::Int(0)),
+        );
+
+        let mut unsupported_model = braced_line_model(Length::from_feet(50.0));
+        unsupported_model.site.seismic = Some(SeismicDesignCategory::C);
+        unsupported_model.walls[0].bracing = vec![braced_panel(
+            "panel",
+            Length::from_feet(4.0),
+            Length::from_feet(4.0),
+            BracingMethod::Wsp,
+        )];
+        let unsupported_resolved = unsupported_model.resolved_standards();
+        let unsupported_plan = generate_project_plan(&unsupported_model).unwrap();
+        let unsupported_snapshot =
+            FactSnapshot::new(&unsupported_model, &unsupported_resolved, &unsupported_plan);
+        assert_unknown_kind(
+            unsupported_snapshot.observe(
+                Fact::BracedLineRequiredLength,
+                &FactSubject::BracedWallLine(ElementId::new("bwl")),
+            ),
+            FactUnknownKind::UnsupportedCondition,
+        );
+    }
+
+    #[test]
+    fn subjects_and_predicate_facts_are_canonical() {
+        let defaults = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.walls = vec![
+            Wall::new("wall-z", "Wall Z", Length::from_feet(8.0), &defaults),
+            Wall::new("wall-a", "Wall A", Length::from_feet(8.0), &defaults),
+        ];
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        model.walls.push(model.walls[1].clone());
+        let snapshot = FactSnapshot::new(&model, &resolved, &plan);
+
+        let subjects = snapshot.subjects_for(&CheckScope::Walls {
+            exterior_only: None,
+            tags: Vec::new(),
+        });
+        assert_eq!(
+            subjects,
+            vec![
+                FactSubject::Wall(ElementId::new("wall-a")),
+                FactSubject::Wall(ElementId::new("wall-z")),
+            ]
+        );
+
+        let observation = snapshot.evaluate_predicate(
+            &Predicate::All(vec![
+                Predicate::Compare {
+                    fact: Fact::WallHeight,
+                    op: CompareOp::Le,
+                    value: FactOperand::Fact(Fact::WallStudMaxHeight),
+                },
+                Predicate::Compare {
+                    fact: Fact::WallLength,
+                    op: CompareOp::Gt,
+                    value: FactOperand::LengthLiteral(Length::ZERO),
+                },
+                Predicate::Compare {
+                    fact: Fact::WallHeight,
+                    op: CompareOp::Eq,
+                    value: FactOperand::Fact(Fact::WallHeight),
+                },
+            ]),
+            &FactSubject::Wall(ElementId::new("wall-a")),
+        );
+        assert_eq!(observation.result, Tri::True);
+        assert_eq!(
+            observation
+                .observed_facts
+                .iter()
+                .map(|observed| observed.fact)
+                .collect::<Vec<_>>(),
+            vec![Fact::WallLength, Fact::WallHeight, Fact::WallStudMaxHeight,]
+        );
+    }
+
+    #[test]
     fn wall_facts_report_known_values_and_unknown_table_misses() {
         let model = one_wall_model(Length::from_feet(8.0));
         let plan = generate_project_plan(&model).unwrap();
@@ -969,6 +1647,51 @@ mod tests {
         assert_eq!(
             fact_value(Fact::WallStudMaxHeight, &wall, &model, &resolved, &plan),
             None
+        );
+    }
+
+    #[test]
+    fn detailed_diagnostics_distinguish_unsupported_facts_from_missing_facts() {
+        let mut model = one_wall_model(Length::from_feet(8.0));
+        let mut pack = StandardsPack::irc_2021_starter();
+        pack.checks = vec![ComplianceCheck {
+            rule: "test.wall.unsupported-stud-height".to_owned(),
+            citation: "Test".to_owned(),
+            title: "Unsupported stud height".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::Walls {
+                exterior_only: None,
+                tags: Vec::new(),
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::WallStudMaxHeight,
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(Length::from_feet(8.0)),
+            },
+        }];
+        model.standards = vec![pack.id.clone()];
+        model.standards_packs = vec![pack];
+
+        let plan = generate_project_plan(&model).unwrap();
+        let mut resolved = model.resolved_standards();
+        resolved.studs.clear();
+        let evaluation = evaluate_detailed(&model, &resolved, &plan);
+
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.unsupported-stud-height",
+            &Outcome::NeedsReview,
+        ));
+        assert!(detail_for(&evaluation, "test.wall.unsupported-stud-height").is_unsupported());
+        assert_eq!(
+            evaluation.diagnostics()[0].severity,
+            DiagnosticSeverity::Unsupported,
+        );
+        assert_eq!(
+            diagnostics(&evaluation.report)[0].severity,
+            DiagnosticSeverity::NeedsReview,
+            "the frozen report cannot encode the detailed unsupported reason",
         );
     }
 
@@ -1139,12 +1862,17 @@ mod tests {
         )];
         let resolved = model.resolved_standards();
         let plan = generate_project_plan(&model).unwrap();
-        let report = evaluate(&model, &resolved, &plan);
+        let evaluation = evaluate_detailed(&model, &resolved, &plan);
+        let report = &evaluation.report;
 
-        assert!(diagnostics(&report).iter().any(|diagnostic| {
+        assert!(diagnostics(report).iter().any(|diagnostic| {
             diagnostic.code == BRACING_OUT_OF_DOMAIN
                 && diagnostic.severity == DiagnosticSeverity::Unsupported
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("bwl")
+        }));
+        assert!(evaluation.details.iter().any(|detail| {
+            detail.synthetic_kind == Some(SyntheticEntryKind::BracingOutOfDomain)
+                && detail.subject == Some(FactSubject::BracedWallLine(ElementId::new("bwl")))
         }));
     }
 
@@ -1159,13 +1887,17 @@ mod tests {
         )];
         let resolved = model.resolved_standards();
         let plan = generate_project_plan(&model).unwrap();
-        let report = evaluate(&model, &resolved, &plan);
+        let evaluation = evaluate_detailed(&model, &resolved, &plan);
+        let report = &evaluation.report;
 
-        assert_eq!(evaluate(&model, &resolved, &plan), report);
-        assert!(diagnostics(&report).iter().any(|diagnostic| {
+        assert_eq!(&evaluate(&model, &resolved, &plan), report);
+        assert!(diagnostics(report).iter().any(|diagnostic| {
             diagnostic.code == BRACING_UNASSOCIATED_PANEL
                 && diagnostic.severity == DiagnosticSeverity::Warning
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("panel")
+        }));
+        assert!(evaluation.details.iter().any(|detail| {
+            detail.synthetic_kind == Some(SyntheticEntryKind::UnassociatedBracingPanel)
         }));
     }
 
@@ -1266,6 +1998,301 @@ mod tests {
     }
 
     #[test]
+    fn detailed_evaluation_preserves_legacy_outputs_and_scoped_waiver_evidence() {
+        let defaults = FramingDefaults::irc_2021_starter();
+        let mut model = BuildingModel::new();
+        model.site.wind_speed_mph = Some(100);
+        model.walls = vec![
+            Wall::new("wall-b", "Wall B", Length::from_feet(8.0), &defaults),
+            Wall::new("wall-a", "Wall A", Length::from_feet(8.0), &defaults),
+        ];
+        let mut room = Room::new(
+            "room-unknown",
+            "Room unknown",
+            RoomUsage::Living,
+            "level-1",
+            Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
+        );
+        room.tags.push("unknown".to_owned());
+        model.rooms.push(room);
+
+        let mut not_applicable = wall_check(
+            "test.wall.not-applicable",
+            CheckSeverity::Required,
+            CompareOp::Gt,
+            FactOperand::LengthLiteral(Length::ZERO),
+        );
+        not_applicable.applies = Applicability::WindSpeedAtLeast(200);
+        let mut applicability_unknown = wall_check(
+            "test.wall.applicability-unknown",
+            CheckSeverity::Required,
+            CompareOp::Gt,
+            FactOperand::LengthLiteral(Length::ZERO),
+        );
+        applicability_unknown.applies = Applicability::SiteFlag {
+            key: "missing-flag".to_owned(),
+        };
+        let room_unknown = ComplianceCheck {
+            rule: "test.room.unknown-detail".to_owned(),
+            citation: "Test".to_owned(),
+            title: "Room unknown detail".to_owned(),
+            severity: CheckSeverity::Required,
+            applies: Applicability::Always,
+            scope: CheckScope::Rooms {
+                tags: vec!["unknown".to_owned()],
+            },
+            requirement: Predicate::Compare {
+                fact: Fact::RoomCeilingHeight,
+                op: CompareOp::Ge,
+                value: FactOperand::LengthLiteral(Length::from_feet(7.0)),
+            },
+        };
+
+        let mut base = StandardsPack::irc_2021_starter();
+        base.checks = vec![
+            wall_check(
+                "test.wall.pass-detail",
+                CheckSeverity::Required,
+                CompareOp::Le,
+                FactOperand::LengthLiteral(Length::from_feet(12.0)),
+            ),
+            wall_check(
+                "test.wall.violation-detail",
+                CheckSeverity::Required,
+                CompareOp::Gt,
+                FactOperand::LengthLiteral(Length::from_feet(20.0)),
+            ),
+            wall_check(
+                "test.wall.advisory-detail",
+                CheckSeverity::Advisory,
+                CompareOp::Gt,
+                FactOperand::LengthLiteral(Length::from_feet(20.0)),
+            ),
+            room_unknown,
+            not_applicable,
+            applicability_unknown,
+            wall_check(
+                "test.wall.waived-detail",
+                CheckSeverity::Required,
+                CompareOp::Gt,
+                FactOperand::LengthLiteral(Length::from_feet(20.0)),
+            ),
+        ];
+        let base_id = base.id.clone();
+
+        let mut overlay = StandardsPack::irc_2021_starter();
+        overlay.id = ElementId::new("std-overlay");
+        overlay.name = "Test overlay".to_owned();
+        overlay.tables.studs.clear();
+        overlay.tables.headers.clear();
+        overlay.tables.fastening.clear();
+        overlay.tables.bracing.clear();
+        overlay.checks.clear();
+        overlay.overlays = vec![
+            framer_core::RuleOverlay::Severity {
+                target: "test.wall.waived-detail".to_owned(),
+                severity: CheckSeverity::Advisory,
+            },
+            framer_core::RuleOverlay::Waive {
+                target: "test.wall.waived-detail".to_owned(),
+                reason: "approved by test AHJ".to_owned(),
+            },
+        ];
+        let overlay_id = overlay.id.clone();
+        model.standards = vec![base_id.clone(), overlay_id.clone()];
+        model.standards_packs = vec![base, overlay];
+
+        let resolved = model.resolved_standards();
+        let plan = generate_project_plan(&model).unwrap();
+        let evaluation = evaluate_detailed(&model, &resolved, &plan);
+        assert_eq!(
+            evaluation,
+            evaluate_detailed(&model, &resolved, &plan),
+            "detailed evaluation must be canonical"
+        );
+        const FROZEN_REPORT_CSV: &str = concat!(
+            "rule,citation,pack,outcome,element,message,chain\n",
+            "test.room.unknown-detail,Test,std-irc-2021,NeedsReview,room-unknown,Room unknown detail needs review; one or more facts are unavailable.,std-irc-2021:Introduced\n",
+            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-a,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
+            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-b,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
+            "test.wall.applicability-unknown,Test,std-irc-2021,NeedsReview,,test.wall.applicability-unknown applicability needs review.,std-irc-2021:Introduced\n",
+            "test.wall.not-applicable,Test,std-irc-2021,NotApplicable,,test.wall.not-applicable is not applicable for this site context.,std-irc-2021:Introduced\n",
+            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-a,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
+            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-b,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
+            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-a,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
+            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-b,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
+            "test.wall.waived-detail,Test,std-irc-2021,Waived,,Waived: approved by test AHJ,std-irc-2021:Introduced;std-overlay:Reseverity;std-overlay:Waived\n",
+        );
+        assert_eq!(evaluation.report.to_csv(), FROZEN_REPORT_CSV);
+
+        let wrapper_report = evaluate(&model, &resolved, &plan);
+        assert_eq!(wrapper_report, evaluation.report);
+        assert_eq!(wrapper_report.to_csv(), evaluation.report.to_csv());
+        assert_eq!(
+            diagnostics(&wrapper_report),
+            diagnostics(&evaluation.report)
+        );
+        assert_eq!(
+            evaluation
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code.as_str(),
+                        diagnostic.source.as_ref().map(|source| source.0.as_str()),
+                        diagnostic.severity,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "test.room.unknown-detail",
+                    Some("room-unknown"),
+                    DiagnosticSeverity::NeedsReview,
+                ),
+                (
+                    "test.wall.advisory-detail",
+                    Some("wall-a"),
+                    DiagnosticSeverity::Warning,
+                ),
+                (
+                    "test.wall.advisory-detail",
+                    Some("wall-b"),
+                    DiagnosticSeverity::Warning,
+                ),
+                (
+                    "test.wall.applicability-unknown",
+                    None,
+                    DiagnosticSeverity::NeedsReview,
+                ),
+                (
+                    "test.wall.violation-detail",
+                    Some("wall-a"),
+                    DiagnosticSeverity::Violation,
+                ),
+                (
+                    "test.wall.violation-detail",
+                    Some("wall-b"),
+                    DiagnosticSeverity::Violation,
+                ),
+            ]
+        );
+
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.pass-detail",
+            &Outcome::Pass
+        ));
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.violation-detail",
+            &Outcome::Violation
+        ));
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.advisory-detail",
+            &Outcome::Advisory
+        ));
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.room.unknown-detail",
+            &Outcome::NeedsReview
+        ));
+        assert!(has_outcome(
+            &evaluation.report,
+            "test.wall.not-applicable",
+            &Outcome::NotApplicable
+        ));
+
+        let required_detail = detail_for(&evaluation, "test.wall.violation-detail");
+        assert_eq!(required_detail.severity, Some(CheckSeverity::Required));
+        assert_eq!(
+            required_detail.predicate.as_ref().map(|value| value.result),
+            Some(Tri::False)
+        );
+        let advisory_detail = detail_for(&evaluation, "test.wall.advisory-detail");
+        assert_eq!(advisory_detail.severity, Some(CheckSeverity::Advisory));
+        assert_eq!(
+            advisory_detail.predicate.as_ref().map(|value| value.result),
+            Some(Tri::False)
+        );
+        let unknown_detail = detail_for(&evaluation, "test.room.unknown-detail");
+        assert_eq!(unknown_detail.applicability, Some(Tri::True));
+        let unknown_predicate = unknown_detail.predicate.as_ref().unwrap();
+        assert_eq!(unknown_predicate.result, Tri::Unknown);
+        assert!(matches!(
+            &unknown_predicate.observed_facts[0].observation,
+            FactObservation::Unknown(FactUnknown {
+                kind: FactUnknownKind::MissingInput,
+                ..
+            })
+        ));
+        let not_applicable_detail = detail_for(&evaluation, "test.wall.not-applicable");
+        assert_eq!(not_applicable_detail.applicability, Some(Tri::False));
+        assert!(not_applicable_detail.predicate.is_none());
+        let applicability_unknown_detail =
+            detail_for(&evaluation, "test.wall.applicability-unknown");
+        assert_eq!(
+            applicability_unknown_detail.applicability,
+            Some(Tri::Unknown)
+        );
+        assert!(applicability_unknown_detail.predicate.is_none());
+
+        let waived_report_entries = evaluation
+            .report
+            .entries
+            .iter()
+            .filter(|entry| entry.rule == "test.wall.waived-detail")
+            .collect::<Vec<_>>();
+        assert_eq!(waived_report_entries.len(), 1);
+        assert_eq!(waived_report_entries[0].element, None);
+        assert!(matches!(
+            &waived_report_entries[0].outcome,
+            Outcome::Waived { reason } if reason == "approved by test AHJ"
+        ));
+
+        let waived_details = evaluation
+            .details
+            .iter()
+            .filter(|detail| detail.check_id.as_deref() == Some("test.wall.waived-detail"))
+            .collect::<Vec<_>>();
+        assert_eq!(waived_details.len(), 2);
+        assert_eq!(
+            waived_details
+                .iter()
+                .map(|detail| detail.subject.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                FactSubject::Wall(ElementId::new("wall-a")),
+                FactSubject::Wall(ElementId::new("wall-b")),
+            ]
+        );
+        assert!(
+            waived_details
+                .iter()
+                .all(|detail| detail.report_entry_index == waived_details[0].report_entry_index)
+        );
+        for detail in waived_details {
+            assert_eq!(detail.definition_pack.as_ref(), Some(&base_id));
+            assert_eq!(detail.severity, Some(CheckSeverity::Advisory));
+            assert_eq!(
+                detail.scope_subjects,
+                vec![
+                    FactSubject::Wall(ElementId::new("wall-a")),
+                    FactSubject::Wall(ElementId::new("wall-b")),
+                ]
+            );
+            let waiver = detail.effective_waiver.as_ref().unwrap();
+            assert_eq!(waiver.reason, "approved by test AHJ");
+            assert_eq!(waiver.overlay_pack, overlay_id);
+            assert_eq!(
+                waiver.chain.last(),
+                Some(&(overlay_id.clone(), ResolutionAction::Waived))
+            );
+        }
+    }
+
+    #[test]
     fn report_csv_is_deterministic_and_escaped() {
         let model = one_wall_model(Length::from_feet(8.0));
         let mut pack = StandardsPack::irc_2021_starter();
@@ -1287,6 +2314,43 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with("rule,citation,pack,outcome,element,message,chain\n"));
         assert!(first.contains("test.wall.pass,Test,std-irc-2021,Pass,wall"));
+    }
+
+    fn assert_known_with_wrapper(
+        fact: Fact,
+        subject: &FactSubject,
+        snapshot: &FactSnapshot<'_>,
+        model: &BuildingModel,
+        resolved: &ResolvedStandards,
+        plan: &ProjectFramePlan,
+    ) {
+        let observation = snapshot.observe(fact, subject);
+        let FactObservation::Known(value) = observation else {
+            panic!("expected {fact:?} for {subject:?} to be known, got {observation:?}");
+        };
+        assert_eq!(
+            fact_value(fact, subject, model, resolved, plan),
+            Some(value),
+            "compatibility wrapper diverged for {fact:?}"
+        );
+    }
+
+    fn assert_unknown_kind(observation: FactObservation, expected: FactUnknownKind) {
+        let FactObservation::Unknown(unknown) = observation else {
+            panic!("expected {expected:?}, got {observation:?}");
+        };
+        assert_eq!(unknown.kind, expected);
+    }
+
+    fn detail_for<'a>(
+        evaluation: &'a StandardsEvaluation,
+        check_id: &str,
+    ) -> &'a StandardsEvaluationDetail {
+        evaluation
+            .details
+            .iter()
+            .find(|detail| detail.check_id.as_deref() == Some(check_id))
+            .unwrap_or_else(|| panic!("missing detail for {check_id}"))
     }
 
     fn one_wall_model(length: Length) -> BuildingModel {

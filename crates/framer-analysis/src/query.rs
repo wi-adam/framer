@@ -29,6 +29,14 @@ pub struct GraphTrace {
     pub path: Vec<GraphStep>,
 }
 
+/// User-relevant projection of the transitive dependent closure. Ownership nodes and internal
+/// provenance remain available in paths but are not presented as possible result changes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DependencyImpact {
+    pub assertions: Vec<GraphTrace>,
+    pub derived_results: Vec<GraphTrace>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QueryCacheStats {
     pub hits: u64,
@@ -51,6 +59,7 @@ struct QueryKey {
 pub struct GraphQueryCache {
     revision: Option<GraphRevision>,
     entries: BTreeMap<QueryKey, Vec<GraphTrace>>,
+    impact_entries: BTreeMap<ProjectNodeRef, DependencyImpact>,
     hits: u64,
     misses: u64,
 }
@@ -119,9 +128,37 @@ impl GraphQueryCache {
         self.query(graph, GraphQueryKind::EvidenceFor, start)
     }
 
+    pub fn impact_of(&mut self, graph: &ProjectGraph, start: &ProjectNodeRef) -> DependencyImpact {
+        self.bind_revision(graph.revision());
+        if let Some(cached) = self.impact_entries.get(start) {
+            self.hits = self.hits.saturating_add(1);
+            return cached.clone();
+        }
+        self.misses = self.misses.saturating_add(1);
+        let mut impact = DependencyImpact::default();
+        for trace in closure(graph, GraphQueryKind::Dependents, start) {
+            match trace.node {
+                ProjectNodeRef::Assertion(_) => impact.assertions.push(trace),
+                ProjectNodeRef::GeneratedMember(_)
+                | ProjectNodeRef::RoomConsequence(_)
+                | ProjectNodeRef::PhysicalBody(_)
+                | ProjectNodeRef::ComplianceEntry(_)
+                | ProjectNodeRef::Diagnostic(_) => impact.derived_results.push(trace),
+                ProjectNodeRef::Project
+                | ProjectNodeRef::Authored(_)
+                | ProjectNodeRef::SolverProvenance(_)
+                | ProjectNodeRef::StandardsRule(_)
+                | ProjectNodeRef::UnknownEvidence(_) => {}
+            }
+        }
+        self.impact_entries.insert(start.clone(), impact.clone());
+        impact
+    }
+
     pub fn clear(&mut self) {
         self.revision = None;
         self.entries.clear();
+        self.impact_entries.clear();
         self.hits = 0;
         self.misses = 0;
     }
@@ -130,7 +167,7 @@ impl GraphQueryCache {
         QueryCacheStats {
             hits: self.hits,
             misses: self.misses,
-            entries: self.entries.len(),
+            entries: self.entries.len() + self.impact_entries.len(),
         }
     }
 
@@ -142,6 +179,7 @@ impl GraphQueryCache {
         if self.revision != Some(revision) {
             self.revision = Some(revision);
             self.entries.clear();
+            self.impact_entries.clear();
             self.hits = 0;
             self.misses = 0;
         }
@@ -258,7 +296,9 @@ fn is_supporting_evidence(current: &ProjectNodeRef, relationship: RelationshipKi
         | RelationshipKind::UsesFamily
         | RelationshipKind::UsesStandardsPack
         | RelationshipKind::VendoredFrom
-        | RelationshipKind::HostedBy => false,
+        | RelationshipKind::HostedBy
+        | RelationshipKind::AppliesTo
+        | RelationshipKind::WaivedBy => false,
     }
 }
 

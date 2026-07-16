@@ -15,7 +15,14 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use framer_core::{DimensionAxis, DimensionKind, ElementId, Length, OpeningKind, Point2};
+use framer_core::{
+    Applicability, CheckScope, CheckSeverity, CompareOp, ComplianceCheck, DimensionAxis,
+    DimensionKind, ElementId, Fact, FactOperand, Length, OpeningKind, Point2, Predicate,
+    RuleOverlay,
+};
+use framer_geometry::{
+    AssemblyKind, BodyRef, GeometryBuildDiagnostic, GeometryQueryViolation, GeometryViolation,
+};
 
 use super::actions::{self, ActionId};
 use super::component_visibility::{
@@ -107,8 +114,73 @@ fn assert_accessible_button(harness: &Harness<FramerApp>, label: &str, surface: 
 }
 
 fn scroll_to_intent_relationships(harness: &mut Harness<FramerApp>) {
-    harness.get_by_label("Intent relationships").scroll_to_me();
+    harness.get_by_label("Intent").scroll_to_me();
     harness.run();
+}
+
+fn prepare_mixed_intent_status(app: &mut FramerApp) {
+    app.model.site.wind_speed_mph = Some(100);
+    app.model.walls[0].height = Length::from_feet(8.0);
+    let wall_check =
+        |rule: &str, title: &str, applies: Applicability, op: CompareOp, limit: Length| {
+            ComplianceCheck {
+                rule: rule.to_owned(),
+                citation: "Intent UI fixture".to_owned(),
+                title: title.to_owned(),
+                severity: CheckSeverity::Required,
+                applies,
+                scope: CheckScope::Walls {
+                    exterior_only: None,
+                    tags: Vec::new(),
+                },
+                requirement: Predicate::Compare {
+                    fact: Fact::WallHeight,
+                    op,
+                    value: FactOperand::LengthLiteral(limit),
+                },
+            }
+        };
+    let pack = &mut app.model.standards_packs[0];
+    pack.tables.studs.clear();
+    pack.checks.extend([
+        wall_check(
+            "fixture.intent.violated",
+            "Intent fixture violation",
+            Applicability::Always,
+            CompareOp::Gt,
+            Length::from_feet(20.0),
+        ),
+        wall_check(
+            "fixture.intent.unknown",
+            "Intent fixture unknown",
+            Applicability::SiteFlag {
+                key: "missing-intent-fixture-flag".to_owned(),
+            },
+            CompareOp::Gt,
+            Length::ZERO,
+        ),
+        wall_check(
+            "fixture.intent.not-applicable",
+            "Intent fixture not applicable",
+            Applicability::WindSpeedAtLeast(200),
+            CompareOp::Gt,
+            Length::ZERO,
+        ),
+        wall_check(
+            "fixture.intent.waived",
+            "Intent fixture waiver",
+            Applicability::Always,
+            CompareOp::Gt,
+            Length::from_feet(20.0),
+        ),
+    ]);
+    pack.overlays.push(RuleOverlay::Waive {
+        target: "fixture.intent.waived".to_owned(),
+        reason: "approved alternate intent fixture".to_owned(),
+    });
+    app.rebuild();
+    app.selected_wall = 0;
+    app.selected = Selection::Wall;
 }
 
 fn secondary_click_pickable_3d_component(harness: &mut Harness<FramerApp>) {
@@ -220,8 +292,23 @@ fn intent_relationships_explain_authored_and_generated_selections() {
     );
     harness.run();
     scroll_to_intent_relationships(&mut harness);
-    assert_accessible_label(&harness, "Affected by", "authored relationship inspector");
+    assert_accessible_label(
+        &harness,
+        "Potential impact",
+        "authored relationship inspector",
+    );
+    assert_accessible_label(
+        &harness,
+        "Dependency only: editing this selection may cause these assertions and derived results to be reevaluated; it does not guarantee their values will change.",
+        "authored relationship inspector",
+    );
+    assert_accessible_label(
+        &harness,
+        "Derived results",
+        "authored relationship inspector",
+    );
     assert_accessible_label(&harness, &member_title, "authored relationship inspector");
+    assert_accessible_label(&harness, "Depends on", "authored relationship inspector");
 
     harness.state_mut().apply_selection(
         Selection::Member {
@@ -269,7 +356,9 @@ fn intent_relationships_show_compliance_and_honest_empty_states() {
     scroll_to_intent_relationships(&mut harness);
     assert!(
         harness
-            .query_all_by_label("No recorded relationships in the current resolution.")
+            .query_all_by_label(
+                "No dependent assertions or derived results are recorded for this selection.",
+            )
             .count()
             >= 1,
         "an unused authored object should report that no graph evidence is recorded"
@@ -289,11 +378,128 @@ fn intent_relationships_show_compliance_and_honest_empty_states() {
     harness.state_mut().project_graph_error = Some("fixture graph failure".to_owned());
     harness.run();
     scroll_to_intent_relationships(&mut harness);
+    assert_accessible_label(&harness, "Construction", "graph-independent intent status");
     assert_accessible_label(
         &harness,
-        "Relationships are unavailable: fixture graph failure",
+        "Relationship analysis is unavailable: fixture graph failure",
         "failed relationship inspector",
     );
+
+    harness.state_mut().project_graph_error = None;
+    harness.state_mut().selected = Selection::Material("missing-material-fixture".to_owned());
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+    assert!(
+        harness
+            .query_all_by_label(
+                "This selection is not present in the current analysis generation.",
+            )
+            .count()
+            >= 1,
+        "a stale authored id should not be misreported as a true empty intent status"
+    );
+}
+
+#[test]
+fn intent_status_groups_mixed_boolean_outcomes_and_exposes_evidence() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_mixed_intent_status(harness.state_mut());
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+
+    for outcome in [
+        "Violated",
+        "Unknown",
+        "Waived",
+        "Satisfied",
+        "Not applicable",
+    ] {
+        assert_accessible_label(&harness, outcome, "mixed current intent status");
+    }
+    assert_accessible_label(
+        &harness,
+        "Requirement · Source: Standards rule fixture.intent.violated",
+        "mixed current intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "Evidence: authored object, standards rule, compliance result, diagnostic",
+        "mixed current intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "Waiver: approved alternate intent fixture",
+        "mixed current intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "Unsupported condition: The current standards evaluator does not support this condition.",
+        "mixed current intent status",
+    );
+    assert!(
+        harness
+            .query_all_by_label("Intent fixture not applicable (Intent UI fixture)")
+            .next()
+            .is_none(),
+        "not-applicable rows should start collapsed while retaining their outcome group"
+    );
+}
+
+#[test]
+fn intent_status_keeps_assumptions_inside_their_domain_without_boolean_outcomes() {
+    let mut harness = demo_harness();
+    harness.run();
+    prepare_mixed_intent_status(harness.state_mut());
+    harness.state_mut().selected = Selection::Site;
+    harness.run();
+    scroll_to_intent_relationships(&mut harness);
+
+    assert_accessible_label(&harness, "Compliance", "site intent status");
+    assert_accessible_label(&harness, "Assumptions", "site intent status");
+    harness.get_by_label("Assumptions").click();
+    harness.run();
+    assert_accessible_label(&harness, "Jurisdiction", "site intent status");
+    assert_accessible_label(
+        &harness,
+        "Missing input: Jurisdiction is not provided.",
+        "site intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "missing-intent-fixture-flag",
+        "site intent status",
+    );
+    assert_accessible_label(
+        &harness,
+        "Missing input: missing-intent-fixture-flag is not provided.",
+        "site intent status",
+    );
+    let report = harness
+        .state()
+        .intent_report
+        .as_ref()
+        .and_then(|report| report.as_ref().ok())
+        .expect("site intent report");
+    let jurisdiction = report
+        .assertions_for(&framer_core::AuthoredEntityRef::Site)
+        .into_iter()
+        .find(|record| {
+            matches!(
+                record,
+                framer_analysis::IntentRecord::Assumption(record)
+                    if record.premise.label == "Jurisdiction"
+            )
+        })
+        .expect("jurisdiction remains an assumption record");
+    assert!(matches!(
+        jurisdiction,
+        framer_analysis::IntentRecord::Assumption(record)
+            if matches!(
+                record.evidence,
+                framer_analysis::AssumptionEvidence::Unavailable(_)
+            )
+    ));
 }
 
 #[test]
@@ -986,6 +1192,110 @@ fn status_bar_diagnostics_popover_selects_source_from_design() {
     harness.run();
 
     assert_eq!(harness.state().selected, Selection::Opening(source.0));
+}
+
+#[test]
+fn diagnostics_popover_keeps_all_buckets_and_lists_geometry_once() {
+    use eframe::egui::accesskit::Role;
+
+    let mut harness = demo_harness();
+    harness.run();
+    let body_a = BodyRef::assembly(ElementId::new("fixture-body-a"), AssemblyKind::Wall);
+    let body_b = BodyRef::assembly(ElementId::new("fixture-body-b"), AssemblyKind::Wall);
+    {
+        let app = harness.state_mut();
+        app.error = Some("fixture application error".to_owned());
+        let plan = app.project_plan.as_mut().expect("default project plan");
+        plan.diagnostics.clear();
+        for wall_plan in &mut plan.wall_plans {
+            wall_plan.diagnostics.clear();
+        }
+        plan.diagnostics.extend([
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::Violation,
+                code: "fixture.violation".to_owned(),
+                source: None,
+                message: "fixture plan violation".to_owned(),
+                rule: None,
+            },
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::NeedsReview,
+                code: "fixture.needs-review".to_owned(),
+                source: None,
+                message: "fixture plan needs review".to_owned(),
+                rule: None,
+            },
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::Warning,
+                code: "fixture.warning".to_owned(),
+                source: None,
+                message: "fixture plan warning".to_owned(),
+                rule: None,
+            },
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::Unsupported,
+                code: "fixture.unsupported".to_owned(),
+                source: None,
+                message: "fixture plan unsupported".to_owned(),
+                rule: None,
+            },
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::Info,
+                code: "fixture.info".to_owned(),
+                source: None,
+                message: "fixture plan info".to_owned(),
+                rule: None,
+            },
+            framer_solver::PlanDiagnostic {
+                severity: framer_solver::DiagnosticSeverity::Violation,
+                code: "geometry.body.unbuildable".to_owned(),
+                source: Some(ElementId::new("fixture-body-a")),
+                message: "fixture unbuildable geometry".to_owned(),
+                rule: None,
+            },
+        ]);
+        app.geometry_audit.violations = vec![
+            GeometryViolation::BodyUnbuildable(GeometryBuildDiagnostic::unbuildable(
+                body_a.clone(),
+                "fixture unbuildable geometry",
+            )),
+            GeometryViolation::QueryUnsupported(GeometryQueryViolation {
+                body_a,
+                body_b,
+                message: "fixture unsupported geometry query".to_owned(),
+            }),
+        ];
+    }
+    harness.run();
+    harness
+        .get_by_role_and_label(Role::Button, "Diagnostics")
+        .click();
+    harness.run();
+
+    for label in [
+        "1 errors",
+        "2 violations",
+        "1 needs review",
+        "1 warnings",
+        "2 unsupported",
+        "1 info",
+    ] {
+        assert_accessible_label(&harness, label, "diagnostics severity buckets");
+    }
+    assert_eq!(
+        harness
+            .query_all_by_label("fixture unbuildable geometry")
+            .count(),
+        1,
+        "the geometry audit owns one visible row per unbuildable body"
+    );
+    assert_eq!(
+        harness
+            .query_all_by_label("fixture unsupported geometry query")
+            .count(),
+        1,
+        "the geometry audit owns one visible row per unsupported query"
+    );
 }
 
 /// The workflow command strip is tabbed by process instead of exposing every

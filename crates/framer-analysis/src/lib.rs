@@ -9,6 +9,8 @@
 mod compile;
 mod graph;
 mod identity;
+mod intent;
+mod lower;
 mod query;
 mod revision;
 
@@ -21,10 +23,27 @@ pub use graph::{
 };
 pub use identity::{
     AssertionRef, AuthoredEntityRef, AuthoredIntentId, ComplianceEntryRef, DerivedAssertionId,
-    DerivedAssertionProvider, DerivedAssertionSource, DiagnosticProvider, DiagnosticRef,
-    GeneratedMemberRef, LibraryVersionRef, PhysicalBodyRef, ProjectNodeRef, RoomConsequenceKind,
-    RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef, UnknownEvidenceKind,
-    UnknownEvidenceRef,
+    DerivedAssertionProvider, DerivedAssertionRole, DerivedAssertionSource, DiagnosticProvider,
+    DiagnosticRef, GeneratedMemberRef, LibraryVersionRef, PhysicalBodyRef, ProjectNodeRef,
+    RoomConsequenceKind, RoomConsequenceRef, SiteAssumptionKey, SolverProvenanceRef,
+    StandardsRuleRef, UnknownEvidenceKind, UnknownEvidenceRef,
 };
-pub use query::{GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats};
+pub use intent::{
+    AssertionParticipant, AssertionParticipantRole, AssertionScope, AssertionSource,
+    AssumptionEvidence, AssumptionIntentRecord, AssumptionPremise, BooleanExpression,
+    BooleanIntentMode, BooleanIntentRecord, CompiledAssertion, ExactValue, IntentDomain,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, IntentUnknown, IntentUnknownKind,
+    IntentValue, ObjectiveDefinition, ObjectiveDirection, ObjectiveIntentRecord,
+    ObjectiveObservation, PreferencePriority, SelectionAttribute, WaiverRecord, WaiverRef,
+};
+pub use query::{
+    DependencyImpact, GraphQueryCache, GraphQueryKind, GraphStep, GraphTrace, QueryCacheStats,
+};
 pub use revision::{GRAPH_CONTRACT_VERSION, GraphRevision};
+
+/// Identify which typed domain owns the canonical row for an existing plan diagnostic.
+/// Presentation layers use this to avoid rendering geometry audit findings twice after they are
+/// also lowered through `ProjectFramePlan::diagnostics`.
+pub fn plan_diagnostic_provider(diagnostic: &framer_solver::PlanDiagnostic) -> DiagnosticProvider {
+    lower::diagnostic_provider(diagnostic)
+}

@@ -24,9 +24,9 @@ framer-core   ─┬─→ framer-solver ─┬─→ framer-geometry ─┐
 | [`framer-core`](../crates/framer-core) | Domain model: authored building intent, units, construction systems, materials, furnishings/MEP objects, standards packs, validation, room topology, `.framer` serialization. | — | No |
 | [`framer-library`](../crates/framer-library) | Library resolution, exact content hashing, vendor-on-use import/remap, and update-lifecycle operations for `.framerlib` content. | `framer-core` | No |
 | [`framer-solver`](../crates/framer-solver) | Deterministic framing generation + takeoffs (members, per-layer BOM, room schedule, diagnostics) and SVG/CSV exports. | `framer-core` | No |
-| [`framer-standards`](../crates/framer-standards) | UI-free standards evaluator: compliance facts, Kleene logic, deterministic reports, CSV export, and diagnostics lowering. | core, solver | No |
+| [`framer-standards`](../crates/framer-standards) | UI-free standards evaluator: one typed fact snapshot/predicate path, Kleene logic, deterministic reports with detailed evidence, CSV export, and canonical detailed plus compatibility diagnostics lowering. | core, solver | No |
 | [`framer-geometry`](../crates/framer-geometry) | UI-free physical scene: stable body identity, exact generated-member solids, finished assembly envelopes, and convex-piece lowering. | core, solver | No |
-| [`framer-analysis`](../crates/framer-analysis) | UI-free coherent project generation plus a deterministic, revision-bound graph and lazy directional explanation/impact queries over current authored and regenerated truth. | core, geometry, library, solver, standards | No |
+| [`framer-analysis`](../crates/framer-analysis) | UI-free coherent project generation, common mode-specific intent outcomes/evidence, a deterministic revision-bound graph, and lazy directional explanation/impact queries over current authored and regenerated truth. | core, geometry, library, solver, standards | No |
 | [`framer-render`](../crates/framer-render) | UI-agnostic CPU path tracer: extract a renderable scene from the model, build a BVH, path-trace it. Headless PNG CLI. | `framer-core` | No |
 | [`framer-app`](../crates/framer-app) | Native desktop CAD shell (`eframe`/`egui` + `wgpu`): model tree, inspector, command surfaces, 2D/3D viewports, real-time GPU path-traced Render view. | analysis, core, geometry, library, render, solver, standards | Yes |
 
@@ -70,11 +70,11 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, standards-stack references, and `ModelError` validation. |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
-| `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, pack validation, the IRC 2021 starter pack, and pure stack resolution. |
+| `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, public non-persisted fact-subject kinds, pack validation, the IRC 2021 starter pack, and pure stack resolution. `ResolvedStandards` retains winning check definitions, including waived checks, for detailed downstream evaluation while its active `checks` view stays non-waived. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; level-scoped room-boundary helpers for stacked drafting; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2`. The basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer (`ConstraintSystem`) for driving dimensions / overconstraint checks. |
-| `src/intent.rs` | Schema-neutral authored semantic references (`AuthoredEntityRef`, `LibraryVersionRef`) and the type-disjoint future-authored `AuthoredIntentId` namespace. Slice 1 adds no `BuildingModel` field. |
+| `src/intent.rs` | Schema-neutral authored semantic references (`AuthoredEntityRef`, `LibraryVersionRef`) and the type-disjoint future-authored `AuthoredIntentId` namespace. Slices 1-2 add no `BuildingModel` field; their graph and common intent report remain regenerated and schema-neutral. |
 
 ### Key types (file: `src/model.rs` unless noted)
 
@@ -295,47 +295,60 @@ UI-agnostic and I/O-free. It evaluates authored standards checks against a
 
 | File | Contains |
 | --- | --- |
-| `src/lib.rs` | `Tri` Kleene logic, `FactValue`, entity scoping, `fact_value`, `evaluate`, `ComplianceReport::to_csv`, and `diagnostics` lowering into solver diagnostics. |
+| `src/lib.rs` | `Tri` Kleene logic; typed `FactSubject`, `FactObservation`, and unknown reasons; canonical `FactSnapshot` measurement and predicate evaluation; deterministic `ComplianceReport`; detailed severity, scope, predicate, synthetic-entry, and waiver provenance; CSV export; and compatibility report/diagnostic entry points. |
 
 ### Entry points
 
-- `evaluate(model, resolved, plan) -> ComplianceReport` — evaluates active, non-waived checks
-  from the resolved standards stack and returns sorted, deterministic entries.
-- `fact_value(fact, entity, model, resolved, plan)` — frozen v1 fact table for wall, opening,
-  room, and placeholder braced-wall-line facts.
-- `diagnostics(&report)` — lowers only violation, advisory, and needs-review outcomes into
-  `PlanDiagnostic`; pass, waived, and not-applicable entries stay report-only.
+- `FactSnapshot::new(model, resolved, plan)` — the sole calculator for wall,
+  opening, room, and braced-wall-line facts, with canonical subject projection,
+  exact observations, and structured unavailable reasons.
+- `evaluate_detailed(model, resolved, plan) -> StandardsEvaluation` — evaluates
+  checks into the unchanged sorted report plus a canonically paired detail
+  sidecar used by common intent analysis.
+- `StandardsEvaluation::diagnostics()` — canonically lowers detailed outcomes to
+  plan diagnostics, including the distinction between unsupported and missing
+  facts.
+- `evaluate(...) -> ComplianceReport`, `fact_value(...)`, and
+  `diagnostics(&report)` remain compatibility entry points over the frozen report
+  contract; the report-only diagnostic adapter cannot recover every detailed
+  unsupported reason.
 
 ---
 
-## framer-analysis — project graph and cross-domain queries
+## framer-analysis — common intent, project graph, and cross-domain queries
 
 UI-free top-level orchestration over `framer-core`, `framer-library`,
 `framer-solver`, `framer-standards`, and `framer-geometry`. It does not persist
-state or introduce a dependency from any lower crate. Slice 1 compiles only
-relationships and evidence that current v13 projects already produce;
-assertions, common outcomes, authored cross-object intent, and candidate edits
-remain later slices.
+state or introduce a dependency from any lower crate. It compiles current v13
+direct intent and evaluator results into a common non-persisted report, then
+links those assertions, evidence, relationships, and consequences in the
+project graph. Persisted authored cross-object intent and candidate edits remain
+later slices.
 
 | File | Contains |
 | --- | --- |
-| `src/lib.rs` | Public API and the UI-free/disposable graph contract. |
-| `src/identity.rs` | Closed `ProjectNodeRef` families for authored entities, revision-scoped generated members, physical bodies, room schedule/boundary consequences, standards rules/report entries, diagnostics, solver provenance, assertions, and explicit unknown evidence. `AssertionRef::Authored` and `AssertionRef::Derived` are type-disjoint. |
+| `src/lib.rs` | Public API for the UI-free/disposable analysis, common intent, and graph contracts. |
+| `src/intent.rs` | Canonical `IntentReport` and the closed common vocabulary for domains, requirements/preferences, objectives, assumptions, participants, expressions, outcomes, unknown reasons, waivers, and recoverable evidence references. Boolean, objective, and assumption records are type-disjoint so non-boolean modes cannot receive invented boolean outcomes. |
+| `src/identity.rs` | Closed `ProjectNodeRef` families for authored entities, revision-scoped generated members, physical bodies, room schedule/boundary consequences, standards rules/report entries, diagnostics, solver provenance, assertions, and explicit unknown evidence. `AssertionRef::Authored` and `AssertionRef::Derived` are type-disjoint, and derived assertion roles/providers form a closed identity vocabulary. |
 | `src/revision.rs` | `GraphRevision`: BLAKE3 over domain separation, `GRAPH_CONTRACT_VERSION`, a length-delimited deterministic starter-library source fingerprint (`available` + content hash, or `unavailable`), and canonical `save_project(model)` bytes. It is deterministic and separate from the app's process-local document revision. |
 | `src/graph.rs` | Canonically ordered `ProjectGraph`, `ProjectNode`, dependency-oriented `ProjectEdge`, relationship families, and indexed authored/generated lookups. `GraphBuilder::finish` validates both endpoints of every edge and returns typed `GraphBuildError::MissingDependent`/`MissingDependency` failures instead of panicking. |
-| `src/compile.rs` | `library_lifecycle_status`, `analyze_project`, and graph compilation across the plan, resolved standards, physical scene/audit, compliance report, room consequences, library lifecycle, and diagnostics. Lifecycle warnings are added to the plan before graph compilation; generated hosts/sources are kind-checked; site context feeds solver-provenance and compliance impact; and missing/inconsistent optional provenance or room facts lower to explicit `UnknownEvidence` nodes. |
-| `src/query.rs` | Cycle-safe dependency, dependent, incoming-intent, derivation, and evidence closures plus `GraphQueryCache`; the cache binds to one `GraphRevision`, memoizes lazy queries, and clears on revision change. Evidence traversal moves only from a consequence toward whitelisted supporting dependencies. `Project` is a result endpoint, never a transitive bridge between unrelated project-owned nodes. |
+| `src/lower.rs` | Normalization of driving dimensions, explicit construction choices, site premises, detailed standards results, non-standards diagnostics, and geometry findings into common intent records. It preserves original compliance, diagnostic, and geometry payloads through evidence references; detailed standards-to-`PlanDiagnostic` lowering remains owned by `StandardsEvaluation::diagnostics()` in `framer-standards`. |
+| `src/compile.rs` | `library_lifecycle_status`, `analyze_project`, and graph compilation across the plan, resolved standards, detailed `StandardsEvaluation`, physical scene/audit, common `IntentReport`, room consequences, library lifecycle, and diagnostics. Intent-report failure also makes the graph unavailable; graph endpoint failure can occur after a valid report. Generated hosts/sources are kind-checked; site context feeds solver-provenance and compliance impact; and missing/inconsistent optional provenance or room facts lower to explicit `UnknownEvidence` nodes. It also provides exact evidence-payload recovery helpers. |
+| `src/query.rs` | Cycle-safe dependency, dependent, incoming-intent, derivation, and evidence closures plus `GraphQueryCache`; the cache binds to one `GraphRevision`, memoizes lazy queries, and clears on revision change. `impact_of` filters an authored entity's dependent closure to assertion traces and user-relevant generated results. Evidence traversal moves only from a consequence toward whitelisted supporting dependencies. `Project` is a result endpoint, never a transitive bridge between unrelated project-owned nodes. |
 
 `analyze_project(&BuildingModel) -> Result<ProjectAnalysis, SolverError>` produces
 one coherent UI-free generation: `ProjectFramePlan`, `ResolvedStandards`,
-`PhysicalScene`, `GeometryAudit`, `ComplianceReport`, `LibraryLifecycleStatus`,
-and a fallible `ProjectGraph`. The lifecycle status exactly matches the lifecycle
-diagnostics already lowered into the returned plan and compiled graph.
+`PhysicalScene`, `GeometryAudit`, detailed `StandardsEvaluation`,
+`LibraryLifecycleStatus`, a fallible `IntentReport`, and a fallible
+`ProjectGraph`. The lifecycle status exactly matches the lifecycle diagnostics
+already lowered into the returned plan and compiled graph.
 `library_lifecycle_status(&BuildingModel)` remains callable when framing cannot
 solve. Revision fingerprint failures and graph endpoint invariant failures lower
-through `AnalysisError::Project` and `AnalysisError::Graph`, respectively. Graph
-compilation is independently fallible so valid plan, geometry, compliance, and
-lifecycle results remain usable if graph analysis is unavailable.
+through `AnalysisError::Project` and `AnalysisError::Graph`, respectively. An
+intent-report failure also makes the graph unavailable, while graph endpoint
+failure can occur after a valid report. Valid plan, geometry, standards, and
+lifecycle results remain usable in either case; current intent status remains
+available in the latter case.
 
 ---
 
@@ -384,7 +397,7 @@ the 2D/3D/Render viewports. Entry: `src/main.rs` → `FramerApp` (`src/app/mod.r
 | `actions.rs` | UI-only command metadata (`ActionId`, `EnabledContext`, labels, icons, tooltips, command-surface homes, workflow-strip tab/panel/flyout placement) for the command-surface migration. It is metadata only; enabled/disabled state is evaluated by `FramerApp`, and model mutations still live on `FramerApp`. |
 | `component_visibility.rs` | App-only stable `ComponentKey`, ordered `ComponentSelection`, per-component hidden overrides, frozen isolation targets/modes, and authored/generated/semantic-source appearance resolution. This is disposable presentation state; it never enters core, solver, or `.framer`. |
 | `context_menu.rs` | App-only typed context-menu surface/target context, section/item model, explicit surface builders, and one egui renderer that reads existing `ActionId` state. Interactive 3-D owns the first builder; the future Model Browser menu remains independently composed, and a later contribution registry can replace builder internals without changing the model/renderer/dispatch contract. |
-| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. Renderable authored/generated browser rows expose independent accessible visibility eyes and ordered multi-selection; the inspector renders a read-only summary for heterogeneous selections. Its read-only **Intent relationships** section lazily queries the current graph for "Depends on"/"Why generated" and "Affected by" traces, with explicit multiple-selection, no-selection, no-evidence, regeneration, and analysis-error states. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
+| `panels.rs` | Model tree, inspector, app header quick-access/actions menus, command-search modal, tabbed workflow command strip with insertion flyouts and Render settings panels, status bar — the egui panel bodies. Renderable authored/generated browser rows expose independent accessible visibility eyes and ordered multi-selection; the inspector renders a read-only summary for heterogeneous selections. Its read-only **Intent** section shows domain/outcome-grouped current status for authored selections, filtered **Potential impact** split into assertions and derived results, and **Depends on** evidence; generated selections instead explain that current status is authored-only and show directional **Why generated** evidence. Multiple-selection, no-selection, empty, stale, regeneration, graph-error, and intent-error states remain explicit. The status Level control and model-browser level rows activate the drafting level used by new level-owned objects. Command placement rules live in [command-surfaces.md](specs/command-surfaces.md). The ceiling inspector edits per-ceiling slope (pitch + low edge), converting a room region to a polygon on enable. The document-level Site & standards inspector edits `SiteContext`, stack order/membership, starter-pack import, project-local pack creation, and per-rule waiver reasons; the Plan inspector groups compliance report entries by outcome and lets report rows focus their source element when the app has a selectable authored context. |
 | `model_edit.rs` | Authored-model mutation primitives (wall/opening drag state, constrained edits, id generation, including `next_standards_pack_id`). |
 | `draw_wall.rs` | Draw-wall tool: snapping engine (`resolve_snap`) + same-level auto-join derivation. |
 | `history.rs` | Generic `History<Snapshot>` undo/redo stack; the app snapshot combines authored intent, complete component selection, and session-only component visibility/isolation (+ `history_integration_tests.rs`). |
@@ -464,12 +477,12 @@ the real symbols:
                               │  framer_analysis::analyze_project(&model)
    ┌──────────────────────────▼────────────────────────────┐
    │ DERIVED  coherent ProjectAnalysis                     │  ← regenerated, never saved
-   │   ProjectFramePlan · standards report · physical      │
-   │   scene/audit · library lifecycle · ProjectGraph      │
+   │   ProjectFramePlan · StandardsEvaluation · physical   │
+   │   scene/audit · lifecycle · IntentReport · ProjectGraph│
    └───────────┬───────────────────────────┬───────────────┘
                │                           │
    scene_build + diagnostics/focus         framer_render::scene_from_model + accumulate
-   read-only relationship queries          (path-traced Render view; GPU mirror in app/render)
+   intent status + relationship queries    (path-traced Render view; GPU mirror in app/render)
                │                           │
    ┌───────────▼───────────────────────────▼──────────────┐
    │ PRESENTATION  pane tree/runtimes, inspector, exports   │  ← disposable project artifacts
@@ -479,9 +492,10 @@ the real symbols:
 - **Authoring** edits `FramerApp.model` only; geometry edits call `reconcile_joins`; edits are
   snapshotted into `History` on interaction end.
 - **Analysis** runs `analyze_project` after wall-local propagation. It generates the plan,
-  standards report, physical scene/audit, starter-library lifecycle status, and a deterministic
-  graph as one coherent UI-free generation. Lifecycle warnings enter the plan before graph
-  compilation, so the plan, returned status, and graph agree. Room schedule/boundary results are
+  detailed standards evaluation, physical scene/audit, starter-library lifecycle status,
+  common intent report, and deterministic graph as one coherent UI-free generation.
+  Standards and lifecycle diagnostics enter the plan once before report/graph compilation,
+  so every returned surface agrees. Room schedule/boundary results are
   typed revision-scoped graph consequences, with explicit unknown evidence for incomplete inputs.
   Graph identity fingerprints the analysis contract, a length-delimited deterministic
   starter-library availability/content-hash input, and canonical model bytes;

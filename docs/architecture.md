@@ -35,9 +35,11 @@ small buildings, garages, decks, and wood framed BBQ islands.
   convex-piece lowering, spatial broad phase, and deterministic contact/overlap
   auditing.
 - `crates/framer-analysis`: UI-free orchestration of the solver, standards,
-  geometry, and library-lifecycle outputs plus a deterministic, revision-bound
-  project graph. The graph is disposable and provides lazy explanation and
-  impact queries without making lower crates depend on the app.
+  geometry, and library-lifecycle outputs plus a common non-persisted intent
+  report and deterministic, revision-bound project graph. Both are disposable;
+  the report provides current mode-specific outcomes/evidence and the graph
+  provides lazy explanation and impact queries without making lower crates
+  depend on the app.
 - `crates/framer-render`: UI-agnostic CPU path tracer (scene extraction, BVH, the
   rendering reference math mirrored by the app's GPU compute shader).
 - `crates/framer-app`: native desktop UI and tiled viewport workspace.
@@ -66,12 +68,13 @@ layers are regenerated unless the product later adds explicit override records.
 Named viewport-layout presets are an app-local preference over presentation state,
 not project data; they never enter `.framer`.
 
-`framer-analysis::ProjectGraph` is a derived index across these layers, not a
-fourth source of truth. Each graph and every generated-member, body, compliance,
-diagnostic, or derived-assertion reference it contains is bound to a deterministic
-`GraphRevision` over the graph contract version, a length-delimited deterministic
-starter-library source input (availability plus content hash when available), and
-the canonical post-propagation project bytes. Graph nodes, edges, and cached query
+`framer-analysis::IntentReport` and `ProjectGraph` are derived indexes across
+these layers, not a fourth source of truth. Each report/graph and every
+generated-member, body, compliance, diagnostic, or derived-assertion reference
+it contains is bound to a deterministic `GraphRevision` over the graph contract
+version, a length-delimited deterministic starter-library source input
+(availability plus content hash when available), and the canonical
+post-propagation project bytes. Reports, graph nodes/edges, and cached query
 closures are discarded and rebuilt after any of those inputs change; they are
 never persisted.
 
@@ -217,19 +220,27 @@ multi-wall CAD shell:
   Elevation, WGPU-backed 3D, and path-traced Render panes. Panes have independent
   cameras/render runtimes and may be deferred into native windows while sharing
   project selection and presentation context.
-- `framer-analysis` generates the coherent plan, standards report, physical
-  scene, geometry audit, starter-library lifecycle status, and a canonically
-  ordered project graph for each successful app rebuild. Lifecycle warnings are
-  lowered into the plan before graph compilation, so the returned status, plan
-  diagnostics, and graph describe the same generation. The inspector adapts the
-  current authored or generated selection to that graph and shows read-only
-  "Depends on"/"Why generated" and "Affected by" relationships. Missing evidence
-  is represented explicitly rather than silently omitted, and graph compilation
-  failure leaves valid framing/compliance output and matching lifecycle status
-  available while relationships are reported as unavailable. Graph finalization
-  validates that every edge endpoint exists; an internal missed endpoint returns
-  a typed `GraphBuildError` through the independently fallible `AnalysisError`
-  channel rather than panicking the rebuild.
+- `framer-analysis` generates the coherent plan, detailed standards evaluation,
+  physical scene, geometry audit, starter-library lifecycle status, common
+  non-persisted intent report, and canonically ordered project graph for each
+  successful app rebuild. Current driving dimensions, construction selections,
+  site premises, standards checks, diagnostics, and geometry findings lower into
+  one typed outcome/evidence protocol; standards measurements remain owned by
+  `framer-standards::FactSnapshot`.
+  `StandardsEvaluation::diagnostics()` lowers detailed standards rows; analysis
+  appends those and lifecycle rows once before intent and graph compilation, so
+  every returned surface describes the same generation. For authored selections,
+  the inspector shows domain-grouped current status, filtered potential impact,
+  and "Depends on" evidence. Generated-member selections state that current
+  status applies to authored selections and show directional "Why generated"
+  evidence. Missing evaluator input is an explicit unknown outcome rather than
+  silently omitted evidence. An intent-report failure also makes the graph
+  unavailable; graph endpoint failure can occur after a valid report and leaves
+  current status plus valid framing, standards, geometry, and lifecycle output
+  available while relationship queries are reported as unavailable. Graph
+  finalization validates that every edge endpoint exists; an internal missed
+  endpoint returns a typed `GraphBuildError` through `AnalysisError` rather than
+  panicking the rebuild.
 - Whole-project SVG and CSV BOM exports are sidecar artifacts regenerated from
   the authored model and generated framing plan.
 

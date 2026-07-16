@@ -5149,6 +5149,10 @@ pub enum ModelError {
         expected_scope: String,
         found_scope: String,
     },
+    #[error(
+        "standards check {rule:?} cannot filter opening scope by tags because openings do not carry tags"
+    )]
+    StandardsOpeningTagsUnsupported { rule: String },
     #[error("braced wall line {braced_wall_line:?} references unknown level {level:?}")]
     BracedWallLineReferencesUnknownLevel {
         braced_wall_line: ElementId,

@@ -1,3 +1,7 @@
+use framer_analysis::{
+    BooleanIntentMode, IntentDomain, IntentOutcome, IntentUnknownKind, ObjectiveDirection,
+    SelectionAttribute,
+};
 use framer_core::{DimensionAxis, DimensionKind, OpeningKind, WallJoinKind};
 use framer_geometry::{AssemblyKind, BodyKind, BodyRef};
 use framer_solver::{DiagnosticSeverity, MemberKind};
@@ -42,6 +46,64 @@ pub(super) fn diagnostic_code_prefix(severity: DiagnosticSeverity) -> &'static s
         DiagnosticSeverity::Unsupported => "Unsupported",
         DiagnosticSeverity::Violation => "Violation",
         DiagnosticSeverity::NeedsReview => "Needs review",
+    }
+}
+
+pub(super) fn intent_domain_label(domain: IntentDomain) -> &'static str {
+    match domain {
+        IntentDomain::SpatialProgram => "Spatial program",
+        IntentDomain::Construction => "Construction",
+        IntentDomain::StructuralPerformance => "Structural / performance",
+        IntentDomain::EnvelopeBuildingScience => "Envelope / building science",
+        IntentDomain::Mep => "MEP",
+        IntentDomain::Compliance => "Compliance",
+        IntentDomain::Resource => "Resource",
+        IntentDomain::FabricationInstallation => "Fabrication / installation",
+        IntentDomain::OperationalMaintenance => "Operational / maintenance",
+        IntentDomain::Aesthetic => "Aesthetic",
+    }
+}
+
+pub(super) fn intent_outcome_label(outcome: &IntentOutcome) -> &'static str {
+    match outcome {
+        IntentOutcome::Violated => "Violated",
+        IntentOutcome::Unknown(_) => "Unknown",
+        IntentOutcome::Waived { .. } => "Waived",
+        IntentOutcome::Satisfied => "Satisfied",
+        IntentOutcome::NotApplicable => "Not applicable",
+    }
+}
+
+pub(super) fn intent_unknown_kind_label(kind: IntentUnknownKind) -> &'static str {
+    match kind {
+        IntentUnknownKind::MissingInput => "Missing input",
+        IntentUnknownKind::UnresolvedSubject => "Unresolved subject",
+        IntentUnknownKind::UnresolvedReference => "Unresolved reference",
+        IntentUnknownKind::WrongSubjectKind => "Wrong subject kind",
+        IntentUnknownKind::UnsupportedCondition => "Unsupported condition",
+        IntentUnknownKind::EvaluationUnavailable => "Evaluation unavailable",
+    }
+}
+
+pub(super) fn boolean_intent_mode_label(mode: BooleanIntentMode) -> String {
+    match mode {
+        BooleanIntentMode::Requirement => "Requirement".to_owned(),
+        BooleanIntentMode::Preference { priority } => {
+            format!("Preference {}", priority.0)
+        }
+    }
+}
+
+pub(super) fn selection_attribute_label(attribute: SelectionAttribute) -> &'static str {
+    match attribute {
+        SelectionAttribute::ConstructionSystem => "Construction system",
+    }
+}
+
+pub(super) fn objective_direction_label(direction: ObjectiveDirection) -> &'static str {
+    match direction {
+        ObjectiveDirection::Minimize => "Minimize",
+        ObjectiveDirection::Maximize => "Maximize",
     }
 }
 

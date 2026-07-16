@@ -15,15 +15,16 @@ use framer_solver::{
     DiagnosticSeverity, FrameMember, MemberKind, PlanDiagnostic, ProjectFramePlan, RoomSchedule,
     SolverError, generate_project_plan,
 };
-use framer_standards::{ComplianceEntry, ComplianceReport, Outcome};
+use framer_standards::{ComplianceEntry, ComplianceReport, Outcome, StandardsEvaluation};
 use thiserror::Error;
 
 use crate::graph::{GraphBuildError, GraphBuilder};
 use crate::{
     ComplianceEntryRef, DiagnosticProvider, DiagnosticRef, GeneratedMemberRef, GraphRevision,
-    PhysicalBodyRef, ProjectEdge, ProjectGraph, ProjectNode, ProjectNodeRef, RelationshipKind,
-    RoomConsequenceKind, RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef,
-    UnknownEvidenceKind, UnknownEvidenceRef,
+    IntentEvidenceRef, IntentOutcome, IntentRecord, IntentReport, PhysicalBodyRef, ProjectEdge,
+    ProjectGraph, ProjectNode, ProjectNodeRef, RelationshipKind, RoomConsequenceKind,
+    RoomConsequenceRef, SolverProvenanceRef, StandardsRuleRef, UnknownEvidenceKind,
+    UnknownEvidenceRef,
 };
 
 /// A coherent generation of every UI-free derived artifact consumed by the app.
@@ -36,9 +37,101 @@ pub struct ProjectAnalysis {
     pub resolved_standards: ResolvedStandards,
     pub physical_scene: PhysicalScene,
     pub geometry_audit: GeometryAudit,
-    pub compliance_report: ComplianceReport,
+    pub standards_evaluation: StandardsEvaluation,
     pub library_lifecycle: LibraryLifecycleStatus,
+    pub intent_report: Result<IntentReport, AnalysisError>,
     pub graph: Result<ProjectGraph, AnalysisError>,
+}
+
+impl ProjectAnalysis {
+    pub fn revision(&self) -> Option<GraphRevision> {
+        self.intent_report
+            .as_ref()
+            .ok()
+            .map(IntentReport::revision)
+            .or_else(|| self.graph.as_ref().ok().map(ProjectGraph::revision))
+    }
+
+    /// Recover the original standards payload referenced by common intent evidence.
+    pub fn compliance_entry(&self, reference: &ComplianceEntryRef) -> Option<&ComplianceEntry> {
+        if self.revision() != Some(reference.revision) {
+            return None;
+        }
+        let mut indices = (0..self.standards_evaluation.report.entries.len()).collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            compare_compliance_entry(
+                &self.standards_evaluation.report.entries[*left],
+                &self.standards_evaluation.report.entries[*right],
+            )
+        });
+        let mut ordinal = 0u32;
+        for index in indices {
+            let entry = &self.standards_evaluation.report.entries[index];
+            let same_rule = entry.rule == reference.rule.rule
+                && Some(&entry.pack) == reference.rule.pack.as_ref();
+            let same_subject = entry.element.as_ref()
+                == reference
+                    .subject
+                    .as_ref()
+                    .and_then(AuthoredEntityRef::element_id);
+            if !same_rule || !same_subject {
+                continue;
+            }
+            if ordinal == reference.ordinal {
+                return Some(entry);
+            }
+            ordinal = ordinal.saturating_add(1);
+        }
+        None
+    }
+
+    pub fn standards_details_for(
+        &self,
+        reference: &ComplianceEntryRef,
+    ) -> Vec<&framer_standards::StandardsEvaluationDetail> {
+        let Some(entry) = self.compliance_entry(reference) else {
+            return Vec::new();
+        };
+        let Some(index) = self
+            .standards_evaluation
+            .report
+            .entries
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, entry))
+        else {
+            return Vec::new();
+        };
+        self.standards_evaluation
+            .details
+            .iter()
+            .filter(|detail| detail.report_entry_index == index)
+            .collect()
+    }
+
+    /// Recover the native geometry witness payload for a common geometry finding.
+    pub fn geometry_violation(&self, reference: &DiagnosticRef) -> Option<&GeometryViolation> {
+        if reference.provider != DiagnosticProvider::Geometry
+            || self.revision() != Some(reference.revision)
+        {
+            return None;
+        }
+        let diagnostic = self.plan_diagnostic(reference)?;
+        let mut violations = self.geometry_audit.violations.iter().collect::<Vec<_>>();
+        violations.sort_by(|left, right| crate::lower::compare_geometry_violation(left, right));
+        violations.into_iter().find(|violation| {
+            violation.code() == reference.code
+                && diagnostic.source.as_ref() == Some(violation.body_a().owner())
+                && diagnostic.message == violation.to_string()
+        })
+    }
+
+    /// Recover the exact native plan diagnostic carried by common intent evidence.
+    pub fn plan_diagnostic(&self, reference: &DiagnosticRef) -> Option<&PlanDiagnostic> {
+        self.intent_report
+            .as_ref()
+            .ok()
+            .and_then(|report| report.plan_diagnostic(reference))
+    }
 }
 
 /// Current lifecycle comparison between vendored project items and the bundled library source.
@@ -49,12 +142,18 @@ pub struct LibraryLifecycleStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalysisError {
     #[error("project graph revision could not be computed: {0}")]
-    Project(#[from] ProjectError),
+    Project(String),
     #[error("project graph could not be compiled: {0}")]
     Graph(#[from] GraphBuildError),
+}
+
+impl From<ProjectError> for AnalysisError {
+    fn from(error: ProjectError) -> Self {
+        Self::Project(error.to_string())
+    }
 }
 
 /// Recompute current library lifecycle status without requiring framing to solve successfully.
@@ -85,26 +184,47 @@ pub fn analyze_project(model: &BuildingModel) -> Result<ProjectAnalysis, SolverE
     let physical_scene = build_physical_scene(model, &plan);
     let geometry_audit = audit_physical_scene(&physical_scene);
     let resolved_standards = model.resolved_standards();
-    let compliance_report = framer_standards::evaluate(model, &resolved_standards, &plan);
-    plan.diagnostics
-        .extend(framer_standards::diagnostics(&compliance_report));
+    let standards_evaluation =
+        framer_standards::evaluate_detailed(model, &resolved_standards, &plan);
+    plan.diagnostics.extend(standards_evaluation.diagnostics());
     append_library_diagnostics(&mut plan, &library_lifecycle);
-    let graph = compile_project_graph(
-        model,
-        &plan,
-        &resolved_standards,
-        &physical_scene,
-        &geometry_audit,
-        &compliance_report,
-    );
+    plan.diagnostics
+        .extend(crate::lower::current_intent_plan_diagnostics(
+            model,
+            &geometry_audit,
+        ));
+    let intent_report = GraphRevision::for_model(model)
+        .map_err(AnalysisError::from)
+        .map(|revision| {
+            crate::lower::compile_project_intent(
+                model,
+                &plan,
+                &geometry_audit,
+                &standards_evaluation,
+                revision,
+            )
+        });
+    let graph = match &intent_report {
+        Ok(intent_report) => compile_project_graph_with_intent(
+            model,
+            &plan,
+            &resolved_standards,
+            &physical_scene,
+            &geometry_audit,
+            &standards_evaluation.report,
+            intent_report,
+        ),
+        Err(error) => Err(error.clone()),
+    };
 
     Ok(ProjectAnalysis {
         plan,
         resolved_standards,
         physical_scene,
         geometry_audit,
-        compliance_report,
+        standards_evaluation,
         library_lifecycle,
+        intent_report,
         graph,
     })
 }
@@ -160,6 +280,7 @@ fn append_library_diagnostics(plan: &mut ProjectFramePlan, status: &LibraryLifec
     }
 }
 
+#[cfg(test)]
 fn compile_project_graph(
     model: &BuildingModel,
     plan: &ProjectFramePlan,
@@ -169,6 +290,29 @@ fn compile_project_graph(
     compliance_report: &ComplianceReport,
 ) -> Result<ProjectGraph, AnalysisError> {
     let revision = GraphRevision::for_model(model)?;
+    let intent_report = crate::lower::compile_current_intent(model, revision);
+    compile_project_graph_with_intent(
+        model,
+        plan,
+        resolved,
+        physical_scene,
+        geometry_audit,
+        compliance_report,
+        &intent_report,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_project_graph_with_intent(
+    model: &BuildingModel,
+    plan: &ProjectFramePlan,
+    resolved: &ResolvedStandards,
+    physical_scene: &PhysicalScene,
+    geometry_audit: &GeometryAudit,
+    compliance_report: &ComplianceReport,
+    intent_report: &IntentReport,
+) -> Result<ProjectGraph, AnalysisError> {
+    let revision = intent_report.revision();
     let mut compiler = Compiler {
         model,
         plan,
@@ -176,6 +320,7 @@ fn compile_project_graph(
         physical_scene,
         geometry_audit,
         compliance_report,
+        intent_report,
         revision,
         graph: GraphBuilder::new(revision),
         authored_by_id: BTreeMap::new(),
@@ -194,6 +339,7 @@ struct Compiler<'a> {
     physical_scene: &'a PhysicalScene,
     geometry_audit: &'a GeometryAudit,
     compliance_report: &'a ComplianceReport,
+    intent_report: &'a IntentReport,
     revision: GraphRevision,
     graph: GraphBuilder,
     authored_by_id: BTreeMap<ElementId, AuthoredEntityRef>,
@@ -213,6 +359,7 @@ impl Compiler<'_> {
         self.compile_plan_diagnostics();
         self.compile_compliance_report();
         self.compile_geometry_audit();
+        self.compile_intent_assertions();
     }
 
     fn compile_authored_nodes(&mut self) {
@@ -950,53 +1097,9 @@ impl Compiler<'_> {
     }
 
     fn compile_plan_diagnostics(&mut self) {
-        let mut diagnostics = self.plan.diagnostics.clone();
-        diagnostics.extend(
-            self.plan
-                .wall_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .floor_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .ceiling_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.extend(
-            self.plan
-                .roof_plans
-                .iter()
-                .flat_map(|host| host.diagnostics.iter().cloned()),
-        );
-        diagnostics.sort_by(compare_diagnostic);
-
-        let mut ordinals =
-            BTreeMap::<(DiagnosticProvider, String, Option<AuthoredEntityRef>), u32>::new();
-        for diagnostic in diagnostics {
-            let provider = diagnostic_provider(&diagnostic);
-            let source = diagnostic
-                .source
-                .as_ref()
-                .and_then(|id| self.authored_by_id.get(id))
-                .cloned();
-            let ordinal = ordinals
-                .entry((provider, diagnostic.code.clone(), source.clone()))
-                .or_default();
-            let reference = DiagnosticRef {
-                revision: self.revision,
-                provider,
-                code: diagnostic.code.clone(),
-                source,
-                ordinal: *ordinal,
-            };
-            *ordinal = ordinal.saturating_add(1);
+        for (diagnostic, reference) in
+            crate::lower::canonical_plan_diagnostic_records(self.model, self.plan, self.revision)
+        {
             let node = ProjectNodeRef::Diagnostic(reference.clone());
             self.graph.node(ProjectNode::new(
                 node.clone(),
@@ -1135,17 +1238,9 @@ impl Compiler<'_> {
     }
 
     fn compile_geometry_audit(&mut self) {
-        let mut violations = self.geometry_audit.violations.iter().collect::<Vec<_>>();
-        violations.sort_by(|left, right| compare_geometry_violation(left, right));
-        for (ordinal, violation) in violations.into_iter().enumerate() {
-            let source = self.authored_by_id.get(violation.body_a().owner()).cloned();
-            let reference = DiagnosticRef {
-                revision: self.revision,
-                provider: DiagnosticProvider::Geometry,
-                code: violation.code().to_owned(),
-                source,
-                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-            };
+        for (violation, reference) in
+            crate::lower::canonical_geometry_records(self.model, self.geometry_audit, self.revision)
+        {
             let diagnostic_node = ProjectNodeRef::Diagnostic(reference);
             self.graph.node(ProjectNode::new(
                 diagnostic_node.clone(),
@@ -1162,6 +1257,94 @@ impl Compiler<'_> {
                     body_node,
                     RelationshipKind::EvaluatedFrom,
                 ));
+            }
+        }
+    }
+
+    fn compile_intent_assertions(&mut self) {
+        // Assertions are compiled after every current evidence family so edges never depend on
+        // source-vector order and missing evidence can fail closed explicitly.
+        let records = self.intent_report.records().to_vec();
+        for record in &records {
+            let assertion = record.assertion();
+            let assertion_node = ProjectNodeRef::Assertion(assertion.reference.clone());
+            self.graph.node(ProjectNode::new(
+                assertion_node,
+                intent_record_title(record),
+                Some(intent_record_detail(record)),
+            ));
+        }
+
+        for record in records {
+            let assertion = record.assertion();
+            let assertion_node = ProjectNodeRef::Assertion(assertion.reference.clone());
+            for participant in &assertion.participants {
+                let participant_node = ProjectNodeRef::Authored(participant.entity.clone());
+                if self.graph.contains_node(&participant_node) {
+                    self.graph.edge(
+                        ProjectEdge::new(
+                            assertion_node.clone(),
+                            participant_node,
+                            RelationshipKind::AppliesTo,
+                        )
+                        .ordered(participant.semantic_order as usize),
+                    );
+                } else {
+                    self.add_unknown_dependency(
+                        assertion_node.clone(),
+                        UnknownEvidenceKind::AuthoredEntity,
+                        format!("{:?}", participant.entity),
+                    );
+                }
+            }
+
+            for evidence in record.evidence() {
+                let evidence_node = intent_evidence_node(evidence);
+                if self.graph.contains_node(&evidence_node) {
+                    let diagnostic_is_source = matches!(
+                        (&assertion.source, evidence),
+                        (
+                            crate::AssertionSource::Diagnostic(source),
+                            IntentEvidenceRef::Diagnostic(evidence)
+                        ) if source == evidence
+                    );
+                    if matches!(evidence, IntentEvidenceRef::Diagnostic(_)) && !diagnostic_is_source
+                    {
+                        self.graph.edge(ProjectEdge::new(
+                            evidence_node,
+                            assertion_node.clone(),
+                            RelationshipKind::LoweredFrom,
+                        ));
+                    } else {
+                        self.graph.edge(ProjectEdge::new(
+                            assertion_node.clone(),
+                            evidence_node,
+                            RelationshipKind::EvaluatedFrom,
+                        ));
+                    }
+                } else if let Some(kind) = unknown_kind_for_intent_evidence(evidence) {
+                    self.add_unknown_dependency(
+                        assertion_node.clone(),
+                        kind,
+                        format!("{evidence:?}"),
+                    );
+                }
+            }
+
+            if let IntentRecord::Boolean(boolean) = &record
+                && let IntentOutcome::Waived { waiver, .. } = &boolean.outcome
+                && let crate::WaiverRef::Standards { overlay_pack, .. } = waiver
+            {
+                let waiver_node = ProjectNodeRef::Authored(AuthoredEntityRef::StandardsPack(
+                    overlay_pack.clone(),
+                ));
+                if self.graph.contains_node(&waiver_node) {
+                    self.graph.edge(ProjectEdge::new(
+                        assertion_node,
+                        waiver_node,
+                        RelationshipKind::WaivedBy,
+                    ));
+                }
             }
         }
     }
@@ -1479,26 +1662,6 @@ fn generated_source_matches(host: &AuthoredEntityRef, source: &AuthoredEntityRef
     }
 }
 
-fn diagnostic_provider(diagnostic: &PlanDiagnostic) -> DiagnosticProvider {
-    if diagnostic.rule.is_some() {
-        DiagnosticProvider::Standards
-    } else if diagnostic.code.starts_with("library.") {
-        DiagnosticProvider::Library
-    } else {
-        DiagnosticProvider::Solver
-    }
-}
-
-fn severity_rank(severity: DiagnosticSeverity) -> u8 {
-    match severity {
-        DiagnosticSeverity::Info => 0,
-        DiagnosticSeverity::Warning => 1,
-        DiagnosticSeverity::Unsupported => 2,
-        DiagnosticSeverity::Violation => 3,
-        DiagnosticSeverity::NeedsReview => 4,
-    }
-}
-
 fn severity_label(severity: DiagnosticSeverity) -> &'static str {
     match severity {
         DiagnosticSeverity::Info => "Info",
@@ -1509,37 +1672,61 @@ fn severity_label(severity: DiagnosticSeverity) -> &'static str {
     }
 }
 
-fn compare_diagnostic(left: &PlanDiagnostic, right: &PlanDiagnostic) -> Ordering {
-    diagnostic_provider(left)
-        .cmp(&diagnostic_provider(right))
-        .then_with(|| left.code.cmp(&right.code))
-        .then_with(|| left.source.cmp(&right.source))
-        .then_with(|| severity_rank(left.severity).cmp(&severity_rank(right.severity)))
-        .then_with(|| left.message.cmp(&right.message))
-        .then_with(|| compare_rule_ref(left.rule.as_ref(), right.rule.as_ref()))
+fn intent_evidence_node(evidence: &IntentEvidenceRef) -> ProjectNodeRef {
+    match evidence {
+        IntentEvidenceRef::Project => ProjectNodeRef::Project,
+        IntentEvidenceRef::Assertion(reference) => ProjectNodeRef::Assertion(reference.clone()),
+        IntentEvidenceRef::Authored(reference) => ProjectNodeRef::Authored(reference.clone()),
+        IntentEvidenceRef::GeneratedMember(reference) => {
+            ProjectNodeRef::GeneratedMember(reference.clone())
+        }
+        IntentEvidenceRef::PhysicalBody(reference) => {
+            ProjectNodeRef::PhysicalBody(reference.clone())
+        }
+        IntentEvidenceRef::StandardsRule(reference) => {
+            ProjectNodeRef::StandardsRule(reference.clone())
+        }
+        IntentEvidenceRef::ComplianceEntry(reference) => {
+            ProjectNodeRef::ComplianceEntry(reference.clone())
+        }
+        IntentEvidenceRef::Diagnostic(reference) => ProjectNodeRef::Diagnostic(reference.clone()),
+    }
 }
 
-fn compare_geometry_violation(left: &GeometryViolation, right: &GeometryViolation) -> Ordering {
-    left.body_a()
-        .cmp(right.body_a())
-        .then_with(|| left.body_b().cmp(&right.body_b()))
-        .then_with(|| left.code().cmp(right.code()))
-        .then_with(|| left.to_string().cmp(&right.to_string()))
+fn unknown_kind_for_intent_evidence(evidence: &IntentEvidenceRef) -> Option<UnknownEvidenceKind> {
+    match evidence {
+        IntentEvidenceRef::Project => None,
+        IntentEvidenceRef::Assertion(_) => Some(UnknownEvidenceKind::Assertion),
+        IntentEvidenceRef::Authored(_) => Some(UnknownEvidenceKind::AuthoredEntity),
+        IntentEvidenceRef::GeneratedMember(_) => Some(UnknownEvidenceKind::GeneratedMember),
+        IntentEvidenceRef::PhysicalBody(_) => Some(UnknownEvidenceKind::PhysicalBody),
+        IntentEvidenceRef::StandardsRule(_) => Some(UnknownEvidenceKind::StandardsRule),
+        IntentEvidenceRef::ComplianceEntry(_) => Some(UnknownEvidenceKind::ComplianceEntry),
+        IntentEvidenceRef::Diagnostic(_) => Some(UnknownEvidenceKind::Diagnostic),
+    }
 }
 
-fn compare_rule_ref(
-    left: Option<&framer_solver::RuleRef>,
-    right: Option<&framer_solver::RuleRef>,
-) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left
-            .pack
-            .cmp(&right.pack)
-            .then_with(|| left.rule.cmp(&right.rule))
-            .then_with(|| left.citation.cmp(&right.citation)),
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
+fn intent_record_title(record: &IntentRecord) -> String {
+    match record {
+        IntentRecord::Boolean(record) => format!("{:?} assertion", record.mode),
+        IntentRecord::Objective(record) => {
+            format!("Objective: {}", record.objective.component)
+        }
+        IntentRecord::Assumption(record) => format!("Assumption: {}", record.premise.label),
+    }
+}
+
+fn intent_record_detail(record: &IntentRecord) -> String {
+    match record {
+        IntentRecord::Boolean(record) => {
+            format!("{:?} — {}", record.outcome, record.assertion.rationale)
+        }
+        IntentRecord::Objective(record) => {
+            format!("{:?} — {}", record.observation, record.assertion.rationale)
+        }
+        IntentRecord::Assumption(record) => {
+            format!("{:?} — {}", record.evidence, record.assertion.rationale)
+        }
     }
 }
 
@@ -1590,7 +1777,12 @@ mod tests {
     use framer_solver::{DiagnosticSeverity, PlanDiagnostic, RuleRef};
 
     use super::*;
-    use crate::{GraphQueryCache, ProjectNodeRef};
+    use crate::{
+        AssertionRef, AssertionScope, AssertionSource, BooleanExpression, BooleanIntentMode,
+        BooleanIntentRecord, CompiledAssertion, DerivedAssertionId, DerivedAssertionProvider,
+        DerivedAssertionRole, DerivedAssertionSource, GraphQueryCache, IntentDomain,
+        ProjectNodeRef, SiteAssumptionKey,
+    };
 
     fn analysis(model: &BuildingModel) -> ProjectAnalysis {
         analyze_project(model).expect("fixture should analyze")
@@ -2294,6 +2486,167 @@ mod tests {
     }
 
     #[test]
+    fn authored_assertions_are_queryable_and_impact_is_filtered_and_cached() {
+        let model = BuildingModel::demo_wall();
+        let analysis = analysis(&model);
+        let report = analysis.intent_report.as_ref().unwrap();
+        let graph = analysis.graph.as_ref().unwrap();
+        let wall_ref = AuthoredEntityRef::Wall(model.walls[0].id.clone());
+        let wall_node = ProjectNodeRef::Authored(wall_ref.clone());
+
+        let wall_assertions = report.assertions_for(&wall_ref);
+        assert!(wall_assertions.iter().any(|record| {
+            matches!(
+                record,
+                IntentRecord::Boolean(crate::BooleanIntentRecord {
+                    expression: crate::BooleanExpression::SelectedEntity { .. },
+                    outcome: IntentOutcome::Satisfied,
+                    ..
+                })
+            )
+        }));
+        assert!(wall_assertions.iter().all(|record| {
+            graph
+                .node(&ProjectNodeRef::Assertion(
+                    record.assertion().reference.clone(),
+                ))
+                .is_some()
+        }));
+        assert!(graph.edges().iter().any(|edge| {
+            edge.dependency == wall_node
+                && matches!(edge.dependent, ProjectNodeRef::Assertion(_))
+                && edge.relationship == RelationshipKind::AppliesTo
+        }));
+
+        let mut cache = GraphQueryCache::default();
+        let first = cache.impact_of(graph, &wall_node);
+        let cached = cache.impact_of(graph, &wall_node);
+        assert_eq!(first, cached);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 1);
+        assert!(!first.assertions.is_empty());
+        assert!(first.derived_results.iter().all(|trace| matches!(
+            trace.node,
+            ProjectNodeRef::GeneratedMember(_)
+                | ProjectNodeRef::RoomConsequence(_)
+                | ProjectNodeRef::PhysicalBody(_)
+                | ProjectNodeRef::ComplianceEntry(_)
+                | ProjectNodeRef::Diagnostic(_)
+        )));
+    }
+
+    #[test]
+    fn missing_common_evidence_compiles_to_exact_unknown_families() {
+        let model = BuildingModel::demo_wall();
+        let plan = generate_project_plan(&model).unwrap();
+        let resolved = model.resolved_standards();
+        let scene = build_physical_scene(&model, &plan);
+        let audit = audit_physical_scene(&scene);
+        let revision = GraphRevision::for_model(&model).unwrap();
+        let owner = AssertionRef::Derived(DerivedAssertionId::new(
+            revision,
+            DerivedAssertionProvider::Analysis,
+            DerivedAssertionSource::Project,
+            DerivedAssertionRole::Diagnostic {
+                provider: DiagnosticProvider::Analysis,
+                code: "test.missing-evidence".to_owned(),
+                ordinal: 0,
+            },
+        ));
+        let absent_assertion = AssertionRef::Derived(DerivedAssertionId::new(
+            revision,
+            DerivedAssertionProvider::Standards,
+            DerivedAssertionSource::Project,
+            DerivedAssertionRole::Diagnostic {
+                provider: DiagnosticProvider::Standards,
+                code: "test.absent-assertion".to_owned(),
+                ordinal: 0,
+            },
+        ));
+        let absent_compliance = ComplianceEntryRef {
+            revision,
+            rule: StandardsRuleRef::resolved(model.standards[0].clone(), "test.absent-compliance"),
+            subject: Some(AuthoredEntityRef::Wall(model.walls[0].id.clone())),
+            ordinal: 0,
+        };
+        let absent_diagnostic = DiagnosticRef {
+            revision,
+            provider: DiagnosticProvider::Solver,
+            code: "test.absent-diagnostic".to_owned(),
+            source: Some(AuthoredEntityRef::Wall(model.walls[0].id.clone())),
+            ordinal: 0,
+        };
+        let intent = IntentReport::from_parts(
+            revision,
+            vec![IntentRecord::Boolean(BooleanIntentRecord {
+                assertion: CompiledAssertion {
+                    reference: owner.clone(),
+                    domain: IntentDomain::Construction,
+                    scope: AssertionScope::Project,
+                    participants: Vec::new(),
+                    source: AssertionSource::Project,
+                    rationale: "Missing evidence test".to_owned(),
+                },
+                mode: BooleanIntentMode::Requirement,
+                expression: BooleanExpression::Finding {
+                    code: "test.missing-evidence".to_owned(),
+                },
+                outcome: IntentOutcome::Unknown(crate::IntentUnknown {
+                    kind: crate::IntentUnknownKind::EvaluationUnavailable,
+                    detail: "evidence is absent".to_owned(),
+                }),
+                evidence: vec![
+                    IntentEvidenceRef::Assertion(absent_assertion),
+                    IntentEvidenceRef::ComplianceEntry(absent_compliance),
+                    IntentEvidenceRef::Diagnostic(absent_diagnostic),
+                ],
+            })],
+            Vec::new(),
+        );
+        let graph = compile_project_graph_with_intent(
+            &model,
+            &plan,
+            &resolved,
+            &scene,
+            &audit,
+            &ComplianceReport::default(),
+            &intent,
+        )
+        .unwrap();
+        let owner_node = ProjectNodeRef::Assertion(owner);
+        let expected = BTreeSet::from([
+            UnknownEvidenceKind::Assertion,
+            UnknownEvidenceKind::ComplianceEntry,
+            UnknownEvidenceKind::Diagnostic,
+        ]);
+        let actual = graph
+            .edges()
+            .iter()
+            .filter_map(|edge| {
+                (edge.dependent == owner_node
+                    && edge.relationship == RelationshipKind::UnresolvedEvidence)
+                    .then_some(&edge.dependency)
+            })
+            .filter_map(|dependency| match dependency {
+                ProjectNodeRef::UnknownEvidence(unknown) => Some(unknown.kind),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+
+        let mut cache = GraphQueryCache::default();
+        let queried = cache
+            .evidence_for(&graph, &owner_node)
+            .into_iter()
+            .filter_map(|trace| match trace.node {
+                ProjectNodeRef::UnknownEvidence(unknown) => Some(unknown.kind),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(queried, expected);
+    }
+
+    #[test]
     fn site_impact_reaches_solver_and_compliance_consequences() {
         let model = BuildingModel::demo_wall();
         let analysis = analysis(&model);
@@ -2318,6 +2671,56 @@ mod tests {
                 && trace.path.first().is_some_and(|step| {
                     step.relationship == RelationshipKind::EvaluatedFrom && !step.toward_dependency
                 })
+        }));
+    }
+
+    #[test]
+    fn standards_evidence_reaches_typed_site_assumptions() {
+        let model = BuildingModel::demo_wall();
+        let analysis = analysis(&model);
+        let report = analysis.intent_report.as_ref().unwrap();
+        let graph = analysis.graph.as_ref().unwrap();
+        let (standards_assertion, site_assumption) = report
+            .records()
+            .iter()
+            .find_map(|record| {
+                let AssertionRef::Derived(assertion) = &record.assertion().reference else {
+                    return None;
+                };
+                if assertion.provider != DerivedAssertionProvider::Standards {
+                    return None;
+                }
+                record
+                    .evidence()
+                    .iter()
+                    .find_map(|evidence| match evidence {
+                        IntentEvidenceRef::Assertion(
+                            reference @ AssertionRef::Derived(assumption),
+                        ) if assumption.role
+                            == DerivedAssertionRole::SiteAssumption(
+                                SiteAssumptionKey::GroundSnowLoad,
+                            ) =>
+                        {
+                            Some((record.assertion().reference.clone(), reference.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("header-span intent should cite the ground-snow-load premise");
+
+        let standards_node = ProjectNodeRef::Assertion(standards_assertion);
+        let assumption_node = ProjectNodeRef::Assertion(site_assumption);
+        let mut cache = GraphQueryCache::default();
+        let evidence = cache.evidence_for(graph, &standards_node);
+        assert!(evidence.iter().any(|trace| {
+            trace.node == assumption_node
+                && trace.path.first().is_some_and(|step| {
+                    step.relationship == RelationshipKind::EvaluatedFrom && step.toward_dependency
+                })
+        }));
+        assert!(evidence.iter().any(|trace| {
+            trace.node == ProjectNodeRef::Authored(AuthoredEntityRef::Site)
+                && trace.path.iter().all(|step| step.toward_dependency)
         }));
     }
 
