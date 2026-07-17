@@ -178,15 +178,15 @@ rather than adding one-off overconstraint checks.
 
 ## Standards Engine
 
-Standards packs should be versioned data plus executable rules. A pack such as
-`IRC 2021` should eventually include:
+Standards packs should be versioned data plus executable rules. An authoritative
+pack from a user, jurisdiction, or licensed source should include:
 
 - Prescriptive framing defaults, spacing limits, and member families.
 - Opening/header lookup rules by span, load path, and story count.
 - Snow, wind, seismic, and local amendment inputs.
 - Explicit assumptions and unsupported-condition diagnostics.
 
-The current `IRC 2021 Prescriptive (starter)` pack stores defaults and a small
+The current `Framer Illustrative Starter` pack stores defaults and a small
 starter table set needed by the first wall solver. It must not be represented as
 complete code compliance.
 
@@ -303,9 +303,9 @@ or opening from the Design Shell view opens the Wall view for layout on that wal
 Plan Mode exposes generated framing in the model tree, read-only authored
 summaries, selectable generated members, diagnostics, BOM review, and export.
 
-Unsupported conditions are shown explicitly. The starter standards pack does not
-claim complete IRC compliance, and garage doors are currently framed as wide
-rough openings with a diagnostic noting that garage-door-specific structural
+Unsupported conditions are shown explicitly. The starter standards pack is
+illustrative and not for construction, and garage doors are currently framed as
+wide rough openings with a diagnostic noting that garage-door-specific structural
 design is unsupported.
 
 ## Data and Export

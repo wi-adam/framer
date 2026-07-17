@@ -221,7 +221,8 @@ newline) and a header-peek-and-reject loader, mirroring `ProjectDocument` /`Sche
 `framer-core/src/project.rs`. `Library::validate()` reuses `ConstructionSystem` validation
 against the library's own material set and runs `StandardsPack::validate()` for each pack so a
 library is self-consistent before publish. The built-in starter library replaces the triplicated
-`starter_library()` copies and now carries the IRC 2021 starter standards pack.
+`starter_library()` copies and now carries the illustrative not-for-construction starter
+standards pack.
 
 ### ElementId remap (the collision crux)
 

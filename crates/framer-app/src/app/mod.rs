@@ -2162,7 +2162,7 @@ impl FramerApp {
     }
 
     fn new_project(&mut self) {
-        let code = framer_core::FramingDefaults::irc_2021_starter();
+        let code = framer_core::FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(Wall::new(
             "wall-1",
@@ -6268,7 +6268,7 @@ mod tests {
         );
         let csv = fs::read_to_string(&csv_path).unwrap();
         assert!(csv.starts_with("rule,citation,pack,outcome,element,message,chain\n"));
-        assert!(csv.contains("irc2021."));
+        assert!(csv.contains("framer.starter."));
 
         let _ = fs::remove_file(csv_path);
     }
@@ -6310,8 +6310,9 @@ mod tests {
         assert!(plan.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Violation
                 && diagnostic.rule.as_ref().is_some_and(|rule| {
-                    rule.rule == "irc2021.r602.3-5.stud-height"
-                        && rule.citation == "IRC 2021 Table R602.3(5)"
+                    rule.rule == "framer.starter.stud-height"
+                        && rule.citation
+                            == "Framer illustrative starter stud assumptions (not for construction)"
                 })
         }));
     }
@@ -6658,10 +6659,10 @@ mod tests {
         );
 
         app.add_project_standards_pack();
-        app.insert_starter_standards_pack("std-irc-2021".to_owned());
-        app.remove_standards_pack_from_stack("std-irc-2021".to_owned());
+        app.insert_starter_standards_pack("std-framer-illustrative".to_owned());
+        app.remove_standards_pack_from_stack("std-framer-illustrative".to_owned());
         app.waive_standards_rule(
-            "irc2021.r602.3-5.studs".to_owned(),
+            "framer.starter.studs".to_owned(),
             "engineered alternative".to_owned(),
         );
 
@@ -6723,7 +6724,7 @@ mod tests {
         let before_packs = app.model.standards_packs.len();
         let before_stack = app.model.standards.len();
 
-        app.insert_starter_standards_pack("std-irc-2021".to_owned());
+        app.insert_starter_standards_pack("std-framer-illustrative".to_owned());
 
         let imported = match &app.selected {
             Selection::StandardsPack(id) => ElementId::new(id.clone()),
@@ -6748,7 +6749,7 @@ mod tests {
     #[test]
     fn standards_waiver_creates_project_local_overlay_pack_and_updates_reason() {
         let mut app = FramerApp::default();
-        let rule = "irc2021.r602.3-5.studs".to_owned();
+        let rule = "framer.starter.studs".to_owned();
 
         app.waive_standards_rule(rule.clone(), "   ".to_owned());
         assert_eq!(app.model.standards_packs.len(), 1);

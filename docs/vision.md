@@ -140,8 +140,8 @@ documented data.
 - 3D modeling, sectioning, object placement, and parametric object editing for
   wood-framing-aware design objects.
 - Framing plans, elevation/plan drawings, schedules, BOMs, cut lists, and exports.
-- Code profiles such as IRC 2021, including explicit local amendment hooks over
-  time.
+- Versioned standards profiles from user, jurisdiction, or licensed sources,
+  including explicit local amendment hooks over time.
 
 ### Out Of Scope For Early Releases
 
@@ -188,7 +188,7 @@ Status: first end-to-end alpha slice is implemented for a single straight wall.
 It supports schema-versioned project files, authored wall/opening edits,
 deterministic framing generation, diagnostics, per-member starter-rule
 provenance, grouped BOM, SVG elevation export, and CSV BOM export. It remains a
-starter framing model, not complete IRC compliance.
+starter framing model, not a code-compliance claim.
 
 - Edit wall dimensions and openings.
 - Generate plates, common studs, king studs, jack studs, headers, sills, and
@@ -250,7 +250,7 @@ Stick-framed, rectangular, and diagnostics-only in v1.
 Remaining M3 work: cathedral/scissor (sloped) ceilings, hips/valleys and
 multi-wing footprints, dormers, manufactured trusses and engineered (I-joist/LVL)
 members, stair-opening headers in decks, projected section/elevation drawings for
-these assemblies, and real IRC span/tie/connection checks (M4 code profiles).
+these assemblies, and validated span/tie/connection checks (M4 code profiles).
 
 ### M4: Code Profiles And Diagnostics
 
@@ -292,7 +292,7 @@ goals relate.
   generated members.
 - **G-007 Multi-Wall Model:** add connected wall segments, levels, corners, and a
   whole-project framing plan.
-- **G-008 Code Profile Data:** expand the IRC 2021 starter profile into explicit
+- **G-008 Code Profile Data:** expand configurable standards profiles into explicit
   rule tables and unsupported-condition warnings.
 - **G-009 Example Projects:** add checked-in sample projects for a wall, shed,
   framed BBQ island, and small garage.
@@ -317,8 +317,9 @@ goals relate.
   prescriptive tables that drive generation plus declarative compliance checks
   verified against the model and plan, with jurisdiction overlays, site-context
   (seismic/wind/snow) applicability, authored wall bracing, and a rule-by-rule
-  compliance report with citations. Ships pre-canned packs (IRC 2021 first);
-  users augment, override, or fully define their own. Subsumes G-008's rule
+  compliance report with citations. Ships an illustrative not-for-construction
+  starter shape; authoritative packs come from user, jurisdiction, or licensed
+  sources. Users augment, override, or fully define their own. Subsumes G-008's rule
   tables. See [specs/standards-engine.md](specs/standards-engine.md).
 - **G-016 Intent Model and Resolution:** compile Framer's typed authored objects,
   explicit cross-object assertions, generated framing, standards outcomes, and
@@ -353,7 +354,7 @@ When using `/goal` with this vision:
 - Keep `framer-core` and `framer-solver` free of desktop UI dependencies.
 - Treat the long-term UI as a professional 3D parametric CAD workspace, even when
   early slices use simpler controls.
-- Do not represent starter defaults as complete IRC compliance.
+- Do not represent starter defaults as authoritative standards content or code compliance.
 - Prefer thin vertical slices that update model, solver, UI, docs, and tests
   together when that creates a usable product loop.
 - If a proposed implementation conflicts with this document, update the vision

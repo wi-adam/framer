@@ -2760,7 +2760,7 @@ mod tests {
 
     #[test]
     fn subjects_and_predicate_facts_are_canonical() {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = vec![
             Wall::new("wall-z", "Wall Z", Length::from_feet(8.0), &defaults),
@@ -2840,7 +2840,7 @@ mod tests {
     #[test]
     fn detailed_diagnostics_distinguish_unsupported_facts_from_missing_facts() {
         let mut model = one_wall_model(Length::from_feet(8.0));
-        let mut pack = StandardsPack::irc_2021_starter();
+        let mut pack = StandardsPack::illustrative_starter();
         pack.checks = vec![ComplianceCheck {
             rule: "test.wall.unsupported-stud-height".to_owned(),
             citation: "Test".to_owned(),
@@ -3027,11 +3027,11 @@ mod tests {
 
         assert!(has_outcome(
             &report,
-            "irc2021.r602.10.braced-length",
+            "framer.starter.braced-length",
             &Outcome::NeedsReview
         ));
         assert!(diagnostics(&report).iter().any(|diagnostic| {
-            diagnostic.code == "irc2021.r602.10.braced-length"
+            diagnostic.code == "framer.starter.braced-length"
                 && diagnostic.severity == DiagnosticSeverity::NeedsReview
                 && diagnostic.source.as_ref().map(|id| id.0.as_str()) == Some("bwl")
         }));
@@ -3099,7 +3099,7 @@ mod tests {
             Point2::new(Length::from_feet(1.0), Length::from_feet(1.0)),
         ));
         model.rooms[0].tags.push("habitable".to_owned());
-        let mut pack = StandardsPack::irc_2021_starter();
+        let mut pack = StandardsPack::illustrative_starter();
         pack.checks = vec![
             wall_check(
                 "test.wall.pass",
@@ -3186,7 +3186,7 @@ mod tests {
 
     #[test]
     fn detailed_evaluation_preserves_legacy_outputs_and_scoped_waiver_evidence() {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.site.wind_speed_mph = Some(100);
         model.walls = vec![
@@ -3235,7 +3235,7 @@ mod tests {
             },
         };
 
-        let mut base = StandardsPack::irc_2021_starter();
+        let mut base = StandardsPack::illustrative_starter();
         base.checks = vec![
             wall_check(
                 "test.wall.pass-detail",
@@ -3267,7 +3267,7 @@ mod tests {
         ];
         let base_id = base.id.clone();
 
-        let mut overlay = StandardsPack::irc_2021_starter();
+        let mut overlay = StandardsPack::illustrative_starter();
         overlay.id = ElementId::new("std-overlay");
         overlay.name = "Test overlay".to_owned();
         overlay.tables.studs.clear();
@@ -3299,16 +3299,16 @@ mod tests {
         );
         const FROZEN_REPORT_CSV: &str = concat!(
             "rule,citation,pack,outcome,element,message,chain\n",
-            "test.room.unknown-detail,Test,std-irc-2021,NeedsReview,room-unknown,Room unknown detail needs review; one or more facts are unavailable.,std-irc-2021:Introduced\n",
-            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-a,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
-            "test.wall.advisory-detail,Test,std-irc-2021,Advisory,wall-b,test.wall.advisory-detail advisory failed.,std-irc-2021:Introduced\n",
-            "test.wall.applicability-unknown,Test,std-irc-2021,NeedsReview,,test.wall.applicability-unknown applicability needs review.,std-irc-2021:Introduced\n",
-            "test.wall.not-applicable,Test,std-irc-2021,NotApplicable,,test.wall.not-applicable is not applicable for this site context.,std-irc-2021:Introduced\n",
-            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-a,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
-            "test.wall.pass-detail,Test,std-irc-2021,Pass,wall-b,test.wall.pass-detail passed.,std-irc-2021:Introduced\n",
-            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-a,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
-            "test.wall.violation-detail,Test,std-irc-2021,Violation,wall-b,test.wall.violation-detail failed.,std-irc-2021:Introduced\n",
-            "test.wall.waived-detail,Test,std-irc-2021,Waived,,Waived: approved by test AHJ,std-irc-2021:Introduced;std-overlay:Reseverity;std-overlay:Waived\n",
+            "test.room.unknown-detail,Test,std-framer-illustrative,NeedsReview,room-unknown,Room unknown detail needs review; one or more facts are unavailable.,std-framer-illustrative:Introduced\n",
+            "test.wall.advisory-detail,Test,std-framer-illustrative,Advisory,wall-a,test.wall.advisory-detail advisory failed.,std-framer-illustrative:Introduced\n",
+            "test.wall.advisory-detail,Test,std-framer-illustrative,Advisory,wall-b,test.wall.advisory-detail advisory failed.,std-framer-illustrative:Introduced\n",
+            "test.wall.applicability-unknown,Test,std-framer-illustrative,NeedsReview,,test.wall.applicability-unknown applicability needs review.,std-framer-illustrative:Introduced\n",
+            "test.wall.not-applicable,Test,std-framer-illustrative,NotApplicable,,test.wall.not-applicable is not applicable for this site context.,std-framer-illustrative:Introduced\n",
+            "test.wall.pass-detail,Test,std-framer-illustrative,Pass,wall-a,test.wall.pass-detail passed.,std-framer-illustrative:Introduced\n",
+            "test.wall.pass-detail,Test,std-framer-illustrative,Pass,wall-b,test.wall.pass-detail passed.,std-framer-illustrative:Introduced\n",
+            "test.wall.violation-detail,Test,std-framer-illustrative,Violation,wall-a,test.wall.violation-detail failed.,std-framer-illustrative:Introduced\n",
+            "test.wall.violation-detail,Test,std-framer-illustrative,Violation,wall-b,test.wall.violation-detail failed.,std-framer-illustrative:Introduced\n",
+            "test.wall.waived-detail,Test,std-framer-illustrative,Waived,,Waived: approved by test AHJ,std-framer-illustrative:Introduced;std-overlay:Reseverity;std-overlay:Waived\n",
         );
         assert_eq!(evaluation.report.to_csv(), FROZEN_REPORT_CSV);
 
@@ -3978,7 +3978,7 @@ mod tests {
         not_applicable.applies = Applicability::SiteFlag {
             key: "fixture-checks".to_owned(),
         };
-        let mut pack = StandardsPack::irc_2021_starter();
+        let mut pack = StandardsPack::illustrative_starter();
         pack.checks = vec![
             fixture_check("test.fixture.pass", 48),
             fixture_check("test.fixture.violation", 180),
@@ -4051,7 +4051,7 @@ mod tests {
     #[test]
     fn report_csv_is_deterministic_and_escaped() {
         let model = one_wall_model(Length::from_feet(8.0));
-        let mut pack = StandardsPack::irc_2021_starter();
+        let mut pack = StandardsPack::illustrative_starter();
         pack.checks = vec![wall_check(
             "test.wall.pass",
             CheckSeverity::Required,
@@ -4069,7 +4069,7 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.starts_with("rule,citation,pack,outcome,element,message,chain\n"));
-        assert!(first.contains("test.wall.pass,Test,std-irc-2021,Pass,wall"));
+        assert!(first.contains("test.wall.pass,Test,std-framer-illustrative,Pass,wall"));
     }
 
     fn assert_known_with_wrapper(
@@ -4110,7 +4110,7 @@ mod tests {
     }
 
     fn clearance_test_model() -> BuildingModel {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = vec![
             Wall::new(
@@ -4171,7 +4171,7 @@ mod tests {
     }
 
     fn diagonal_clearance_test_model(northwest_y: i64) -> BuildingModel {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = clearance_test_model();
         model.walls = vec![
             Wall::new(
@@ -4306,7 +4306,7 @@ mod tests {
     }
 
     fn one_wall_model(length: Length) -> BuildingModel {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = vec![Wall::new("wall", "Wall", length, &defaults)];
         model

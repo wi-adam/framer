@@ -1851,7 +1851,7 @@ mod tests {
 
     #[test]
     fn placement_preview_is_bounds_neutral() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = rect_walls(&code, "bounds", "level-1", 0.0, 12.0);
         model.furnishings.push(Furnishing::new(
@@ -1886,7 +1886,7 @@ mod tests {
 
     #[test]
     fn placement_preview_destination_is_not_pickable() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = rect_walls(&code, "pick", "level-1", 0.0, 12.0);
         model.furnishings.push(Furnishing::new(
@@ -2148,7 +2148,7 @@ mod tests {
 
     #[test]
     fn room_boundaries_by_level_batches_and_preserves_room_order() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .levels

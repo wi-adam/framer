@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn opening_drag_moves_center_and_bottom_in_two_axes() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn opening_drag_resizes_from_corner_without_moving_opposite_corner() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn opening_drag_clamps_to_wall_bounds() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn opening_drag_stops_below_top_plates_for_header_space() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn opening_drag_stops_before_neighbor_opening() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "left-window",
@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn snap_rounds_move_to_step() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn next_wall_id_is_globally_unique() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         model
             .walls
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn endpoint_move_clamps_perpendicular_neighbour_at_a_corner() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         // L-corner at (10,0): horizontal `a` meets vertical `b`.
         model
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn endpoint_move_allows_collinear_and_free_ends() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         // Collinear run a—b sharing the node at (10,0).
         model
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn translate_keeps_ortho_allows_perpendicular_clamps_along_axis() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         model
             .walls
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn endpoint_move_rejects_collapsing_a_wall_onto_its_fixed_end() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         model
             .walls
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn translate_rejects_collapsing_a_neighbour() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = framer_core::BuildingModel::new();
         // `a` horizontal at y=0; `b` vertical from the shared corner up to (0,8).
         model
@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn ortho_locks_move_to_dominant_axis() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(20.0), &code);
         wall.openings.push(Opening::door(
             "door",

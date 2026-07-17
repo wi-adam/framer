@@ -2048,7 +2048,7 @@ mod tests {
     /// Rectangular room + asymmetric obstacle. The four desired-pose directional observations
     /// form an exact integer-tick box: only the center pose at Deg0 satisfies all four.
     fn unique_option_model() -> BuildingModel {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls = vec![
             Wall::new(

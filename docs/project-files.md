@@ -69,7 +69,7 @@ for the single-wall example.
 - `site` stores jurisdiction and environmental inputs used by standards checks.
 - `standards` is the ordered standards-pack stack. `standards_packs` embeds the
   self-contained pack definitions referenced by that stack. New projects seed
-  both with the IRC 2021 starter pack.
+  both with the Framer illustrative starter pack.
 - `libraries`, `materials`, `systems`, `furnishings`, `mep_objects`, `rooms`,
   `furnishing_instances`, `mep_instances`, `roof_planes`, `ceilings`,
   `floor_decks`, `braced_wall_lines`, `intents`, and `intent_overrides` are
@@ -157,11 +157,11 @@ The current format is schema 3:
 The checked-in starter catalog is
 [`../libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib).
 New projects and demos load that document for material/system definitions and
-seed the same IRC 2021 starter standards pack into the authored project model;
-the starter catalog also distributes that pack for vendor workflows. Furnishing
-and MEP object families are copied when placed from the starter catalog. Opening
-an existing `.framer` project does not read any `.framerlib`; projects remain
-self-contained.
+seed the same Framer illustrative starter standards pack into the authored project
+model; the starter catalog also distributes that pack for vendor workflows.
+Furnishing and MEP object families are copied when placed from the starter catalog.
+Opening an existing `.framer` project does not read any `.framerlib`; projects
+remain self-contained.
 
 ## Project Packages
 
@@ -746,9 +746,10 @@ letters, digits, or hyphens. Examples:
 Do not rewrite existing IDs when changing properties or names. Add a new stable ID
 only when adding a new authored object.
 
-The checked-in IRC 2021 standards pack is named `IRC 2021 Prescriptive (starter)`
-because it is only a starter data shape for the early wall solver. It is not a
-complete code-compliance claim.
+The checked-in `Framer Illustrative Starter` standards pack is only a starter
+data shape for exercising the early wall solver and standards-engine flows. Its
+`illustrative` and `not-for-construction` tags are part of the authored pack;
+it is not an authoritative standards source or a code-compliance claim.
 
 Garage doors are stored as authored semantic openings, but the current solver
 frames them as wide rough openings with starter king, jack, and header rules. It
@@ -820,8 +821,8 @@ When Codex, Claude, or another coding agent edits a `.framer` file:
 10. Keep deterministic ordering by ID, or re-save through Framer to canonicalize.
     Preserve semantic order inside construction layers, standards stacks, exact
     participants, and predicate children.
-11. Do not present the starter IRC 2021 standards pack as complete code
-   compliance.
+11. Do not present the Framer illustrative starter pack as authoritative or as
+    code compliance.
 12. Represent plan adjustments as authored design changes. Use
     `IntentOverride::Waive` only as an explicit exception to an authored
     assertion; it does not permit adding or changing generated members directly.

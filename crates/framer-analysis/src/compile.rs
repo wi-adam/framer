@@ -2015,15 +2015,15 @@ mod tests {
         assert!(matches!(
             provenance,
             Some(ProjectNodeRef::SolverProvenance(reference))
-                if reference.rule_id == "irc2021.r602.7-1.headers"
+                if reference.rule_id == "framer.starter.headers"
         ));
         assert!(graph.edges().iter().any(|edge| {
             edge.dependent == *provenance.unwrap()
                 && matches!(
                     &edge.dependency,
                     ProjectNodeRef::StandardsRule(rule)
-                        if rule.pack.as_ref().is_some_and(|pack| pack.0 == "std-irc-2021")
-                            && rule.rule == "irc2021.r602.7-1.headers"
+                        if rule.pack.as_ref().is_some_and(|pack| pack.0 == "std-framer-illustrative")
+                            && rule.rule == "framer.starter.headers"
                 )
         }));
     }
@@ -2267,7 +2267,7 @@ mod tests {
         let graph = analysis.graph.as_ref().unwrap();
         let entry = graph.nodes().iter().find_map(|node| match &node.reference {
             ProjectNodeRef::ComplianceEntry(entry)
-                if entry.rule.rule == "irc2021.r602.3-5.stud-height" =>
+                if entry.rule.rule == "framer.starter.stud-height" =>
             {
                 Some(node.reference.clone())
             }

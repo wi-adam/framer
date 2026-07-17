@@ -70,7 +70,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
 | `src/model.rs` | All domain types: `BuildingModel`, construction systems, materials, furnishing/MEP families and instances, walls, openings, joins, rooms, dimensions, standards-stack references, and `ModelError` validation including authored intents/overrides. |
 | `src/project.rs` | `.framer` serialization envelope: `ProjectDocument`, `load_project`/`save_project`, schema versioning + canonicalization. |
 | `src/library.rs` | `.framerlib` serialization envelope: `LibraryDocument`, `Library`, `load_library`/`save_library`, schema versioning + canonicalization; also loads the checked-in starter catalog. |
-| `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, public non-persisted fact-subject kinds, pack validation, the IRC 2021 starter pack, and pure stack resolution. `ResolvedStandards` retains winning check definitions, including waived checks, for detailed downstream evaluation while its active `checks` view stays non-waived. |
+| `src/standards.rs` | Standards Engine v1 authored data types: `StandardsPack`, `SiteContext`, prescriptive tables, compliance predicates, public non-persisted fact-subject kinds, pack validation, the illustrative not-for-construction starter pack, and pure stack resolution. `ResolvedStandards` retains winning check definitions, including waived checks, for detailed downstream evaluation while its active `checks` view stays non-waived. |
 | `src/topology.rs` | Derives room boundaries/areas from the wall graph; level-scoped room-boundary helpers for stacked drafting; `wall_interior_sides`. |
 | `src/units.rs` | `Length` (integer **ticks**, 16 = 1 inch) and `Point2`. The basis of determinism. |
 | `src/constraints.rs` | Generic linear-constraint layer (`ConstraintSystem`) for driving dimensions / overconstraint checks. |
@@ -142,8 +142,8 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   [ceilings-and-roofs.md](specs/ceilings-and-roofs.md).
 - **`StandardsPack`** / **`FramingDefaults`** (`src/standards.rs`) — project-embedded standards
   data, starter framing defaults, prescriptive tables, checks, overlays, and stack resolution.
-  `StandardsPack::irc_2021_starter()` is the built-in seed. Not a complete code-compliance
-  engine.
+  `StandardsPack::illustrative_starter()` is the built-in seed and is explicitly not
+  authoritative standards content.
 - **`ElementId`** — stable semantic id (lowercase letters/digits/hyphens). **`ModelError`** —
   the validation error enum (dangling system refs, framing/layer mismatches, etc.).
 
@@ -153,7 +153,7 @@ UI-agnostic source of truth. Everything else derives from a `BuildingModel`.
   construct models; `new`/demos seed the starter material + system library
   (`BuildingModel::starter_library()`), sourced from
   [`libraries/framer-starter.framerlib`](../libraries/framer-starter.framerlib), and seed the
-  embedded IRC 2021 starter standards pack. Furnishing and MEP object families remain in the
+  embedded illustrative starter standards pack. Furnishing and MEP object families remain in the
   starter catalog until placed/imported.
 - `BuildingModel::resolved_standards()` / `framing_defaults()` — resolve the ordered standards
   stack into the tables and defaults consumed by the solver and UI defaults.

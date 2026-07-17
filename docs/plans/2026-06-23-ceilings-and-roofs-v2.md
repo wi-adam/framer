@@ -22,7 +22,7 @@ Deepen the [Ceilings & Roofs](../specs/ceilings-and-roofs.md) feature (G-014) pa
   geometry; several slices.
 
 Phase A ships first and stands alone; Phase B builds on it. Trusses, engineered members, dormers,
-and real IRC span/tie tables remain out of scope (see the spec).
+and validated span/tie calculations remain out of scope (see the spec).
 
 ## Architecture / stack summary
 

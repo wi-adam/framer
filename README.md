@@ -4,7 +4,9 @@ Framer is an open source parametric CAD tool for wood framed structures.
 
 The project goal is to model structures semantically, place openings into walls,
 floors, ceilings, and roofs, then generate framing plans and bills of materials
-from configurable code profiles such as IRC 2021.
+from configurable standards packs. The built-in pack is explicitly illustrative
+and not for construction; authoritative content must come from a source with
+known provenance and reuse rights.
 
 ## Status
 

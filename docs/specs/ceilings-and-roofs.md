@@ -96,7 +96,7 @@ The observable contract. Testable statements; edge cases are explicit.
   compliance is explicit, never implied"): e.g. a ridge with no rafter tie / ceiling joist
   reports "ridge board used without a tie — a structural ridge beam may be required"; spans
   are emitted with a "span not checked against a code table" note; varying plate heights under
-  one roof are flagged as unsupported. v1 performs **no** IRC span/tie/connection lookups
+  one roof are flagged as unsupported. v1 performs **no** authoritative span/tie/connection lookups
   (deferred to M4 code profiles).
 
 ### Authoring
@@ -259,7 +259,7 @@ persisted intent or the `.framer` schema.
    explicit run.*
 6. **Structural correctness in v1 is diagnostics, not enforcement.** Generate geometry + BOM;
    surface ridge-board-vs-beam, missing ties, unchecked spans, and varying plate heights as
-   explicit diagnostics. Real IRC span/tie/connection rules belong to M4 code profiles.
+   explicit diagnostics. Validated span/tie/connection rules belong to M4 code profiles.
 7. **Floor decks and flat ceilings share one joisting generator.** A flat ceiling is a floor
    deck viewed from below; modeling both now keeps the generator and the model symmetric and
    sets up multi-level stacking (floor-of-N+1 = ceiling-of-N) later.
@@ -435,7 +435,7 @@ non-axis-aligned framing member**.
 - **Manufactured trusses** (profile + spacing + bearing, web design deferred to "the plant").
 - **Engineered members** (I-joist / LVL / open-web): `BoardProfile` is capped at 2×12 with a
   hardcoded 1.5″ thickness and nominal depths — a richer `MemberProfile` comes with them.
-- **Real IRC span/tie/connection lookups, header sizing, snow/wind tie forces** — M4 code
+- **Validated span/tie/connection lookups, header sizing, snow/wind tie forces** — M4 code
   profiles; v1 emits diagnostics only.
 - **Varying plate heights / split levels under one roof; multi-level floor-of-N+1 = ceiling-of-N
   stacking** — v1 assumes one plate height per roof; the solver doesn't read `Level.elevation`

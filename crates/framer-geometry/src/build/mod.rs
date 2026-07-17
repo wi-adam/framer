@@ -378,7 +378,7 @@ mod tests {
 
     fn valley_test_model() -> BuildingModel {
         let mut model = roof_test_model();
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let p = |x, y| Point2::new(Length::from_feet(x), Length::from_feet(y));
         let footprint = [
             p(0.0, 0.0),

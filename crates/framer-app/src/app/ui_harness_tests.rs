@@ -394,7 +394,7 @@ fn intent_relationships_show_compliance_and_honest_empty_states() {
     scroll_to_intent_relationships(&mut harness);
     assert_accessible_label(
         &harness,
-        "Compliance Violation: irc2021.r602.3-5.stud-height",
+        "Compliance Violation: framer.starter.stud-height",
         "compliance relationship inspector",
     );
 
@@ -1940,8 +1940,8 @@ fn status_bar_diagnostics_popover_selects_source_from_design() {
     harness.run();
 
     assert!(
-        harness.query_all_by_label("3 warnings").next().is_some(),
-        "diagnostics popover should keep the visible warning count"
+        harness.query_all_by_label("0 warnings").next().is_some(),
+        "the illustrative headers should leave the default shell without warnings"
     );
     assert!(
         harness

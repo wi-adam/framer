@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn save_project_is_deterministic_for_reordered_authored_objects() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
 
         let mut first = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
@@ -980,7 +980,7 @@ mod tests {
     fn wall_system_and_tags_round_trip() {
         use crate::ElementId;
 
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.system = ElementId::new("system-wall-interior-1");
@@ -1222,7 +1222,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_dangling_wall_system() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.system = ElementId::new("system-does-not-exist");
@@ -1240,7 +1240,7 @@ mod tests {
     fn room_round_trips_through_save_and_load() {
         use crate::{Point2, Room, RoomUsage};
 
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -1271,7 +1271,7 @@ mod tests {
     fn bracing_round_trips_through_save_and_load() {
         use crate::{BracedPanel, BracedWallLine, BracingMethod, Point2};
 
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut empty = BuildingModel::new();
         empty.walls.push(Wall::new(
             "wall-empty",
