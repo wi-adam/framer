@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     fn wall_model(exposure: WallExposure, openings: Vec<Opening>) -> BuildingModel {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall-1", "Wall", Length::from_feet(12.0), &code);
         wall.start = Point2::new(Length::ZERO, Length::ZERO);
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     fn corner_model() -> BuildingModel {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(
             Wall::new("wall-a", "Wall A", Length::from_feet(10.0), &code).with_placement(

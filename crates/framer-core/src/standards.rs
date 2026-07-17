@@ -556,17 +556,19 @@ impl StandardsPack {
         Ok(())
     }
 
-    pub fn irc_2021_starter() -> Self {
+    pub fn illustrative_starter() -> Self {
         Self {
-            id: ElementId::new("std-irc-2021"),
-            name: "IRC 2021 Prescriptive (starter)".to_owned(),
-            edition: "2021".to_owned(),
+            id: ElementId::new("std-framer-illustrative"),
+            name: "Framer Illustrative Starter".to_owned(),
+            edition: "illustrative-v1".to_owned(),
             source: None,
             tables: StandardsTables {
-                defaults: FramingDefaults::irc_2021_starter(),
+                defaults: FramingDefaults::illustrative_starter(),
                 studs: vec![StudTable {
-                    rule: "irc2021.r602.3-5.studs".to_owned(),
-                    citation: "IRC 2021 Table R602.3(5)".to_owned(),
+                    rule: "framer.starter.studs".to_owned(),
+                    citation:
+                        "Framer illustrative starter stud assumptions (not for construction)"
+                            .to_owned(),
                     rows: vec![
                         StudRow {
                             profile: BoardProfile::TwoByFour,
@@ -595,46 +597,34 @@ impl StandardsPack {
                     ],
                 }],
                 headers: vec![HeaderSpanTable {
-                    rule: "irc2021.r602.7-1.headers".to_owned(),
-                    citation: "IRC 2021 Table R602.7(1)".to_owned(),
+                    rule: "framer.starter.headers".to_owned(),
+                    citation:
+                        "Framer illustrative starter header assumptions (not for construction)"
+                            .to_owned(),
                     rows: vec![
                         HeaderRow {
-                            profile: BoardProfile::TwoByTen,
-                            plies: 1,
-                            max_ground_snow_psf: 30,
-                            max_building_width: Length::from_feet(36.0),
+                            profile: BoardProfile::TwoBySix,
+                            plies: 2,
+                            max_ground_snow_psf: 0,
+                            max_building_width: Length::ZERO,
                             max_span: Length::from_feet(4.0),
                             jack_studs: 1,
                         },
                         HeaderRow {
-                            profile: BoardProfile::TwoByTen,
+                            profile: BoardProfile::TwoByEight,
                             plies: 2,
-                            max_ground_snow_psf: 30,
-                            max_building_width: Length::from_feet(36.0),
-                            max_span: Length::from_feet(6.0),
-                            jack_studs: 1,
-                        },
-                        HeaderRow {
-                            profile: BoardProfile::TwoByTwelve,
-                            plies: 1,
-                            max_ground_snow_psf: 30,
-                            max_building_width: Length::from_feet(36.0),
-                            max_span: Length::from_feet(5.0),
-                            jack_studs: 1,
-                        },
-                        HeaderRow {
-                            profile: BoardProfile::TwoByTwelve,
-                            plies: 2,
-                            max_ground_snow_psf: 30,
-                            max_building_width: Length::from_feet(36.0),
+                            max_ground_snow_psf: 0,
+                            max_building_width: Length::ZERO,
                             max_span: Length::from_feet(8.0),
                             jack_studs: 2,
                         },
                     ],
                 }],
                 fastening: vec![FasteningSchedule {
-                    rule: "irc2021.r602.3-1.fastening".to_owned(),
-                    citation: "IRC 2021 Table R602.3(1)".to_owned(),
+                    rule: "framer.starter.fastening".to_owned(),
+                    citation:
+                        "Framer illustrative starter fastening assumptions (not for construction)"
+                            .to_owned(),
                     rows: vec![
                         FasteningRow {
                             connection: ConnectionKind::StudToPlateEnd,
@@ -661,8 +651,10 @@ impl StandardsPack {
                     ],
                 }],
                 bracing: vec![BracingTable {
-                    rule: "irc2021.r602.10-3.bracing".to_owned(),
-                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    rule: "framer.starter.bracing".to_owned(),
+                    citation:
+                        "Framer illustrative starter bracing assumptions (not for construction)"
+                            .to_owned(),
                     rows: vec![
                         BracingRow {
                             method: BracingMethod::Wsp,
@@ -781,8 +773,10 @@ impl StandardsPack {
             },
             checks: vec![
                 ComplianceCheck {
-                    rule: "irc2021.r602.3-5.stud-height".to_owned(),
-                    citation: "IRC 2021 Table R602.3(5)".to_owned(),
+                    rule: "framer.starter.stud-height".to_owned(),
+                    citation:
+                        "Framer illustrative starter stud assumptions (not for construction)"
+                            .to_owned(),
                     title: "Wall stud height".to_owned(),
                     severity: CheckSeverity::Required,
                     applies: Applicability::Always,
@@ -797,8 +791,10 @@ impl StandardsPack {
                     },
                 },
                 ComplianceCheck {
-                    rule: "irc2021.r602.7.header-span".to_owned(),
-                    citation: "IRC 2021 R602.7(1)".to_owned(),
+                    rule: "framer.starter.header-span".to_owned(),
+                    citation:
+                        "Framer illustrative starter header assumptions (not for construction)"
+                            .to_owned(),
                     title: "Opening header span".to_owned(),
                     severity: CheckSeverity::Required,
                     applies: Applicability::Always,
@@ -810,8 +806,9 @@ impl StandardsPack {
                     },
                 },
                 ComplianceCheck {
-                    rule: "irc2021.r305.1.ceiling-height".to_owned(),
-                    citation: "IRC 2021 R305.1".to_owned(),
+                    rule: "framer.starter.ceiling-height".to_owned(),
+                    citation: "Framer illustrative starter ceiling-height assumption (not for construction)"
+                        .to_owned(),
                     title: "Habitable room ceiling height".to_owned(),
                     severity: CheckSeverity::Advisory,
                     applies: Applicability::Always,
@@ -825,8 +822,10 @@ impl StandardsPack {
                     },
                 },
                 ComplianceCheck {
-                    rule: "irc2021.r602.10.braced-length".to_owned(),
-                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    rule: "framer.starter.braced-length".to_owned(),
+                    citation:
+                        "Framer illustrative starter bracing assumptions (not for construction)"
+                            .to_owned(),
                     title: "Braced wall line length".to_owned(),
                     severity: CheckSeverity::Required,
                     applies: Applicability::Always,
@@ -838,8 +837,10 @@ impl StandardsPack {
                     },
                 },
                 ComplianceCheck {
-                    rule: "irc2021.r602.10.line-has-panels".to_owned(),
-                    citation: "IRC 2021 R602.10.3".to_owned(),
+                    rule: "framer.starter.line-has-panels".to_owned(),
+                    citation:
+                        "Framer illustrative starter bracing assumptions (not for construction)"
+                            .to_owned(),
                     title: "Braced wall line has panels".to_owned(),
                     severity: CheckSeverity::Advisory,
                     applies: Applicability::Always,
@@ -852,22 +853,22 @@ impl StandardsPack {
                 },
             ],
             overlays: Vec::new(),
-            tags: Vec::new(),
+            tags: vec!["illustrative".to_owned(), "not-for-construction".to_owned()],
             properties: BTreeMap::new(),
         }
     }
 }
 
 impl FramingDefaults {
-    pub fn irc_2021_starter() -> Self {
+    pub fn illustrative_starter() -> Self {
         Self {
             default_wall_height: Length::from_feet(8.0),
             default_stud_spacing: Length::from_whole_inches(16),
             double_top_plate: true,
-            default_header_depth: Length::from_whole_inches(9),
+            default_header_depth: Length::from_whole_inches(6),
             stud_profile: BoardProfile::TwoByFour,
             plate_profile: BoardProfile::TwoByFour,
-            header_profile: BoardProfile::TwoByTen,
+            header_profile: BoardProfile::TwoBySix,
         }
     }
 }
@@ -925,7 +926,7 @@ pub fn resolve_standards(stack: &[&StandardsPack]) -> ResolvedStandards {
     let mut defaults = stack
         .first()
         .map(|pack| pack.tables.defaults.clone())
-        .unwrap_or_else(FramingDefaults::irc_2021_starter);
+        .unwrap_or_else(FramingDefaults::illustrative_starter);
     let mut rules = BTreeMap::<String, ResolvedEntry>::new();
     let mut warnings = Vec::new();
 
@@ -1213,7 +1214,7 @@ mod tests {
     use super::*;
 
     fn starter_pack() -> StandardsPack {
-        StandardsPack::irc_2021_starter()
+        StandardsPack::illustrative_starter()
     }
 
     fn test_check(rule: &str, requirement: Predicate) -> ComplianceCheck {
@@ -1391,8 +1392,9 @@ mod tests {
                 .to_owned(),
         });
         pack.tables.bracing.push(BracingTable {
-            rule: "irc2021.r602.10-3.bracing".to_owned(),
-            citation: "IRC 2021 R602.10.3".to_owned(),
+            rule: "framer.starter.bracing".to_owned(),
+            citation: "Framer illustrative starter bracing assumptions (not for construction)"
+                .to_owned(),
             rows: vec![BracingRow {
                 method: BracingMethod::Wsp,
                 max_seismic: Some(SeismicDesignCategory::C),
@@ -1402,9 +1404,9 @@ mod tests {
             }],
         });
         pack.checks
-            .push(wall_height_check("irc2021.r602.3-5.stud-height"));
+            .push(wall_height_check("framer.starter.stud-height"));
         pack.overlays.push(RuleOverlay::Severity {
-            target: "irc2021.r602.3-5.stud-height".to_owned(),
+            target: "framer.starter.stud-height".to_owned(),
             severity: CheckSeverity::Advisory,
         });
         pack.tags.push("starter".to_owned());
@@ -1420,7 +1422,7 @@ mod tests {
     #[test]
     fn validation_rejects_invalid_rule_id() {
         let mut pack = starter_pack();
-        pack.tables.studs[0].rule = "IRC 2021".to_owned();
+        pack.tables.studs[0].rule = "invalid rule id".to_owned();
 
         assert!(matches!(
             pack.validate(),
@@ -1444,7 +1446,7 @@ mod tests {
     fn validation_rejects_waive_without_reason() {
         let mut pack = starter_pack();
         pack.overlays.push(RuleOverlay::Waive {
-            target: "irc2021.r602.3-5.studs".to_owned(),
+            target: "framer.starter.studs".to_owned(),
             reason: " ".to_owned(),
         });
 
@@ -1564,22 +1566,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&pack).unwrap(),
             serde_json::json!({
-                "id": "std-irc-2021",
-                "name": "IRC 2021 Prescriptive (starter)",
-                "edition": "2021",
+                "id": "std-framer-illustrative",
+                "name": "Framer Illustrative Starter",
+                "edition": "illustrative-v1",
                 "tables": {
                     "defaults": {
                         "default_wall_height": {"ticks": 1536},
                         "default_stud_spacing": {"ticks": 256},
                         "double_top_plate": true,
-                        "default_header_depth": {"ticks": 144},
+                        "default_header_depth": {"ticks": 96},
                         "stud_profile": "TwoByFour",
                         "plate_profile": "TwoByFour",
-                        "header_profile": "TwoByTen"
+                        "header_profile": "TwoBySix"
                     },
                     "studs": [{
-                        "rule": "irc2021.r602.3-5.studs",
-                        "citation": "IRC 2021 Table R602.3(5)",
+                        "rule": "framer.starter.studs",
+                        "citation": "Framer illustrative starter stud assumptions (not for construction)",
                         "rows": [
                             {"profile": "TwoByFour", "spacing": {"ticks": 256}, "max_height_bearing": {"ticks": 1920}, "max_height_nonbearing": {"ticks": 2688}},
                             {"profile": "TwoByFour", "spacing": {"ticks": 384}, "max_height_bearing": {"ticks": 1920}, "max_height_nonbearing": {"ticks": 2304}},
@@ -1588,18 +1590,16 @@ mod tests {
                         ]
                     }],
                     "headers": [{
-                        "rule": "irc2021.r602.7-1.headers",
-                        "citation": "IRC 2021 Table R602.7(1)",
+                        "rule": "framer.starter.headers",
+                        "citation": "Framer illustrative starter header assumptions (not for construction)",
                         "rows": [
-                            {"profile": "TwoByTen", "plies": 1, "max_ground_snow_psf": 30, "max_building_width": {"ticks": 6912}, "max_span": {"ticks": 768}, "jack_studs": 1},
-                            {"profile": "TwoByTen", "plies": 2, "max_ground_snow_psf": 30, "max_building_width": {"ticks": 6912}, "max_span": {"ticks": 1152}, "jack_studs": 1},
-                            {"profile": "TwoByTwelve", "plies": 1, "max_ground_snow_psf": 30, "max_building_width": {"ticks": 6912}, "max_span": {"ticks": 960}, "jack_studs": 1},
-                            {"profile": "TwoByTwelve", "plies": 2, "max_ground_snow_psf": 30, "max_building_width": {"ticks": 6912}, "max_span": {"ticks": 1536}, "jack_studs": 2}
+                            {"profile": "TwoBySix", "plies": 2, "max_ground_snow_psf": 0, "max_building_width": {"ticks": 0}, "max_span": {"ticks": 768}, "jack_studs": 1},
+                            {"profile": "TwoByEight", "plies": 2, "max_ground_snow_psf": 0, "max_building_width": {"ticks": 0}, "max_span": {"ticks": 1536}, "jack_studs": 2}
                         ]
                     }],
                     "fastening": [{
-                        "rule": "irc2021.r602.3-1.fastening",
-                        "citation": "IRC 2021 Table R602.3(1)",
+                        "rule": "framer.starter.fastening",
+                        "citation": "Framer illustrative starter fastening assumptions (not for construction)",
                         "rows": [
                             {"connection": "StudToPlateEnd", "fastener": "16d common nail", "schedule": {"Count": 2}},
                             {"connection": "StudToPlateToe", "fastener": "8d common nail", "schedule": {"Count": 4}},
@@ -1608,8 +1608,8 @@ mod tests {
                         ]
                     }],
                     "bracing": [{
-                        "rule": "irc2021.r602.10-3.bracing",
-                        "citation": "IRC 2021 R602.10.3",
+                        "rule": "framer.starter.bracing",
+                        "citation": "Framer illustrative starter bracing assumptions (not for construction)",
                         "rows": [
                             {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 1920}, "required_length": {"ticks": 384}},
                             {"method": "Wsp", "max_seismic": "C", "line_length": {"ticks": 3840}, "required_length": {"ticks": 768}},
@@ -1632,8 +1632,8 @@ mod tests {
                 },
                 "checks": [
                     {
-                        "rule": "irc2021.r602.3-5.stud-height",
-                        "citation": "IRC 2021 Table R602.3(5)",
+                        "rule": "framer.starter.stud-height",
+                        "citation": "Framer illustrative starter stud assumptions (not for construction)",
                         "title": "Wall stud height",
                         "severity": "Required",
                         "applies": "Always",
@@ -1645,8 +1645,8 @@ mod tests {
                         }}
                     },
                     {
-                        "rule": "irc2021.r602.7.header-span",
-                        "citation": "IRC 2021 R602.7(1)",
+                        "rule": "framer.starter.header-span",
+                        "citation": "Framer illustrative starter header assumptions (not for construction)",
                         "title": "Opening header span",
                         "severity": "Required",
                         "applies": "Always",
@@ -1658,8 +1658,8 @@ mod tests {
                         }}
                     },
                     {
-                        "rule": "irc2021.r305.1.ceiling-height",
-                        "citation": "IRC 2021 R305.1",
+                        "rule": "framer.starter.ceiling-height",
+                        "citation": "Framer illustrative starter ceiling-height assumption (not for construction)",
                         "title": "Habitable room ceiling height",
                         "severity": "Advisory",
                         "applies": "Always",
@@ -1671,8 +1671,8 @@ mod tests {
                         }}
                     },
                     {
-                        "rule": "irc2021.r602.10.braced-length",
-                        "citation": "IRC 2021 R602.10.3",
+                        "rule": "framer.starter.braced-length",
+                        "citation": "Framer illustrative starter bracing assumptions (not for construction)",
                         "title": "Braced wall line length",
                         "severity": "Required",
                         "applies": "Always",
@@ -1684,8 +1684,8 @@ mod tests {
                         }}
                     },
                     {
-                        "rule": "irc2021.r602.10.line-has-panels",
-                        "citation": "IRC 2021 R602.10.3",
+                        "rule": "framer.starter.line-has-panels",
+                        "citation": "Framer illustrative starter bracing assumptions (not for construction)",
                         "title": "Braced wall line has panels",
                         "severity": "Advisory",
                         "applies": "Always",
@@ -1696,7 +1696,8 @@ mod tests {
                             "value": {"LengthLiteral": {"ticks": 0}}
                         }}
                     }
-                ]
+                ],
+                "tags": ["illustrative", "not-for-construction"]
             })
         );
     }
@@ -1705,13 +1706,13 @@ mod tests {
     fn resolution_shadows_waives_reseverities_and_warns_deterministically() {
         let mut base = table_pack(
             "base-pack",
-            "irc2021.r602.3-5.studs",
+            "framer.starter.studs",
             Length::from_whole_inches(9),
         );
         base.checks.push(wall_height_check("check.wall-height"));
         let mut overlay = table_pack(
             "overlay-pack",
-            "irc2021.r602.3-5.studs",
+            "framer.starter.studs",
             Length::from_whole_inches(11),
         );
         overlay.overlays.push(RuleOverlay::Severity {
@@ -1719,7 +1720,7 @@ mod tests {
             severity: CheckSeverity::Advisory,
         });
         overlay.overlays.push(RuleOverlay::Waive {
-            target: "irc2021.r602.3-5.studs".to_owned(),
+            target: "framer.starter.studs".to_owned(),
             reason: "local engineered design".to_owned(),
         });
         overlay.overlays.push(RuleOverlay::Waive {
@@ -1744,7 +1745,7 @@ mod tests {
         let stud_rule = resolved
             .rules
             .iter()
-            .find(|rule| rule.rule == "irc2021.r602.3-5.studs")
+            .find(|rule| rule.rule == "framer.starter.studs")
             .unwrap();
         assert_eq!(stud_rule.pack, ElementId::new("overlay-pack"));
         assert_eq!(stud_rule.waived.as_deref(), Some("local engineered design"));

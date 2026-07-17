@@ -4692,7 +4692,7 @@ mod tests {
 
     use super::*;
 
-    const STARTER_STANDARDS_NAME: &str = "IRC 2021 Prescriptive (starter)";
+    const STARTER_STANDARDS_NAME: &str = "Framer Illustrative Starter";
 
     fn starter_standards() -> ResolvedStandards {
         BuildingModel::new().resolved_standards()
@@ -4770,7 +4770,7 @@ mod tests {
     /// A closed 12ft × 8ft rectangle with one room seeded at its centre.
     fn rectangle_with_room() -> BuildingModel {
         use framer_core::{Point2, Room, RoomUsage};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let (w, h, z) = (
             Length::from_feet(12.0),
@@ -4871,7 +4871,7 @@ mod tests {
     #[test]
     fn tee_join_frames_partition_end_stud_and_backing_no_corner_post() {
         use framer_core::{WallJoin, WallJoinKind};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed(
             "through",
@@ -4928,7 +4928,7 @@ mod tests {
     #[test]
     fn cross_join_frames_backing_on_both_walls() {
         use framer_core::{WallJoin, WallJoinKind};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed(
             "horizontal",
@@ -5021,7 +5021,7 @@ mod tests {
     #[test]
     fn open_room_emits_warning_diagnostic() {
         use framer_core::{Point2, Room, RoomUsage};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -5089,7 +5089,7 @@ mod tests {
 
     #[test]
     fn wall_with_door_generates_kings_jacks_and_header() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5129,7 +5129,7 @@ mod tests {
 
     #[test]
     fn header_sizing_uses_widest_band_and_tie_breaks() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5207,7 +5207,7 @@ mod tests {
 
     #[test]
     fn header_sizing_unknown_snow_uses_highest_snow_band() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5252,7 +5252,7 @@ mod tests {
 
     #[test]
     fn header_sizing_known_snow_rejects_underrated_rows() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5302,7 +5302,7 @@ mod tests {
 
     #[test]
     fn header_sizing_out_of_domain_falls_back_and_diagnoses() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(16.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5349,7 +5349,7 @@ mod tests {
 
     #[test]
     fn bearing_interior_wall_uses_header_tables() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         let system = framing_system("system-interior", BoardProfile::TwoByFour);
         wall.system = system.id.clone();
@@ -5386,7 +5386,7 @@ mod tests {
 
     #[test]
     fn nonbearing_interior_wall_uses_fallback_header_profile() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         let system = framing_system("system-interior", BoardProfile::TwoByFour);
         wall.system = system.id.clone();
@@ -5421,7 +5421,7 @@ mod tests {
     }
 
     #[test]
-    fn starter_header_table_drives_plies_jacks_and_provenance() {
+    fn illustrative_header_table_drives_plies_jacks_and_provenance() {
         let model = BuildingModel::demo_wall();
         let system = model.system_for(&model.walls[0]).unwrap();
         let plan = generate_wall_plan(
@@ -5479,15 +5479,14 @@ mod tests {
         header_bands.sort_unstable();
         assert_eq!(header_bands[0].1, header_bands[1].0);
         for header in garage_headers {
-            assert_eq!(header.profile, BoardProfile::TwoByTwelve);
-            assert_eq!(header.side_depth, BoardProfile::TwoByTwelve.thickness());
-            assert_eq!(header.provenance.rule_id, "irc2021.r602.7-1.headers");
-            assert!(header.provenance.summary.contains("2-ply 2x12"));
+            assert_eq!(header.profile, BoardProfile::TwoByEight);
+            assert_eq!(header.side_depth, BoardProfile::TwoByEight.thickness());
+            assert_eq!(header.provenance.rule_id, "framer.starter.headers");
+            assert!(header.provenance.summary.contains("2-ply 2x8"));
             assert!(
-                header
-                    .provenance
-                    .summary
-                    .contains("IRC 2021 Table R602.7(1)")
+                header.provenance.summary.contains(
+                    "Framer illustrative starter header assumptions (not for construction)"
+                )
             );
         }
         assert_eq!(garage_jacks, 4);
@@ -5506,7 +5505,7 @@ mod tests {
 
     #[test]
     fn members_sit_in_the_framing_layer_band() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -5571,7 +5570,7 @@ mod tests {
 
     #[test]
     fn king_and_jack_studs_are_adjacent_not_overlapping() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -5613,7 +5612,7 @@ mod tests {
 
     #[test]
     fn bom_groups_cut_lengths() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
         let plan = generate_wall_plan(
@@ -5635,7 +5634,7 @@ mod tests {
 
     #[test]
     fn framing_member_sizes_studs_and_plates() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         let system = framing_system("system-2x6", BoardProfile::TwoBySix);
         wall.system = system.id.clone();
@@ -5683,7 +5682,7 @@ mod tests {
 
     #[test]
     fn end_studs_align_faces_with_wall_edges() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
         let plan = generate_wall_plan(
@@ -5713,7 +5712,7 @@ mod tests {
 
     #[test]
     fn eight_foot_wall_uses_actual_plate_thickness_for_stud_length() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
 
         let plan = generate_wall_plan(
@@ -5779,8 +5778,68 @@ mod tests {
     }
 
     #[test]
+    fn illustrative_demo_shell_headers_fit_without_depth_clipping() {
+        let model = BuildingModel::demo_shell();
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert!(
+            plan.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.diagnostics.iter())
+                .all(|diagnostic| diagnostic.code != "opening.header.depth-clipped"),
+            "the default shell must not open with clipped illustrative headers: {:?}",
+            plan.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.diagnostics.iter())
+                .collect::<Vec<_>>()
+        );
+
+        let headers_for = |opening_id: &str| {
+            plan.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.members.iter())
+                .filter(|member| member.kind == MemberKind::Header && member.source.0 == opening_id)
+                .collect::<Vec<_>>()
+        };
+
+        let window_headers = headers_for("opening-back-left-window");
+        assert_eq!(window_headers.len(), 2);
+        assert!(
+            window_headers
+                .iter()
+                .all(|header| header.profile == BoardProfile::TwoBySix)
+        );
+
+        let garage_headers = headers_for("opening-front-garage");
+        assert_eq!(garage_headers.len(), 2);
+        assert!(
+            garage_headers
+                .iter()
+                .all(|header| header.profile == BoardProfile::TwoByEight)
+        );
+    }
+
+    #[test]
+    fn illustrative_header_rows_reject_configured_snow_load() {
+        let mut model = BuildingModel::demo_shell();
+        model.site.ground_snow_load_psf = Some(1);
+
+        let plan = generate_project_plan(&model).unwrap();
+
+        assert!(
+            plan.wall_plans
+                .iter()
+                .flat_map(|wall_plan| wall_plan.diagnostics.iter())
+                .any(|diagnostic| {
+                    diagnostic.code == "standards.header.out-of-domain"
+                        && matches!(diagnostic.severity, DiagnosticSeverity::Unsupported)
+                })
+        );
+    }
+
+    #[test]
     fn corner_lapped_spans_control_opening_end_clearance() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed(
             "a-through",
@@ -5907,7 +5966,7 @@ mod tests {
 
     #[test]
     fn wall_layer_takeoff_uses_lapped_physical_face_length() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed(
             "a",
@@ -5961,7 +6020,7 @@ mod tests {
 
     #[test]
     fn starter_fastening_schedule_emits_expected_takeoff_for_known_wall() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -5980,8 +6039,11 @@ mod tests {
         let double_top = fastener_row(&plan, "16d common nail", ConnectionKind::DoubleTopPlate);
 
         assert_eq!(end_nails.quantity, 28);
-        assert_eq!(end_nails.rule, "irc2021.r602.3-1.fastening");
-        assert_eq!(end_nails.citation, "IRC 2021 Table R602.3(1)");
+        assert_eq!(end_nails.rule, "framer.starter.fastening");
+        assert_eq!(
+            end_nails.citation,
+            "Framer illustrative starter fastening assumptions (not for construction)"
+        );
         assert_eq!(toe_nails.quantity, 56);
         assert_eq!(double_top.quantity, 6);
         assert!(
@@ -5994,16 +6056,16 @@ mod tests {
         let csv = export_bom_csv(&plan.bom(), &plan.fasteners);
         assert!(csv.contains("\n\nfastener_quantity,fastener,connection,rule,citation\n"));
         assert!(csv.contains(
-            "28,16d common nail,stud to plate end,irc2021.r602.3-1.fastening,IRC 2021 Table R602.3(1)"
+            "28,16d common nail,stud to plate end,framer.starter.fastening,Framer illustrative starter fastening assumptions (not for construction)"
         ));
         assert!(csv.contains(
-            "6,16d common nail,double top plate,irc2021.r602.3-1.fastening,IRC 2021 Table R602.3(1)"
+            "6,16d common nail,double top plate,framer.starter.fastening,Framer illustrative starter fastening assumptions (not for construction)"
         ));
     }
 
     #[test]
     fn double_top_plate_spacing_rounds_up_partial_bays() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -6017,7 +6079,7 @@ mod tests {
 
     #[test]
     fn fastening_schedule_counts_header_to_king_connections_from_generated_headers() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::door(
@@ -6048,7 +6110,7 @@ mod tests {
 
     #[test]
     fn sheathing_fastening_rows_emit_single_not_counted_diagnostic() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -6117,7 +6179,7 @@ mod tests {
     fn opening_cripples_honor_system_spacing_not_code_default() {
         // A wall system framed at 24" o.c. — distinct from the code profile's
         // 16" default — must lay out its opening cripples at 24" o.c.
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         assert_eq!(
             code.default_stud_spacing,
             Length::from_whole_inches(16),
@@ -6187,7 +6249,7 @@ mod tests {
 
     #[test]
     fn window_generates_sill_and_cripples() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -6239,12 +6301,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(header.source.0, "opening-door-1");
-        assert_eq!(header.provenance.rule_id, "irc2021.r602.7-1.headers");
+        assert_eq!(header.provenance.rule_id, "framer.starter.headers");
         assert!(
             header
                 .provenance
                 .summary
-                .contains("IRC 2021 Table R602.7(1)")
+                .contains("Framer illustrative starter header assumptions (not for construction)")
         );
         assert_eq!(
             header.cross_section_depth,
@@ -6301,7 +6363,7 @@ mod tests {
             first_svg
                 .lines()
                 .any(|line| line.contains(r#"id="opening-door-1-header""#)
-                    && line.contains(r#"height="10""#))
+                    && line.contains(r#"height="6""#))
         );
         assert!(csv.starts_with("quantity,profile,kind"));
         assert!(csv.contains("total_length_inches"));
@@ -6325,7 +6387,7 @@ mod tests {
     fn layer_bom_area_goods_equal_net_face_area() {
         // 12ft x 8ft = 144" x 96" = 13_824 sq in gross; a 36" x 80" door removes
         // 2_880 sq in, leaving a 10_944 sq in net face.
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.height = Length::from_feet(8.0);
         wall.openings.push(Opening::door(
@@ -6374,7 +6436,7 @@ mod tests {
 
     #[test]
     fn layer_bom_volumetric_goods_equal_area_times_thickness() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.height = Length::from_feet(8.0);
         wall.openings.push(Opening::door(
@@ -7329,7 +7391,7 @@ mod tests {
     #[test]
     fn floor_deck_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
         use framer_core::{Room, RoomUsage};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         // A single wall never encloses a loop, so the room stays open.
         model
@@ -7365,7 +7427,7 @@ mod tests {
     #[test]
     fn ceiling_over_open_room_emits_boundary_open_diagnostic_and_no_members() {
         use framer_core::{Room, RoomUsage};
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         // A single wall never encloses a loop, so the room stays open.
         model
@@ -7677,7 +7739,7 @@ mod tests {
     /// Add a counter-clockwise exterior wall loop whose authored wall tops land
     /// at the 8ft roof springing used by the roof fixtures in this module.
     fn add_rectangular_wall_loop(model: &mut BuildingModel, width: Length, depth: Length) {
-        let defaults = FramingDefaults::irc_2021_starter();
+        let defaults = FramingDefaults::illustrative_starter();
         let zero = Length::ZERO;
         let points = [
             Point2::new(zero, zero),
@@ -7852,7 +7914,7 @@ mod tests {
     /// outside corner to that reentrant corner. Each plane clips its rafters
     /// against the diagonal, producing jack rafters that die into the valley.
     fn l_valley_model() -> BuildingModel {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         let p = |x: f64, y: f64| Point2::new(Length::from_feet(x), Length::from_feet(y));
@@ -8850,7 +8912,7 @@ mod tests {
 
     #[test]
     fn varying_plate_height_under_a_roof_is_flagged_unsupported() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.systems.push(roof_system());
         // Two walls on the roof's level at different heights: the bearing plate

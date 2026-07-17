@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn wall_on_level(id: &str, level: &str, a: Point2, b: Point2) -> Wall {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         Wall::new(id, id, Length::from_feet(1.0), &code).with_placement(level, a, b)
     }
 

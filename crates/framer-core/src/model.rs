@@ -536,7 +536,7 @@ impl BuildingModel {
             .rev()
             .find_map(|id| self.standards_packs.iter().find(|pack| pack.id == *id))
             .map(|pack| pack.tables.defaults.clone())
-            .unwrap_or_else(FramingDefaults::irc_2021_starter)
+            .unwrap_or_else(FramingDefaults::illustrative_starter)
     }
 
     pub fn base_standards_name(&self) -> Option<&str> {
@@ -5563,7 +5563,7 @@ fn default_levels() -> Vec<Level> {
 }
 
 fn default_standards_stack() -> (Vec<ElementId>, Vec<StandardsPack>) {
-    let pack = StandardsPack::irc_2021_starter();
+    let pack = StandardsPack::illustrative_starter();
     (vec![pack.id.clone()], vec![pack])
 }
 
@@ -5770,7 +5770,7 @@ mod tests {
     use super::*;
 
     fn wall_with_window(center: Length, width: Length) -> Wall {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -7215,7 +7215,7 @@ mod tests {
 
     #[test]
     fn opening_validation_rejects_out_of_bounds() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.openings.push(Opening::door(
             "door",
@@ -7233,7 +7233,7 @@ mod tests {
 
     #[test]
     fn model_validation_rejects_duplicate_ids() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(Wall::new(
             "wall",
@@ -7262,7 +7262,7 @@ mod tests {
         assert!(matches!(
             model.validate(),
             Err(ModelError::StandardsStackDuplicatePack { pack })
-                if pack == ElementId::new("std-irc-2021")
+                if pack == ElementId::new("std-framer-illustrative")
         ));
     }
 
@@ -7281,7 +7281,7 @@ mod tests {
     #[test]
     fn framing_defaults_use_last_resolvable_standards_pack() {
         let mut model = BuildingModel::new();
-        let mut overlay = StandardsPack::irc_2021_starter();
+        let mut overlay = StandardsPack::illustrative_starter();
         overlay.id = ElementId::new("std-local-overlay");
         overlay.name = "Local overlay".to_owned();
         overlay.tables.defaults.default_wall_height = Length::from_feet(9.0);
@@ -7300,7 +7300,7 @@ mod tests {
     fn base_standards_name_uses_first_resolvable_standards_pack() {
         let mut model = BuildingModel::new();
         let base_name = model.standards_packs[0].name.clone();
-        let mut overlay = StandardsPack::irc_2021_starter();
+        let mut overlay = StandardsPack::illustrative_starter();
         overlay.id = ElementId::new("std-local-overlay");
         overlay.name = "Local overlay".to_owned();
 
@@ -7344,7 +7344,7 @@ mod tests {
 
     #[test]
     fn model_validation_rejects_invalid_bracing_panel_length() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.bracing.push(BracedPanel {
@@ -7364,7 +7364,7 @@ mod tests {
 
     #[test]
     fn model_validation_rejects_out_of_bounds_bracing_panel() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.bracing.push(BracedPanel {
@@ -7384,7 +7384,7 @@ mod tests {
 
     #[test]
     fn deterministic_sort_uses_stable_ids() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall_b = Wall::new("wall-b", "B", Length::from_feet(8.0), &code);
         wall_b.openings.push(Opening::window(
@@ -7417,7 +7417,7 @@ mod tests {
 
     #[test]
     fn wall_dimensions_validate_opening_anchors() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(8.0), &code);
         wall.dimensions.push(DimensionConstraint::new(
             "dim",
@@ -7530,7 +7530,7 @@ mod tests {
 
     #[test]
     fn tee_join_validates_when_partition_meets_through_wall_midspan() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "through",
@@ -7558,7 +7558,7 @@ mod tests {
 
     #[test]
     fn cross_join_validates_when_point_interior_to_both() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "horizontal",
@@ -7590,7 +7590,7 @@ mod tests {
 
     #[test]
     fn reconcile_creates_corner_for_shared_endpoint() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7609,7 +7609,7 @@ mod tests {
 
     #[test]
     fn extend_collinear_wall_moves_start_and_preserves_wall_local_content() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = placed_wall("existing", rp(10.0, 0.0), rp(0.0, 0.0), &code);
         wall.openings.push(Opening::window(
@@ -7653,7 +7653,7 @@ mod tests {
 
     #[test]
     fn extend_collinear_wall_moves_end_without_shifting_local_content() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut wall = placed_wall("existing", rp(0.0, 0.0), rp(0.0, 10.0), &code);
         wall.openings.push(Opening::window(
@@ -7680,7 +7680,7 @@ mod tests {
 
     #[test]
     fn extend_collinear_wall_rejects_overlap_ambiguity_and_driving_conflicts() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         let mut constrained = placed_wall("constrained", rp(0.0, 0.0), rp(10.0, 0.0), &code);
         constrained.dimensions.push(driving_dimension(
@@ -7743,7 +7743,7 @@ mod tests {
 
     #[test]
     fn extend_collinear_wall_rejects_multiple_candidates_and_other_wall_overlap() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7778,7 +7778,7 @@ mod tests {
 
     #[test]
     fn wall_envelope_span_laps_open_corner_by_stable_wall_id() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7899,7 +7899,7 @@ mod tests {
 
     #[test]
     fn wall_corner_lap_uses_the_adjoining_wall_thickness() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7935,7 +7935,7 @@ mod tests {
 
     #[test]
     fn wall_corner_lap_clamps_an_inverted_short_span() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7950,7 +7950,7 @@ mod tests {
 
     #[test]
     fn wall_envelope_span_butts_partition_against_through_wall_face() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -7981,7 +7981,7 @@ mod tests {
 
     #[test]
     fn reconcile_creates_tee_with_through_then_partition() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -8006,7 +8006,7 @@ mod tests {
 
     #[test]
     fn reconcile_detects_cross() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model.walls.push(placed_wall(
             "horizontal",
@@ -8028,7 +8028,7 @@ mod tests {
 
     #[test]
     fn reconcile_ignores_cross_level_wall_geometry() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .levels
@@ -8066,7 +8066,7 @@ mod tests {
 
     #[test]
     fn reconcile_drops_stale_join_when_walls_separate() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -8088,7 +8088,7 @@ mod tests {
 
     #[test]
     fn reconcile_preserves_join_id_across_point_move() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -8118,7 +8118,7 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_moves_free_end_and_resyncs_length() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -8134,7 +8134,7 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_drags_shared_node_along_collinear_run() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         // A collinear run a—b sharing the node at (10,0); moving it stays ortho.
         model
@@ -8156,7 +8156,7 @@ mod tests {
 
     #[test]
     fn translate_wall_moves_both_ends_and_stretches_neighbour() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         // L-corner at (0,0): horizontal `a` and vertical `b`.
         model
@@ -8184,7 +8184,7 @@ mod tests {
 
     #[test]
     fn move_wall_endpoint_unknown_wall_is_noop() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         model
             .walls
@@ -8199,7 +8199,7 @@ mod tests {
 
     #[test]
     fn tee_join_rejected_when_point_is_a_shared_endpoint() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut model = BuildingModel::new();
         // Two walls meeting at a shared endpoint (a corner) but mislabelled Tee.
         model.walls.push(placed_wall(
@@ -8267,7 +8267,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_moves_opening_anchor() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -8302,7 +8302,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_between_opening_edges_resizes_opening() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -8401,7 +8401,7 @@ mod tests {
 
     #[test]
     fn driving_dimension_can_move_first_anchor_when_second_anchor_is_fixed() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",
@@ -8602,7 +8602,7 @@ mod tests {
 
     #[test]
     fn duplicate_wall_length_dimension_overconstrains() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.dimensions.push(driving_dimension(
             "length",
@@ -8647,7 +8647,7 @@ mod tests {
 
     #[test]
     fn new_driving_dimension_can_be_overconstrained_even_when_measured_value_matches() {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",

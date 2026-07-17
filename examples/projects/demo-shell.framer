@@ -6,13 +6,13 @@
       "jurisdiction": ""
     },
     "standards": [
-      "std-irc-2021"
+      "std-framer-illustrative"
     ],
     "standards_packs": [
       {
-        "id": "std-irc-2021",
-        "name": "IRC 2021 Prescriptive (starter)",
-        "edition": "2021",
+        "id": "std-framer-illustrative",
+        "name": "Framer Illustrative Starter",
+        "edition": "illustrative-v1",
         "tables": {
           "defaults": {
             "default_wall_height": {
@@ -23,16 +23,16 @@
             },
             "double_top_plate": true,
             "default_header_depth": {
-              "ticks": 144
+              "ticks": 96
             },
             "stud_profile": "TwoByFour",
             "plate_profile": "TwoByFour",
-            "header_profile": "TwoByTen"
+            "header_profile": "TwoBySix"
           },
           "studs": [
             {
-              "rule": "irc2021.r602.3-5.studs",
-              "citation": "IRC 2021 Table R602.3(5)",
+              "rule": "framer.starter.studs",
+              "citation": "Framer illustrative starter stud assumptions (not for construction)",
               "rows": [
                 {
                   "profile": "TwoByFour",
@@ -87,15 +87,15 @@
           ],
           "headers": [
             {
-              "rule": "irc2021.r602.7-1.headers",
-              "citation": "IRC 2021 Table R602.7(1)",
+              "rule": "framer.starter.headers",
+              "citation": "Framer illustrative starter header assumptions (not for construction)",
               "rows": [
                 {
-                  "profile": "TwoByTen",
-                  "plies": 1,
-                  "max_ground_snow_psf": 30,
+                  "profile": "TwoBySix",
+                  "plies": 2,
+                  "max_ground_snow_psf": 0,
                   "max_building_width": {
-                    "ticks": 6912
+                    "ticks": 0
                   },
                   "max_span": {
                     "ticks": 768
@@ -103,35 +103,11 @@
                   "jack_studs": 1
                 },
                 {
-                  "profile": "TwoByTen",
+                  "profile": "TwoByEight",
                   "plies": 2,
-                  "max_ground_snow_psf": 30,
+                  "max_ground_snow_psf": 0,
                   "max_building_width": {
-                    "ticks": 6912
-                  },
-                  "max_span": {
-                    "ticks": 1152
-                  },
-                  "jack_studs": 1
-                },
-                {
-                  "profile": "TwoByTwelve",
-                  "plies": 1,
-                  "max_ground_snow_psf": 30,
-                  "max_building_width": {
-                    "ticks": 6912
-                  },
-                  "max_span": {
-                    "ticks": 960
-                  },
-                  "jack_studs": 1
-                },
-                {
-                  "profile": "TwoByTwelve",
-                  "plies": 2,
-                  "max_ground_snow_psf": 30,
-                  "max_building_width": {
-                    "ticks": 6912
+                    "ticks": 0
                   },
                   "max_span": {
                     "ticks": 1536
@@ -143,8 +119,8 @@
           ],
           "fastening": [
             {
-              "rule": "irc2021.r602.3-1.fastening",
-              "citation": "IRC 2021 Table R602.3(1)",
+              "rule": "framer.starter.fastening",
+              "citation": "Framer illustrative starter fastening assumptions (not for construction)",
               "rows": [
                 {
                   "connection": "StudToPlateEnd",
@@ -181,7 +157,11 @@
               ]
             }
           ]
-        }
+        },
+        "tags": [
+          "illustrative",
+          "not-for-construction"
+        ]
       }
     ],
     "materials": [

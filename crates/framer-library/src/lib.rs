@@ -2322,7 +2322,7 @@ mod tests {
                 Length::from_whole_inches(4),
                 Length::from_whole_inches(24),
             )],
-            standards: vec![StandardsPack::irc_2021_starter()],
+            standards: vec![StandardsPack::illustrative_starter()],
         }
     }
 
@@ -2444,7 +2444,7 @@ mod tests {
 
         assert_eq!(
             loaded.content_hash,
-            "blake3:213e6ce4530fb5f07d60fea2120440a0f44cf299fbe2bbcec1ab6505b383063c"
+            "blake3:0292298aaf0700ac853a880d36fac4213337379c967a6be65f9f16e03be673c9"
         );
     }
 
@@ -3025,7 +3025,7 @@ mod tests {
             &mut project,
             &library,
             &library_hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
         let pack = project
@@ -3136,13 +3136,13 @@ mod tests {
             &mut project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
 
         assert_eq!(
             imported.standards_pack,
-            Some(ElementId::new("acme-walls-std-irc-2021"))
+            Some(ElementId::new("acme-walls-std-framer-illustrative"))
         );
         assert!(imported.materials.is_empty());
         assert!(imported.system.is_none());
@@ -3158,10 +3158,10 @@ mod tests {
         let pack = project
             .standards_packs
             .iter()
-            .find(|pack| pack.id == ElementId::new("acme-walls-std-irc-2021"))
+            .find(|pack| pack.id == ElementId::new("acme-walls-std-framer-illustrative"))
             .unwrap();
         let source = pack.source.as_ref().expect("vendored pack has provenance");
-        assert_eq!(source.source_id, ElementId::new("std-irc-2021"));
+        assert_eq!(source.source_id, ElementId::new("std-framer-illustrative"));
         assert_eq!(
             source.content_hash,
             standards_pack_content_hash(&library.standards[0]).unwrap()
@@ -3179,7 +3179,7 @@ mod tests {
             &mut project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
         let local_id = imported.standards_pack.unwrap();
@@ -3193,7 +3193,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             pack.source.as_ref().unwrap().source_id,
-            ElementId::new("std-irc-2021")
+            ElementId::new("std-framer-illustrative")
         );
         assert!(
             library_lifecycle_issues(&reloaded, &[library])
@@ -3243,7 +3243,7 @@ mod tests {
             &mut project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
 
@@ -3361,14 +3361,14 @@ mod tests {
             &mut standards_project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
         let local_pack_id = imported_pack.standards_pack.unwrap();
         let mut standards_missing = library;
         standards_missing
             .standards
-            .retain(|pack| pack.id != ElementId::new("std-irc-2021"));
+            .retain(|pack| pack.id != ElementId::new("std-framer-illustrative"));
 
         let standards_issues =
             library_lifecycle_issues(&standards_project, &[standards_missing]).unwrap();
@@ -3418,7 +3418,7 @@ mod tests {
             &mut project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
         let local_id = imported.standards_pack.unwrap();
@@ -3505,7 +3505,7 @@ mod tests {
             &mut project,
             &library,
             &hash,
-            &ElementId::new("std-irc-2021"),
+            &ElementId::new("std-framer-illustrative"),
         )
         .unwrap();
         let local_id = imported.standards_pack.unwrap();

@@ -525,7 +525,7 @@ mod tests {
     }
 
     fn wall_from(id: &str, start: Point2, end: Point2) -> Wall {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         Wall::new(id, id, Length::from_feet(10.0), &code).with_placement("level-1", start, end)
     }
 

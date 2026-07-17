@@ -53,7 +53,7 @@ decisions are already made in the spec; do not redesign.
   never sorted**: the standards *stack* (`BuildingModel.standards`) and table *rows*
   (validated strictly ordered by natural key, author-supplied).
 - **Rule ids** match `^[a-z0-9][a-z0-9.-]*$` (the `ElementId` charset plus `.`), e.g.
-  `irc2021.r602.3-5.stud-height`. They are plain `String`s, **not** `ElementId`s.
+  `framer.starter.stud-height`. They are plain `String`s, **not** `ElementId`s.
 - **No clock, RNG, `Date`, or I/O** anywhere in `framer-core` / `framer-solver` /
   `framer-standards` code paths.
 - **Fail closed:** unknown site context or an uncomputable fact must surface as
@@ -76,7 +76,7 @@ PR 2), `PlanDiagnostic` + `RuleProvenance` + `DiagnosticSeverity`
 ## PR 1 — Core standards types + pure resolution (no schema change)
 
 **Scope:** a new `framer-core` module with all standards data types, pack validation, the
-IRC 2021 starter pack, and the pure stack-resolution fold. `BuildingModel` is **not**
+illustrative starter pack, and the pure stack-resolution fold. `BuildingModel` is **not**
 touched; nothing serializes into `.framer` yet. Difficulty: medium (large but fully pinned).
 
 - **Task 1.1 — Types.** New module `crates/framer-core/src/standards.rs`, re-exported from
@@ -180,21 +180,23 @@ touched; nothing serializes into `.framer` yet. Difficulty: medium (large but fu
   - Verify: one failing-case test per rule above
   - Commit: `feat(core): standards pack validation`
 
-- **Task 1.3 — Starter pack.** `StandardsPack::irc_2021_starter()` — id `std-irc-2021`,
-  name `IRC 2021 Prescriptive (starter)`, edition `2021`. Defaults = the exact current
-  `CodeProfile::irc_2021_prescriptive()` values. Starter table rows (a common-case subset,
-  NOT full transcriptions — see the spec's open question on licensing): one `StudTable`
-  (`irc2021.r602.3-5.studs`, citation `IRC 2021 Table R602.3(5)`) with 2x4/2x6 rows at
+- **Task 1.3 — Starter pack.** `StandardsPack::illustrative_starter()` — id
+  `std-framer-illustrative`, name `Framer Illustrative Starter`, edition
+  `illustrative-v1`. Defaults and table rows are bounded product examples, explicitly not
+  authoritative data or full transcriptions: one `StudTable`
+  (`framer.starter.studs`, citation `Framer illustrative starter stud assumptions (not for
+  construction)`) with 2x4/2x6 rows at
   16″/24″ (bearing 10 ft, non-bearing 14 ft for 2x4@16 as anchor row; keep rows plausible
-  and clearly starter-scoped); one `HeaderSpanTable` (`irc2021.r602.7-1.headers`) with
-  2x10/2x12 single+double-ply rows at 30 psf / 36 ft width bands; one `FasteningSchedule`
-  (`irc2021.r602.3-1.fastening`) with `StudToPlateEnd` (2×16d, `Count(2)`),
+  and clearly starter-scoped); one `HeaderSpanTable` (`framer.starter.headers`) with
+  a 2-ply 2x6 demo row through 4 ft and a 2-ply 2x8 demo row through 8 ft; one
+  `FasteningSchedule`
+  (`framer.starter.fastening`) with `StudToPlateEnd` (2×16d, `Count(2)`),
   `StudToPlateToe` (4×8d, `Count(4)`), `DoubleTopPlate` (16d @ 16″ o.c.,
   `Spacing { on_center: 16" }`), `TopPlateLap` (8×16d, `Count(8)`). No checks yet (PR 5)
   and no bracing rows yet (PR 6). Keep `checks: vec![]`, `overlays: vec![]`.
-  - Verify: `irc_2021_starter().validate()` passes; a golden test asserts its canonical
+  - Verify: `illustrative_starter().validate()` passes; a golden test asserts its canonical
     JSON is stable (guards accidental churn)
-  - Commit: `feat(core): IRC 2021 starter standards pack`
+  - Commit: `feat(core): illustrative starter standards pack`
 
 - **Task 1.4 — Resolution.** Pure fold, no model dependency yet:
   ```rust
@@ -235,7 +237,7 @@ mechanical but wide — touches many tests.
   `braced_wall_lines: Vec<BracedWallLine>` (skip-empty). `Wall` gains
   `bracing: Vec<BracedPanel>` (default + skip-empty). Delete `CodeProfile` and
   `PrescriptiveCode`. `BuildingModel::new()` seeds `standards_packs =
-  vec![StandardsPack::irc_2021_starter()]`, `standards = vec![that id]`, default site.
+  vec![StandardsPack::illustrative_starter()]`, `standards = vec![that id]`, default site.
   Add `BuildingModel::resolved_standards(&self) -> ResolvedStandards` (resolves the stack
   refs; a dangling stack entry is a `ModelError` from `validate()`). Extend `validate()`:
   stack entries resolve and are duplicate-free; pack ids pool into the global id set;
@@ -246,8 +248,8 @@ mechanical but wide — touches many tests.
   read **only** `resolved.defaults` in this PR (a mechanical swap). The
   `code-profile.starter-only` diagnostic text now uses the base pack's `name` (the first
   stack entry); it is retired later (PR 5). Update `framer-app` call sites and every test
-  (`CodeProfile::irc_2021_prescriptive()` → seed a model / use
-  `StandardsPack::irc_2021_starter().tables.defaults`).
+  (legacy flat profile construction → seed a model / use
+  `StandardsPack::illustrative_starter().tables.defaults`).
 - **Task 2.3 — Schema bump ritual** (checklist, all in this PR):
   1. `PROJECT_SCHEMA_VERSION` 12 → 13 in `crates/framer-core/src/project.rs`.
   2. Regenerate every `examples/projects/*.framer` (load-with-migration is NOT a thing —
@@ -280,8 +282,8 @@ medium.
   `standards.header.out-of-domain` citing the table's `citation`, and fall back to the
   resolved `defaults.default_header_depth`/`header_profile` (current behavior).
 - **Provenance:** the header members' existing `RuleProvenance.rule_id` = the table's
-  `rule`; `summary` includes the citation and the row chosen (e.g.
-  `"2-ply 2x10 ≤ 6'0\" span — IRC 2021 Table R602.7(1)"`).
+  `rule`; `summary` includes the citation and the row chosen (e.g. a two-ply profile,
+  maximum span, and the illustrative not-for-construction source statement).
 - Files: `crates/framer-solver/src/lib.rs`
 - Verify: unit tests — row selection incl. tie-breaks, unknown-snow conservatism,
   out-of-domain fallback + diagnostic, provenance rule id on header members.
@@ -365,14 +367,15 @@ assign the strongest available implementer.** The three-valued semantics below a
   Vec<PlanDiagnostic>` — Violation/Advisory(→Warning)/NeedsReview entries only; Pass and
   Waived stay report-only. Retire the blanket `code-profile.starter-only` warning from the
   solver (it is superseded by per-rule coverage).
-- **Task 5.6 — Starter checks** (added to `irc_2021_starter()`, evaluable green-or-honest
+- **Task 5.6 — Starter checks** (added to `illustrative_starter()`, evaluable green-or-honest
   on the example projects):
-  1. `irc2021.r602.3-5.stud-height` / Required / Walls / `WallHeight ≤
-     Fact(WallStudMaxHeight)` — cites Table R602.3(5).
-  2. `irc2021.r602.7.header-span` / Required / Openings / `OpeningRoughWidth ≤
-     Fact(OpeningHeaderMaxSpan)` — cites R602.7(1).
-  3. `irc2021.r305.1.ceiling-height` / Advisory / Rooms tagged `habitable` /
-     `RoomCeilingHeight ≥ 7'0"` — cites R305.1 (needs-review when level height unset).
+  1. `framer.starter.stud-height` / Required / Walls / `WallHeight ≤
+     Fact(WallStudMaxHeight)` — cites the illustrative stud assumptions.
+  2. `framer.starter.header-span` / Required / Openings / `OpeningRoughWidth ≤
+     Fact(OpeningHeaderMaxSpan)` — cites the illustrative header assumptions.
+  3. `framer.starter.ceiling-height` / Advisory / Rooms tagged `habitable` /
+     `RoomCeilingHeight ≥ 7'0"` — cites the illustrative ceiling-height assumption
+     (needs-review when level height unset).
 - **Docs:** new crate section in [code-map.md](../code-map.md); repo-map row in
   [AGENTS.md](../../AGENTS.md).
 - Verify: Kleene truth-table tests; per-fact known/unknown tests; outcome mapping tests;
@@ -400,12 +403,13 @@ high (geometry + table semantics; pinned below).
   line** (conservative). SDC unknown while any eligible row is seismic-gated ⇒ None
   (needs-review). Line longer than every row ⇒ None + an `Unsupported`
   `standards.bracing.out-of-domain` diagnostic.
-- **Starter rows + checks** in `irc_2021_starter()`: one `BracingTable`
-  (`irc2021.r602.10-3.bracing`, citation `IRC 2021 R602.10.3`) with starter WSP + GB rows
+- **Starter rows + checks** in `illustrative_starter()`: one `BracingTable`
+  (`framer.starter.bracing`, citation `Framer illustrative starter bracing assumptions (not
+  for construction)`) with starter WSP + GB rows
   across SDC bands (≤C, D0–D2) at 10/20/30/40 ft line lengths; checks:
-  4. `irc2021.r602.10.braced-length` / Required / BracedWallLines /
+  4. `framer.starter.braced-length` / Required / BracedWallLines /
      `BracedLineProvidedLength ≥ Fact(BracedLineRequiredLength)`.
-  5. `irc2021.r602.10.line-has-panels` / Advisory / BracedWallLines /
+  5. `framer.starter.line-has-panels` / Advisory / BracedWallLines /
      `BracedLineProvidedLength > 0"`.
   Unassociated panels ⇒ one Advisory diagnostic each (`standards.bracing.unassociated-panel`).
 - Files: `crates/framer-standards/src/lib.rs`, `crates/framer-core/src/standards.rs`
@@ -428,8 +432,8 @@ established patterns in `framer-library` exactly).
   `ElementId` references to materials/systems (`CheckScope` filters are tags/enums only) —
   add a test asserting vendoring a pack adds exactly one element.
 - Update/divergence/detach: reuse the provenance-excluded item-hash machinery unchanged
-  (`source: None` during hashing, library-local id space). Starter library gains the IRC
-  2021 pack.
+  (`source: None` during hashing, library-local id space). Starter library gains the
+  illustrative not-for-construction pack.
 - Docs: [libraries.md](../specs/libraries.md) collection list + `.framerlib` snippet;
   [code-map.md](../code-map.md).
 - Verify: `cargo test -p framer-library` — vendor round-trip, divergence detection on an

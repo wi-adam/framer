@@ -59,8 +59,8 @@ Docs index:
    [docs/code-map.md](docs/code-map.md).
 5. **CPU render is the reference;** the app's WGSL compute shader mirrors it. Change
    both together and keep `tests/gpu_parity.rs` green.
-6. **Code compliance is explicit, never implied.** The IRC 2021 standards pack is a
-   *starter* shape; label unsupported conditions with diagnostics.
+6. **Code compliance is explicit, never implied.** The built-in standards pack is
+   illustrative and not for construction; label unsupported conditions with diagnostics.
 
 ## How we work: spec-driven
 

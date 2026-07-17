@@ -326,7 +326,7 @@ mod tests {
                 Length::from_whole_inches(4),
                 Length::from_whole_inches(24),
             )],
-            standards: vec![StandardsPack::irc_2021_starter()],
+            standards: vec![StandardsPack::illustrative_starter()],
         };
 
         let reloaded = load_library(&save_library(&library).unwrap()).unwrap();
@@ -369,7 +369,7 @@ mod tests {
                 .iter()
                 .map(|pack| pack.id.0.as_str())
                 .collect::<Vec<_>>(),
-            vec!["std-irc-2021"]
+            vec!["std-framer-illustrative"]
         );
         assert_eq!(
             library

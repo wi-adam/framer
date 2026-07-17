@@ -10437,7 +10437,7 @@ mod tests {
     fn standards_rule_rows_match_full_resolution_metadata() {
         let mut app = FramerApp::default();
         app.waive_standards_rule(
-            "irc2021.r602.3-5.studs".to_owned(),
+            "framer.starter.studs".to_owned(),
             "accepted by AHJ".to_owned(),
         );
 
@@ -10745,7 +10745,7 @@ mod tests {
     }
 
     fn wall_with_window(center: Length, width: Length) -> Wall {
-        let code = FramingDefaults::irc_2021_starter();
+        let code = FramingDefaults::illustrative_starter();
         let mut wall = Wall::new("wall", "Wall", Length::from_feet(12.0), &code);
         wall.openings.push(Opening::window(
             "window",

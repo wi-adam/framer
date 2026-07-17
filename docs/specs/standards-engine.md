@@ -7,35 +7,34 @@
 > **Status:** Implemented ·
 > **Linked goal:** G-015 (Standards Engine; subsumes G-008 Code
 > Profile Data, advances G-006 Rule Explanations) ·
-> **Plan:** [2026-07-04 — Standards Engine](../plans/2026-07-04-standards-engine.md) ·
+> **Plans:** [2026-07-04 — Standards Engine](../plans/2026-07-04-standards-engine.md) ·
+> [2026-07-16 — Illustrative Standards Reset](../plans/2026-07-16-illustrative-standards-reset.md) ·
+> [2026-07-16 — Header Span Calculation Research](../plans/2026-07-16-header-span-calculation-research.md) ·
 > **Last reviewed:** 2026-07-16
 
 ## Intent / Purpose
 
 Framer generates framing from construction intent, and the [vision](../vision.md) commits to
-making the *rules* behind that generation explicit: every member already carries
-`RuleProvenance`, and every plan carries diagnostics. But today the rules live in one
-hard-coded `CodeProfile::irc_2021_prescriptive()` — a handful of defaults, one jurisdiction,
-no way to verify a model against anything.
+making the *rules* behind that generation explicit: every member carries
+`RuleProvenance`, and every plan carries diagnostics. The **Standards Engine** makes
+standards first-class, data-driven, and layered so real projects can combine a licensed or
+otherwise reusable base source, jurisdiction amendments, and project-specific requirements.
 
-Real buildings answer to **layered standards**: semi-universal model codes (IRC, IBC),
-state amendments, municipal ordinances, and project-specific requirements — covering framing,
-fastening/nailing, wall bracing, seismic and wind provisions, and (later) electrical,
-plumbing, and mechanical systems. The **Standards Engine** makes standards first-class,
-data-driven, and layered:
-
-- Framer **ships pre-canned packs** (IRC 2021 prescriptive first).
+- Framer ships an **illustrative, not-for-construction starter pack** solely to exercise
+  generation, provenance, evaluation, and authoring flows. It is not a model-code dataset
+  and must not be presented as authoritative compliance content.
+- Authoritative content comes from user-authored, jurisdiction-provided, or explicitly
+  licensed packs with source provenance and known redistribution rights.
 - Users **augment** them (add rules), **override** them (shadow a rule with their own),
   or **define their own** standards entirely — without writing Rust.
 - Standards both **prescribe** (feed deterministic generation: sizing tables, spacing,
   fastening schedules) and **verify** (evaluate the finished model + derived plan and report
   rule-by-rule outcomes with citations).
 
-This delivers G-008 ("expand the IRC 2021 starter profile into explicit rule tables and
-unsupported-condition warnings") and extends G-006's rule provenance from generated members
-to the full compliance surface. It preserves invariant #6: **code compliance is explicit,
-never implied** — Framer reports per-rule outcomes with citations; it never claims a
-building "is compliant."
+This delivers the data-driven rule tables and unsupported-condition warnings tracked by
+G-008 and extends G-006's rule provenance from generated members to the full compliance
+surface. It preserves invariant #6: **code compliance is explicit, never implied** —
+Framer reports per-rule outcomes with citations; it never claims a building "is compliant."
 
 ## Requirements & behavior
 
@@ -45,7 +44,7 @@ The observable contract (prefer testable statements):
 
 - A **standards pack** is a typed, versioned collection of **prescriptive tables** and
   **declarative compliance checks**, each bearing a stable **rule id** and a human
-  **citation** (e.g. `IRC 2021 Table R602.3(5)`).
+  **citation** describing its source and intended use.
 - The project holds an ordered **standards stack** (`base → most specific`): built-in or
   library packs first, jurisdiction overlay packs after, and optionally a project-local
   pack last. **Stack order is semantic and never sorted** (like construction-layer order);
@@ -58,7 +57,7 @@ The observable contract (prefer testable statements):
   (downgrade/upgrade a check). The resolved rule set is **derived, never persisted**.
 - Every resolved rule carries a **provenance chain** — the ordered list of (pack,
   action) that produced it — so the app can answer *"why 12″ o.c. here?"* with
-  *"introduced by IRC 2021 R602.3(5); shadowed by Seattle Amendments 2024"*.
+  *"introduced by Example Base Pack v1; shadowed by Seattle Amendments 2024"*.
 - `ResolvedStandards.checks` remains the active non-waived check set used by
   compatibility evaluators. A separate derived `check_definitions` catalog
   retains each winning post-shadow/post-reseverity check definition, including
@@ -87,16 +86,15 @@ The observable contract (prefer testable statements):
 - v1 table kinds, all typed and closed-schema:
   - **Framing defaults** — the absorbed `CodeProfile` fields (default wall height, stud
     spacing, plate/top-plate policy, stud/plate/header profiles).
-  - **Stud tables** — allowed (profile × spacing) rows with height limits
-    (IRC Table R602.3(5) shape).
+  - **Stud tables** — allowed (profile × spacing) rows with height limits.
   - **Header span tables** — (profile, plies, ground-snow band, building-width band) →
-    max span + required jack studs (IRC Table R602.7(1) shape). The solver sizes each
+    max span + required jack studs. The solver sizes each
     opening's header from the table instead of a single `default_header_depth`.
-  - **Fastening schedules** — (connection kind → fastener, count or edge/field spacing)
-    (IRC Table R602.3(1) shape). The solver emits fastener line items into the BOM and
+  - **Fastening schedules** — (connection kind → fastener, count or edge/field spacing).
+    The solver emits fastener line items into the BOM and
     the schedule feeds connection checks.
   - **Bracing tables** — required braced length per braced-wall-line by (seismic design
-    category or wind band, line spacing/length, bracing method) (IRC R602.10.3 shape).
+    category or wind band, line spacing/length, bracing method).
 - Generation is **table-driven where a table exists, defaults otherwise**, and each
   generated member's existing `RuleProvenance.rule_id` cites the resolved rule that sized
   or placed it (realizing G-006 with real citations).
@@ -212,7 +210,7 @@ The observable contract (prefer testable statements):
   passes because context is missing or a fact is uncomputable. This is invariant #6 as an
   evaluation semantics.
 - **Rule ids are strings with the `ElementId` charset plus `.`** (e.g.
-  `irc2021.r602.3-5.stud-spacing`), unique per pack, shadowable across packs. They are
+  `framer.starter.stud-spacing`), unique per pack, shadowable across packs. They are
   *not* `ElementId`s — they name rules, not model elements, and cross the pack boundary by
   design. The existing `RuleProvenance.rule_id` and `PlanDiagnostic.code` string channels
   carry them unchanged.
@@ -262,8 +260,8 @@ pub struct SiteContext {
 
 pub struct StandardsPack {
     pub id: ElementId,                 // project-local id (remapped on vendor, like materials)
-    pub name: String,                  // "IRC 2021 Prescriptive"
-    pub edition: String,               // "2021"
+    pub name: String,                  // "Framer Illustrative Starter"
+    pub edition: String,               // "illustrative-v1"
     pub source: Option<Provenance>,    // vendored-from-library stamp (same as systems)
     pub tables: StandardsTables,       // typed prescriptive tables (each with rule id + citation)
     pub checks: Vec<ComplianceCheck>,  // sorted by rule id (id-keyed canonicalization)
@@ -274,15 +272,15 @@ pub struct StandardsPack {
 
 pub struct StandardsTables {
     pub defaults: FramingDefaults,             // absorbed CodeProfile fields
-    pub studs: Vec<StudTable>,                 // R602.3(5) shape
-    pub headers: Vec<HeaderSpanTable>,         // R602.7(1) shape
-    pub fastening: Vec<FasteningSchedule>,     // R602.3(1) shape
-    pub bracing: Vec<BracingTable>,            // R602.10.3 shape
+    pub studs: Vec<StudTable>,
+    pub headers: Vec<HeaderSpanTable>,
+    pub fastening: Vec<FasteningSchedule>,
+    pub bracing: Vec<BracingTable>,
 }
 
 pub struct ComplianceCheck {
-    pub rule: String,              // e.g. "irc2021.r602.3-5.stud-height"
-    pub citation: String,          // "IRC 2021 Table R602.3(5)"
+    pub rule: String,              // e.g. "framer.starter.stud-height"
+    pub citation: String,          // source + intended-use statement
     pub title: String,
     pub severity: CheckSeverity,   // Required | Advisory
     pub applies: Applicability,    // 3-valued predicate over SiteContext
@@ -327,9 +325,11 @@ pub struct BracedPanel   { pub id: ElementId, pub offset: Length, pub length: Le
                             pub method: BracingMethod }
 ```
 
-`StandardsPack::irc_2021_starter()` replaces `CodeProfile::irc_2021_prescriptive()` as the
-built-in seeded by `BuildingModel::new()` / `starter_library()`, carrying real (starter-
-scoped) IRC 2021 rows with per-table citations. `validate()` gains: stack entries resolve
+`StandardsPack::illustrative_starter()` is the built-in seeded by
+`BuildingModel::new()` / `starter_library()`. It carries bounded demonstration rows with
+per-table citations that explicitly say illustrative and not for construction. It is a
+product exercise fixture, not an authoritative standards source. `validate()` ensures:
+stack entries resolve
 to packs, no duplicate stack entries, pack ids pool into the global id set, rule ids unique
 within a pack, waive reasons non-empty, predicates type-check (fact type vs. operand type),
 table rows strictly ordered by natural key, panel spans inside their wall. Non-empty
@@ -395,7 +395,7 @@ evaluate(...) -> ComplianceReport
 (library-local ids). Vendoring a pack is the existing single-item pipeline — no closure,
 because packs hold no `ElementId` references into other collections. Update/divergence/
 detach and the provenance-excluded item hash work unchanged. The starter library gains the
-IRC 2021 starter pack.
+Framer illustrative starter pack.
 
 ### App (`framer-app`)
 
@@ -445,13 +445,15 @@ Every [architecture invariant](../architecture.md) holds; specifically:
 - **Field-level amend/patch overlays** — copy-and-shadow covers it; revisit only with
   evidence that pack authors need surgical patches.
 - **Automatic bracing panel placement/suggestion** — v1 verifies authored bracing.
-- **Engineering calculations** (load paths, shear walls beyond prescriptive bracing,
-  engineered lumber sizing) — prescriptive tables only; out-of-domain conditions are
-  labeled unsupported.
-- **MEP rule content** (NEC/IPC/IMC) — the engine, scopes, and tags are ready, but
+- **Production engineering calculations** (load paths, shear walls beyond prescriptive
+  bracing, engineered lumber sizing) — the independent mechanics feasibility and required
+  input boundary are recorded in the
+  [header span calculation research](../plans/2026-07-16-header-span-calculation-research.md);
+  production behavior waits for explicit material/load provenance and validated load paths.
+- **MEP rule content** — the engine, scopes, and tags are ready, but
   electrical/plumbing/mechanical facts wait on MEP connectivity modeling (circuits,
   runs); today's MEP instances support only presence/clearance-style checks via tags.
-- **Energy-code compliance** (IECC envelope/UA calculations) — the R-value fact exists;
+- **Energy-code compliance** — the R-value fact exists;
   whole-building energy math is a separate feature.
 - **Live jurisdiction data feeds / a standards registry** — distribution rides libraries;
   a registry is the libraries spec's open question, not this one's.
@@ -460,10 +462,10 @@ Every [architecture invariant](../architecture.md) holds; specifically:
 
 ## Open questions
 
-- **Starter pack depth.** Which IRC 2021 rows ship in v1's built-in pack (full Table
-  R602.3(5)/R602.7(1)/R602.3(1)/R602.10.3 transcriptions vs. the common-case subset)?
-  Transcription is mechanical but licensing/fidelity review is prudent before shipping
-  verbatim table content.
+- **Authoritative pack acquisition.** Which organizations can provide machine-readable
+  standards content with permission to redistribute it, and how should Framer expose
+  licensing, source revision, signing, and jurisdiction-specific provenance? The built-in
+  illustrative pack must stay visibly separate from that future content.
 - **Fact vocabulary growth.** The closed list now covers wall length/height/exposure/system-R/
   stud facts; opening rough size/header/jack facts; room area/ceiling height; braced-line
   length/required/provided facts; and placed-object containment/directional clearance. Add the
