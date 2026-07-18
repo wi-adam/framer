@@ -72,7 +72,7 @@ jobs:
           persist-credentials: false
 
       - name: Run Claude Code
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1.0.171
+        uses: anthropics/claude-code-action@3553f84341b92da26052e28acf1aa898f9511f32 # v1.0.177
         with:
           # Pro/Max subscription token, already stored as a repo secret. No
           # ANTHROPIC_API_KEY exists in this repo, so OAuth is the only path.
