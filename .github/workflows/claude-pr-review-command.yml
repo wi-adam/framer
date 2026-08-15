@@ -47,7 +47,7 @@ jobs:
     steps:
       # Default checkout = main (issue_comment runs on the default branch), which
       # carries the current .claude/ review assets. The PR's diff is fetched via gh.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -87,7 +87,7 @@ jobs:
 
       - name: Run framer PR review (on demand — bypasses the CI gate)
         id: review
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1.0.171
+        uses: anthropics/claude-code-action@239e3a730883eeb5c53db12b0fc9573b3024b126 # v1.0.191
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The PR number comes from the comment's issue number (a PR comment).
