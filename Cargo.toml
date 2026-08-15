@@ -19,7 +19,7 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
-blake3 = "=1.8.5"
+blake3 = "=1.8.6"
 clap = "4.6.1"
 config = { version = "0.15.25", default-features = false, features = ["toml"] }
 eframe = "0.35.0"
